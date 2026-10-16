@@ -18,7 +18,7 @@ Or from a shell:
 claude plugin install mnemosyne --marketplace Interstellar-code/claude-mnemosyne
 ```
 
-Answer `y` to add the marketplace, then pick a scope (user scope for every project). The install then asks for the settings below. Leave the empty ones empty to use the defaults; the screen shows defaults only for the scope picker and the on/off switch.
+Answer `y` to add the marketplace, then pick a scope (user scope for every project). The install then asks for the settings below; leave the empty ones empty. Claude Code's install screen shows values only for the scope picker and the on/off switch, so `/mnemosyne-setup` saves the defaults into any empty setting, and after a restart `/plugin` → Mnemosyne → configure shows them, ready to edit.
 
 Works on macOS, Linux and Windows. On Windows, `~` means `%USERPROFILE%`.
 

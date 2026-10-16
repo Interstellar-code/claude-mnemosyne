@@ -220,3 +220,42 @@ test('empty terms use the defaults; none turns them off', { options: { rememberT
 
   expect(seen[0]?.some(c => c.includes('memory_remember exactly once')) ?? false).toBe(false)
 })
+
+test('a list stored as one comma-joined string still splits into terms', { options: { rememberTerms: ['remember that, note that'] } }, async ($, on) => {
+  // `claude plugin configure` stores a list this way.
+  world(on, '{"results":[]}')
+  const seen: (readonly string[] | undefined)[] = []
+  on('prompt.submit', (_$, e) => {
+    seen.push(e.context)
+    return { text: e.text, context: e.context }
+  })
+  await $.prompt.submit({ text: 'note that tabs win', origin: { kind: 'composer' } } as never)
+
+  expect(seen[0]?.some(c => c.includes('memory_remember exactly once') && c.includes('tabs win'))).toBe(true)
+})
+
+test('setup fills only blank settings, through claude plugin configure', async ($, on) => {
+  const runs: { argv: readonly string[]; init?: ProcessRunInit }[] = []
+  on('env.get', () => ({ value: '/home/u' }))
+  on('fs.stat', () => ({ value: { kind: 'file' } }) as never)
+  on('session.id', () => ({ value: 's1' }))
+  on('process.run', (_$, e) => {
+    runs.push(e)
+    const argv = e.argv.join(' ')
+    if (argv.endsWith('--json')) {
+      return { value: { exitCode: 0, stdout: JSON.stringify({ inputs: { memoryDir: '/mine', rememberTerms: '', recallTerms: ' ' } }), stderr: '' } } as never
+    }
+    const stdout = `${JSON.stringify({ jsonrpc: '2.0', id: 1, result: { content: [{ type: 'text', text: '{}' }] } })}\n`
+    return { value: { exitCode: 0, stdout, stderr: '' } } as never
+  })
+  on('fs.write', () => ({ value: undefined }))
+  const ran = await $.command.run({ command: 'mnemosyne-setup', args: '' } as never)
+
+  const save = runs.find(r => r.argv.includes('--values-stdin'))
+  expect(save?.argv.slice(0, 4)).toEqual(['claude', 'plugin', 'configure', 'mnemosyne@mnemosyne'])
+  expect(JSON.parse(save?.init?.stdin ?? '{}')).toEqual({
+    rememberTerms: 'remember:, remember that, note that, save to memory',
+    recallTerms: 'recall:, what do you remember about, check memory',
+  })
+  expect((ran as { text?: string }).text).toContain('Saved defaults for rememberTerms, recallTerms')
+})

@@ -89,7 +89,8 @@ const TOOLS = [
 // Configured trigger terms: normalized, blanks dropped (a blank would match every
 // prompt), longest first so the remainder after the match is right.
 function terms(value: unknown) {
-  const list = Array.isArray(value) ? value : typeof value === 'string' ? value.split(',') : []
+  // `claude plugin configure` stores a list as one comma-joined string.
+  const list = (Array.isArray(value) ? value : typeof value === 'string' ? [value] : []).flatMap(t => String(t).split(','))
   if (list.length === 1 && String(list[0]).trim().toLowerCase() === 'none') return []
   return [...new Set(list.map(t => String(t).normalize('NFKC').trim().toLocaleLowerCase()).filter(Boolean))].sort(
     (x, y) => y.length - x.length,
@@ -284,6 +285,28 @@ function compact(recall: string) {
   }))
 }
 
+// What /mnemosyne-setup saves into blank settings, so the settings screen shows
+// a value to edit: it draws text and list fields only once they hold one.
+const DEFAULTS: Readonly<Record<string, string>> = {
+  memoryDir: '~/.claude/mnemosyne/store',
+  rememberTerms: 'remember:, remember that, note that, save to memory',
+  recallTerms: 'recall:, what do you remember about, check memory',
+}
+
+// Fills blank settings through Claude Code's own `plugin configure`, never by
+// editing settings.json; a plugin loaded from a folder (--plugin-dir) has no
+// installed id and is left alone. Resolves to the keys it filled.
+async function fillDefaults($: EngineInterface) {
+  const id = `${$.plugin.name}@${$.plugin.name}`
+  const shown = await $.process.run(['claude', 'plugin', 'configure', id, '--json'])
+  if (shown.exitCode !== 0) return []
+  const inputs: Record<string, string> = JSON.parse(shown.stdout).inputs ?? {}
+  const blank = Object.fromEntries(Object.entries(DEFAULTS).filter(([key]) => !inputs[key]?.trim()))
+  if (Object.keys(blank).length === 0) return []
+  const saved = await $.process.run(['claude', 'plugin', 'configure', id, '--values-stdin'], { stdin: JSON.stringify(blank) })
+  return saved.exitCode === 0 ? Object.keys(blank) : []
+}
+
 export const register: Register = (on, options) => {
   const isPerProject = options.scope === 'per-project'
 
@@ -339,11 +362,13 @@ export const register: Register = (on, options) => {
 
       await secure($, options)
       await syncWrapper($, options)
+      const filled = await fillDefaults($).catch(() => [])
       const stats = await call($, options, 'mnemopi_stats', {})
       const { wrapper } = await paths($, options)
       const external =
         options.externalMcp === true ? `\nOther MCP clients: claude mcp add mnemosyne-store -- ${wrapper}` : ''
-      return { text: `Mnemosyne ready. Engine: ${engine}. Store: ${store}.${external}\n${stats}` }
+      const saved = filled.length > 0 ? `\nSaved defaults for ${filled.join(', ')}; restart Claude Code to see them in /plugin.` : ''
+      return { text: `Mnemosyne ready. Engine: ${engine}. Store: ${store}.${external}${saved}\n${stats}` }
     } catch (err) {
       return { text: `Mnemosyne setup failed: ${(err as Error).message}` }
     }
