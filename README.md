@@ -24,6 +24,34 @@ The trade-off: memories saved in omp are not visible here, and the reverse.
 - **Saves only what the model chooses** to `memory_remember` — no transcript capture, no noise. Saved facts stay until `memory_forget` deletes them.
 - Recall is full-text only (see [DESIGN.md](DESIGN.md) §2.5).
 
+## How it works
+
+One hooks module (`hooks/register.ts`), no settings-file hooks. Every memory operation is one short-lived `bun cli.ts mcp` process against `~/.claude/mnemosyne/store/mnemopi.db`; no server stays running.
+
+| Hook | Fires | Does |
+|---|---|---|
+| `session.start` | once per session | registers `/mnemosyne-setup` and the four tools; toasts if the engine is missing |
+| `command.run` | `/mnemosyne-setup` | checks Bun, installs the engine, runs a stats call |
+| `tool.call` | the model calls a `memory_*` tool | runs the engine, returns its answer as the tool result |
+| `prompt.submit` | every prompt; acts once per session | first real prompt: recalls per sentence, attaches up to 5 hits as hidden context |
+
+### Memory lifecycle
+
+- **Add.** The model calls `memory_remember`. The fact is stored as one row with `source: 'imported'`, the engine's durable tier; any other source is deleted by the engine after 24 hours. Owner is `global`, or `project-<repo>-<hash>` in per-project mode; `scope` is `global`, or `channel` for a project-only fact.
+- **Recall.** Automatically on the first prompt of a session, or whenever the model calls `memory_recall`. It searches the current owner's rows plus every `global` row, by keywords: "ferry Varn" finds "The ferry to Varn leaves at 06:40", "boat schedule" does not.
+- **Update.** No update tool: forget the old fact, remember the new one.
+- **Remove.** The model calls `memory_forget` with the id and owner a recall returned. Nothing expires on its own.
+
+### When it is used
+
+Apart from the first-prompt recall, the model decides when to save or recall, from the tool descriptions alone. There is no keyword trigger and no skill yet. Saying "remember …" or "what do you remember about …" works in practice, but it is the model's judgement, not a rule.
+
+### Planned
+
+- A fixed system-prompt section telling the model when to save and recall.
+- Term triggers, configurable per install (`rememberTerms`, `recallTerms`): a prompt starting with a remember term is stored directly; a recall term recalls on that prompt.
+- Later, a small `/mnemosyne` skill for manual review.
+
 ## Prerequisites
 
 - **Bun** on `PATH` ([bun.sh](https://bun.sh)). The engine ships TypeScript only; Node cannot run it.
