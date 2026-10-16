@@ -216,6 +216,18 @@ omp-written rows, §2.4).
    Reviewed by a Fable consult; a manual `/mnemosyne` skill is deferred until
    there is a store worth curating.
 
+6. **External clients get four tools only (v0.4.0).** `externalMcp`'s wrapper
+   runs `bin/mcp-proxy.ts`, which lists and serves only
+   `mnemopi_remember/recall/forget/stats` and pins remember to
+   `source: 'imported'`. The engine's other tools were verified harmful for
+   this store: `mnemopi_sleep` widens a project's `channel` facts to `global`
+   when a chunk holds one global row, and leaves episodes that `forget` cannot
+   remove; `mnemopi_get` reads any owner's row; `mnemopi_export` writes every
+   owner to any path; `mnemopi_shared_*` writes STATED rows the 24h trim
+   deletes. Every engine run also blanks `MNEMOPI_LLM_BASE_URL` and
+   `MNEMOPI_HOST_LLM_ENABLED`: the env is layered over the host's, and either
+   would let fact extraction call out.
+
 ## 6. What the matrixkoder side needs (findings only)
 
 Recorded because MatrixKoder is a listed consumer, not a dependency. Nothing here

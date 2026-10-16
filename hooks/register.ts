@@ -147,6 +147,8 @@ async function secure($: EngineInterface, options: PluginOptions) {
 // the folder modes above.
 async function syncWrapper($: EngineInterface, options: PluginOptions) {
   const { root, cli, store, wrapper } = await paths($, options)
+  // Rewritten at each session start, so an updated plugin's proxy path stays current.
+  const proxy = `${$.plugin.root}/bin/mcp-proxy.ts`
   if (options.externalMcp !== true) {
     await $.process.run(['rm', '-f', wrapper])
     return
@@ -155,14 +157,18 @@ async function syncWrapper($: EngineInterface, options: PluginOptions) {
   await $.fs.write(
     wrapper,
     `#!/bin/sh
-# Written by the Mnemosyne plugin (externalMcp). Runs its engine as a stdio MCP server.
+# Written by the Mnemosyne plugin (externalMcp). A stdio MCP server over its store,
+# serving only remember / recall / forget / stats.
 # MNEMOSYNE_OWNER picks the owner: global (default) or a project-… id.
 export MNEMOPI_DATA_DIR=${shellQuote(store)}
 export MNEMOPI_SESSION_ID="\${MNEMOSYNE_OWNER:-global}"
 export MNEMOPI_CHANNEL_ID="$MNEMOPI_SESSION_ID"
 export MNEMOPI_NO_EMBEDDINGS=1
 export MNEMOPI_MCP_BANK=
-exec bun ${shellQuote(cli)} mcp
+export MNEMOPI_LLM_BASE_URL=
+export MNEMOPI_HOST_LLM_ENABLED=
+export MNEMOSYNE_CLI=${shellQuote(cli)}
+exec bun ${shellQuote(proxy)}
 `,
   )
   await $.process.run(['chmod', '700', `${root}/bin`, wrapper])
@@ -196,6 +202,9 @@ async function runAll(
       MNEMOPI_NO_EMBEDDINGS: '1',
       // Inherited from an omp shell this would move writes to <store>/banks/<x>; empty falls back to `default`.
       MNEMOPI_MCP_BANK: '',
+      // The env is layered over the host's: an exported LLM URL would let the engine call out.
+      MNEMOPI_LLM_BASE_URL: '',
+      MNEMOPI_HOST_LLM_ENABLED: '',
     },
     timeoutMs: 20_000,
   })
@@ -317,7 +326,7 @@ export const register: Register = (on, options) => {
     } catch (err) {
       return { deny: `Mnemosyne: ${(err as Error).message}` }
     }
-  })
+  }).catch(() => ({ deny: 'Mnemosyne: its tool failed.' }))
 
   const rememberTerms = terms(options.rememberTerms)
   const recallTerms = terms(options.recallTerms)

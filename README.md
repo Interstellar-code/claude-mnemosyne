@@ -6,20 +6,19 @@ Long-term memory for Claude Code. A fact you save in one session is there in the
 
 ## Install
 
-You need [Bun](https://bun.sh) on your `PATH`.
-
-```sh
-claude plugin marketplace add Interstellar-code/claude-mnemosyne
-claude plugin install mnemosyne@mnemosyne
-```
-
-Or, inside a Claude Code session:
+You need [Bun](https://bun.sh) on your `PATH`. At the prompt of a Claude Code session:
 
 ```
 /plugin install mnemosyne --marketplace Interstellar-code/claude-mnemosyne
 ```
 
-The install asks for the settings below; the defaults are fine.
+Or from a shell:
+
+```sh
+claude plugin install mnemosyne --marketplace Interstellar-code/claude-mnemosyne
+```
+
+Answer `y` to add the marketplace, then pick a scope (user scope for every project). The install then asks for the settings below; the defaults are fine.
 
 > The marketplace install has not been tested end to end yet. Every test so far loaded the plugin from a checkout (`claude --plugin-dir <repo>`). If the install fails, use that instead and [open an issue](https://github.com/Interstellar-code/claude-mnemosyne/issues).
 
@@ -86,7 +85,7 @@ Turn on `externalMcp`, start a new session, and the plugin writes `~/.claude/mne
 claude mcp add mnemosyne-store -- ~/.claude/mnemosyne/bin/mnemosyne-mcp
 ```
 
-For Cursor, Codex and others, use the same path as the server command. It reads and writes `global` memories by default; set `MNEMOSYNE_OWNER` to a `project-…` owner to use a project's. Turning the option off deletes the file.
+For Cursor, Codex and others, use the same path as the server command. It offers the same four tools as the plugin (remember, recall, forget, stats) and nothing else of the engine's. It reads and writes `global` memories by default; set `MNEMOSYNE_OWNER` to a `project-…` owner to use a project's. Turning the option off deletes the file.
 
 **Security.** There is no token because there is no network port: the client starts the server itself over stdin/stdout, and nothing listens on the network. Access is whoever can run programs as your user, the same people who could read the database file directly. To keep other accounts on the machine out, the plugin sets `~/.claude/mnemosyne` and the store to owner-only (`700`). Don't wrap the server in an HTTP bridge without adding authentication there.
 
@@ -98,6 +97,8 @@ The plugin hooks into Claude Code at four points:
 - **System prompt:** adds a short, fixed set of rules telling Claude when to save and recall.
 - **Your prompt:** on the first prompt, or one starting with a term above, looks up memories and attaches them to that prompt.
 - **Tool calls:** when Claude calls a memory tool, runs the engine once and returns the answer.
+
+Where an organization manages Claude Code, the system-prompt rules are skipped unless the organization lists this plugin in its managed settings; the tools and trigger terms still work.
 
 Memories live in a local SQLite file. Mnemosyne uses its own copy of the [Mnemopi](https://github.com/can1357/oh-my-pi/tree/main/packages/mnemopi) engine and never touches omp's memory. Design notes: [DESIGN.md](DESIGN.md).
 

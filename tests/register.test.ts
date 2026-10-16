@@ -36,6 +36,8 @@ test('remember runs the private engine against the private store, global bank', 
     MNEMOPI_CHANNEL_ID: 'global',
     MNEMOPI_NO_EMBEDDINGS: '1',
     MNEMOPI_MCP_BANK: '',
+    MNEMOPI_LLM_BASE_URL: '',
+    MNEMOPI_HOST_LLM_ENABLED: '',
   })
   // `imported`: the durable tier the engine's 24h working-memory trim skips.
   expect(request(run)).toEqual({
@@ -172,6 +174,8 @@ test('externalMcp writes an owner-only stdio wrapper', { options: { externalMcp:
   const wrapper = written.find(w => w.path === '/home/u/.claude/mnemosyne/bin/mnemosyne-mcp')
   expect(wrapper?.text).toContain(`export MNEMOPI_DATA_DIR='/home/u/it'\\''s mine'`)
   expect(wrapper?.text).toContain('MNEMOPI_NO_EMBEDDINGS=1')
+  expect(wrapper?.text).toContain('export MNEMOPI_LLM_BASE_URL=')
+  expect(wrapper?.text).toMatch(/exec bun '.*\/bin\/mcp-proxy\.ts'/)
   const argv = runs.map(r => r.argv.join(' '))
   expect(argv).toContain('chmod 700 /home/u/.claude/mnemosyne /home/u/it\'s mine')
   expect(argv).toContain('chmod 700 /home/u/.claude/mnemosyne/bin /home/u/.claude/mnemosyne/bin/mnemosyne-mcp')
