@@ -1,4 +1,4 @@
-# Claude Mnemopi
+# Claude Mnemosyne
 
 Shared long-term memory for Claude Code, backed by [Mnemopi](https://github.com/can1357/oh-my-pi/tree/main/packages/mnemopi) — the Bun/TypeScript port of the [Mnemosyne](https://github.com/mnemosyne-oss/mnemosyne) memory engine.
 
@@ -48,8 +48,8 @@ Not needed to install the scaffold. These are what the real thing will require, 
 Once the implementation lands:
 
 ```sh
-claude plugin marketplace add Interstellar-code/claude-mnemopi
-claude plugin install mnemopi@mnemopi
+claude plugin marketplace add Interstellar-code/claude-mnemosyne
+claude plugin install mnemosyne@mnemosyne
 ```
 
 For v0.0.1 there is nothing to install — loading this plugin changes nothing.

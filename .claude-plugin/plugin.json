@@ -1,14 +1,14 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
-  "name": "mnemopi",
-  "displayName": "Claude Mnemopi",
+  "name": "mnemosyne",
+  "displayName": "Claude Mnemosyne",
   "version": "0.0.1",
   "description": "Shared long-term memory for Claude Code, backed by the Mnemopi engine that omp writes. Scaffold: no behavior ships in this version.",
   "author": {
     "name": "Interstellar-code"
   },
-  "homepage": "https://github.com/Interstellar-code/claude-mnemopi",
-  "repository": "https://github.com/Interstellar-code/claude-mnemopi",
+  "homepage": "https://github.com/Interstellar-code/claude-mnemosyne",
+  "repository": "https://github.com/Interstellar-code/claude-mnemosyne",
   "license": "MIT",
   "keywords": ["memory", "claude-code", "mnemopi", "mnemosyne", "sqlite", "mcp"],
   "defaultEnabled": false,

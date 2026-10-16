@@ -1,14 +1,14 @@
 {
-  "name": "mnemopi",
+  "name": "mnemosyne",
   "owner": {
     "name": "Interstellar-code"
   },
   "plugins": [
     {
-      "name": "mnemopi",
+      "name": "mnemosyne",
       "source": "./",
       "description": "Shared long-term memory for Claude Code, backed by the Mnemopi engine that omp writes. Scaffold: no behavior ships in this version."
     }
   ],
-  "description": "Claude Mnemopi — shared long-term memory plugin for Claude Code"
+  "description": "Claude Mnemosyne — shared long-term memory plugin for Claude Code"
 }

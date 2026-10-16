@@ -1,4 +1,4 @@
-// Claude Mnemopi — the hooks module.
+// Claude Mnemosyne — the hooks module.
 //
 // THIS IS A SCAFFOLD. It registers nothing and touches nothing: no tools, no
 // hooks, no file reads, no process spawns. It exists so the plugin loads

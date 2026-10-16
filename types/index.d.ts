@@ -1,4 +1,4 @@
-// Claude Mnemopi — type declarations.
+// Claude Mnemosyne — type declarations.
 //
 // The mods reference says this file is required when a mod uses `$.state` or
 // adds a namespace to the mods API. This scaffold does neither, so the file
