@@ -111,13 +111,14 @@ const clamp = (value: unknown, low: number, high: number, fallback: number) =>
 async function paths($: EngineInterface, options: PluginOptions) {
   const home = (await $.env.get('HOME')) ?? ''
   if (!home.startsWith('/')) throw new Error('HOME is not set to an absolute path.')
-  const engine = `${home}/.claude/mnemosyne/engine`
+  const root = `${home}/.claude/mnemosyne`
+  const engine = `${root}/engine`
   const dir = typeof options.memoryDir === 'string' && options.memoryDir ? options.memoryDir : '~/.claude/mnemosyne/store'
   const store = (dir === '~' || dir.startsWith('~/') ? `${home}${dir.slice(1)}` : dir).replace(/\/+$/, '')
   if (!store.startsWith('/')) throw new Error(`memoryDir must be absolute or start with ~/ (got "${dir}").`)
   // One store, one writer: omp's database must never get a second one (DESIGN §2.6).
   if (store === `${home}/.omp` || store.startsWith(`${home}/.omp/`)) throw new Error('memoryDir must not be inside ~/.omp.')
-  return { engine, cli: `${engine}/node_modules/${ENGINE_PACKAGE}/src/cli.ts`, store }
+  return { root, engine, cli: `${engine}/node_modules/${ENGINE_PACKAGE}/src/cli.ts`, store, wrapper: `${root}/bin/mnemosyne-mcp` }
 }
 
 async function owner($: EngineInterface, options: PluginOptions) {
@@ -127,6 +128,44 @@ async function owner($: EngineInterface, options: PluginOptions) {
   for (const char of root) hash = ((hash * 33) ^ char.charCodeAt(0)) >>> 0
   // The hash keeps /a/b-c and /a/b/c apart; the name keeps it readable.
   return `project-${root.split('/').filter(Boolean).at(-1)?.replace(/[^A-Za-z0-9]+/g, '-') ?? 'root'}-${hash.toString(36)}`
+}
+
+// Single-quoted for sh: the store path comes from settings and may hold anything.
+const shellQuote = (text: string) => `'${text.replace(/'/g, `'\\''`)}'`
+
+// Memories are private: owner-only folders, so other accounts on the machine
+// cannot read the store or run the wrapper.
+async function secure($: EngineInterface, options: PluginOptions) {
+  const { root, store } = await paths($, options)
+  await $.process.run(['mkdir', '-p', root, store])
+  await $.process.run(['chmod', '700', root, store])
+}
+
+// externalMcp: a wrapper other MCP clients (Cursor, Codex, `claude mcp add`)
+// launch as a stdio server against the same store and owner rules. stdio has no
+// port, so no token: access is whoever can run files as this user, guarded by
+// the folder modes above.
+async function syncWrapper($: EngineInterface, options: PluginOptions) {
+  const { root, cli, store, wrapper } = await paths($, options)
+  if (options.externalMcp !== true) {
+    await $.process.run(['rm', '-f', wrapper])
+    return
+  }
+  await $.process.run(['mkdir', '-p', `${root}/bin`])
+  await $.fs.write(
+    wrapper,
+    `#!/bin/sh
+# Written by the Mnemosyne plugin (externalMcp). Runs its engine as a stdio MCP server.
+# MNEMOSYNE_OWNER picks the owner: global (default) or a project-… id.
+export MNEMOPI_DATA_DIR=${shellQuote(store)}
+export MNEMOPI_SESSION_ID="\${MNEMOSYNE_OWNER:-global}"
+export MNEMOPI_CHANNEL_ID="$MNEMOPI_SESSION_ID"
+export MNEMOPI_NO_EMBEDDINGS=1
+export MNEMOPI_MCP_BANK=
+exec bun ${shellQuote(cli)} mcp
+`,
+  )
+  await $.process.run(['chmod', '700', `${root}/bin`, wrapper])
 }
 
 async function isInstalled($: EngineInterface, options: PluginOptions) {
@@ -232,6 +271,7 @@ export const register: Register = (on, options) => {
     })
     for (const tool of TOOLS) await $.tool.register({ ...tool, isDeferred: false })
     if (!(await isInstalled($, options))) $.ui.toast('Mnemosyne: memory engine not installed. Run /mnemosyne-setup.')
+    else await Promise.all([secure($, options), syncWrapper($, options)]).catch(() => undefined)
 
     return next(e)
   })
@@ -249,8 +289,13 @@ export const register: Register = (on, options) => {
       })
       if (added.exitCode !== 0) return { text: `Engine install failed:\n${added.stderr.trim().slice(-800)}` }
 
+      await secure($, options)
+      await syncWrapper($, options)
       const stats = await call($, options, 'mnemopi_stats', {})
-      return { text: `Mnemosyne ready. Engine: ${engine}. Store: ${store}.\n${stats}` }
+      const { wrapper } = await paths($, options)
+      const external =
+        options.externalMcp === true ? `\nOther MCP clients: claude mcp add mnemosyne-store -- ${wrapper}` : ''
+      return { text: `Mnemosyne ready. Engine: ${engine}. Store: ${store}.${external}\n${stats}` }
     } catch (err) {
       return { text: `Mnemosyne setup failed: ${(err as Error).message}` }
     }

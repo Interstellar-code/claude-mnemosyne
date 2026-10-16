@@ -48,6 +48,19 @@ Change any time from `/plugin` → Mnemosyne → configure.
 | `rememberTerms` | `remember:`, `remember that`, `note that`, `save to memory` | A prompt that starts with one of these is saved. Empty turns it off. |
 | `recallTerms` | `recall:`, `what do you remember about`, `check memory` | A prompt that starts with one of these looks up memories. Empty turns it off. |
 | `memoryDir` | `~/.claude/mnemosyne/store` | Where memories are stored. |
+| `externalMcp` | off | Lets other MCP clients use the same memory (see below). |
+
+## Use the memory from other tools
+
+Turn on `externalMcp`, start a new session, and the plugin writes `~/.claude/mnemosyne/bin/mnemosyne-mcp`: the engine as a stdio MCP server, with the right store and settings baked in. Add it to any MCP client:
+
+```sh
+claude mcp add mnemosyne-store -- ~/.claude/mnemosyne/bin/mnemosyne-mcp
+```
+
+For Cursor, Codex and others, use the same path as the server command. It reads and writes `global` memories by default; set `MNEMOSYNE_OWNER` to a `project-…` owner to use a project's. Turning the option off deletes the file.
+
+**Security.** There is no token because there is no network port: the client starts the server itself over stdin/stdout, and nothing listens on the network. Access is whoever can run programs as your user, the same people who could read the database file directly. To keep other accounts on the machine out, the plugin sets `~/.claude/mnemosyne` and the store to owner-only (`700`). Don't wrap the server in an HTTP bridge without adding authentication there.
 
 ## How it works
 

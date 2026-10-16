@@ -155,3 +155,34 @@ test('a remember term asks the model to save once; a recall term recalls on that
   expect(seen[2]?.at(-1)).toContain('- [m1 owner=global] use pnpm')
   expect(seen[3]).toBeUndefined()
 })
+
+test('externalMcp writes an owner-only stdio wrapper', { options: { externalMcp: true, memoryDir: "~/it's mine" } }, async ($, on) => {
+  const runs = world(on, '{}')
+  const written: { path: string; text: string }[] = []
+  on('fs.write', (_$, e) => {
+    written.push(e as never)
+    return { value: undefined }
+  })
+  on('command.register', () => ({ value: {} }) as never)
+  on('tool.register', () => ({ value: {} }) as never)
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/w', surface: null, isInteractive: false } as never)
+
+  const wrapper = written.find(w => w.path === '/home/u/.claude/mnemosyne/bin/mnemosyne-mcp')
+  expect(wrapper?.text).toContain(`export MNEMOPI_DATA_DIR='/home/u/it'\\''s mine'`)
+  expect(wrapper?.text).toContain('MNEMOPI_NO_EMBEDDINGS=1')
+  const argv = runs.map(r => r.argv.join(' '))
+  expect(argv).toContain('chmod 700 /home/u/.claude/mnemosyne /home/u/it\'s mine')
+  expect(argv).toContain('chmod 700 /home/u/.claude/mnemosyne/bin /home/u/.claude/mnemosyne/bin/mnemosyne-mcp')
+})
+
+test('without externalMcp the wrapper is removed', async ($, on) => {
+  const runs = world(on, '{}')
+  on('command.register', () => ({ value: {} }) as never)
+  on('tool.register', () => ({ value: {} }) as never)
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/w', surface: null, isInteractive: false } as never)
+
+  expect(runs.map(r => r.argv.join(' '))).toContain('rm -f /home/u/.claude/mnemosyne/bin/mnemosyne-mcp')
+})
