@@ -13,7 +13,35 @@ claude plugin marketplace add Interstellar-code/claude-mnemosyne
 claude plugin install mnemosyne@mnemosyne
 ```
 
+Or, inside a Claude Code session:
+
+```
+/plugin install mnemosyne --marketplace Interstellar-code/claude-mnemosyne
+```
+
 The install asks for the settings below; the defaults are fine.
+
+> The marketplace install has not been tested end to end yet. Every test so far loaded the plugin from a checkout (`claude --plugin-dir <repo>`). If the install fails, use that instead and [open an issue](https://github.com/Interstellar-code/claude-mnemosyne/issues).
+
+## Update
+
+```sh
+claude plugin update mnemosyne@mnemosyne
+```
+
+Restart Claude Code afterwards. The engine version is pinned; updating the plugin does not update the engine.
+
+## Uninstall
+
+```sh
+claude plugin uninstall mnemosyne@mnemosyne
+```
+
+This leaves the engine and your memories in `~/.claude/mnemosyne/`. To delete them too (this erases every memory, permanently):
+
+```sh
+rm -rf ~/.claude/mnemosyne
+```
 
 ## Setup
 
