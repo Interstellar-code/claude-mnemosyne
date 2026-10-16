@@ -7,7 +7,7 @@
     {
       "name": "mnemosyne",
       "source": "./",
-      "description": "Long-term memory for Claude Code across sessions and repos, on its own private copy of the Mnemopi engine and its own store."
+      "description": "Long-term memory for Claude Code across sessions and repos, on its own private copy of the Mnemosyne Memory engine and its own store."
     }
   ],
   "description": "Claude Mnemosyne — long-term memory plugin for Claude Code"

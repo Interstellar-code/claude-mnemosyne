@@ -6,13 +6,13 @@ reproduced. `v0.1.0` implements it; §5 records the decisions taken.
 
 ---
 
-## 1. What Mnemopi is, and what it costs to depend on
+## 1. What the Mnemosyne Memory engine is, and what it costs to depend on
 
 [`@oh-my-pi/pi-mnemopi`](https://www.npmjs.com/package/@oh-my-pi/pi-mnemopi) —
 MIT, ~153K weekly downloads, source at
 [`can1357/oh-my-pi` → `packages/mnemopi`](https://github.com/can1357/oh-my-pi/tree/main/packages/mnemopi).
 It is a package inside the oh-my-pi monorepo, published independently, so it can
-be consumed without installing omp.
+be consumed on its own.
 
 Do not confuse it with
 [`mnemosyne-oss/pi-mnemosyne`](https://github.com/mnemosyne-oss/pi-mnemosyne) —
@@ -63,13 +63,13 @@ affordable once per conversation and not per turn.
 
 ### 2.3 The data dir must be set explicitly
 
-Mnemopi's built-in default is `~/.hermes/mnemopi/data`
+The engine's built-in default is `~/.hermes/mnemopi/data`
 (`packages/mnemopi/src/config.ts`). The plugin always sets `MNEMOPI_DATA_DIR`
 to its own store, `~/.claude/mnemosyne/store` by default.
 
 Verified with a throwaway `HOME`: a remember wrote only to `MNEMOPI_DATA_DIR`
 (plus bun's own cache under `~/Library/Caches/bun`). Nothing under `~/.omp` or
-`~/.hermes`. An end-to-end run left omp's `mnemopi.db*` mtimes and sizes
+`~/.hermes`. An end-to-end run left the other installation's `mnemopi.db*` mtimes and sizes
 unchanged.
 
 ### 2.4 Scoping silently returns zero hits — the trap
@@ -78,7 +78,7 @@ This is the one that cost the most time and would have shipped as a bug.
 
 `recall` narrows rows by
 `(session_id = ? OR scope = 'global' OR channel_id = ?)`
-(`core/beam/recall.ts`). omp writes rows with `session_id = channel_id = <bank>`.
+(`core/beam/recall.ts`). Other writers set `session_id = channel_id = <bank>`.
 The MCP server defaults its session id to `mcp_<bank>`, which matches neither —
 so a naive recall against a populated bank returns **`count: 0`**, with no
 error.
@@ -96,12 +96,12 @@ With fastembed enabled, both the CLI and the MCP server died repeatedly with a
 Bun C++ panic when spawned as a standalone process. With
 `MNEMOPI_NO_EMBEDDINGS=1` everything is stable.
 
-omp's own sessions are unaffected: they attach to a detached embedding server at
-`~/.omp/run/mnemopi/` (`omp://mnemosyne-memory-backend.md`). A spawned CLI does
+Sessions of other hosts are unaffected: they attach to a detached embedding server at
+`~/.omp/run/mnemopi/`. A spawned CLI does
 not, and loads fastembed in-process.
 
-**Consequence: recall from this plugin is FTS-only.** Vector recall stays inside
-omp. If that is unacceptable, the fix is to talk to omp's embed server, which is
+**Consequence: recall from this plugin is FTS-only.** Vector recall stays with
+the other hosts. If that is unacceptable, the fix is to talk to their embed server, which is
 a larger piece of work and not in scope.
 
 ### 2.6 One engine only — keep the TypeScript one
@@ -121,8 +121,8 @@ would corrupt the vector index.
 
 ## 3. Where memory lives
 
-The plugin keeps its own engine and store, separate from omp, so the two never
-share a writer (§2.6) and an omp upgrade cannot change the engine under it.
+The plugin keeps its own engine and store, separate from any other installation, so the two never
+share a writer (§2.6) and an upgrade elsewhere cannot change the engine under it.
 `/mnemosyne-setup` runs `bun add @oh-my-pi/pi-mnemopi@18.11.0` in
 `~/.claude/mnemosyne/engine/`. Each call is one `bun <cli> mcp` process:
 
@@ -174,7 +174,7 @@ Terms: the engine's *bank* is always `default` (`<store>/mnemopi.db`). What
 this plugin varies is the row's *owner*, its `session_id`, set from
 `MNEMOPI_SESSION_ID` (`MNEMOPI_CHANNEL_ID` carries the same value; for this
 plugin's own rows the session id alone suffices, the channel matters only for
-omp-written rows, §2.4).
+rows written elsewhere, §2.4).
 
 1. **Scope: the user picks at install.** `userConfig.scope` is `global` (owner
    `global`, every row `scope: 'global'`) or `per-project` (owner
@@ -218,7 +218,8 @@ omp-written rows, §2.4).
 
 6. **External clients get four tools only (v0.4.0).** `externalMcp`'s wrapper
    runs `bin/mcp-proxy.ts`, which lists and serves only
-   `mnemopi_remember/recall/forget/stats` and pins remember to
+   `memory_remember/recall/forget/stats` (mapped to the engine's
+   `mnemopi_*`) and pins remember to
    `source: 'imported'`. The engine's other tools were verified harmful for
    this store: `mnemopi_sleep` widens a project's `channel` facts to `global`
    when a chunk holds one global row, and leaves episodes that `forget` cannot
@@ -247,6 +248,6 @@ is implemented in that repo.
 ## 7. Provenance
 
 Probes run against a real machine on 2026-10-16: `bun` 1.x, Node 24.13.0,
-`pi-mnemopi` 18.11.0, omp with `memory.backend: mnemopi`, and a live store of 8
+`pi-mnemopi` 18.11.0, a second installation using the same engine, and a live store of 8
 banks. Claims marked *verified* were observed directly; the rest are marked as
 inference where they appear.

@@ -65,7 +65,7 @@
 
   <rect x="300" y="600" width="330" height="64" class="box hook"/>
   <text x="316" y="626" class="t">command.run</text>
-  <text x="316" y="646" class="s">bun add @oh-my-pi/pi-mnemopi@18.11.0</text>
+  <text x="316" y="646" class="s">install the Mnemosyne Memory engine</text>
 
   <!-- model -->
   <rect x="680" y="274" width="200" height="150" class="box model"/>
@@ -77,7 +77,7 @@
 
   <!-- engine -->
   <rect x="930" y="400" width="230" height="110" class="box eng"/>
-  <text x="946" y="426" class="t">bun cli.ts mcp</text>
+  <text x="946" y="426" class="t">Mnemosyne Memory engine</text>
   <text x="946" y="448" class="s">one process per call,</text>
   <text x="946" y="466" class="s">exits when done</text>
   <text x="946" y="490" class="m">~/.claude/mnemosyne/engine</text>
@@ -86,7 +86,7 @@
   <text x="946" y="586" class="t">Memory store (SQLite)</text>
   <text x="946" y="608" class="m">~/.claude/mnemosyne/store</text>
   <text x="946" y="630" class="s">owner: global or project-…</text>
-  <text x="946" y="650" class="s">separate from omp's ~/.omp</text>
+  <text x="946" y="650" class="s">private to Mnemosyne</text>
 
   <!-- arrows -->
   <path class="l" d="M250,162 H300"/>

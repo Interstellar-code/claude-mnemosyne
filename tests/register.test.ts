@@ -1,6 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import type { On, ProcessRunInit } from 'claude-code'
 import { afterTerm } from '../hooks/register'
+import { engineTool, mnemosyneStats, publicTool } from '../hooks/surface'
 
 type Run = { argv: readonly string[]; init?: ProcessRunInit }
 
@@ -94,7 +95,7 @@ test('forget deletes as the owner it is given', { options: { scope: 'per-project
   expect(request(runs[0]!)).toEqual({ name: 'mnemopi_forget', arguments: { memory_id: 'm1' } })
 })
 
-test('a store inside ~/.omp is refused before any engine run', { options: { memoryDir: '~/.omp/agent/memories/mnemopi' } }, async ($, on) => {
+test('a store inside ~/.omp is refused before any engine run', { options: { memoryDir: '~/.omp/agent/memories/store' } }, async ($, on) => {
   const runs = world(on, '{}')
   const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_stats' })
 
@@ -258,4 +259,19 @@ test('setup fills only blank settings, through claude plugin configure', async (
     recallTerms: 'recall:, what do you remember about, check memory',
   })
   expect((ran as { text?: string }).text).toContain('Saved defaults for rememberTerms, recallTerms')
+})
+
+test('stats say Mnemosyne, keep the counts, and pass non-JSON through', async ($, on) => {
+  world(on, '{"status":"ok","provider":"mnemopi","bank":"default","working":{"n":2},"episodic":{"n":1},"memoria":{},"stats":{}}')
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_stats' })
+
+  expect(JSON.parse(ran.result as string)).toEqual({ status: 'ok', provider: 'mnemosyne', working: { n: 2 }, episodic: { n: 1 }, memoria: {} })
+  expect(mnemosyneStats('not json')).toBe('not json')
+  expect(mnemosyneStats('{"status":"error","message":"boom"}')).toBe('{"status":"error","message":"boom"}')
+})
+
+test('the proxy maps public memory_* names to the engine and back', async () => {
+  expect(engineTool('memory_recall')).toBe('mnemopi_recall')
+  expect(publicTool('mnemopi_stats')).toBe('memory_stats')
+  expect(publicTool('mnemopi_shared_stats')).toBe('memory_shared_stats') // still refused: not in the proxy's allowed set
 })

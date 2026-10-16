@@ -1,9 +1,9 @@
 // Claude Mnemosyne — the hooks module.
 //
-// Long-term memory on the Mnemopi engine, in a home of its own: the engine is
-// a private copy under ~/.claude/mnemosyne/engine (installed by
-// /mnemosyne-setup) and the store defaults to ~/.claude/mnemosyne/store. omp's
-// engine and store are never read or written. See DESIGN.md.
+// Long-term memory on the Mnemosyne Memory engine, in a home of its own: the
+// engine is a private copy under ~/.claude/mnemosyne/engine (installed by
+// /mnemosyne-setup) and the store defaults to ~/.claude/mnemosyne/store. See
+// DESIGN.md.
 //
 // Every call is one `bun cli.ts mcp` process answering one bare `tools/call`.
 // The owner id (global, or the repo's) rides on MNEMOPI_SESSION_ID: recall
@@ -14,12 +14,13 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, PluginOptions, Register } from 'claude-code'
 
 import type { Recalled } from '../types'
+import { mnemosyneStats } from './surface'
 
 export const ENGINE_VERSION = '18.11.0'
 const ENGINE_PACKAGE = '@oh-my-pi/pi-mnemopi'
 const GLOBAL_OWNER = 'global'
 const RECALL_LIMIT = 5
-const NOT_INSTALLED = 'Mnemosyne engine not installed: ask the user to run /mnemosyne-setup.'
+const NOT_INSTALLED = 'Mnemosyne Memory engine not installed: ask the user to run /mnemosyne-setup.'
 
 // Where a person typed the prompt; another plugin's or session's text never triggers a save.
 const PERSON_ORIGINS = new Set(['composer', 'bridge', 'sdk', 'slack-ping'])
@@ -126,7 +127,7 @@ async function paths($: EngineInterface, options: PluginOptions) {
   const store = dir === '~' || dir.startsWith('~/') ? `${home}${dir.slice(1)}` : dir
   if (!isAbsolute(store)) throw new Error(`memoryDir must be absolute or start with ~/ (got "${dir}").`)
   if (windows && /["%]/.test(store)) throw new Error('memoryDir must not contain " or % on Windows.')
-  // One store, one writer: omp's database must never get a second one (DESIGN §2.6).
+  // One store, one writer: the ~/.omp database must never get a second one (DESIGN §2.6).
   const omp = `${home}/.omp`
   const fold = (path: string) => (windows ? path.toLowerCase() : path)
   if (fold(store) === fold(omp) || fold(store).startsWith(`${fold(omp)}/`)) throw new Error('memoryDir must not be inside ~/.omp.')
@@ -240,7 +241,7 @@ async function runAll(
       MNEMOPI_SESSION_ID: id,
       MNEMOPI_CHANNEL_ID: id,
       MNEMOPI_NO_EMBEDDINGS: '1',
-      // Inherited from an omp shell this would move writes to <store>/banks/<x>; empty falls back to `default`.
+      // Inherited from the shell this would move writes to <store>/banks/<x>; empty falls back to `default`.
       MNEMOPI_MCP_BANK: '',
       // The env is layered over the host's: an exported LLM URL would let the engine call out.
       MNEMOPI_LLM_BASE_URL: '',
@@ -338,10 +339,10 @@ export const register: Register = (on, options) => {
   on('session.start', { cwd: /.*/ }, async ($, e, next) => {
     await $.command.register({
       name: 'mnemosyne-setup',
-      description: `Install the Mnemosyne memory engine (${ENGINE_PACKAGE}@${ENGINE_VERSION}) into ~/.claude/mnemosyne`,
+      description: `Install the Mnemosyne Memory engine (${ENGINE_PACKAGE}@${ENGINE_VERSION}) into ~/.claude/mnemosyne`,
     })
     for (const tool of TOOLS) await $.tool.register({ ...tool, isDeferred: false })
-    if (!(await isInstalled($, options))) $.ui.toast('Mnemosyne: memory engine not installed. Run /mnemosyne-setup.')
+    if (!(await isInstalled($, options))) $.ui.toast('Mnemosyne Memory engine not installed. Run /mnemosyne-setup.')
     else await Promise.all([secure($, options), syncWrapper($, options)]).catch(() => undefined)
 
     return next(e)
@@ -363,10 +364,10 @@ export const register: Register = (on, options) => {
       await secure($, options)
       await syncWrapper($, options)
       const filled = await fillDefaults($).catch(() => [])
-      const stats = await call($, options, 'mnemopi_stats', {})
+      const stats = mnemosyneStats(await call($, options, 'mnemopi_stats', {}))
       const { wrapper } = await paths($, options)
       const external =
-        options.externalMcp === true ? `\nOther MCP clients: claude mcp add mnemosyne-store -- ${wrapper}` : ''
+        options.externalMcp === true ? `\nOther MCP clients: claude mcp add mnemosyne-memory -- ${wrapper}` : ''
       const saved = filled.length > 0 ? `\nSaved defaults for ${filled.join(', ')}; restart Claude Code to see them in /plugin.` : ''
       return { text: `Mnemosyne ready. Engine: ${engine}. Store: ${store}.${external}${saved}\n${stats}` }
     } catch (err) {
@@ -386,7 +387,7 @@ export const register: Register = (on, options) => {
       // A row is deleted as its owner: a global fact from another project names its own.
       const as = tool === 'memory_forget' && typeof input.owner === 'string' && input.owner ? input.owner : undefined
       const text = await call($, options, name, args, as)
-      return { result: name === 'mnemopi_recall' ? JSON.stringify(compact(text)) : text }
+      return { result: name === 'mnemopi_recall' ? JSON.stringify(compact(text)) : name === 'mnemopi_stats' ? mnemosyneStats(text) : text }
     } catch (err) {
       return { deny: `Mnemosyne: ${(err as Error).message}` }
     }

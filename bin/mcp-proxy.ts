@@ -1,6 +1,7 @@
 // Claude Mnemosyne — stdio MCP proxy for other clients (userConfig externalMcp).
 //
-// Runs the engine and passes through only the plugin's own four tools. The
+// Runs the engine and passes through only the plugin's own four tools, named
+// memory_* as in the plugin (the engine calls them mnemopi_*). The
 // engine's others leak across owners or lose data (DESIGN §5.6): sleep widens a
 // project's facts to global, get reads any owner's row, export writes the whole
 // store anywhere, shared_* rows are deleted after 24 hours.
@@ -8,13 +9,16 @@
 // Remember is pinned the way the plugin writes it: `source: 'imported'`, the
 // durable tier (any other source is deleted after 24 hours, DESIGN §5.2).
 // Run by ~/.claude/mnemosyne/bin/mnemosyne-mcp, which sets the environment.
-const ALLOWED = new Set(['mnemopi_remember', 'mnemopi_recall', 'mnemopi_forget', 'mnemopi_stats'])
+import { engineTool, mnemosyneStats, publicTool } from '../hooks/surface'
+
+const ALLOWED = new Set(['memory_remember', 'memory_recall', 'memory_forget', 'memory_stats'])
 const cli = process.env.MNEMOSYNE_CLI
 if (!cli) throw new Error('MNEMOSYNE_CLI is not set: run this through mnemosyne-mcp.')
 const isGlobalOwner = (process.env.MNEMOPI_SESSION_ID ?? 'global') === 'global'
 
 const engine = Bun.spawn(['bun', cli, 'mcp'], { stdin: 'pipe', stdout: 'pipe', stderr: 'inherit' })
 const listIds = new Set<unknown>()
+const statsIds = new Set<unknown>()
 const send = (message: unknown) => process.stdout.write(`${JSON.stringify(message)}\n`)
 
 async function* lines(stream: ReadableStream<Uint8Array>) {
@@ -47,7 +51,9 @@ void (async () => {
         send({ jsonrpc: '2.0', id: message.id, error: { code: -32601, message: `Tool not available: ${name}` } })
         continue
       }
-      if (name === 'mnemopi_remember') {
+      message.params.name = engineTool(name)
+      if (name === 'memory_stats') statsIds.add(message.id)
+      if (name === 'memory_remember') {
         const args = message.params.arguments ?? {}
         message.params.arguments = {
           ...args,
@@ -61,7 +67,7 @@ void (async () => {
   engine.stdin.end()
 })()
 
-// Engine to client: list only the allowed tools.
+// Engine to client: list only the allowed tools, under their public names.
 for await (const line of lines(engine.stdout)) {
   let message
   try {
@@ -71,8 +77,17 @@ for await (const line of lines(engine.stdout)) {
     continue
   }
   if (listIds.delete(message?.id) && Array.isArray(message.result?.tools)) {
-    message.result.tools = message.result.tools.filter((tool: { name: string }) => ALLOWED.has(tool.name))
+    message.result.tools = message.result.tools
+      .map((tool: { name: string; description?: string }) => ({
+        ...tool,
+        name: publicTool(tool.name),
+        description: tool.description?.replaceAll('Mnemopi', 'Mnemosyne'),
+      }))
+      .filter((tool: { name: string }) => ALLOWED.has(tool.name))
   }
+  if (message?.result?.serverInfo?.name === 'mnemopi') message.result.serverInfo.name = 'mnemosyne'
+  const text = message?.result?.content?.[0]
+  if (statsIds.delete(message?.id) && typeof text?.text === 'string') text.text = mnemosyneStats(text.text)
   send(message)
 }
 process.exit(await engine.exited)

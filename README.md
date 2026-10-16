@@ -52,7 +52,7 @@ In a Claude Code session, run once:
 /mnemosyne-setup
 ```
 
-This installs the memory engine into `~/.claude/mnemosyne/engine/` (about 130 MB) and creates the store at `~/.claude/mnemosyne/store/`.
+This installs the Mnemosyne Memory engine into `~/.claude/mnemosyne/engine/` (about 130 MB) and creates the store at `~/.claude/mnemosyne/store/`.
 
 ## Use
 
@@ -84,12 +84,12 @@ Change any time from `/plugin` → Mnemosyne → configure.
 Turn on `externalMcp`, start a new session, and the plugin writes `~/.claude/mnemosyne/bin/mnemosyne-mcp`: the engine as a stdio MCP server, with the right store and settings baked in. Add it to any MCP client:
 
 ```sh
-claude mcp add mnemosyne-store -- ~/.claude/mnemosyne/bin/mnemosyne-mcp
+claude mcp add mnemosyne-memory -- ~/.claude/mnemosyne/bin/mnemosyne-mcp
 ```
 
 On Windows the file is `%USERPROFILE%\.claude\mnemosyne\bin\mnemosyne-mcp.cmd`.
 
-For Cursor, Codex and others, use the same path as the server command. It offers the same four tools as the plugin (remember, recall, forget, stats) and nothing else of the engine's. It reads and writes `global` memories by default; set `MNEMOSYNE_OWNER` to a `project-…` owner to use a project's. Turning the option off deletes the file.
+For Cursor, Codex and others, use the same path as the server command. It offers the same four tools as the plugin (`memory_remember`, `memory_recall`, `memory_forget`, `memory_stats`) and nothing else of the engine's. It reads and writes `global` memories by default; set `MNEMOSYNE_OWNER` to a `project-…` owner to use a project's. Turning the option off deletes the file.
 
 **Security.** There is no token because there is no network port: the client starts the server itself over stdin/stdout, and nothing listens on the network. Access is whoever can run programs as your user, the same people who could read the database file directly. To keep other accounts on the machine out, the plugin sets `~/.claude/mnemosyne` and the store to owner-only (`700`) on macOS and Linux; on Windows your user profile's permissions already do. Don't wrap the server in an HTTP bridge without adding authentication there.
 
@@ -104,7 +104,7 @@ The plugin hooks into Claude Code at four points:
 
 Where an organization manages Claude Code, the system-prompt rules are skipped unless the organization lists this plugin in its managed settings; the tools and trigger terms still work.
 
-Memories live in a local SQLite file. Mnemosyne uses its own copy of the [Mnemopi](https://github.com/can1357/oh-my-pi/tree/main/packages/mnemopi) engine and never touches omp's memory. Design notes: [DESIGN.md](DESIGN.md).
+Memories live in a local SQLite file. Mnemosyne runs on its own private copy of the Mnemosyne Memory engine. Design notes: [DESIGN.md](DESIGN.md).
 
 ## License
 
