@@ -201,6 +201,21 @@ omp-written rows, §2.4).
 4. **`memoryDir` stays configurable**, defaulting to the plugin's own store. It
    must be absolute or `~/…`, and is refused inside `~/.omp`.
 
+5. **Steering without a skill (2026-10-16, v0.2.0).** A skill loads only when
+   the model picks it, which is the judgement being backed up, so instead:
+   - `prompt.compose` appends one fixed section, `mnemosyne:rules`, last on the
+     `session` side (fixed text: the prompt cache holds). Skipped under the
+     `bare` trait and when the request does not offer the memory tools.
+   - `prompt.submit` matches configurable `rememberTerms` / `recallTerms`
+     (`userConfig` `string` + `multiple`) at the start of prompts a person typed
+     (origin `composer`, `bridge`, `sdk`, `slack-ping`), as whole words. A
+     remember term attaches a directive and the model calls `memory_remember`
+     once: the hook never writes raw text, so wording and the never-secrets
+     rule apply. A recall term recalls the first sentence after it, on that
+     prompt only.
+   Reviewed by a Fable consult; a manual `/mnemosyne` skill is deferred until
+   there is a store worth curating.
+
 ## 6. What the matrixkoder side needs (findings only)
 
 Recorded because MatrixKoder is a listed consumer, not a dependency. Nothing here

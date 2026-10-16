@@ -21,6 +21,20 @@ const GLOBAL_OWNER = 'global'
 const RECALL_LIMIT = 5
 const NOT_INSTALLED = 'Mnemosyne engine not installed: ask the user to run /mnemosyne-setup.'
 
+// Where a person typed the prompt; another plugin's or session's text never triggers a save.
+const PERSON_ORIGINS = new Set(['composer', 'bridge', 'sdk', 'slack-ping'])
+
+const RULES_SECTION = {
+  id: 'mnemosyne:rules',
+  scope: 'session',
+  text: `# Long-term memory (Mnemosyne)
+mcp__mnemosyne__memory_remember / _recall / _forget keep facts across sessions and repos.
+- Remember: lasting preferences, conventions, decisions, runbooks the user states. One self-contained fact per call.
+- Never remember secrets, credentials, or one-off task details.
+- Recall before answering about past decisions or preferences ("what did we…", "how do I usually…").
+- To change a fact: forget the old id and owner, then remember the new one.`,
+} as const
+
 const recalled = atom({ plugin: 'mnemosyne', key: 'recalled' } as const, {} as Recalled)
 
 const TOOLS = [
@@ -71,6 +85,24 @@ const TOOLS = [
     inputSchema: { type: 'object' },
   },
 ] as const
+
+// Configured trigger terms: normalized, blanks dropped (a blank would match every
+// prompt), longest first so the remainder after the match is right.
+function terms(value: unknown) {
+  const list = Array.isArray(value) ? value : typeof value === 'string' ? value.split(',') : []
+  return [...new Set(list.map(t => String(t).normalize('NFKC').trim().toLocaleLowerCase()).filter(Boolean))].sort(
+    (x, y) => y.length - x.length,
+  )
+}
+
+// The text after a term the prompt opens with, or undefined. A term ending in a
+// letter or digit must end a word there: "remember" does not match "remembering".
+export function afterTerm(text: string, list: readonly string[]) {
+  const prompt = text.normalize('NFKC').trim().replace(/^(please|hey claude)[,\s]+/i, '')
+  const lower = prompt.toLocaleLowerCase()
+  const term = list.find(t => lower.startsWith(t) && (!/[\p{L}\p{N}]$/u.test(t) || !/^[\p{L}\p{N}]/u.test(lower.slice(t.length))))
+  return term === undefined ? undefined : prompt.slice(term.length).replace(/^[\s:,]+/, '').trim()
+}
 
 const clamp = (value: unknown, low: number, high: number, fallback: number) =>
   typeof value === 'number' && Number.isFinite(value) ? Math.min(high, Math.max(low, value)) : fallback
@@ -242,29 +274,57 @@ export const register: Register = (on, options) => {
     }
   })
 
-  // Recall once per session, on its first prompt, attached beside that prompt:
-  // the message never changes afterwards, so the prompt cache holds.
+  const rememberTerms = terms(options.rememberTerms)
+  const recallTerms = terms(options.recallTerms)
+
+  // Fixed text, appended last on the session side, so the prompt cache holds.
+  on('prompt.compose', async (_$, e, next) => {
+    const composed = await next(e)
+    if (e.traits.includes('bare') || !e.tools.includes('mcp__mnemosyne__memory_remember')) return composed
+    return { ...composed, sections: [...composed.sections, RULES_SECTION] }
+  }).catch((_$, e, next) => next(e))
+
+  // On the first prompt of a session, recall per sentence. On any prompt the
+  // person typed that opens with a configured term: a remember term asks the
+  // model to save once (so the never-secrets rule and its wording apply); a
+  // recall term recalls now, for that prompt only.
   on('prompt.submit', async ($, e, next) => {
     if (e.command || e.isMeta) return next(e)
+    const isPerson = PERSON_ORIGINS.has(e.origin?.kind ?? 'composer')
+    const remember = isPerson ? afterTerm(e.text, rememberTerms) : undefined
+    const asked = isPerson && remember === undefined ? afterTerm(e.text, recallTerms) : undefined
     const session = await $.session.id()
-    if ((await read($, recalled))[session]) return next(e)
+    const isFirst = !(await read($, recalled))[session]
+    if (!isFirst && !remember && asked === undefined) return next(e)
     if (!(await isInstalled($, options))) return next(e)
-    await update($, recalled, seen => ({ ...seen, [session]: true as const }))
+    if (isFirst) await update($, recalled, seen => ({ ...seen, [session]: true as const }))
 
+    const context: string[] = []
+    if (remember) {
+      context.push(
+        `The user invoked a Mnemosyne remember trigger. Call mcp__mnemosyne__memory_remember exactly once with a self-contained version of:\n${remember}\nIf it is a secret or credential, do not save it; say so.`,
+      )
+    }
     try {
       // The engine drops a row matching under ~22% of the query's words, so a long
       // prompt recalls nothing as one query: ask per sentence, in one process.
-      const sentences = e.text.split(/(?<=[.?!])\s+|\n+/).map(t => t.trim()).filter(Boolean).slice(0, 4)
-      const answers = await runAll($, options, sentences.map(query => ['mnemopi_recall', { query: query.slice(0, 300), limit: RECALL_LIMIT }] as const))
+      const sentences = (text: string) => text.split(/(?<=[.?!])\s+|\n+/).map(t => t.trim()).filter(Boolean)
+      // A recall term's query is the first sentence after it: "recall: heron? and then…" asks for heron.
+      const topic = asked ? sentences(asked)[0]?.replace(/[?.!]+$/, '') : undefined
+      const queries = [...(topic ? [topic] : []), ...(isFirst ? sentences(e.text).slice(0, 4) : [])]
+      const answers = queries.length === 0 ? [] : await runAll($, options, [...new Set(queries)].map(query => ['mnemopi_recall', { query: query.slice(0, 300), limit: RECALL_LIMIT }] as const))
       const byId = new Map<string, { id: string; owner: string; content: string }>()
       for (const answer of answers) if (typeof answer === 'string') for (const row of compact(answer)) byId.set(row.id, row)
       const found = [...byId.values()].slice(0, RECALL_LIMIT)
-      if (found.length === 0) return next(e)
-      const lines = found.map(r => `- [${r.id} owner=${r.owner}] ${r.content}`)
-      const block = `Long-term memories that may be relevant (Mnemosyne; memory_forget takes the id and owner):\n${lines.join('\n')}`
-      return next({ ...e, context: [...(e.context ?? []), block] })
+      if (found.length > 0) {
+        const lines = found.map(r => `- [${r.id} owner=${r.owner}] ${r.content}`)
+        context.push(`Long-term memories that may be relevant (Mnemosyne; mcp__mnemosyne__memory_forget takes the id and owner):\n${lines.join('\n')}`)
+      } else if (asked !== undefined) {
+        context.push(`Mnemosyne recall for "${topic ?? asked}" found nothing.`)
+      }
     } catch {
-      return next(e)
+      // recall is best effort; the prompt goes on without it
     }
+    return context.length > 0 ? next({ ...e, context: [...(e.context ?? []), ...context] }) : next(e)
   }).catch((_$, e, next) => next(e))
 }

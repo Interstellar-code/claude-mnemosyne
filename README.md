@@ -1,99 +1,65 @@
 # Claude Mnemosyne
 
-Long-term memory for Claude Code across sessions and repos, backed by [Mnemopi](https://github.com/can1357/oh-my-pi/tree/main/packages/mnemopi) — the Bun/TypeScript port of the [Mnemosyne](https://github.com/mnemosyne-oss/mnemosyne) memory engine.
+Long-term memory for Claude Code. A fact you save in one session is there in the next one, in any repo.
 
-## Why
-
-Claude Code's own memory is per-repository (`~/.claude/projects/<repo>/memory/`). A fact learned in one repo is invisible in the next, which is wrong for knowledge that is not repo-specific — a runbook, a tool convention, a machine-wide preference.
-
-## Its own home, not omp's
-
-Mnemosyne installs and uses **its own copy** of the engine and **its own store**. It never reads or writes omp's engine or memory, so the two cannot conflict:
-
-| | omp | Mnemosyne |
-|---|---|---|
-| Engine | `~/.bun/install/global/node_modules/@oh-my-pi/pi-mnemopi` | `~/.claude/mnemosyne/engine/` (pinned `18.11.0`) |
-| Store | `~/.omp/agent/memories/mnemopi/` | `~/.claude/mnemosyne/store/` |
-
-The trade-off: memories saved in omp are not visible here, and the reverse.
-
-## What it does
-
-- **Four tools** the model can call: `memory_remember`, `memory_recall`, `memory_forget`, `memory_stats`.
-- **Recall on the first prompt** of each session: up to 5 memories matching its sentences ride along beside it. Once per session, so the prompt cache holds.
-- **Saves only what the model chooses** to `memory_remember` — no transcript capture, no noise. Saved facts stay until `memory_forget` deletes them.
-- Recall is full-text only (see [DESIGN.md](DESIGN.md) §2.5).
-
-## How it works
-
-One hooks module (`hooks/register.ts`), no settings-file hooks. Every memory operation is one short-lived `bun cli.ts mcp` process against `~/.claude/mnemosyne/store/mnemopi.db`; no server stays running.
-
-| Hook | Fires | Does |
-|---|---|---|
-| `session.start` | once per session | registers `/mnemosyne-setup` and the four tools; toasts if the engine is missing |
-| `command.run` | `/mnemosyne-setup` | checks Bun, installs the engine, runs a stats call |
-| `tool.call` | the model calls a `memory_*` tool | runs the engine, returns its answer as the tool result |
-| `prompt.submit` | every prompt; acts once per session | first real prompt: recalls per sentence, attaches up to 5 hits as hidden context |
-
-### Memory lifecycle
-
-- **Add.** The model calls `memory_remember`. The fact is stored as one row with `source: 'imported'`, the engine's durable tier; any other source is deleted by the engine after 24 hours. Owner is `global`, or `project-<repo>-<hash>` in per-project mode; `scope` is `global`, or `channel` for a project-only fact.
-- **Recall.** Automatically on the first prompt of a session, or whenever the model calls `memory_recall`. It searches the current owner's rows plus every `global` row, by keywords: "ferry Varn" finds "The ferry to Varn leaves at 06:40", "boat schedule" does not.
-- **Update.** No update tool: forget the old fact, remember the new one.
-- **Remove.** The model calls `memory_forget` with the id and owner a recall returned. Nothing expires on its own.
-
-### When it is used
-
-Apart from the first-prompt recall, the model decides when to save or recall, from the tool descriptions alone. There is no keyword trigger and no skill yet. Saying "remember …" or "what do you remember about …" works in practice, but it is the model's judgement, not a rule.
-
-### Planned
-
-- A fixed system-prompt section telling the model when to save and recall.
-- Term triggers, configurable per install (`rememberTerms`, `recallTerms`): a prompt starting with a remember term is stored directly; a recall term recalls on that prompt.
-- Later, a small `/mnemosyne` skill for manual review.
-
-## Prerequisites
-
-- **Bun** on `PATH` ([bun.sh](https://bun.sh)). The engine ships TypeScript only; Node cannot run it.
+![How memory flows](docs/architecture.png)
 
 ## Install
+
+You need [Bun](https://bun.sh) on your `PATH`.
 
 ```sh
 claude plugin marketplace add Interstellar-code/claude-mnemosyne
 claude plugin install mnemosyne@mnemosyne
 ```
 
-The install asks for the two settings below. Then, in a session:
+The install asks for the settings below; the defaults are fine.
+
+## Setup
+
+In a Claude Code session, run once:
 
 ```
 /mnemosyne-setup
 ```
 
-That installs the engine into `~/.claude/mnemosyne/engine/` (about 130 MB) and creates the store. Until it runs, the tools refuse and a toast says to run it.
+This installs the memory engine into `~/.claude/mnemosyne/engine/` (about 130 MB) and creates the store at `~/.claude/mnemosyne/store/`.
 
-## Configuration
+## Use
 
-| Key | Options | Default | Purpose |
-|---|---|---|---|
-| `scope` | `global`, `per-project` | `global` | `global`: one memory for every repo. `per-project`: each repo (by git root; worktrees share their repo's) keeps its own, and `memory_remember` with `global: true` saves a fact every repo sees. |
-| `memoryDir` | path | `~/.claude/mnemosyne/store` | Where the database lives: absolute or `~/…`. A path inside `~/.omp` is refused: one store, one writer. |
+| You type | What happens |
+|---|---|
+| `remember that we deploy on Fridays` | Claude saves the fact. |
+| `what do you remember about deploys?` | Matching memories are looked up and shown to Claude. |
+| any first prompt of a session | Memories matching it are looked up automatically. |
+| `forget the memory about deploys` | Claude finds it and deletes it. |
 
-Change either later from `/plugin` → Mnemosyne → configure.
+Claude also saves and recalls on its own: lasting preferences, conventions, decisions. To change a fact, ask Claude to forget the old one and remember the new one.
 
-## Development
+Recall matches words, not meaning: "deploy Fridays" finds the fact above, "release schedule" does not.
 
-```sh
-claude plugin validate .
-claude plugin test .
-claude --plugin-dir .
-```
+## Settings
 
-`tsc -p .` needs the engine's API types in `.claude-plugin/types/` (gitignored). The engine lays them there the first time it loads the plugin from this folder, for example with `claude --plugin-dir .`.
+Change any time from `/plugin` → Mnemosyne → configure.
 
-## Relationship to MatrixKoder
+| Setting | Default | What it does |
+|---|---|---|
+| `scope` | `global` | `global`: one memory for every repo. `per-project`: each repo keeps its own; ask for "global" to share a fact. |
+| `rememberTerms` | `remember:`, `remember that`, `note that`, `save to memory` | A prompt that starts with one of these is saved. Empty turns it off. |
+| `recallTerms` | `recall:`, `what do you remember about`, `check memory` | A prompt that starts with one of these looks up memories. Empty turns it off. |
+| `memoryDir` | `~/.claude/mnemosyne/store` | Where memories are stored. |
 
-Standalone. MatrixKoder may offer to switch it on from its setup wizard; that integration lives in MatrixKoder's repo.
+## How it works
+
+The plugin hooks into Claude Code at four points:
+
+- **Session start:** adds the memory tools and `/mnemosyne-setup`.
+- **System prompt:** adds a short, fixed set of rules telling Claude when to save and recall.
+- **Your prompt:** on the first prompt, or one starting with a term above, looks up memories and attaches them to that prompt.
+- **Tool calls:** when Claude calls a memory tool, runs the engine once and returns the answer.
+
+Memories live in a local SQLite file. Mnemosyne uses its own copy of the [Mnemopi](https://github.com/can1357/oh-my-pi/tree/main/packages/mnemopi) engine and never touches omp's memory. Design notes: [DESIGN.md](DESIGN.md).
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT

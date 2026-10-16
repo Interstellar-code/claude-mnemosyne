@@ -1,5 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import type { On, ProcessRunInit } from 'claude-code'
+import { afterTerm } from '../hooks/register'
 
 type Run = { argv: readonly string[]; init?: ProcessRunInit }
 
@@ -112,4 +113,45 @@ test('without the engine the tools say to run setup', async ($, on) => {
 
   expect(ran.deny).toContain('/mnemosyne-setup')
   expect(runs.length).toBe(0)
+})
+
+test('the rules section rides last on the session side, only where the tools are offered', async ($, on) => {
+  on('prompt.compose', () => ({ sections: [{ id: 'intro', text: 'engine', scope: 'shared' }] }))
+  const base = { model: 'm', promptModel: 'm', surfaces: [], outputStyle: null }
+  const offered = await $.prompt.compose({ ...base, tools: ['mcp__mnemosyne__memory_remember'], traits: [] } as never)
+  const bare = await $.prompt.compose({ ...base, tools: ['mcp__mnemosyne__memory_remember'], traits: ['bare'] } as never)
+  const without = await $.prompt.compose({ ...base, tools: [], traits: [] } as never)
+
+  expect(offered.sections.at(-1)).toMatchObject({ id: 'mnemosyne:rules', scope: 'session' })
+  expect(bare.sections.some(s => s.id === 'mnemosyne:rules')).toBe(false)
+  expect(without.sections.some(s => s.id === 'mnemosyne:rules')).toBe(false)
+})
+
+test('terms match at the start, as whole words, longest first', () => {
+  const list = ['remember that', 'remember', 'note that']
+  expect(afterTerm('Remember that we use pnpm', list)).toBe('we use pnpm')
+  expect(afterTerm('please remember: tabs', list)).toBe(': tabs'.replace(/^[\s:,]+/, ''))
+  expect(afterTerm('remembering the past', list)).toBeUndefined()
+  expect(afterTerm('I do not remember that', list)).toBeUndefined()
+})
+
+test('a remember term asks the model to save once; a recall term recalls on that prompt', async ($, on) => {
+  const runs = world(on, JSON.stringify({ results: [{ id: 'm1', session_id: 'global', content: 'use pnpm' }] }))
+  const seen: (readonly string[] | undefined)[] = []
+  on('prompt.submit', (_$, e) => {
+    seen.push(e.context)
+    return { text: e.text, context: e.context }
+  })
+
+  await $.prompt.submit({ text: 'hello', origin: { kind: 'composer' } } as never) // first prompt: auto-recall
+  await $.prompt.submit({ text: 'remember that we deploy on Fridays', origin: { kind: 'composer' } } as never)
+  await $.prompt.submit({ text: 'what do you remember about pnpm? answer briefly.', origin: { kind: 'composer' } } as never)
+  await $.prompt.submit({ text: 'remember that x', origin: { kind: 'plugin', plugin: 'other' } } as never)
+
+  expect(seen[1]?.at(-1)).toContain('memory_remember exactly once')
+  expect(seen[1]?.at(-1)).toContain('we deploy on Fridays')
+  expect(runs.length).toBe(2) // first-prompt recall + the recall term; the remember term stores nothing itself
+  expect(request(runs[1]!).arguments.query).toBe('pnpm')
+  expect(seen[2]?.at(-1)).toContain('- [m1 owner=global] use pnpm')
+  expect(seen[3]).toBeUndefined()
 })
