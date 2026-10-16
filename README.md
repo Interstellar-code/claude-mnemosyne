@@ -18,7 +18,9 @@ Or from a shell:
 claude plugin install mnemosyne --marketplace Interstellar-code/claude-mnemosyne
 ```
 
-Answer `y` to add the marketplace, then pick a scope (user scope for every project). The install then asks for the settings below; the defaults are fine.
+Answer `y` to add the marketplace, then pick a scope (user scope for every project). The install then asks for the settings below. Leave the empty ones empty to use the defaults; the screen shows defaults only for the scope picker and the on/off switch.
+
+Works on macOS, Linux and Windows. On Windows, `~` means `%USERPROFILE%`.
 
 > The marketplace install has not been tested end to end yet. Every test so far loaded the plugin from a checkout (`claude --plugin-dir <repo>`). If the install fails, use that instead and [open an issue](https://github.com/Interstellar-code/claude-mnemosyne/issues).
 
@@ -72,8 +74,8 @@ Change any time from `/plugin` → Mnemosyne → configure.
 | Setting | Default | What it does |
 |---|---|---|
 | `scope` | `global` | `global`: one memory for every repo. `per-project`: each repo keeps its own; ask for "global" to share a fact. |
-| `rememberTerms` | `remember:`, `remember that`, `note that`, `save to memory` | A prompt that starts with one of these is saved. Empty turns it off. |
-| `recallTerms` | `recall:`, `what do you remember about`, `check memory` | A prompt that starts with one of these looks up memories. Empty turns it off. |
+| `rememberTerms` | `remember:`, `remember that`, `note that`, `save to memory` | A prompt that starts with one of these is saved. `none` turns it off. |
+| `recallTerms` | `recall:`, `what do you remember about`, `check memory` | A prompt that starts with one of these looks up memories. `none` turns it off. |
 | `memoryDir` | `~/.claude/mnemosyne/store` | Where memories are stored. |
 | `externalMcp` | off | Lets other MCP clients use the same memory (see below). |
 
@@ -85,9 +87,11 @@ Turn on `externalMcp`, start a new session, and the plugin writes `~/.claude/mne
 claude mcp add mnemosyne-store -- ~/.claude/mnemosyne/bin/mnemosyne-mcp
 ```
 
+On Windows the file is `%USERPROFILE%\.claude\mnemosyne\bin\mnemosyne-mcp.cmd`.
+
 For Cursor, Codex and others, use the same path as the server command. It offers the same four tools as the plugin (remember, recall, forget, stats) and nothing else of the engine's. It reads and writes `global` memories by default; set `MNEMOSYNE_OWNER` to a `project-…` owner to use a project's. Turning the option off deletes the file.
 
-**Security.** There is no token because there is no network port: the client starts the server itself over stdin/stdout, and nothing listens on the network. Access is whoever can run programs as your user, the same people who could read the database file directly. To keep other accounts on the machine out, the plugin sets `~/.claude/mnemosyne` and the store to owner-only (`700`). Don't wrap the server in an HTTP bridge without adding authentication there.
+**Security.** There is no token because there is no network port: the client starts the server itself over stdin/stdout, and nothing listens on the network. Access is whoever can run programs as your user, the same people who could read the database file directly. To keep other accounts on the machine out, the plugin sets `~/.claude/mnemosyne` and the store to owner-only (`700`) on macOS and Linux; on Windows your user profile's permissions already do. Don't wrap the server in an HTTP bridge without adding authentication there.
 
 ## How it works
 

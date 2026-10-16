@@ -90,6 +90,7 @@ const TOOLS = [
 // prompt), longest first so the remainder after the match is right.
 function terms(value: unknown) {
   const list = Array.isArray(value) ? value : typeof value === 'string' ? value.split(',') : []
+  if (list.length === 1 && String(list[0]).trim().toLowerCase() === 'none') return []
   return [...new Set(list.map(t => String(t).normalize('NFKC').trim().toLocaleLowerCase()).filter(Boolean))].sort(
     (x, y) => y.length - x.length,
   )
@@ -107,38 +108,60 @@ export function afterTerm(text: string, list: readonly string[]) {
 const clamp = (value: unknown, low: number, high: number, fallback: number) =>
   typeof value === 'number' && Number.isFinite(value) ? Math.min(high, Math.max(low, value)) : fallback
 
+const isWindows = async ($: EngineInterface) => (await $.env.get('OS')) === 'Windows_NT'
+
+// Forward slashes on every OS: Bun and Windows both accept them.
+const slashes = (path: string) => path.replace(/\\/g, '/').replace(/\/+$/, '')
+const isAbsolute = (path: string) => /^(\/|[A-Za-z]:\/)/.test(path)
+
 // Rejects with a message the person can act on; every caller turns it into text.
 async function paths($: EngineInterface, options: PluginOptions) {
-  const home = (await $.env.get('HOME')) ?? ''
-  if (!home.startsWith('/')) throw new Error('HOME is not set to an absolute path.')
+  const windows = await isWindows($)
+  const home = slashes((await $.env.get('HOME')) || (windows ? ((await $.env.get('USERPROFILE')) ?? '') : ''))
+  if (!isAbsolute(home)) throw new Error(`${windows ? 'USERPROFILE' : 'HOME'} is not set to an absolute path.`)
   const root = `${home}/.claude/mnemosyne`
   const engine = `${root}/engine`
-  const dir = typeof options.memoryDir === 'string' && options.memoryDir ? options.memoryDir : '~/.claude/mnemosyne/store'
-  const store = (dir === '~' || dir.startsWith('~/') ? `${home}${dir.slice(1)}` : dir).replace(/\/+$/, '')
-  if (!store.startsWith('/')) throw new Error(`memoryDir must be absolute or start with ~/ (got "${dir}").`)
+  const dir = slashes(typeof options.memoryDir === 'string' && options.memoryDir.trim() ? options.memoryDir.trim() : '~/.claude/mnemosyne/store')
+  const store = dir === '~' || dir.startsWith('~/') ? `${home}${dir.slice(1)}` : dir
+  if (!isAbsolute(store)) throw new Error(`memoryDir must be absolute or start with ~/ (got "${dir}").`)
+  if (windows && /["%]/.test(store)) throw new Error('memoryDir must not contain " or % on Windows.')
   // One store, one writer: omp's database must never get a second one (DESIGN §2.6).
-  if (store === `${home}/.omp` || store.startsWith(`${home}/.omp/`)) throw new Error('memoryDir must not be inside ~/.omp.')
-  return { root, engine, cli: `${engine}/node_modules/${ENGINE_PACKAGE}/src/cli.ts`, store, wrapper: `${root}/bin/mnemosyne-mcp` }
+  const omp = `${home}/.omp`
+  const fold = (path: string) => (windows ? path.toLowerCase() : path)
+  if (fold(store) === fold(omp) || fold(store).startsWith(`${fold(omp)}/`)) throw new Error('memoryDir must not be inside ~/.omp.')
+  return {
+    windows,
+    root,
+    engine,
+    cli: `${engine}/node_modules/${ENGINE_PACKAGE}/src/cli.ts`,
+    store,
+    wrapper: `${root}/bin/mnemosyne-mcp${windows ? '.cmd' : ''}`,
+  }
 }
 
 async function owner($: EngineInterface, options: PluginOptions) {
   if (options.scope !== 'per-project') return GLOBAL_OWNER
-  const root = (await $.session.repo())?.root ?? (await $.session.cwd())
+  const root = slashes((await $.session.repo())?.root ?? (await $.session.cwd()))
   let hash = 5381
   for (const char of root) hash = ((hash * 33) ^ char.charCodeAt(0)) >>> 0
   // The hash keeps /a/b-c and /a/b/c apart; the name keeps it readable.
   return `project-${root.split('/').filter(Boolean).at(-1)?.replace(/[^A-Za-z0-9]+/g, '-') ?? 'root'}-${hash.toString(36)}`
 }
 
+// Folder work runs through Bun, which every install has: mkdir, rm and chmod
+// are not commands on Windows.
+const bunFs = ($: EngineInterface, code: string, ...args: string[]) =>
+  $.process.run(['bun', '-e', `const fs = require('fs'); const a = process.argv.slice(1); ${code}`, ...args])
+
 // Single-quoted for sh: the store path comes from settings and may hold anything.
 const shellQuote = (text: string) => `'${text.replace(/'/g, `'\\''`)}'`
 
-// Memories are private: owner-only folders, so other accounts on the machine
-// cannot read the store or run the wrapper.
+// Memories are private: owner-only folders on macOS and Linux, so other
+// accounts cannot read the store or run the wrapper. On Windows the user
+// profile's own permissions already keep other non-admin accounts out.
 async function secure($: EngineInterface, options: PluginOptions) {
-  const { root, store } = await paths($, options)
-  await $.process.run(['mkdir', '-p', root, store])
-  await $.process.run(['chmod', '700', root, store])
+  const { root, store, windows } = await paths($, options)
+  await bunFs($, `for (const d of a) { fs.mkdirSync(d, { recursive: true }); ${windows ? '' : 'fs.chmodSync(d, 0o700);'} }`, root, store)
 }
 
 // externalMcp: a wrapper other MCP clients (Cursor, Codex, `claude mcp add`)
@@ -146,20 +169,24 @@ async function secure($: EngineInterface, options: PluginOptions) {
 // port, so no token: access is whoever can run files as this user, guarded by
 // the folder modes above.
 async function syncWrapper($: EngineInterface, options: PluginOptions) {
-  const { root, cli, store, wrapper } = await paths($, options)
+  const { root, cli, store, wrapper, windows } = await paths($, options)
   // Rewritten at each session start, so an updated plugin's proxy path stays current.
-  const proxy = `${$.plugin.root}/bin/mcp-proxy.ts`
+  const proxy = `${slashes($.plugin.root)}/bin/mcp-proxy.ts`
   if (options.externalMcp !== true) {
-    await $.process.run(['rm', '-f', wrapper])
+    await bunFs($, 'fs.rmSync(a[0], { force: true })', wrapper)
     return
   }
-  await $.process.run(['mkdir', '-p', `${root}/bin`])
-  await $.fs.write(
-    wrapper,
-    `#!/bin/sh
-# Written by the Mnemosyne plugin (externalMcp). A stdio MCP server over its store,
-# serving only remember / recall / forget / stats.
-# MNEMOSYNE_OWNER picks the owner: global (default) or a project-… id.
+  await bunFs($, `fs.mkdirSync(a[0], { recursive: true }); ${windows ? '' : 'fs.chmodSync(a[0], 0o700);'}`, `${root}/bin`)
+  const text = windows ? cmdWrapper(store, cli, proxy) : shWrapper(store, cli, proxy)
+  await bunFs($, `fs.writeFileSync(a[0], a[1]); ${windows ? '' : 'fs.chmodSync(a[0], 0o700);'}`, wrapper, text)
+}
+
+const WRAPPER_NOTE = `Written by the Mnemosyne plugin (externalMcp). A stdio MCP server over its store,
+serving only remember / recall / forget / stats.
+MNEMOSYNE_OWNER picks the owner: global (default) or a project-... id.`
+
+const shWrapper = (store: string, cli: string, proxy: string) => `#!/bin/sh
+${WRAPPER_NOTE.replace(/^/gm, '# ')}
 export MNEMOPI_DATA_DIR=${shellQuote(store)}
 export MNEMOPI_SESSION_ID="\${MNEMOSYNE_OWNER:-global}"
 export MNEMOPI_CHANNEL_ID="$MNEMOPI_SESSION_ID"
@@ -169,10 +196,22 @@ export MNEMOPI_LLM_BASE_URL=
 export MNEMOPI_HOST_LLM_ENABLED=
 export MNEMOSYNE_CLI=${shellQuote(cli)}
 exec bun ${shellQuote(proxy)}
-`,
-  )
-  await $.process.run(['chmod', '700', `${root}/bin`, wrapper])
-}
+`
+
+// cmd has no safe quoting for " or %; paths() refuses a store holding either.
+const cmdWrapper = (store: string, cli: string, proxy: string) => `@echo off\r
+${WRAPPER_NOTE.replace(/^/gm, 'rem ').replace(/\n/g, '\r\n')}\r
+set "MNEMOPI_DATA_DIR=${store}"\r
+if not defined MNEMOSYNE_OWNER set "MNEMOSYNE_OWNER=global"\r
+set "MNEMOPI_SESSION_ID=%MNEMOSYNE_OWNER%"\r
+set "MNEMOPI_CHANNEL_ID=%MNEMOSYNE_OWNER%"\r
+set "MNEMOPI_NO_EMBEDDINGS=1"\r
+set "MNEMOPI_MCP_BANK="\r
+set "MNEMOPI_LLM_BASE_URL="\r
+set "MNEMOPI_HOST_LLM_ENABLED="\r
+set "MNEMOSYNE_CLI=${cli}"\r
+bun "${proxy}"\r
+`
 
 async function isInstalled($: EngineInterface, options: PluginOptions) {
   try {

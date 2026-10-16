@@ -160,25 +160,23 @@ test('a remember term asks the model to save once; a recall term recalls on that
 
 test('externalMcp writes an owner-only stdio wrapper', { options: { externalMcp: true, memoryDir: "~/it's mine" } }, async ($, on) => {
   const runs = world(on, '{}')
-  const written: { path: string; text: string }[] = []
-  on('fs.write', (_$, e) => {
-    written.push(e as never)
-    return { value: undefined }
-  })
   on('command.register', () => ({ value: {} }) as never)
   on('tool.register', () => ({ value: {} }) as never)
   on('ui.toast', () => ({ value: undefined }))
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   await $.session.start({ cwd: '/w', surface: null, isInteractive: false } as never)
 
-  const wrapper = written.find(w => w.path === '/home/u/.claude/mnemosyne/bin/mnemosyne-mcp')
-  expect(wrapper?.text).toContain(`export MNEMOPI_DATA_DIR='/home/u/it'\\''s mine'`)
-  expect(wrapper?.text).toContain('MNEMOPI_NO_EMBEDDINGS=1')
-  expect(wrapper?.text).toContain('export MNEMOPI_LLM_BASE_URL=')
-  expect(wrapper?.text).toMatch(/exec bun '.*\/bin\/mcp-proxy\.ts'/)
-  const argv = runs.map(r => r.argv.join(' '))
-  expect(argv).toContain('chmod 700 /home/u/.claude/mnemosyne /home/u/it\'s mine')
-  expect(argv).toContain('chmod 700 /home/u/.claude/mnemosyne/bin /home/u/.claude/mnemosyne/bin/mnemosyne-mcp')
+  const write = runs.find(r => r.argv[2]?.includes('writeFileSync'))
+  expect(write?.argv[3]).toBe('/home/u/.claude/mnemosyne/bin/mnemosyne-mcp')
+  const wrapper = { text: write?.argv[4] }
+  expect(wrapper.text).toContain(`export MNEMOPI_DATA_DIR='/home/u/it'\\''s mine'`)
+  expect(wrapper.text).toContain('MNEMOPI_NO_EMBEDDINGS=1')
+  expect(wrapper.text).toContain('export MNEMOPI_LLM_BASE_URL=')
+  expect(wrapper.text).toMatch(/exec bun '.*\/bin\/mcp-proxy\.ts'/)
+  // Folder work runs through `bun -e`: the code, then its path arguments.
+  const fsRuns = runs.filter(r => r.argv[1] === '-e').map(r => ({ code: r.argv[2]!, args: r.argv.slice(3) }))
+  expect(fsRuns.some(r => r.code.includes('chmodSync(d, 0o700)') && r.args.join('|') === "/home/u/.claude/mnemosyne|/home/u/it's mine")).toBe(true)
+  expect(write?.argv[2]).toContain('chmodSync(a[0], 0o700)')
 })
 
 test('without externalMcp the wrapper is removed', async ($, on) => {
@@ -188,5 +186,37 @@ test('without externalMcp the wrapper is removed', async ($, on) => {
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   await $.session.start({ cwd: '/w', surface: null, isInteractive: false } as never)
 
-  expect(runs.map(r => r.argv.join(' '))).toContain('rm -f /home/u/.claude/mnemosyne/bin/mnemosyne-mcp')
+  expect(runs.some(r => r.argv[2]?.includes('rmSync') && r.argv[3] === '/home/u/.claude/mnemosyne/bin/mnemosyne-mcp')).toBe(true)
+})
+
+test('on Windows: USERPROFILE home, a .cmd wrapper, no chmod', { options: { externalMcp: true } }, async ($, on) => {
+  const runs: { argv: readonly string[] }[] = []
+  on('env.get', (_$, e) => ({ value: ({ OS: 'Windows_NT', USERPROFILE: 'C:\\Users\\u' } as Record<string, string>)[(e as { name: string }).name] }))
+  on('fs.stat', () => ({ value: { kind: 'file' } }) as never)
+  on('process.run', (_$, e) => {
+    runs.push(e)
+    return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
+  })
+  on('command.register', () => ({ value: {} }) as never)
+  on('tool.register', () => ({ value: {} }) as never)
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: 'C:\\w', surface: null, isInteractive: false } as never)
+
+  const write = runs.find(r => r.argv[2]?.includes('writeFileSync'))
+  expect(write?.argv[3]).toBe('C:/Users/u/.claude/mnemosyne/bin/mnemosyne-mcp.cmd')
+  expect(write?.argv[4]).toContain('set "MNEMOPI_DATA_DIR=C:/Users/u/.claude/mnemosyne/store"')
+  expect(write?.argv[4]?.startsWith('@echo off')).toBe(true)
+  expect(runs.some(r => (r.argv[2] ?? '').includes('chmodSync'))).toBe(false)
+})
+
+test('empty terms use the defaults; none turns them off', { options: { rememberTerms: ['none'] } }, async ($, on) => {
+  world(on, '{"results":[]}')
+  const seen: (readonly string[] | undefined)[] = []
+  on('prompt.submit', (_$, e) => {
+    seen.push(e.context)
+    return { text: e.text, context: e.context }
+  })
+  await $.prompt.submit({ text: 'remember that x', origin: { kind: 'composer' } } as never)
+
+  expect(seen[0]?.some(c => c.includes('memory_remember exactly once')) ?? false).toBe(false)
 })

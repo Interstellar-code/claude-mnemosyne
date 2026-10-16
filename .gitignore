@@ -5,3 +5,6 @@ node_modules/
 
 # laid by the Claude Code engine when it loads the mod
 .claude-plugin/types/
+.omc/
+**/.omc/
+.serena/
