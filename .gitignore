@@ -2,3 +2,6 @@ node_modules/
 *.log
 .DS_Store
 .env
+
+# laid by the Claude Code engine when it loads the mod
+.claude-plugin/types/

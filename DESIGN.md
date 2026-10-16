@@ -2,7 +2,7 @@
 
 Everything below was probed on 2026-10-16 against a real install, not read off a
 page. Commands that produced each finding are noted where they can be
-reproduced. `v0.0.1` implements none of it.
+reproduced. `v0.1.0` implements it; §5 records the decisions taken.
 
 ---
 
@@ -64,10 +64,13 @@ affordable once per conversation and not per turn.
 ### 2.3 The data dir must be set explicitly
 
 Mnemopi's built-in default is `~/.hermes/mnemopi/data`
-(`packages/mnemopi/src/config.ts`), which does not exist on a machine where
-only omp has run. omp writes to `~/.omp/agent/memories/mnemopi/`. Without
-`MNEMOPI_DATA_DIR` pointing there, the plugin reads an empty store and looks
-broken.
+(`packages/mnemopi/src/config.ts`). The plugin always sets `MNEMOPI_DATA_DIR`
+to its own store, `~/.claude/mnemosyne/store` by default.
+
+Verified with a throwaway `HOME`: a remember wrote only to `MNEMOPI_DATA_DIR`
+(plus bun's own cache under `~/Library/Caches/bun`). Nothing under `~/.omp` or
+`~/.hermes`. An end-to-end run left omp's `mnemopi.db*` mtimes and sizes
+unchanged.
 
 ### 2.4 Scoping silently returns zero hits — the trap
 
@@ -118,19 +121,20 @@ would corrupt the vector index.
 
 ## 3. Where memory lives
 
-Each call is one `bun <cli> mcp` process:
+The plugin keeps its own engine and store, separate from omp, so the two never
+share a writer (§2.6) and an omp upgrade cannot change the engine under it.
+`/mnemosyne-setup` runs `bun add @oh-my-pi/pi-mnemopi@18.11.0` in
+`~/.claude/mnemosyne/engine/`. Each call is one `bun <cli> mcp` process:
 
 ```mermaid
 flowchart LR
   SS["session start"] --> T["$.tool.register ×4"]
-  PC["prompt.context"] --> R["recall (FTS)"]
-  R --> B["context block"]
-  TC["turn.complete"] --> W["retain"]
+  PS["first prompt.submit"] --> R["recall (FTS)"]
+  R --> B["context beside the prompt"]
   T --> P["$.process.run<br/>bun cli.ts mcp"]
-  PC --> P
-  TC --> P
-  P --> DB[("~/.omp/agent/memories/mnemopi")]
-  OMP["omp sessions"] --> DB
+  PS --> P
+  P --> E["~/.claude/mnemosyne/engine"]
+  E --> DB[("~/.claude/mnemosyne/store")]
 ```
 
 ## 4. Why a plugin, and why mod tools rather than an MCP server
@@ -150,8 +154,8 @@ conditional inclusion, and `${user_config.*}` substitutes into `env`/`args`
 only. So a bundled server **cannot be gated on a user's choice** — which
 defeats the entire point of an opt-in memory.
 
-`$.tool.register` is code, so it sits behind `if (options.memory !== true) return`
-and costs nothing when off.
+`$.tool.register` is code, so the plugin's own enable switch gates everything;
+no separate `memory` key is needed.
 
 ### 4.1 Two registration rules the engine enforces
 
@@ -162,31 +166,40 @@ Learned by hitting both errors:
   modules already work around this — `tools.ts` and `wake.ts` register with
   `{ cwd: /.*/ }`.
 - Same for `tool.call`. A new module needs a matcher on both:
-  `{ cwd: /.*/ }` and `{ tool: /(^|__)memory_/ }`.
+  `{ cwd: /.*/ }` and `{ tool: /^mcp__mnemosyne__memory_/ }`.
 
-## 5. Open questions — settle before writing code
+## 5. Decisions (2026-10-16)
 
-These change the design and are not obvious. **No answers yet.**
+Terms: the engine's *bank* is always `default` (`<store>/mnemopi.db`). What
+this plugin varies is the row's *owner*, its `session_id`, set from
+`MNEMOPI_SESSION_ID` (`MNEMOPI_CHANNEL_ID` carries the same value; for this
+plugin's own rows the session id alone suffices, the channel matters only for
+omp-written rows, §2.4).
 
-1. **Scope: one shared bank, or per-repo + shared?**
-   `scope: 'global'` writes a row every bank can recall — verified: stored with
-   `scope:"global"`, then recalled from a *different* session id in a different
-   process. That gives literally one central memory, which is the stated goal.
-   The cost is that the store has one retrieval budget for every project.
-   The alternative (omp's `per-project-tagged`) layers a project bank under a
-   shared one.
-
-2. **What gets retained?** Every completed turn is the obvious rule and probably
-   wrong: it drowns recall in transcript noise. Options: every turn;
-   only turns that used tools; only explicit `memory_remember` calls.
-
-3. **Recall cadence and prompt-cache stability.** A recall block that differs on
-   every request invalidates the prompt cache. Once per conversation, keyed by a
-   stable id, is the safe shape. Per-turn is not.
-
-4. **Does `memoryDir` need to be configurable at all?** If the whole point is one
-   shared store, a configurable path invites divergence. It is declared in the
-   manifest for the wizard's benefit; it may be better to drop it.
+1. **Scope: the user picks at install.** `userConfig.scope` is `global` (owner
+   `global`, every row `scope: 'global'`) or `per-project` (owner
+   `project-<repo name>-<hash of git root>`, rows `scope: 'channel'`;
+   `memory_remember` with `global: true` writes `scope: 'global'`, which every
+   owner recalls). Forget deletes `WHERE id = ? AND session_id = ?`, so recall
+   reports each row's owner and `memory_forget` takes it.
+2. **Retain only explicit `memory_remember` calls**, written with
+   `source: 'imported'`. Any other source lands as trust tier STATED, and every
+   remember runs `trimWorkingMemory` (`core/beam/store.ts`), which deletes
+   unconsolidated STATED rows older than 24 hours (hard-coded
+   `workingMemoryTtlHours`) or past 1000 per owner. IMPORTED rows are never
+   trimmed. Verified: a row backdated weeks survived 5 more remembers in 3 of 3
+   scratch runs as IMPORTED; as STATED it was gone after one. Recall weight is
+   keyed on `veracity`, not trust tier, so it is unchanged.
+3. **Recall once per session**, on the first non-command prompt, as
+   `prompt.submit` context: that message never changes, so the prompt cache
+   holds. `prompt.context` was not used: it fires before any prompt text
+   exists to query with. The once-only mark lives in `$.state`. The engine
+   drops a row matching under ~22% of the query's words (`minimumRelevance`,
+   `core/beam/recall.ts`), so a whole long prompt recalls nothing; the plugin
+   sends one recall per sentence (up to 4) to a single engine process and
+   merges by id.
+4. **`memoryDir` stays configurable**, defaulting to the plugin's own store. It
+   must be absolute or `~/…`, and is refused inside `~/.omp`.
 
 ## 6. What the matrixkoder side needs (findings only)
 

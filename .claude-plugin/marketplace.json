@@ -7,8 +7,8 @@
     {
       "name": "mnemosyne",
       "source": "./",
-      "description": "Shared long-term memory for Claude Code, backed by the Mnemopi engine that omp writes. Scaffold: no behavior ships in this version."
+      "description": "Long-term memory for Claude Code across sessions and repos, on its own private copy of the Mnemopi engine and its own store."
     }
   ],
-  "description": "Claude Mnemosyne — shared long-term memory plugin for Claude Code"
+  "description": "Claude Mnemosyne — long-term memory plugin for Claude Code"
 }

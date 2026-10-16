@@ -1,58 +1,70 @@
 # Claude Mnemosyne
 
-Shared long-term memory for Claude Code, backed by [Mnemopi](https://github.com/can1357/oh-my-pi/tree/main/packages/mnemopi) — the Bun/TypeScript port of the [Mnemosyne](https://github.com/mnemosyne-oss/mnemosyne) memory engine.
-
-> **Status: scaffold.** `v0.0.1` ships **no behavior**. It installs, loads and validates cleanly, and does nothing else. See [DESIGN.md](DESIGN.md) for what the implementing version does, the constraints it must honour, and the questions still open.
+Long-term memory for Claude Code across sessions and repos, backed by [Mnemopi](https://github.com/can1357/oh-my-pi/tree/main/packages/mnemopi) — the Bun/TypeScript port of the [Mnemosyne](https://github.com/mnemosyne-oss/mnemosyne) memory engine.
 
 ## Why
 
 Claude Code's own memory is per-repository (`~/.claude/projects/<repo>/memory/`). A fact learned in one repo is invisible in the next, which is wrong for knowledge that is not repo-specific — a runbook, a tool convention, a machine-wide preference.
 
-Meanwhile [omp](https://omp.sh) already keeps a memory store at `~/.omp/agent/memories/mnemopi/`. This plugin's goal is to read and write **that same store**, so a fact learned in a Claude Code session in one repo is available to omp, and to Claude Code in every other repo.
+## Its own home, not omp's
 
-## Relationship to MatrixKoder
+Mnemosyne installs and uses **its own copy** of the engine and **its own store**. It never reads or writes omp's engine or memory, so the two cannot conflict:
 
-This is a **standalone plugin**. It has no dependency on [MatrixKoder](https://github.com/Interstellar-code/matrixkoder) and does not require it.
+| | omp | Mnemosyne |
+|---|---|---|
+| Engine | `~/.bun/install/global/node_modules/@oh-my-pi/pi-mnemopi` | `~/.claude/mnemosyne/engine/` (pinned `18.11.0`) |
+| Store | `~/.omp/agent/memories/mnemopi/` | `~/.claude/mnemosyne/store/` |
 
-MatrixKoder is listed as one *consumer*: its `/mk setup` wizard can offer to switch this memory on, and its settings tab can expose the two keys below. That integration is optional and lives in MatrixKoder's repo, not here.
+The trade-off: memories saved in omp are not visible here, and the reverse.
 
-## What ships today
+## What it does
 
-| File | Contents |
-|---|---|
-| `.claude-plugin/plugin.json` | manifest; `defaultEnabled: false` |
-| `.claude-plugin/marketplace.json` | single-plugin marketplace, so the repo can be added as a marketplace |
-| `hooks/hooks.json` | points at the hooks module |
-| `hooks/register.ts` | `register()` that registers nothing |
-| `types/index.d.ts` | empty contract; the shape the implementation will need is commented |
+- **Four tools** the model can call: `memory_remember`, `memory_recall`, `memory_forget`, `memory_stats`.
+- **Recall on the first prompt** of each session: up to 5 memories matching its sentences ride along beside it. Once per session, so the prompt cache holds.
+- **Saves only what the model chooses** to `memory_remember` — no transcript capture, no noise. Saved facts stay until `memory_forget` deletes them.
+- Recall is full-text only (see [DESIGN.md](DESIGN.md) §2.5).
 
-## Configuration
+## Prerequisites
 
-Both keys are declared and inert until the implementation lands.
-
-| Key | Type | Default | Purpose |
-|---|---|---|---|
-| `memory` | boolean | `false` | master switch; the implementation gates every hook and tool on it |
-| `memoryDir` | string | `~/.omp/agent/memories/mnemopi` | the store. Default is omp's, so both agents share one memory |
-
-## Prerequisites (for the implementing version)
-
-Not needed to install the scaffold. These are what the real thing will require, and they are not optional:
-
-- **Bun.** The Mnemopi package publishes TypeScript only — `exports.import` points at `./src/*.ts` and `dist/` holds type declarations alone. Node refuses those files outright (`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`), so `bun` must be on `PATH`.
-- **The engine.** `@oh-my-pi/pi-mnemopi`, installed by omp. Expected at `~/.bun/install/global/node_modules/@oh-my-pi/pi-mnemopi`.
-- **A store.** `memoryDir` must point at a real Mnemopi data dir. Mnemopi's built-in default is `~/.hermes/mnemopi/data`, which is empty on most machines — the default above avoids it.
+- **Bun** on `PATH` ([bun.sh](https://bun.sh)). The engine ships TypeScript only; Node cannot run it.
 
 ## Install
-
-Once the implementation lands:
 
 ```sh
 claude plugin marketplace add Interstellar-code/claude-mnemosyne
 claude plugin install mnemosyne@mnemosyne
 ```
 
-For v0.0.1 there is nothing to install — loading this plugin changes nothing.
+The install asks for the two settings below. Then, in a session:
+
+```
+/mnemosyne-setup
+```
+
+That installs the engine into `~/.claude/mnemosyne/engine/` (about 130 MB) and creates the store. Until it runs, the tools refuse and a toast says to run it.
+
+## Configuration
+
+| Key | Options | Default | Purpose |
+|---|---|---|---|
+| `scope` | `global`, `per-project` | `global` | `global`: one memory for every repo. `per-project`: each repo (by git root; worktrees share their repo's) keeps its own, and `memory_remember` with `global: true` saves a fact every repo sees. |
+| `memoryDir` | path | `~/.claude/mnemosyne/store` | Where the database lives: absolute or `~/…`. A path inside `~/.omp` is refused: one store, one writer. |
+
+Change either later from `/plugin` → Mnemosyne → configure.
+
+## Development
+
+```sh
+claude plugin validate .
+claude plugin test .
+claude --plugin-dir .
+```
+
+`tsc -p .` needs the engine's API types in `.claude-plugin/types/` (gitignored). The engine lays them there the first time it loads the plugin from this folder, for example with `claude --plugin-dir .`.
+
+## Relationship to MatrixKoder
+
+Standalone. MatrixKoder may offer to switch it on from its setup wizard; that integration lives in MatrixKoder's repo.
 
 ## License
 

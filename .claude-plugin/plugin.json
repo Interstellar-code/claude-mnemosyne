@@ -2,29 +2,29 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "mnemosyne",
   "displayName": "Claude Mnemosyne",
-  "version": "0.0.1",
-  "description": "Shared long-term memory for Claude Code, backed by the Mnemopi engine that omp writes. Scaffold: no behavior ships in this version.",
+  "version": "0.1.0",
+  "description": "Long-term memory for Claude Code across sessions and repos, on its own private copy of the Mnemopi engine and its own store (never omp's).",
   "author": {
     "name": "Interstellar-code"
   },
   "homepage": "https://github.com/Interstellar-code/claude-mnemosyne",
   "repository": "https://github.com/Interstellar-code/claude-mnemosyne",
   "license": "MIT",
-  "keywords": ["memory", "claude-code", "mnemopi", "mnemosyne", "sqlite", "mcp"],
-  "defaultEnabled": false,
+  "keywords": ["memory", "claude-code", "mnemopi", "mnemosyne", "sqlite"],
   "types": "./types/index.d.ts",
   "userConfig": {
-    "memory": {
-      "title": "Long-term memory",
-      "type": "boolean",
-      "default": false,
-      "description": "Reserved. The scaffold ships no behavior; this switch is inert until the implementation lands."
+    "scope": {
+      "title": "Memory scope",
+      "type": "string",
+      "options": ["global", "per-project"],
+      "default": "global",
+      "description": "global: one memory shared by every repo. per-project: each repo keeps its own, and facts saved as global are seen everywhere."
     },
     "memoryDir": {
       "title": "Memory store",
       "type": "string",
-      "default": "~/.omp/agent/memories/mnemopi",
-      "description": "Mnemopi data dir. The default is the store omp writes, so both agents share one memory."
+      "default": "~/.claude/mnemosyne/store",
+      "description": "Where the memory database lives. Keep it away from ~/.omp: one store, one writer."
     }
   }
 }
