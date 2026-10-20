@@ -16,7 +16,7 @@ import type { EngineInterface, PluginOptions, Register } from 'claude-code'
 import type { Recalled } from '../types'
 import { mnemosyneStats } from './surface'
 
-export const ENGINE_VERSION = '18.11.0'
+export const ENGINE_VERSION = '18.12.3'
 const ENGINE_PACKAGE = '@oh-my-pi/pi-mnemopi'
 const GLOBAL_OWNER = 'global'
 const RECALL_LIMIT = 5

@@ -123,7 +123,7 @@ would corrupt the vector index.
 
 The plugin keeps its own engine and store, separate from any other installation, so the two never
 share a writer (§2.6) and an upgrade elsewhere cannot change the engine under it.
-`/mnemosyne-setup` runs `bun add @oh-my-pi/pi-mnemopi@18.11.0` in
+`/mnemosyne-setup` runs `bun add @oh-my-pi/pi-mnemopi@18.12.3` in
 `~/.claude/mnemosyne/engine/`. Each call is one `bun <cli> mcp` process:
 
 ```mermaid
@@ -250,4 +250,5 @@ is implemented in that repo.
 Probes run against a real machine on 2026-10-16: `bun` 1.x, Node 24.13.0,
 `pi-mnemopi` 18.11.0, a second installation using the same engine, and a live store of 8
 banks. Claims marked *verified* were observed directly; the rest are marked as
-inference where they appear.
+inference where they appear. Re-probed on 2026-10-20 with `pi-mnemopi` 18.12.3:
+remember, owner-scoped recall, owner-only forget and stats behave the same.
