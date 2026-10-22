@@ -1,5 +1,6 @@
 import { expect, test } from 'claude-code/testing'
-import type { On, ProcessRunInit } from 'claude-code'
+import type { Engine } from 'claude-code/testing'
+import type { On, ProcessRunInit, SessionCompactResult } from 'claude-code'
 import { afterTerm } from '../hooks/register'
 import { engineTool, mnemosyneStats, publicTool } from '../hooks/surface'
 
@@ -76,6 +77,36 @@ test('first prompt of a session gets recalled memories as context, later prompts
   expect(seen[0]?.at(-1)?.match(/use pnpm/g)?.length).toBe(1)
   expect(seen[0]?.at(-1)).toContain('- [m1 owner=global] use pnpm')
   expect(seen[1]).toBeUndefined()
+})
+
+const summary = { role: 'user' as const, text: 'summary', toolUses: [] }
+
+// Prompt, compact (the core step beneath answers `core`), prompt: how many recalls ran.
+async function recallsAfter($: Engine, on: On, core: SessionCompactResult, args: object = {}, trigger = 'manual') {
+  const runs = world(on, JSON.stringify({ results: [{ id: 'm1', session_id: 'global', content: 'use pnpm' }] }))
+  on('prompt.submit', (_$, e) => ({ text: e.text, context: e.context }))
+  on('session.compact', () => core)
+
+  await $.prompt.submit({ text: 'How do I install deps?' } as never)
+  await $.session.compact({ trigger, messages: [summary], ...args } as never)
+  await $.prompt.submit({ text: 'again' } as never)
+  return runs.length
+}
+
+test('a compaction of the main conversation lets the next prompt recall again', async ($, on) => {
+  expect(await recallsAfter($, on, { messages: [summary] })).toBe(2)
+})
+
+test('a precompute does not recall again: it installs nothing', async ($, on) => {
+  expect(await recallsAfter($, on, { messages: [summary] }, {}, 'precompute')).toBe(1)
+})
+
+test('a skipped compaction does not recall again', async ($, on) => {
+  expect(await recallsAfter($, on, { skip: 'off' })).toBe(1)
+})
+
+test('a subagent\'s compaction does not recall again', async ($, on) => {
+  expect(await recallsAfter($, on, { messages: [summary] }, { agentId: 'a1' })).toBe(1)
 })
 
 test('recall hands the model only id, owner, content, scope and time, limit clamped', async ($, on) => {

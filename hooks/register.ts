@@ -403,6 +403,16 @@ export const register: Register = (on, options) => {
     return { ...composed, sections: [...composed.sections, RULES_SECTION] }
   }).catch((_$, e, next) => next(e))
 
+  // A main-conversation compaction summarises the recalled memories away: let the next prompt recall again.
+  on('session.compact', { trigger: ['manual', 'auto', 'plugin'] }, async ($, e, next) => {
+    const result = await next(e)
+    if (!e.agentId && result.skip === undefined) {
+      const session = await $.session.id()
+      await update($, recalled, ({ [session]: _, ...rest }) => rest)
+    }
+    return result
+  }).catch((_$, e, next) => next(e))
+
   // On the first prompt of a session, recall per sentence. On any prompt the
   // person typed that opens with a configured term: a remember term asks the
   // model to save once (so the never-secrets rule and its wording apply); a

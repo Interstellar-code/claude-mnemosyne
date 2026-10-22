@@ -198,6 +198,10 @@ rows written elsewhere, §2.4).
    `core/beam/recall.ts`), so a whole long prompt recalls nothing; the plugin
    sends one recall per sentence (up to 4) to a single engine process and
    merges by id.
+   After a main-conversation compaction (not skipped, not a subagent's) the
+   once-only mark is cleared, so the next prompt recalls again (a `precompute`
+   is left alone: it installs nothing until a real compaction); `/clear` needs
+   nothing, since it starts a new session id.
 4. **`memoryDir` stays configurable**, defaulting to the plugin's own store. It
    must be absolute or `~/…`, and is refused inside `~/.omp`.
 

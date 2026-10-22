@@ -60,7 +60,7 @@ This installs the Mnemosyne Memory engine into `~/.claude/mnemosyne/engine/` (ab
 |---|---|
 | `remember that we deploy on Fridays` | Claude saves the fact. |
 | `what do you remember about deploys?` | Matching memories are looked up and shown to Claude. |
-| any first prompt of a session | Memories matching it are looked up automatically. |
+| the first prompt of a session, and the first after a compaction | Memories matching it are looked up automatically. |
 | `forget the memory about deploys` | Claude finds it and deletes it. |
 
 Claude also saves and recalls on its own: lasting preferences, conventions, decisions. To change a fact, ask Claude to forget the old one and remember the new one.
@@ -99,7 +99,7 @@ The plugin hooks into Claude Code at four points:
 
 - **Session start:** adds the memory tools and `/mnemosyne-setup`.
 - **System prompt:** adds a short, fixed set of rules telling Claude when to save and recall.
-- **Your prompt:** on the first prompt, or one starting with a term above, looks up memories and attaches them to that prompt.
+- **Your prompt:** on the first prompt (again after a compaction), or one starting with a term above, looks up memories and attaches them to that prompt.
 - **Tool calls:** when Claude calls a memory tool, runs the engine once and returns the answer.
 
 Where an organization manages Claude Code, the system-prompt rules are skipped unless the organization lists this plugin in its managed settings; the tools and trigger terms still work.
