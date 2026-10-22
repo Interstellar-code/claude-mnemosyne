@@ -30,7 +30,7 @@ Works on macOS, Linux and Windows. On Windows, `~` means `%USERPROFILE%`.
 claude plugin update mnemosyne@mnemosyne
 ```
 
-Restart Claude Code afterwards. The engine version is pinned; updating the plugin does not update the engine.
+Restart Claude Code afterwards. The plugin carries its own copy of the engine; when an update brings a new engine build, session start shows a notice, and `/mnemosyne-setup` installs it. Until then the older engine keeps working, and only `memory_update` asks for the setup.
 
 ## Uninstall
 
@@ -52,7 +52,7 @@ In a Claude Code session, run once:
 /mnemosyne-setup
 ```
 
-This installs the Mnemosyne Memory engine into `~/.claude/mnemosyne/engine/` (about 130 MB) and creates the store at `~/.claude/mnemosyne/store/`.
+This installs the Mnemosyne Memory engine into `~/.claude/mnemosyne/engine/` (about 135 MB) and creates the store at `~/.claude/mnemosyne/store/`. The engine comes from the plugin's own copy (the `engine/` folder of this repo: the `@oh-my-pi/pi-mnemopi` 18.12.3 source with a few changes, listed in [engine/UPSTREAM.md](engine/UPSTREAM.md)); only its four `@oh-my-pi` dependencies are downloaded from npm. Setup builds the new engine next to the old one and swaps it in only once it answers, so a failed setup leaves the old engine working.
 
 ## Use
 
@@ -61,9 +61,10 @@ This installs the Mnemosyne Memory engine into `~/.claude/mnemosyne/engine/` (ab
 | `remember that we deploy on Fridays` | Claude saves the fact. |
 | `what do you remember about deploys?` | Matching memories are looked up and shown to Claude. |
 | the first prompt of a session, and the first after a compaction | Memories matching it are looked up automatically. |
+| `we now deploy on Thursdays` | Claude updates the saved fact in place (`memory_update`). |
 | `forget the memory about deploys` | Claude finds it and deletes it. |
 
-Claude also saves and recalls on its own: lasting preferences, conventions, decisions. To change a fact, ask Claude to forget the old one and remember the new one.
+Claude also saves and recalls on its own: lasting preferences, conventions, decisions. To change a fact, or give it topic tags, Claude updates it in place with `memory_update`; it keeps its id and recall history, and no duplicate is saved.
 
 Recall matches words, not meaning: "deploy Fridays" finds the fact above, "release schedule" does not.
 
@@ -90,7 +91,7 @@ claude mcp add mnemosyne-memory -- ~/.claude/mnemosyne/bin/mnemosyne-mcp
 
 On Windows the file is `%USERPROFILE%\.claude\mnemosyne\bin\mnemosyne-mcp.cmd`.
 
-For Cursor, Codex and others, use the same path as the server command. It offers the same four tools as the plugin (`memory_remember`, `memory_recall`, `memory_forget`, `memory_stats`) and nothing else of the engine's. It reads and writes `global` memories by default; set `MNEMOSYNE_OWNER` to a `project-…` owner to use a project's. Turning the option off deletes the file.
+For Cursor, Codex and others, use the same path as the server command. It offers the same five tools as the plugin (`memory_remember`, `memory_recall`, `memory_update`, `memory_forget`, `memory_stats`) and nothing else of the engine's. Remember and update take topic `tags`; a client cannot pick an engine bank or write other metadata. `memory_update` needs the engine build this plugin ships, so after a plugin update run `/mnemosyne-setup` once, then restart your other MCP clients: a server that is already running keeps the engine it started with. It reads and writes `global` memories by default; set `MNEMOSYNE_OWNER` to a `project-…` owner to use a project's. Turning the option off deletes the file.
 
 **Security.** There is no token because there is no network port: the client starts the server itself over stdin/stdout, and nothing listens on the network. Access is whoever can run programs as your user, the same people who could read the database file directly. To keep other accounts on the machine out, the plugin sets `~/.claude/mnemosyne` and the store to owner-only (`700`) on macOS and Linux; on Windows your user profile's permissions already do. Don't wrap the server in an HTTP bridge without adding authentication there.
 
@@ -98,7 +99,7 @@ For Cursor, Codex and others, use the same path as the server command. It offers
 
 The plugin hooks into Claude Code at four points:
 
-- **Session start:** adds the memory tools and `/mnemosyne-setup`.
+- **Session start:** adds the memory tools and `/mnemosyne-setup`, and says so if the installed engine is older than the plugin's.
 - **System prompt:** adds a short, fixed set of rules telling Claude when to save and recall.
 - **Your prompt:** on the first prompt (again after a compaction), or one starting with a term above, looks up memories and attaches them to that prompt.
 - **Tool calls:** when Claude calls a memory tool, runs the engine once and returns the answer.
@@ -107,7 +108,7 @@ Mnemosyne shows a dim line in the conversation when it recalls and a status line
 
 Where an organization manages Claude Code, the system-prompt rules are skipped unless the organization lists this plugin in its managed settings; the tools and trigger terms still work.
 
-Memories live in a local SQLite file. Mnemosyne runs on its own private copy of the Mnemosyne Memory engine. Design notes: [DESIGN.md](DESIGN.md).
+Memories live in a local SQLite file. Mnemosyne runs on its own private copy of the Mnemosyne Memory engine, built from the plugin's `engine/` folder. Design notes: [DESIGN.md](DESIGN.md).
 
 ## License
 

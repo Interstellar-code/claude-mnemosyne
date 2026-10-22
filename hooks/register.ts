@@ -14,13 +14,18 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, PluginOptions, Register } from 'claude-code'
 
 import type { Recalled } from '../types'
+import { ENGINE_BUILD, SETUP_TIMEOUT_MS } from './engine-build'
 import { mnemosyneStats } from './surface'
+import { cleanTags } from './tags'
 
+export { ENGINE_BUILD } from './engine-build'
+// The upstream base version; the plugin's own build of it is ENGINE_BUILD (engine/UPSTREAM.md).
 export const ENGINE_VERSION = '18.12.3'
 const ENGINE_PACKAGE = '@oh-my-pi/pi-mnemopi'
 const GLOBAL_OWNER = 'global'
 const RECALL_LIMIT = 5
 const NOT_INSTALLED = 'Mnemosyne Memory engine not installed: ask the user to run /mnemosyne-setup.'
+const NOT_CURRENT = `Mnemosyne Memory engine is out of date (memory_update needs build ${ENGINE_BUILD}): ask the user to run /mnemosyne-setup.`
 
 // Where a person typed the prompt; another plugin's or session's text never triggers a save.
 const PERSON_ORIGINS = new Set(['composer', 'bridge', 'sdk', 'slack-ping'])
@@ -29,11 +34,11 @@ const RULES_SECTION = {
   id: 'mnemosyne:rules',
   scope: 'session',
   text: `# Long-term memory (Mnemosyne)
-mcp__mnemosyne__memory_remember / _recall / _forget keep facts across sessions and repos.
+mcp__mnemosyne__memory_remember / _recall / _update / _forget keep facts across sessions and repos.
 - Remember: lasting preferences, conventions, decisions, runbooks the user states. One self-contained fact per call.
 - Never remember secrets, credentials, or one-off task details.
 - Recall before answering about past decisions or preferences ("what did we…", "how do I usually…").
-- To change a fact: forget the old id and owner, then remember the new one.`,
+- To change or tag a fact, update it by id and owner with memory_update. Use memory_forget only to delete. Never save a duplicate.`,
 } as const
 
 const recalled = atom({ plugin: 'mnemosyne', key: 'recalled' } as const, {} as Recalled)
@@ -66,6 +71,26 @@ const TOOLS = [
         limit: { type: 'integer', description: '1 to 50; default 5.' },
       },
       required: ['query'],
+    },
+  },
+  {
+    name: 'memory_update',
+    description:
+      'Change a memory in place, by the id and owner memory_recall returned: its content, importance or topic tags. Keeps its id and recall history. Use this rather than forgetting and saving again.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        memory_id: { type: 'string' },
+        content: { type: 'string', description: 'The new text of the fact, self-contained.' },
+        importance: { type: 'number', description: '0 to 1.' },
+        tags: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Short lowercase topic tags (at most 5); replaces the old ones. [] removes them.',
+        },
+        owner: { type: 'string', description: "The row's owner from memory_recall; default this project's." },
+      },
+      required: ['memory_id'],
     },
   },
   {
@@ -115,6 +140,15 @@ const isWindows = async ($: EngineInterface) => (await $.env.get('OS')) === 'Win
 // Forward slashes on every OS: Bun and Windows both accept them.
 const slashes = (path: string) => path.replace(/\\/g, '/').replace(/\/+$/, '')
 const isAbsolute = (path: string) => /^(\/|[A-Za-z]:\/)/.test(path)
+// `.` and `..` resolved, so a/b/../c compares as a/c (forward slashes, as slashes() gives).
+function normalize(path: string) {
+  const parts: string[] = []
+  for (const part of path.split('/')) {
+    if (part === '..') parts.pop()
+    else if (part !== '.' && part !== '') parts.push(part)
+  }
+  return `${path.startsWith('/') ? '/' : ''}${parts.join('/')}`
+}
 
 // Rejects with a message the person can act on; every caller turns it into text.
 async function paths($: EngineInterface, options: PluginOptions) {
@@ -131,6 +165,12 @@ async function paths($: EngineInterface, options: PluginOptions) {
   const omp = `${home}/.omp`
   const fold = (path: string) => (windows ? path.toLowerCase() : path)
   if (fold(store) === fold(omp) || fold(store).startsWith(`${fold(omp)}/`)) throw new Error('memoryDir must not be inside ~/.omp.')
+  // Setup replaces these folders whole: a store inside one would be deleted.
+  // Case is ignored, as the macOS and Windows file systems do (Engine/ is engine/).
+  const lower = normalize(store).toLowerCase()
+  for (const folder of [engine, `${engine}.next`, `${engine}.old`].map(f => f.toLowerCase())) {
+    if (lower === folder || lower.startsWith(`${folder}/`)) throw new Error(`memoryDir must not be inside the engine folder (${engine}).`)
+  }
   return {
     windows,
     root,
@@ -184,7 +224,7 @@ async function syncWrapper($: EngineInterface, options: PluginOptions) {
 }
 
 const WRAPPER_NOTE = `Written by the Mnemosyne plugin (externalMcp). A stdio MCP server over its store,
-serving only remember / recall / forget / stats.
+serving only remember / recall / update / forget / stats.
 MNEMOSYNE_OWNER picks the owner: global (default) or a project-... id.`
 
 const shWrapper = (store: string, cli: string, proxy: string) => `#!/bin/sh
@@ -220,6 +260,34 @@ async function isInstalled($: EngineInterface, options: PluginOptions) {
     return (await $.fs.stat((await paths($, options)).cli)).kind === 'file'
   } catch {
     return false
+  }
+}
+
+// The one "engine is current" check: the installed engine is this plugin's
+// build (ENGINE_BUILD), so it has the metadata update and the recall flag.
+async function isCurrent($: EngineInterface, options: PluginOptions) {
+  try {
+    const { engine } = await paths($, options)
+    const installed = JSON.parse(await $.fs.read(`${engine}/node_modules/${ENGINE_PACKAGE}/package.json`))
+    return installed?.version === ENGINE_BUILD
+  } catch {
+    return false
+  }
+}
+
+// memory_update's engine arguments, or the reason it is refused before any engine run.
+function updateArgs(input: Record<string, unknown>): Record<string, unknown> | string {
+  const hasContent = typeof input.content === 'string'
+  const hasImportance = typeof input.importance === 'number' && Number.isFinite(input.importance)
+  if (input.tags !== undefined && !Array.isArray(input.tags)) return 'tags must be an array of strings.'
+  if (!hasContent && !hasImportance && input.tags === undefined) return 'memory_update needs content, importance or tags.'
+  const tags = Array.isArray(input.tags) ? cleanTags(input.tags) : undefined
+  return {
+    memory_id: input.memory_id,
+    ...(hasContent ? { content: input.content } : {}),
+    ...(hasImportance ? { importance: clamp(input.importance, 0, 1, 0.5) } : {}),
+    // An empty list removes the key (C7).
+    ...(tags !== undefined ? { metadata: { tags: tags.length > 0 ? tags : null } } : {}),
   }
 }
 
@@ -343,6 +411,12 @@ export const register: Register = (on, options) => {
         return ['mnemopi_recall', { query: input.query, limit: clamp(input.limit, 1, 50, RECALL_LIMIT) }] as const
       case 'memory_forget':
         return ['mnemopi_forget', { memory_id: input.memory_id }] as const
+      case 'memory_update': {
+        const args = updateArgs(input)
+        // tool.call refuses a bad update before any engine run; this only narrows the type.
+        if (typeof args === 'string') throw new Error(args)
+        return ['mnemopi_update', args] as const
+      }
       default:
         return ['mnemopi_stats', {}] as const
     }
@@ -351,11 +425,13 @@ export const register: Register = (on, options) => {
   on('session.start', { cwd: /.*/ }, async ($, e, next) => {
     await $.command.register({
       name: 'mnemosyne-setup',
-      description: `Install the Mnemosyne Memory engine (${ENGINE_PACKAGE}@${ENGINE_VERSION}) into ~/.claude/mnemosyne`,
+      description: `Install the Mnemosyne Memory engine (${ENGINE_PACKAGE} ${ENGINE_BUILD}, the plugin's own copy) into ~/.claude/mnemosyne`,
     })
     for (const tool of TOOLS) await $.tool.register({ ...tool, isDeferred: false })
     if (!(await isInstalled($, options))) $.ui.toast('Mnemosyne Memory engine not installed. Run /mnemosyne-setup.')
     else {
+      // A stale engine keeps the four older tools working; only memory_update refuses.
+      if (!(await isCurrent($, options))) $.ui.toast('Mnemosyne Memory engine is out of date. Run /mnemosyne-setup to update it.')
       await Promise.all([secure($, options), syncWrapper($, options)]).catch(() => undefined)
       activity($, options, 'memory ready', 'ready')
     }
@@ -369,14 +445,17 @@ export const register: Register = (on, options) => {
 
     try {
       const { engine, store } = await paths($, options)
-      await $.fs.write(`${engine}/package.json`, '{ "name": "mnemosyne-engine", "private": true }\n')
-      const added = await $.process.run(['bun', 'add', `${ENGINE_PACKAGE}@${ENGINE_VERSION}`], {
-        cwd: engine,
-        timeoutMs: 300_000,
-      })
-      if (added.exitCode !== 0) return { text: `Engine install failed:\n${added.stderr.trim().slice(-800)}` }
-
+      // Creates <root> and the store first: the installer writes only <engine>, <engine>.next and <engine>.old.
       await secure($, options)
+      const root = slashes($.plugin.root)
+      // Builds <engine>.next from the plugin's engine/ and swaps it in only once it answers (bin/install-engine.ts).
+      const installed = await $.process.run(['bun', `${root}/bin/install-engine.ts`, root, engine, store], {
+        timeoutMs: SETUP_TIMEOUT_MS,
+      })
+      if (installed.exitCode !== 0) {
+        return { text: `Engine install failed; the engine already installed (if any) is unchanged:\n${`${installed.stderr}\n${installed.stdout}`.trim().slice(-800)}` }
+      }
+
       await syncWrapper($, options)
       const filled = await fillDefaults($).catch(() => [])
       const stats = mnemosyneStats(await call($, options, 'mnemopi_stats', {}))
@@ -394,13 +473,19 @@ export const register: Register = (on, options) => {
     const tool = e.tool.replace('mcp__mnemosyne__', '')
     const input = e as unknown as Record<string, unknown>
     try {
+      if (tool === 'memory_update') {
+        const refused = updateArgs(input)
+        if (typeof refused === 'string') return { deny: `Mnemosyne: ${refused}` }
+      }
       if (!(await isInstalled($, options))) {
         await paths($, options) // a bad HOME or memoryDir says so rather than "not installed"
         return { deny: NOT_INSTALLED }
       }
+      if (tool === 'memory_update' && !(await isCurrent($, options))) return { deny: NOT_CURRENT }
       const [name, args] = engineArgs(tool, input)
-      // A row is deleted as its owner: a global fact from another project names its own.
-      const as = tool === 'memory_forget' && typeof input.owner === 'string' && input.owner ? input.owner : undefined
+      // A row is changed or deleted as its owner: a global fact from another project names its own.
+      const ownsRow = tool === 'memory_forget' || tool === 'memory_update'
+      const as = ownsRow && typeof input.owner === 'string' && input.owner ? input.owner : undefined
       const text = await call($, options, name, args, as)
       return { result: name === 'mnemopi_recall' ? JSON.stringify(compact(text)) : name === 'mnemopi_stats' ? mnemosyneStats(text) : text }
     } catch (err) {
@@ -471,7 +556,7 @@ export const register: Register = (on, options) => {
       else if (isFirst) activity($, options, n > 0 ? `recalled ${n} ${noun} for ${where}` : `recall found nothing for ${where}`, n > 0 ? `recalled ${n}` : 'found nothing')
       if (found.length > 0) {
         const lines = found.map(r => `- [${r.id} owner=${r.owner}] ${r.content}`)
-        context.push(`Long-term memories that may be relevant (Mnemosyne; mcp__mnemosyne__memory_forget takes the id and owner):\n${lines.join('\n')}`)
+        context.push(`Long-term memories that may be relevant (Mnemosyne; mcp__mnemosyne__memory_update and _forget take the id and owner):\n${lines.join('\n')}`)
       } else if (asked !== undefined) {
         context.push(`Mnemosyne recall for "${topic ?? asked}" found nothing.`)
       }

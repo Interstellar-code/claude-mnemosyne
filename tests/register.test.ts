@@ -1,17 +1,21 @@
 import { expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On, ProcessRunInit, SessionCompactResult } from 'claude-code'
-import { afterTerm } from '../hooks/register'
+import { afterTerm, ENGINE_BUILD, ENGINE_VERSION } from '../hooks/register'
+import { ENGINE_BUILD as BUILD_FILE, INSTALL_CHECK_TIMEOUT_MS, INSTALL_STEP_TIMEOUT_MS, SETUP_TIMEOUT_MS } from '../hooks/engine-build'
 import { engineTool, mnemosyneStats, publicTool } from '../hooks/surface'
 
 type Run = { argv: readonly string[]; init?: ProcessRunInit }
 
-// The world beneath the plugin: an installed engine whose every call answers
-// `reply`, and a record of each process run.
-function world(on: On, reply: string, isInstalled = true, exitCode = 0) {
+const INSTALLED_PACKAGE = '/home/u/.claude/mnemosyne/engine/node_modules/@oh-my-pi/pi-mnemopi/package.json'
+
+// The world beneath the plugin: an installed engine of build `build` whose
+// every call answers `reply`, and a record of each process run.
+function world(on: On, reply: string, isInstalled = true, exitCode = 0, build: string = ENGINE_BUILD) {
   const runs: Run[] = []
   on('env.get', () => ({ value: '/home/u' }))
   on('fs.stat', () => (isInstalled ? { value: { kind: 'file' } } : { deny: 'ENOENT' }) as never)
+  on('fs.read', (_$, e) => (e.path === INSTALLED_PACKAGE && isInstalled ? { value: JSON.stringify({ name: '@oh-my-pi/pi-mnemopi', version: build }) } : { deny: 'ENOENT' }) as never)
   on('session.id', () => ({ value: 's1' }))
   on('session.repo', () => ({ value: { root: '/work/My Repo' } }) as never)
   on('process.run', (_$, e) => {
@@ -369,4 +373,181 @@ test('an engine failure says recall failed, not found nothing', async ($, on) =>
   await $.prompt.submit({ text: 'How do I install deps?' } as never)
   expect(logs).toEqual(['Mnemosyne: recall failed'])
   expect(statuses).toEqual(['Mnemosyne · recall failed'])
+})
+
+// ENG.5 / ENG.6: the engine build, the staged setup, memory_update.
+
+test('register.ts re-exports ENGINE_BUILD and keeps ENGINE_VERSION', () => {
+  expect(ENGINE_BUILD).toBe(BUILD_FILE)
+  expect(ENGINE_VERSION).toBe('18.12.3')
+})
+
+test('memory_update runs mnemopi_update as the given owner, tags cleaned into metadata', { options: { scope: 'per-project' } }, async ($, on) => {
+  const runs = world(on, '{"status":"updated"}')
+  const ran = await $.tool.call({
+    tool: 'mcp__mnemosyne__memory_update',
+    memory_id: 'm1',
+    owner: 'project-Other-abc',
+    content: 'new text',
+    importance: 7,
+    tags: [' Build ', 'build', 'CI', '', 'a-very-long-tag-name-that-goes-past-24', 'x', 'y', 'z'],
+  })
+
+  expect(ran.result).toBe('{"status":"updated"}')
+  expect(runs[0]!.init?.env?.MNEMOPI_SESSION_ID).toBe('project-Other-abc')
+  expect(request(runs[0]!)).toEqual({
+    name: 'mnemopi_update',
+    arguments: {
+      memory_id: 'm1',
+      content: 'new text',
+      importance: 1,
+      metadata: { tags: ['build', 'ci', 'a-very-long-tag-name-tha', 'x', 'y'] },
+    },
+  })
+})
+
+test('memory_update without tags sends no metadata; tags [] sends tags null', async ($, on) => {
+  const runs = world(on, '{"status":"updated"}')
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1', content: 'only text' })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1', tags: [] })
+
+  expect(request(runs[0]!).arguments).toEqual({ memory_id: 'm1', content: 'only text' })
+  expect(request(runs[1]!).arguments).toEqual({ memory_id: 'm1', metadata: { tags: null } })
+  // no owner given: this project's (global here)
+  expect(runs[0]!.init?.env?.MNEMOPI_SESSION_ID).toBe('global')
+})
+
+test('memory_update with nothing to change, or tags that are not an array, is denied without an engine run', async ($, on) => {
+  const runs = world(on, '{"status":"updated"}')
+  const empty = await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1' })
+  const bad = await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1', tags: 'build' })
+
+  expect(empty.deny).toBe('Mnemosyne: memory_update needs content, importance or tags.')
+  expect(bad.deny).toBe('Mnemosyne: tags must be an array of strings.')
+  expect(runs.length).toBe(0)
+})
+
+test('on a stale engine memory_update is denied with /mnemosyne-setup, and the four other tools still run', async ($, on) => {
+  const runs = world(on, '{"results":[]}', true, 0, '18.12.3')
+  const update = await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1', tags: ['a'] })
+  expect(update.deny).toContain('/mnemosyne-setup')
+  expect(update.deny).toContain('out of date')
+  expect(runs.length).toBe(0)
+
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_recall', query: 'x' })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'fact' })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_forget', memory_id: 'm1' })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_stats' })
+  expect(runs.map(run => request(run).name)).toEqual(['mnemopi_recall', 'mnemopi_remember', 'mnemopi_forget', 'mnemopi_stats'])
+})
+
+// Session start in a world whose installed engine is `build`; the toasts it raised.
+async function startWith($: Engine, on: On, build: string) {
+  const toasts: string[] = []
+  const tools: string[] = []
+  world(on, '{}', true, 0, build)
+  on('command.register', () => ({ value: {} }) as never)
+  on('tool.register', (_$, e) => {
+    tools.push((e as { name: string }).name)
+    return { value: {} } as never
+  })
+  on('ui.toast', (_$, e) => {
+    toasts.push((e as { text: string }).text)
+    return { value: undefined } as never
+  })
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/w', surface: null, isInteractive: false } as never)
+  return { toasts, tools }
+}
+
+test('session start: a stale engine gets a toast asking for /mnemosyne-setup, and all five tools register', async ($, on) => {
+  const stale = await startWith($, on, '18.12.3')
+  expect(stale.toasts.length).toBe(1)
+  expect(stale.toasts[0]).toContain('/mnemosyne-setup')
+  expect(stale.tools).toEqual(['memory_remember', 'memory_recall', 'memory_update', 'memory_forget', 'memory_stats'])
+})
+
+test('session start with the current engine raises no toast', async ($, on) => {
+  const current = await startWith($, on, ENGINE_BUILD)
+  expect(current.toasts).toEqual([])
+})
+
+test('setup installs the plugin\'s engine copy through install-engine.ts, never bun add', async ($, on) => {
+  const runs = world(on, '{}')
+  on('fs.write', () => ({ value: undefined }))
+  const ran = await $.command.run({ command: 'mnemosyne-setup', args: '' } as never)
+
+  const install = runs.find(r => (r.argv[1] ?? '').endsWith('/bin/install-engine.ts'))
+  expect(install?.argv[0]).toBe('bun')
+  expect(install?.argv[1]).toBe(`${install?.argv[2]}/bin/install-engine.ts`)
+  expect(install?.argv.slice(3)).toEqual(['/home/u/.claude/mnemosyne/engine', '/home/u/.claude/mnemosyne/store'])
+  expect(runs.some(r => r.argv.includes('add'))).toBe(false)
+  // <root> and the store exist before the installer runs
+  const secured = runs.findIndex(r => r.argv[1] === '-e' && (r.argv[2] ?? '').includes('mkdirSync(d'))
+  expect(secured).toBeGreaterThanOrEqual(0)
+  expect(secured).toBeLessThan(runs.indexOf(install!))
+  expect((ran as { text?: string }).text).toContain('Mnemosyne ready. Engine: /home/u/.claude/mnemosyne/engine.')
+})
+
+test('a failed install says so and that the installed engine is unchanged', async ($, on) => {
+  on('env.get', () => ({ value: '/home/u' }))
+  on('process.run', (_$, e) => {
+    if ((e.argv[1] ?? '').endsWith('/bin/install-engine.ts')) {
+      return { value: { exitCode: 1, stdout: '', stderr: 'install-engine: bun install failed (exit 1): ConnectionRefused' } } as never
+    }
+    return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
+  })
+  const ran = await $.command.run({ command: 'mnemosyne-setup', args: '' } as never)
+
+  expect((ran as { text?: string }).text).toContain('Engine install failed; the engine already installed (if any) is unchanged')
+  expect((ran as { text?: string }).text).toContain('ConnectionRefused')
+})
+
+test('the rules text names memory_update: update by id and owner, forget only to delete, never a duplicate', async ($, on) => {
+  const base = { model: 'm', promptModel: 'm', surfaces: [], outputStyle: null }
+  on('prompt.compose', () => ({ sections: [] }))
+  const composed = await $.prompt.compose({ ...base, tools: ['mcp__mnemosyne__memory_remember'], traits: [] } as never)
+  const rules = composed.sections.find(s => s.id === 'mnemosyne:rules')?.text ?? ''
+
+  expect(rules).toContain('memory_update')
+  expect(rules).toContain('To change or tag a fact, update it by id and owner')
+  expect(rules).toContain('memory_forget only to delete')
+  expect(rules).toContain('Never save a duplicate')
+  expect(rules).not.toContain('forget the old id and owner, then remember')
+})
+
+// Review r1 HIGH 1 and MED 3.
+
+for (const memoryDir of ['~/.claude/mnemosyne/Engine/store', '~/.claude/mnemosyne/engine', '~/.claude/mnemosyne/ENGINE.old/s', '~/.claude/mnemosyne/store/../engine.next/x']) {
+  test(`a store inside the engine folder (${memoryDir}) is refused, case ignored, before any engine run`, { options: { memoryDir } }, async ($, on) => {
+    const runs = world(on, '{}')
+    const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_stats' })
+
+    expect(ran.deny).toBe('Mnemosyne: memoryDir must not be inside the engine folder (/home/u/.claude/mnemosyne/engine).')
+    expect(runs.length).toBe(0)
+  })
+}
+
+test('setup refuses a store inside the engine folder before running the installer', { options: { memoryDir: '~/.claude/mnemosyne/Engine/store' } }, async ($, on) => {
+  const runs = world(on, '{}')
+  const ran = await $.command.run({ command: 'mnemosyne-setup', args: '' } as never)
+
+  expect((ran as { text?: string }).text).toBe('Mnemosyne setup failed: memoryDir must not be inside the engine folder (/home/u/.claude/mnemosyne/engine).')
+  expect(runs.some(r => (r.argv[1] ?? '').endsWith('/bin/install-engine.ts'))).toBe(false)
+})
+
+test('a store next to the engine folder is still fine', { options: { memoryDir: '~/.claude/mnemosyne/engines-store' } }, async ($, on) => {
+  const runs = world(on, '{}')
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_stats' })
+  expect(runs[0]!.init?.env?.MNEMOPI_DATA_DIR).toBe('/home/u/.claude/mnemosyne/engines-store')
+})
+
+test('setup gives the installer the host limit, and the installer\'s own limits stay well below it', async ($, on) => {
+  const runs = world(on, '{}')
+  on('fs.write', () => ({ value: undefined }))
+  await $.command.run({ command: 'mnemosyne-setup', args: '' } as never)
+
+  const install = runs.find(r => (r.argv[1] ?? '').endsWith('/bin/install-engine.ts'))
+  expect(install?.init?.timeoutMs).toBe(SETUP_TIMEOUT_MS)
+  expect(INSTALL_STEP_TIMEOUT_MS + INSTALL_CHECK_TIMEOUT_MS).toBeLessThanOrEqual(SETUP_TIMEOUT_MS - 30_000)
 })

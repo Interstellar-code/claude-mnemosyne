@@ -123,12 +123,12 @@ would corrupt the vector index.
 
 The plugin keeps its own engine and store, separate from any other installation, so the two never
 share a writer (§2.6) and an upgrade elsewhere cannot change the engine under it.
-`/mnemosyne-setup` runs `bun add @oh-my-pi/pi-mnemopi@18.12.3` in
+`/mnemosyne-setup` installs the plugin's own engine copy (§3.1) into
 `~/.claude/mnemosyne/engine/`. Each call is one `bun <cli> mcp` process:
 
 ```mermaid
 flowchart LR
-  SS["session start"] --> T["$.tool.register ×4"]
+  SS["session start"] --> T["$.tool.register ×5"]
   PS["first prompt.submit"] --> R["recall (FTS)"]
   R --> B["context beside the prompt"]
   T --> P["$.process.run<br/>bun cli.ts mcp"]
@@ -136,6 +136,62 @@ flowchart LR
   P --> E["~/.claude/mnemosyne/engine"]
   E --> DB[("~/.claude/mnemosyne/store")]
 ```
+
+### 3.1 The engine lives in the repo: engine/ and UPSTREAM.md (v0.5.0)
+
+Upstream's `mnemopi_update` changes only content and importance, and its recall
+always bumps `recall_count`. Tagging an existing memory needs a metadata update,
+and a dashboard search must not change counts, so the engine source is now part
+of the plugin:
+
+- `engine/` is the npm tarball of `@oh-my-pi/pi-mnemopi` 18.12.3, copied in
+  whole (`src/`, `dist/types/`, `package.json`, `LICENSE`, `README.md`,
+  `CHANGELOG.md`, `THIRD-PARTY-NOTICES.txt`). Its four `@oh-my-pi`
+  dependencies stay npm downloads pinned at exactly 18.12.3.
+- `engine/UPSTREAM.md` is the registry: upstream repo and path
+  (`can1357/oh-my-pi`, `packages/mnemopi`), tag `v18.12.3` and its commit, the
+  tarball URL and sha512 integrity, a numbered list of our changes (what, why,
+  files, upstream issue, status), the `engine/src` sha256 of each build, and
+  the rebase steps. Today: change 1, `mnemopi_update` shallow-merges a
+  `metadata` object in one `BEGIN IMMEDIATE` transaction (a key set to `null`
+  is removed; a row whose `metadata_json` is not an object is refused and left
+  unchanged); change 2, `mnemopi_recall` takes `update_recall_counts`
+  (default true); change 3, the build number (`18.12.3-mnemosyne.2`) in
+  `engine/package.json`.
+- `bun scripts/engine-diff.ts` downloads the tarball, checks its integrity, and
+  fails unless every file that differs from `engine/` is listed in a change and
+  the recorded `engine/src` hash for the current build is the real one. So an
+  unlisted edit, or an edit without a build bump, fails the gate.
+- Our engine tests are `engine/test/*.spec.ts` (real temporary stores, real
+  engine processes, including two processes merging metadata into one row at
+  once). `engine/` is not type-checked by us: upstream checks it with its
+  monorepo setup, which the tarball lacks.
+- `/mnemosyne-setup` runs `bin/install-engine.ts <plugin root> <engine dir>
+  <store>`. It builds `<engine dir>.next` (the copy as `pi-mnemopi/`, a
+  `package.json` with `file:./pi-mnemopi`, `bun install --production
+  --omit=peer`, since Bun would otherwise install the folder's dev and optional
+  peer dependencies, onnxruntime included), checks that the new cli answers
+  `tools/list` with the metadata-capable `mnemopi_update`, and only then
+  renames the old engine to `.old`, the new one into place, and deletes
+  `.old`. Any failure deletes `.next` and leaves the installed engine as it
+  was; a test proves it with an unreachable registry. It writes nothing outside
+  those three folders and refuses a store inside them, comparing real paths
+  (the nearest existing parent through `realpathSync.native`, symlinks
+  followed, case-folded on macOS and Windows); `paths()` also refuses a
+  `memoryDir` inside `<root>/engine`, `.next` or `.old`, ignoring case. The
+  staged install has no lockfile (Bun saves none under `--production`): the
+  four `@oh-my-pi` packages are pinned at 18.12.3, their own dependencies
+  resolve fresh at each setup, through Bun's global cache or the registry.
+  The installer's own limits (240 s install, 30 s check) stay below the
+  host's 300 s limit on setup (`hooks/engine-build.ts`). The cli path is
+  unchanged: `<engine dir>/node_modules/@oh-my-pi/pi-mnemopi/src/cli.ts`.
+- `ENGINE_BUILD` (`hooks/engine-build.ts`, no imports) equals
+  `engine/package.json`'s version; a Bun spec fails when they differ.
+  `isCurrent` in `register.ts` reads the installed engine's `package.json` with
+  `$.fs.read` and compares. Session start with a stale engine shows a toast
+  asking for `/mnemosyne-setup`; it does not reinstall on its own (an install
+  can take minutes and needs the network). The four older tools keep working
+  on a stale engine; `memory_update` refuses, and so does the proxy (§5.8).
 
 ## 4. Why a plugin, and why mod tools rather than an MCP server
 
@@ -247,6 +303,24 @@ rows written elsewhere, §2.4).
    adds no engine call for a memory count: the first one is awaited, and an
    engine run costs about 0.57 s. `userConfig.showActivity`: `on` (default,
    line and status), `status` (status only), `off`; unknown means `on`.
+
+8. **memory_update, and five external tools (v0.5.0).** A fifth tool,
+   `memory_update`, changes a memory in place: `content`, `importance` (clamped
+   to 0..1) or `tags`, by `memory_id` and `owner` (it runs as the row's owner,
+   like forget). Tags are cleaned by `hooks/tags.ts` (no imports: trimmed,
+   lowercased, unique, at most 5 of at most 24 characters) and sent as
+   `metadata.tags`; `[]` sends `tags: null`, which removes the key. With none of
+   content, importance and tags, or tags that are not an array, it is denied
+   before any engine run; on a stale engine it is denied with a message to run
+   `/mnemosyne-setup`. The rules text now says to update a fact by id and
+   owner, to forget only to delete, and never to save a duplicate. The proxy
+   (§5.6) serves `memory_update` too, so `tools/list` holds five tools; it
+   drops `bank` and `metadata` from every client call (a client `bank` would
+   move writes to `<store>/banks/<x>`), maps a cleaned `tags` array to
+   `metadata.tags` for remember and update, shows `tags` (never `metadata` or
+   `bank`) in the schemas, and refuses `memory_update` when the installed
+   engine's version is not `ENGINE_BUILD`. See engine/UPSTREAM.md for the
+   engine side.
 
 ## 6. What the matrixkoder side needs (findings only)
 

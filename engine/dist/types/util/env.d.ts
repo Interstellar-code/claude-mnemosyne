@@ -1,0 +1,10 @@
+export type Env = Record<string, string | undefined>;
+export declare function envValue(name: string, env?: Env): string | undefined;
+export declare function envString(name: string, defaultValue?: string, env?: Env): string;
+export declare function envOptionalString(name: string, env?: Env): string | undefined;
+export declare function envTruthy(name: string, env?: Env): boolean;
+export declare function envDisabled(name: string, env?: Env): boolean;
+export declare function envBool(name: string, defaultValue: boolean, env?: Env): boolean;
+export declare function envInt(name: string, defaultValue: number, env?: Env): number;
+export declare function envFloat(name: string, defaultValue: number, env?: Env): number;
+export declare function envOneOf<T extends string>(name: string, allowed: readonly T[], defaultValue: T, env?: Env): T;
