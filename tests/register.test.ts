@@ -8,7 +8,7 @@ type Run = { argv: readonly string[]; init?: ProcessRunInit }
 
 // The world beneath the plugin: an installed engine whose every call answers
 // `reply`, and a record of each process run.
-function world(on: On, reply: string, isInstalled = true) {
+function world(on: On, reply: string, isInstalled = true, exitCode = 0) {
   const runs: Run[] = []
   on('env.get', () => ({ value: '/home/u' }))
   on('fs.stat', () => (isInstalled ? { value: { kind: 'file' } } : { deny: 'ENOENT' }) as never)
@@ -17,8 +17,8 @@ function world(on: On, reply: string, isInstalled = true) {
   on('process.run', (_$, e) => {
     runs.push(e)
     const ids = (e.init?.stdin ?? '').split('\n').filter(Boolean).map(line => JSON.parse(line).id)
-    const stdout = ids.map(id => `${JSON.stringify({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: reply }] } })}\n`).join('')
-    return { value: { exitCode: 0, stdout, stderr: '' } } as never
+    const stdout = exitCode !== 0 ? '' : ids.map(id => `${JSON.stringify({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: reply }] } })}\n`).join('')
+    return { value: { exitCode, stdout, stderr: '' } } as never
   })
   return runs
 }
@@ -305,4 +305,68 @@ test('the proxy maps public memory_* names to the engine and back', async () => 
   expect(engineTool('memory_recall')).toBe('mnemopi_recall')
   expect(publicTool('mnemopi_stats')).toBe('memory_stats')
   expect(publicTool('mnemopi_shared_stats')).toBe('memory_shared_stats') // still refused: not in the proxy's allowed set
+})
+
+// The UI lines a prompt and a compaction raise, for each showActivity mode.
+function activityWorld(on: On, exitCode = 0) {
+  const logs: string[] = []
+  const statuses: (string | undefined)[] = []
+  world(on, JSON.stringify({ results: [{ id: 'm1', session_id: 'global', content: 'use pnpm' }] }), true, exitCode)
+  on('prompt.submit', (_$, e) => ({ text: e.text, context: e.context }))
+  on('ui.log', (_$, e) => { logs.push(e.text); return { value: undefined } })
+  on('ui.status', (_$, e) => { statuses.push(e.text); return { value: undefined } })
+  return { logs, statuses }
+}
+
+test('showActivity on: a dim line with the count, and a status line', async ($, on) => {
+  const { logs, statuses } = activityWorld(on)
+  await $.prompt.submit({ text: 'How do I install deps?' } as never)
+  expect(logs).toEqual(['Mnemosyne: recalled 1 memory for this prompt'])
+  expect(statuses).toEqual(['Mnemosyne · recalled 1'])
+})
+
+test('showActivity status: the status line only', { options: { showActivity: 'status' } }, async ($, on) => {
+  const { logs, statuses } = activityWorld(on)
+  await $.prompt.submit({ text: 'How do I install deps?' } as never)
+  expect(logs).toEqual([])
+  expect(statuses).toEqual(['Mnemosyne · recalled 1'])
+})
+
+test('showActivity off: silent', { options: { showActivity: 'off' } }, async ($, on) => {
+  const { logs, statuses } = activityWorld(on)
+  await $.prompt.submit({ text: 'How do I install deps?' } as never)
+  expect(logs).toEqual([])
+  expect(statuses).toEqual([])
+})
+
+test('a compaction says it will recall again', async ($, on) => {
+  const { logs } = activityWorld(on)
+  on('session.compact', () => ({ messages: [summary] }))
+  await $.prompt.submit({ text: 'How do I install deps?' } as never)
+  await $.session.compact({ trigger: 'manual', messages: [summary] } as never)
+  expect(logs.at(-1)).toBe('Mnemosyne: conversation compacted; will recall again on the next prompt')
+})
+
+test('session start says memory is ready', async ($, on) => {
+  const { logs, statuses } = activityWorld(on)
+  on('command.register', () => ({ value: {} }) as never)
+  on('tool.register', () => ({ value: {} }) as never)
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/w', surface: null, isInteractive: false } as never)
+  expect(logs).toEqual(['Mnemosyne: memory ready'])
+  expect(statuses).toEqual(['Mnemosyne · ready'])
+})
+
+test('a recall term logs the topic, singular for one memory', async ($, on) => {
+  const { logs, statuses } = activityWorld(on)
+  await $.prompt.submit({ text: 'what do you remember about pnpm? and more', origin: { kind: 'composer' } } as never)
+  expect(logs).toEqual(['Mnemosyne: recalled 1 memory for "pnpm"'])
+  expect(statuses).toEqual(['Mnemosyne · recalled 1'])
+})
+
+test('an engine failure says recall failed, not found nothing', async ($, on) => {
+  const { logs, statuses } = activityWorld(on, 1)
+  await $.prompt.submit({ text: 'How do I install deps?' } as never)
+  expect(logs).toEqual(['Mnemosyne: recall failed'])
+  expect(statuses).toEqual(['Mnemosyne · recall failed'])
 })

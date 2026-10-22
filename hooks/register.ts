@@ -308,6 +308,18 @@ async function fillDefaults($: EngineInterface) {
   return saved.exitCode === 0 ? Object.keys(blank) : []
 }
 
+// Shows what Mnemosyne just did: a dim transcript line (`on`) and a status line
+// under the prompt (`on`, `status`). Not sent to the model; never throws.
+function activity($: EngineInterface, options: PluginOptions, line: string, status?: string) {
+  const mode = options.showActivity === 'off' || options.showActivity === 'status' ? options.showActivity : 'on'
+  try {
+    if (mode === 'on') $.ui.log(`Mnemosyne: ${line}`)
+    if (mode !== 'off') $.ui.status(`Mnemosyne · ${status ?? line}`)
+  } catch {
+    // a UI failure must not break a hook
+  }
+}
+
 export const register: Register = (on, options) => {
   const isPerProject = options.scope === 'per-project'
 
@@ -343,7 +355,10 @@ export const register: Register = (on, options) => {
     })
     for (const tool of TOOLS) await $.tool.register({ ...tool, isDeferred: false })
     if (!(await isInstalled($, options))) $.ui.toast('Mnemosyne Memory engine not installed. Run /mnemosyne-setup.')
-    else await Promise.all([secure($, options), syncWrapper($, options)]).catch(() => undefined)
+    else {
+      await Promise.all([secure($, options), syncWrapper($, options)]).catch(() => undefined)
+      activity($, options, 'memory ready', 'ready')
+    }
 
     return next(e)
   })
@@ -409,6 +424,7 @@ export const register: Register = (on, options) => {
     if (!e.agentId && result.skip === undefined) {
       const session = await $.session.id()
       await update($, recalled, ({ [session]: _, ...rest }) => rest)
+      activity($, options, 'conversation compacted; will recall again on the next prompt', 'recalls again next prompt')
     }
     return result
   }).catch((_$, e, next) => next(e))
@@ -430,6 +446,7 @@ export const register: Register = (on, options) => {
 
     const context: string[] = []
     if (remember) {
+      activity($, options, 'remember term matched; asking Claude to save it')
       context.push(
         `The user invoked a Mnemosyne remember trigger. Call mcp__mnemosyne__memory_remember exactly once with a self-contained version of:\n${remember}\nIf it is a secret or credential, do not save it; say so.`,
       )
@@ -445,6 +462,13 @@ export const register: Register = (on, options) => {
       const byId = new Map<string, { id: string; owner: string; content: string }>()
       for (const answer of answers) if (typeof answer === 'string') for (const row of compact(answer)) byId.set(row.id, row)
       const found = [...byId.values()].slice(0, RECALL_LIMIT)
+      const n = found.length
+      const noun = n === 1 ? 'memory' : 'memories'
+      const where = asked !== undefined ? `"${topic ?? asked}"` : 'this prompt'
+      // runAll hands back an Error per failed request: all of them failing is a failure, not "nothing".
+      if (answers.length > 0 && answers.every(answer => answer instanceof Error)) activity($, options, 'recall failed')
+      else if (asked !== undefined) activity($, options, n > 0 ? `recalled ${n} ${noun} for ${where}` : `found nothing for ${where}`, n > 0 ? `recalled ${n}` : 'found nothing')
+      else if (isFirst) activity($, options, n > 0 ? `recalled ${n} ${noun} for ${where}` : `recall found nothing for ${where}`, n > 0 ? `recalled ${n}` : 'found nothing')
       if (found.length > 0) {
         const lines = found.map(r => `- [${r.id} owner=${r.owner}] ${r.content}`)
         context.push(`Long-term memories that may be relevant (Mnemosyne; mcp__mnemosyne__memory_forget takes the id and owner):\n${lines.join('\n')}`)
@@ -453,6 +477,7 @@ export const register: Register = (on, options) => {
       }
     } catch {
       // recall is best effort; the prompt goes on without it
+      activity($, options, 'recall failed')
     }
     return context.length > 0 ? next({ ...e, context: [...(e.context ?? []), ...context] }) : next(e)
   }).catch((_$, e, next) => next(e))

@@ -76,6 +76,7 @@ Change any time from `/plugin` → Mnemosyne → configure.
 | `scope` | `global` | `global`: one memory for every repo. `per-project`: each repo keeps its own; ask for "global" to share a fact. |
 | `rememberTerms` | `remember:`, `remember that`, `note that`, `save to memory` | A prompt that starts with one of these is saved. `none` turns it off. |
 | `recallTerms` | `recall:`, `what do you remember about`, `check memory` | A prompt that starts with one of these looks up memories. `none` turns it off. |
+| `showActivity` | `on` | `on`: a dim line in the conversation when Mnemosyne recalls, plus a status line under the prompt. `status`: the status line only. `off`: silent. |
 | `memoryDir` | `~/.claude/mnemosyne/store` | Where memories are stored. |
 | `externalMcp` | off | Lets other MCP clients use the same memory (see below). |
 
@@ -101,6 +102,8 @@ The plugin hooks into Claude Code at four points:
 - **System prompt:** adds a short, fixed set of rules telling Claude when to save and recall.
 - **Your prompt:** on the first prompt (again after a compaction), or one starting with a term above, looks up memories and attaches them to that prompt.
 - **Tool calls:** when Claude calls a memory tool, runs the engine once and returns the answer.
+
+Mnemosyne shows a dim line in the conversation when it recalls and a status line under the prompt; `showActivity` quiets them.
 
 Where an organization manages Claude Code, the system-prompt rules are skipped unless the organization lists this plugin in its managed settings; the tools and trigger terms still work.
 

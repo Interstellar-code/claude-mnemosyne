@@ -233,6 +233,21 @@ rows written elsewhere, §2.4).
    `MNEMOPI_HOST_LLM_ENABLED`: the env is layered over the host's, and either
    would let fact extraction call out.
 
+7. **Visible activity (v0.4.7).** Hooks run silently, so the person never saw
+   them fire. `activity()` calls `$.ui.log` (a dim transcript line) and
+   `$.ui.status` (one line under the prompt); both are UI only and never reach
+   the model. It fires on: engine ready at `session.start`, a first-prompt or
+   recall-term recall (with the count), a remember term matched, a compaction
+   that re-arms recall, and a failed recall. `recall failed` is the engine call
+   failing or every query erroring; `found nothing` is the engine answering
+   with no match. The status line shows the last recall's result only, not a
+   running total (a total would span `/clear` and sessions). Not on
+   `prompt.compose` (runs on every request) or `tool.call` (already shown as a
+   tool call). `session.start`
+   adds no engine call for a memory count: the first one is awaited, and an
+   engine run costs about 0.57 s. `userConfig.showActivity`: `on` (default,
+   line and status), `status` (status only), `off`; unknown means `on`.
+
 ## 6. What the matrixkoder side needs (findings only)
 
 Recorded because MatrixKoder is a listed consumer, not a dependency. Nothing here
