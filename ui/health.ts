@@ -6,6 +6,7 @@
 // textContent only. ui/app.ts fetches the reply and calls them.
 import { agoText } from './knowledge'
 import { plainLabel } from './escape'
+import { EMBEDDINGS_HINT } from './map-state'
 
 export type MemoryRow = { id: string; owner: string; created: string | null; lastRecalled: string | null; label: string; tags: string[]; recalls: number }
 export type HealthData = {
@@ -103,14 +104,15 @@ export function kpis(data: HealthData): Kpi[] {
   ]
 }
 
-/** In 0.6.0 embeddings are not built (EMB is 0.7.0): the bar reads 0 whatever the store holds. */
-export const EMBEDDINGS_ARRIVED = false
+/** Whether embeddings count as on: the store holds at least one vector, or the galaxy reply said `meaning: true` (a caller that has the reply passes it). */
+export const embeddingsOn = (data: HealthData, meaning = false): boolean => meaning || data.coverage.embeddings > 0
 
 export type Coverage = { label: string; value: string; pct: number; note: string; good: boolean }
 
 /** The coverage bars: tagged, knowledge, embeddings, provenance, recalled at least once; each with what it means and how to turn it on. */
-export function coverageBars(data: HealthData): Coverage[] {
+export function coverageBars(data: HealthData, meaning = false): Coverage[] {
   const total = data.total
+  const embeddings = embeddingsOn(data, meaning)
   const of = (n: number) => `${n} of ${total}`
   const { tagged, knowledge, provenance } = data.coverage
   const used = Math.max(0, total - data.neverCount)
@@ -131,10 +133,10 @@ export function coverageBars(data: HealthData): Coverage[] {
     },
     {
       label: 'Embeddings (meaning search)',
-      value: EMBEDDINGS_ARRIVED ? of(data.coverage.embeddings) : of(0),
-      pct: EMBEDDINGS_ARRIVED ? percent(data.coverage.embeddings, total) : 0,
-      good: false,
-      note: EMBEDDINGS_ARRIVED ? 'Memories are placed by meaning.' : 'Embeddings arrive in a later version',
+      value: of(embeddings ? data.coverage.embeddings : 0),
+      pct: embeddings ? percent(data.coverage.embeddings, total) : 0,
+      good: embeddings && total > 0 && data.coverage.embeddings > 0,
+      note: embeddings ? 'Memories are placed by meaning.' : EMBEDDINGS_HINT,
     },
     {
       label: 'Who wrote it (provenance)',
@@ -231,8 +233,8 @@ export function kpiTiles(data: HealthData): HTMLElement[] {
   })
 }
 
-export function coverageRows(data: HealthData): HTMLElement[] {
-  return coverageBars(data).map(bar => {
+export function coverageRows(data: HealthData, meaning = false): HTMLElement[] {
+  return coverageBars(data, meaning).map(bar => {
     const row = el('div', undefined, 'cov-row')
     const head = el('div', undefined, 'cov-head')
     head.append(el('span', bar.label), el('span', bar.value, 'mono'))

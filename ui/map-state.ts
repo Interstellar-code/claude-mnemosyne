@@ -10,13 +10,16 @@
 //
 // Every transition returns a new state; none changes the one it is given.
 import { plainLabel } from './escape'
-import { gauss, galaxyLayout, placeOne, randomOf, rangeDays, seedOf, ticks, timelinePosition, LANE_SPAN, TIMELINE_DAYS_X, TIMELINE_TODAY_X, type GalaxyInputMemory, type GalaxyLayout, type GalaxyStar, type Tick, type TimelineRange, type Vec3 } from './map-layout'
+import { gauss, galaxyLayout, placeOne, randomOf, rangeDays, seedOf, ticks, timelinePosition, LANE_SPAN, TIMELINE_DAYS_X, TIMELINE_TODAY_X, UNTAGGED, type GalaxyInputMemory, type GalaxyLayout, type GalaxyStar, type Tick, type TimelineRange, type Vec3 } from './map-layout'
 import type { MapEvent, MapEventKind } from './map-live'
 
 // ---- What the server sends ----
 
 type GalaxyProject = { owner: string; label: string; count: number; recalls: number }
-type GalaxyMemory = { id: string; owner: string; tags: string[]; recalls: number; lastRecalled: string | null; created: string | null; label: string }
+/** One neighbour of a memory in meaning (SEMX): its id and the cosine score, at least 0.65. */
+type SimilarLink = { id: string; score: number }
+/** `position` and `similar` come only from memories that have a vector (SEMX); the others have neither. */
+type GalaxyMemory = { id: string; owner: string; tags: string[]; recalls: number; lastRecalled: string | null; created: string | null; label: string; position?: Vec3; similar?: SimilarLink[] }
 /** The five kinds of knowledge a memory is mined into, in the order the chips show them. */
 export const KNOWLEDGE_KINDS = ['fact', 'preference', 'instruction', 'timeline', 'relation'] as const
 export type KnowledgeKind = (typeof KNOWLEDGE_KINDS)[number]
@@ -25,6 +28,8 @@ type KnowledgeRow = { id: string; kind: KnowledgeKind; text: string; memory: str
 export type GalaxyReply = { projects: GalaxyProject[]; memories: GalaxyMemory[]; knowledge: KnowledgeRow[]; meaning: boolean; total: number; shown: number }
 
 const LABEL_CHARS = 80
+/** A memory lists its three closest neighbours (SEMX). */
+const SIMILAR_LIMIT = 3
 // Knowledge text is shown as the API gives it (a KSTORE item can be 500 characters, the route cuts it to 80); this only bounds a bad reply.
 const KNOWLEDGE_CHARS = 500
 const isKind = (value: unknown): value is KnowledgeKind => (KNOWLEDGE_KINDS as readonly unknown[]).includes(value)
@@ -32,6 +37,28 @@ const isKind = (value: unknown): value is KnowledgeKind => (KNOWLEDGE_KINDS as r
 const text = (value: unknown, fallback = '') => (typeof value === 'string' ? value : fallback)
 const count = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0)
 const stamp = (value: unknown) => (typeof value === 'string' && value !== '' ? value : null)
+
+/** A vector's place as three finite numbers, or null for anything else. */
+const vec3Of = (value: unknown): Vec3 | null => (Array.isArray(value) && value.length === 3 && value.every(n => typeof n === 'number' && Number.isFinite(n)) ? ([value[0], value[1], value[2]] as Vec3) : null)
+
+/** The neighbours a memory lists: at most SIMILAR_LIMIT well-formed ones, a score kept between 0 and 1. */
+function similarOf(value: unknown): SimilarLink[] {
+  if (!Array.isArray(value)) return []
+  const links: SimilarLink[] = []
+  for (const item of value) {
+    if (item === null || typeof item !== 'object') continue
+    const { id, score } = item as Record<string, unknown>
+    if (typeof id === 'string' && id !== '' && typeof score === 'number' && Number.isFinite(score)) links.push({ id, score: clamp01(score) })
+  }
+  return links.slice(0, SIMILAR_LIMIT)
+}
+
+/** The Meaning fields of a reply row. A reply that says `meaning: false` has none that count, whatever its rows carry: nothing is read from it. */
+function meaningFields(row: Record<string, unknown>, meaning: boolean): { position?: Vec3; similar?: SimilarLink[] } {
+  if (!meaning) return {}
+  const position = vec3Of(row.position)
+  return position === null ? {} : { position, similar: similarOf(row.similar) }
+}
 
 /** A /api/galaxy reply made safe to use: a field of the wrong type is replaced, a row without an id is dropped; null when it is no object at all. */
 export function parseGalaxy(body: unknown): GalaxyReply | null {
@@ -48,6 +75,7 @@ export function parseGalaxy(body: unknown): GalaxyReply | null {
       lastRecalled: stamp(row.lastRecalled),
       created: stamp(row.created),
       label: plainLabel(text(row.label), LABEL_CHARS),
+      ...meaningFields(row, raw.meaning === true),
     }))
   const projects = rows(raw.projects)
     .filter(row => typeof row.owner === 'string' && row.owner !== '')
@@ -244,6 +272,10 @@ export type Galaxy = {
   knowledge: Map<string, KnowledgeRow[]>
   /** The same rows by their own id. */
   knowledgeById: Map<string, KnowledgeRow>
+  /** Where the Meaning layout puts each memory that has a vector (by id); empty unless the reply said `meaning: true`. */
+  meaningAt: Map<string, Vec3>
+  /** Each embedded memory's closest neighbours (by id), best first. */
+  similar: Map<string, SimilarLink[]>
 }
 
 const DAY_MS = 86_400_000
@@ -279,7 +311,22 @@ export function buildGalaxy(reply: GalaxyReply, now = Date.now()): Galaxy {
     colours,
     gone: new Set(),
     ...knowledgeIndex(reply.knowledge, input),
+    ...meaningIndex(reply),
   }
+}
+
+/** The vectors' places and neighbours by memory id; nothing at all when the reply has no Meaning. */
+function meaningIndex(reply: GalaxyReply): Pick<Galaxy, 'meaningAt' | 'similar'> {
+  const meaningAt = new Map<string, Vec3>()
+  const similar = new Map<string, SimilarLink[]>()
+  if (reply.meaning) {
+    for (const memory of reply.memories) {
+      if (memory.position === undefined) continue
+      meaningAt.set(memory.id, memory.position)
+      similar.set(memory.id, memory.similar ?? [])
+    }
+  }
+  return { meaningAt, similar }
 }
 
 /** The knowledge rows grouped by their memory; a row whose memory is not in the reply (cut by the 2000 limit) is dropped. */
@@ -365,6 +412,8 @@ export type MapState = {
   moon: string | null
   /** The Knowledge chips picked (MOON.2): only memories with one of these kinds stay lit. */
   kinds: ReadonlySet<KnowledgeKind>
+  /** Similar memories on (SEM.1): faint cyan links between neighbours in meaning. Only has an effect when the galaxy has Meaning. */
+  similar: boolean
 }
 
 export function initialState(options: { reducedMotion: boolean; layout?: LayoutName }): MapState {
@@ -390,6 +439,7 @@ export function initialState(options: { reducedMotion: boolean; layout?: LayoutN
     moons: true,
     moon: null,
     kinds: new Set<KnowledgeKind>(),
+    similar: true,
   }
 }
 
@@ -430,6 +480,8 @@ export const setRange = (state: MapState, range: TimelineRange): MapState => (ra
 export const setColourBy = (state: MapState, colourBy: ColourBy): MapState => (COLOUR_BY.includes(colourBy) && colourBy !== state.colourBy ? { ...state, colourBy } : state)
 export const toggleSpokes = (state: MapState): MapState => ({ ...state, spokes: !state.spokes })
 export const toggleBridges = (state: MapState): MapState => ({ ...state, bridges: !state.bridges })
+/** Switch Similar memories; without Meaning (no vectors) there is nothing to switch and the state stays as it is. */
+export const toggleSimilar = (state: MapState, meaningAvailable: boolean): MapState => (meaningAvailable ? { ...state, similar: !state.similar } : state)
 export const toggleRotation = (state: MapState): MapState => ({ ...state, rotating: !state.rotating })
 export const toggleLayer = (state: MapState, layer: 'recall' | 'write'): MapState => (layer === 'recall' ? { ...state, layerRecall: !state.layerRecall } : { ...state, layerWrite: !state.layerWrite })
 export const setQuery = (state: MapState, query: string): MapState => (query === state.query ? state : { ...state, query })
@@ -523,6 +575,8 @@ export const foundText = (query: string, found: Found) => (query.trim() === '' ?
 // ---- What dims, and by how much ----
 
 const DIM_OTHER_PROJECT = 0.14
+/** In Meaning projects intermix on purpose, so a focused project dims the others only lightly: 0.14 + 0.6 x the meaning weight (0.14 in Galaxy and Timeline, 0.74 in Meaning). */
+export const projectDim = (meaningWeight: number): number => DIM_OTHER_PROJECT + 0.6 * clamp01(meaningWeight)
 const DIM_OTHER_TOPIC = 0.4
 const DIM_NO_MATCH = 0.08
 /** A memory without any of the picked kinds keeps a tenth of its brightness (MOON.2). */
@@ -537,7 +591,7 @@ export function starTarget(galaxy: Galaxy, index: number, state: MapState, found
   if (state.layout === 'timeline' && !onTimelineAxis(galaxy, index, timelineDays(galaxy, state.range))) return 0
   let a = starBrightness(galaxy.ages[index] ?? 0, galaxy.oldestAge)
   if (!passesKnowledgeFilter(galaxy, star.id, state)) a *= DIM_NO_KNOWLEDGE
-  if (state.project !== null && star.owner !== state.project) a *= DIM_OTHER_PROJECT
+  if (state.project !== null && star.owner !== state.project) a *= projectDim(meaningTarget(state.layout))
   if (state.topic !== null && star.topic !== state.topic && star.owner === state.project) a *= DIM_OTHER_TOPIC
   if (found !== null && state.query.trim() !== '' && !found.ids.has(star.id)) a *= DIM_NO_MATCH
   return a
@@ -953,11 +1007,11 @@ export function laneLines(galaxy: Galaxy): { owner: string; colour: string; from
 //
 // ui/map.ts only carries these out; every choice of what to do this frame is a pure function here, tested with real values.
 
-type VisualKind = 'core' | 'hub' | 'star' | 'claude'
+type VisualKind = 'core' | 'hub' | 'star' | 'claude' | 'cluster'
 
 /** Where a visual goes in Timeline: its slot in the places lists (the Claude core has none). */
 export function awayPlace(places: TimelinePlaces, kind: VisualKind, slot: number): Vec3 | undefined {
-  return kind === 'star' ? places.stars[slot] : kind === 'hub' ? places.hubs[slot] : kind === 'core' ? places.cores[slot] : places.claude
+  return kind === 'star' ? places.stars[slot] : kind === 'hub' ? places.hubs[slot] : kind === 'core' ? places.cores[slot] : kind === 'claude' ? places.claude : undefined
 }
 
 /** A visual's place at a blend: its home when there is no Timeline place or no blend. */
@@ -1016,6 +1070,168 @@ export function linkFadeToApply(fade: number, applied: number, dirty: boolean): 
   return fade
 }
 
+// ---- The Meaning layout (SEM.1, SEM.2) ----
+//
+// Meaning is the third layout: every memory with a vector moves to the `position`
+// SEMX computed for it (similar memories sit together across projects), those
+// without one wait on a small ring at the edge. It reuses Timeline's morph (the
+// same 1.4 s, the same cubic ease): a second weight runs beside Timeline's and
+// the places are blended by the three weights. Numbers follow the mockup
+// (design/MapGalaxy.dc.html: meaningMix, posOf, the hub and similar blocks of frame).
+
+/** The one hint, on the Meaning button, the Similar memories toggle and the Health tab, while there are no vectors. */
+export const EMBEDDINGS_HINT = 'Turn on embeddings, then run /mnemosyne-embed apply'
+/** The line under a memory's Similar memories list. */
+export const SIMILAR_NOTE = 'From embeddings, made on this machine.'
+/** The links between neighbours. */
+export const SIMILAR_COLOUR = '#7DE3F4'
+export const NOT_EMBEDDED_LABEL = 'Not embedded'
+const NO_VECTOR_NOTE = 'This memory has no embedding yet. Run /mnemosyne-embed apply to add it.'
+const NO_CLOSE_NOTE = 'No other memory is close enough in meaning yet.'
+export const MEANING_HINT = 'Stars sit near memories that say similar things, across projects.'
+/** Where the Meaning morph is heading: 1 in Meaning, 0 in the other layouts. */
+export const meaningTarget = (layout: LayoutName): 0 | 1 => (layout === 'meaning' ? 1 : 0)
+/** One frame of the Meaning weight: Timeline's own stepMorph over the same 1.4 s (none under prefers-reduced-motion). */
+export const meaningStep = (weight: number, layout: LayoutName, dt: number, reducedMotion: boolean): number => stepMorph(weight, meaningTarget(layout), dt, morphSeconds(reducedMotion))
+
+/** How much of each layout a place takes: they add up to 1. */
+export type LayoutWeights = { galaxy: number; meaning: number; timeline: number }
+/** The three weights from Timeline's and Meaning's morph weights (each eased): Galaxy is what is left of both; a switch from Meaning to Timeline mid-morph can blend in more than 1, so they are shared out to add up to 1. */
+export function layoutWeights(timelineMorph: number, meaningMorph: number): LayoutWeights {
+  const timeline = morphBlend(timelineMorph)
+  const meaning = morphBlend(meaningMorph)
+  const galaxy = Math.max(0, 1 - timeline - meaning)
+  const total = galaxy + meaning + timeline
+  return { galaxy: galaxy / total, meaning: meaning / total, timeline: timeline / total }
+}
+
+/** A place among the three layouts. A visual with no Meaning (or Timeline) place stays at its home there. */
+export function layoutPlace(home: Vec3, meaningAt: Vec3 | null | undefined, timelineAt: Vec3 | null | undefined, weights: LayoutWeights): Vec3 {
+  const m = meaningAt ?? home
+  const t = timelineAt ?? home
+  return [0, 1, 2].map(i => home[i]! * weights.galaxy + m[i]! * weights.meaning + t[i]! * weights.timeline) as Vec3
+}
+
+/** A ring this far past the farthest embedded star (horizontally), and never tighter than the minimum. */
+export const NOT_EMBEDDED_RING_FACTOR = 1.25
+export const NOT_EMBEDDED_MIN_RADIUS = 220
+
+type NotEmbeddedRing = { radius: number; ids: string[]; labelAt: Vec3 }
+export type MeaningPlaces = { stars: Vec3[]; ring: NotEmbeddedRing }
+
+/** The ids of the live memories with no vector, in the layout's order. */
+export const notEmbeddedIds = (galaxy: Galaxy): string[] => liveStars(galaxy).filter(star => !galaxy.meaningAt.has(star.id)).map(star => star.id)
+
+/** The ring's label: "Not embedded · 3". */
+export const ringLabel = (count: number): string => `${NOT_EMBEDDED_LABEL} · ${count}`
+
+/**
+ * Where every star sits in Meaning, in the layout's own order: an embedded star at its position, a star
+ * without a vector evenly spaced on a flat ring around the middle, starting at the top. A forgotten star
+ * keeps its Galaxy place (it is not drawn).
+ */
+export function meaningPlaces(galaxy: Galaxy): MeaningPlaces {
+  let reach = 0
+  for (const star of liveStars(galaxy)) {
+    const at = galaxy.meaningAt.get(star.id)
+    if (at !== undefined) reach = Math.max(reach, Math.hypot(at[0], at[2]))
+  }
+  const radius = Math.max(NOT_EMBEDDED_MIN_RADIUS, reach * NOT_EMBEDDED_RING_FACTOR)
+  const ids = notEmbeddedIds(galaxy)
+  const stars = galaxy.layout.stars.map(star => galaxy.meaningAt.get(star.id) ?? star.position)
+  ids.forEach((id, n) => {
+    const angle = -Math.PI / 2 + (n * Math.PI * 2) / ids.length
+    stars[slotOf(galaxy.layout.starById, id)] = [Math.cos(angle) * radius, 0, Math.sin(angle) * radius]
+  })
+  return { stars, ring: { radius, ids, labelAt: [0, 24, radius] } }
+}
+
+/** A star's place in Meaning (a star with no Meaning place is anything but a star: undefined). */
+export const meaningAway = (places: MeaningPlaces, kind: VisualKind, slot: number): Vec3 | undefined => (kind === 'star' ? places.stars[slot] : undefined)
+
+/** One label per cluster: the memories that share a topic name, across projects, at the middle of their places. */
+type MeaningCluster = { name: string; centre: Vec3; count: number }
+/** A cluster is two memories or more, and the map labels the biggest 24 so the labels stay readable. */
+export const CLUSTER_MIN = 2
+export const CLUSTER_LABEL_LIMIT = 24
+
+export function meaningClusters(galaxy: Galaxy): MeaningCluster[] {
+  const groups = new Map<string, { name: string; sum: Vec3; count: number }>()
+  for (const star of liveStars(galaxy)) {
+    const at = galaxy.meaningAt.get(star.id)
+    const name = topicName(galaxy, star)
+    if (at === undefined || name.toLowerCase() === UNTAGGED.toLowerCase()) continue
+    const group = groups.get(name.toLowerCase()) ?? { name, sum: [0, 0, 0] as Vec3, count: 0 }
+    group.count++
+    for (let i = 0; i < 3; i++) group.sum[i] = group.sum[i]! + at[i]!
+    groups.set(name.toLowerCase(), group)
+  }
+  return [...groups.values()]
+    .filter(group => group.count >= CLUSTER_MIN)
+    .map(group => ({ name: group.name, centre: group.sum.map(v => v / group.count) as Vec3, count: group.count }))
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
+    .slice(0, CLUSTER_LABEL_LIMIT)
+}
+
+// Similar memories: faint cyan links between neighbours.
+
+/** In Meaning each star links to its two closest (the mockup's `similar.slice(0, 2)`); the selected star links to all three it lists. */
+export const SIMILAR_PER_STAR = 2
+/** Below this much meaning weight the map counts as Galaxy or Timeline for the links. */
+export const SIMILAR_MEANING_MIN = 0.3
+export type SimilarPair = { from: string; to: string; score: number }
+
+/**
+ * The links to draw. Off when the toggle is off or the galaxy has no Meaning. In Meaning every live, shown star
+ * links to its closest neighbours (a pair once); in Galaxy and Timeline only the selected star's links show.
+ * An end that is forgotten, hidden, not in the reply, or (in Timeline) off the axis for `days` is not linked.
+ */
+export function similarPairs(galaxy: Galaxy, state: MapState, days: number, meaningWeight: number = meaningTarget(state.layout)): SimilarPair[] {
+  if (!state.similar || !galaxy.meaning) return []
+  // While the map leaves Meaning the links stay until it is mostly gone (the mockup's `mw > 0.3`).
+  const inMeaning = state.layout === 'meaning' || meaningWeight > SIMILAR_MEANING_MIN
+  const usable = (id: string): boolean => {
+    const slot = slotOf(galaxy.layout.starById, id)
+    const star = galaxy.layout.stars[slot]
+    if (star === undefined || galaxy.gone.has(id) || state.hidden.has(star.owner)) return false
+    return state.layout !== 'timeline' || onTimelineAxis(galaxy, slot, days)
+  }
+  const pairs: SimilarPair[] = []
+  const seen = new Set<string>()
+  const add = (from: string, links: readonly SimilarLink[]) => {
+    if (!usable(from)) return
+    for (const link of links) {
+      const key = from < link.id ? `${from}\n${link.id}` : `${link.id}\n${from}`
+      if (!usable(link.id) || seen.has(key)) continue
+      seen.add(key)
+      pairs.push({ from, to: link.id, score: link.score })
+    }
+  }
+  if (inMeaning) for (const star of galaxy.layout.stars) add(star.id, (galaxy.similar.get(star.id) ?? []).slice(0, SIMILAR_PER_STAR))
+  if (state.selected !== null) add(state.selected, galaxy.similar.get(state.selected) ?? [])
+  return pairs
+}
+
+/** The links' opacity: 0.12, plus 0.18 x the meaning weight (brightest in Meaning), plus 0.1 while a star is selected; 0 when off. */
+export const similarOpacity = (state: MapState, meaningWeight: number): number => (state.similar ? 0.12 + 0.18 * clamp01(meaningWeight) + (state.selected === null ? 0 : 0.1) : 0)
+
+/** One line of the inspector's "Similar memories": whose it is, where it is from, the score as a whole percentage. */
+type SimilarItem = { id: string; text: string; project: string; colour: string; percent: number; score: string }
+
+function similarSection(galaxy: Galaxy, star: GalaxyStar): { note: string; items: SimilarItem[] } {
+  if (!galaxy.meaning) return { note: 'Similar memories need embeddings.', items: [] }
+  const links = galaxy.similar.get(star.id)
+  if (links === undefined) return { note: NO_VECTOR_NOTE, items: [] }
+  const items: SimilarItem[] = []
+  for (const link of links) {
+    const other = galaxy.layout.stars[slotOf(galaxy.layout.starById, link.id)]
+    if (other === undefined || galaxy.gone.has(other.id)) continue
+    const percent = Math.round(link.score * 100)
+    items.push({ id: other.id, text: other.label === '' ? '(no text)' : other.label, project: coreLabel(galaxy, other.owner), colour: projectColour(galaxy, other.owner), percent, score: `${percent}% similar` })
+  }
+  return { note: items.length > 0 ? SIMILAR_NOTE : NO_CLOSE_NOTE, items }
+}
+
 // ---- Label de-overlap ----
 
 /** A label's screen rectangle (top-left corner and size, in pixels) and who wins a clash: a higher rank keeps its place. */
@@ -1054,8 +1270,8 @@ export const sparkOrigin = (claude: Vec3 | null | undefined): Vec3 => claude ?? 
 /** The camera move a layout switch asks for: the straight-on view when Timeline is entered, the Galaxy view when it is left, none otherwise. */
 export const layoutFlight = (before: LayoutName, after: LayoutName): 'timeline' | 'galaxy' | null => (before === after ? null : after === 'timeline' ? 'timeline' : before === 'timeline' ? 'galaxy' : null)
 
-/** What the hubs' (and their labels') own fade is: only hubs leave in Timeline. */
-export const visualFade = (kind: VisualKind, galaxyFade: number): number => (kind === 'hub' ? galaxyFade : 1)
+/** What a visual keeps of itself: hubs leave in Timeline and in Meaning (`galaxyFade`), project cores leave in Meaning, a cluster label is there only in Meaning. */
+export const visualFade = (kind: VisualKind, galaxyFade: number, meaningWeight = 0): number => (kind === 'hub' ? galaxyFade : kind === 'core' ? 1 - clamp01(meaningWeight) : kind === 'cluster' ? clamp01(meaningWeight) : 1)
 
 /** A visual's drawn size: cores and the Claude core shrink with the blend; every one grows with its pulse. */
 export const visualScale = (kind: VisualKind, size: number, blend: number, pulse: number): number => size * (kind === 'core' || kind === 'claude' ? coreScale(blend) : 1) * (1 + pulse * 1.6)
@@ -1128,7 +1344,7 @@ type Inspector = {
   hint: string
   /** The two sections of a memory: what was mined from it (MOON.1), and the similar memories (empty until embeddings are built). */
   knowledge?: { note: string; items: KnowledgeItem[] }
-  similar?: { note: string }
+  similar?: { note: string; items: SimilarItem[] }
 }
 
 /** One line of the inspector's "Knowledge from this memory". */
@@ -1152,6 +1368,12 @@ function knowledgeSection(galaxy: Galaxy, state: MapState, star: GalaxyStar, now
   }
 }
 
+/** The Overview's line in Meaning: what the layout is, and how many memories wait on the ring. */
+function meaningHint(galaxy: Galaxy): string {
+  const n = notEmbeddedIds(galaxy).length
+  return n === 0 ? MEANING_HINT : `${MEANING_HINT} ${n} ${n === 1 ? 'memory is' : 'memories are'} not embedded yet, on the outer ring.`
+}
+
 export function inspector(galaxy: Galaxy, state: MapState, now = Date.now()): Inspector {
   const layout = galaxy.layout
   const star = state.selected === null || galaxy.gone.has(state.selected) ? undefined : layout.stars[slotOf(layout.starById, state.selected)]
@@ -1171,7 +1393,7 @@ export function inspector(galaxy: Galaxy, state: MapState, now = Date.now()): In
       ],
       hint: star.recalls === 0 ? 'Never recalled: a candidate to review or forget.' : 'Its star grows each time Claude recalls it.',
       knowledge: knowledgeSection(galaxy, state, star, now),
-      similar: { note: 'Similar memories need embeddings.' },
+      similar: similarSection(galaxy, star),
     }
   }
   const hub = state.topic === null ? undefined : layout.hubs[slotOf(layout.hubByKey, state.topic)]
@@ -1221,7 +1443,7 @@ export function inspector(galaxy: Galaxy, state: MapState, now = Date.now()): In
       { label: 'Topics', value: String(layout.hubs.length) },
       { label: 'Bridges', value: String(layout.bridges.length) },
     ],
-    hint: state.layout === 'timeline' ? TIMELINE_HINT : 'Every star is one memory. Click a project core to fly in.',
+    hint: state.layout === 'timeline' ? TIMELINE_HINT : state.layout === 'meaning' ? meaningHint(galaxy) : 'Every star is one memory. Click a project core to fly in.',
   }
 }
 

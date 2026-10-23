@@ -554,6 +554,11 @@ button.toggle-name:focus-visible { outline: 2px solid var(--accent); outline-off
 .rail-item.is-selected { background: var(--accent-soft); }
 .rail-item:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .rail-mark { font-size: 11px; color: var(--amber-ink); }
+/* Similar memories in the inspector: the other memory's text, then its project and score (colours are the page's tokens). */
+.sim-item { flex-direction: column; align-items: flex-start; gap: 2px; padding: 6px 8px; }
+.sim-text { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sim-meta { display: flex; align-items: center; gap: 6px; }
+#map-meaning-hint { margin: 6px 0 0; line-height: 1.4; }
 
 .map-centre { flex: 999 1 560px; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
 
