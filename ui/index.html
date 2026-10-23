@@ -25,11 +25,44 @@
 
   <p id="status" class="status" role="status">Loading…</p>
 
-  <main id="view-map" class="main view" hidden>
-    <section class="panel">
-      <h1>Map</h1>
-      <p class="muted">The map of how memories group arrives in a later build.</p>
+  <main id="view-map" class="main view map-view" hidden>
+    <h1 class="sr-only">Memory map</h1>
+    <aside class="map-rail" aria-label="Map controls">
+      <section class="rail-card">
+        <h2 class="rail-title">Colour by</h2>
+        <div role="group" aria-label="Colour by" class="segmented" id="map-colour"></div>
+      </section>
+      <section class="rail-card">
+        <h2 class="rail-title">Projects</h2>
+        <div id="map-toggles" class="toggles"></div>
+      </section>
+      <section class="rail-card" aria-labelledby="map-list-heading">
+        <h2 id="map-list-heading" class="rail-title" tabindex="-1">Projects to open</h2>
+        <div id="map-list" class="rail-list"></div>
+        <span class="rail-note">The same as clicking in the map, for keyboard and screen readers.</span>
+      </section>
+      <section class="rail-card">
+        <label for="map-min" class="rail-title">Min recalls <span id="map-min-value" class="mono">0</span></label>
+        <input id="map-min" class="range" type="range" min="0" max="20" value="0">
+      </section>
+    </aside>
+
+    <section class="map-centre" aria-label="3D memory map">
+      <nav id="map-path" class="path" aria-label="Drill-down path"></nav>
+      <div id="map-stage" class="stage">
+        <div id="map-canvas" class="stage-canvas"></div>
+        <p id="map-message" class="stage-message" hidden></p>
+        <div id="map-tip" class="stage-tip" hidden></div>
+        <div class="stage-controls">
+          <button id="map-rotate" type="button" class="stage-btn" aria-pressed="true">Auto-rotate</button>
+          <button id="map-reset" type="button" class="stage-btn">Reset view</button>
+        </div>
+        <span class="stage-hint" aria-hidden="true">Drag to orbit · scroll to zoom · click to drill in</span>
+      </div>
+      <p id="map-live" class="sr-only" aria-live="polite"></p>
     </section>
+
+    <aside id="map-inspector" class="inspector" aria-label="Inspector"></aside>
   </main>
 
   <main id="view-memories" class="main view" hidden>

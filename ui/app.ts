@@ -10,7 +10,11 @@
 //
 // Every element is built with createElement and textContent: no HTML is ever
 // parsed from data (tests/bun/inert.spec.ts checks this file on every run).
+// The Map tab lives in ui/map.ts (its rules in ui/map-state.ts) and loads its
+// library from /vendor/ only when that tab first opens.
 // Styles live in style.css: the CSP refuses inline ones.
+
+import { createMap, type MapView } from './map'
 
 const TOKEN_KEY = 'mnemosyne.token'
 const VIEWS = ['map', 'memories', 'activity', 'search'] as const
@@ -434,10 +438,6 @@ function drawTabs() {
     const tab = el('button', VIEW_NAMES[view], 'tab')
     tab.type = 'button'
     tab.dataset.view = view
-    if (view === 'map') {
-      tab.disabled = true
-      tab.title = 'The map arrives in a later build'
-    }
     tab.addEventListener('click', () => show(view))
     tabs.append(tab)
   }
@@ -455,7 +455,20 @@ function show(view: View) {
     if (view === 'memories') void loadMemories()
     if (view === 'activity') void startActivity()
     if (view === 'search') byId<HTMLInputElement>('search-query').focus()
+    // The map (and its library, under /vendor/) loads only when the Map tab first opens.
+    if (view === 'map') map = createMap({ api: path => api(path), openMemory: openInMemories, status: setStatus })
   }
+  map?.visible(view === 'map')
+}
+
+// ---- Map ----
+
+let map: MapView | null = null
+
+/** The map inspector's Open in Memories: the Memories view, with that memory open. */
+function openInMemories(id: string) {
+  show('memories')
+  void openMemory(id)
 }
 
 // ---- Header and footer ----

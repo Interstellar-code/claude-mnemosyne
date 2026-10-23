@@ -6,6 +6,10 @@
 // <token>`. Every reply carries a strict CSP and no CORS allow header. SQLite
 // is opened read-only; every change goes through the engine (hooks/engine.ts).
 //
+// The map's route (plan phase MAP): GET /api/map, one drill level per call
+// (projects; ?project= its topics; ?project=&tag= or &untagged=1 a topic's
+// memories; each with min_recalls). /vendor/ serves the map's library.
+//
 // The views' routes (plan phase VIEW): GET /api/memories (owner, sort, q),
 // GET /api/memories/<id>, GET /api/activity, GET /api/activity/stream (NDJSON),
 // POST /api/search (the engine's recall with update_recall_counts false, once
@@ -52,7 +56,7 @@ import {
 } from 'node:fs'
 import { dirname, join, sep } from 'node:path'
 import { appendActivity } from '../bin/activity'
-import { hasTagSql, untaggedSql } from '../bin/memories'
+import { hasTagSql, tagsSql, untaggedSql } from '../bin/memories'
 import { activityEntry, preview } from '../hooks/activity-log'
 import type { ActivityFields } from '../hooks/activity-log'
 import { buildRequests, engineEnv, parseReplies } from '../hooks/engine'
@@ -73,12 +77,10 @@ const SECURITY_HEADERS: Readonly<Record<string, string>> = {
   'Cache-Control': 'no-store',
 }
 
-// What /vendor/ serves, by extension; anything else is 404.
+// What /vendor/ serves, by extension: the map's script only; anything else
+// (its notices, inputs list, scan allowlist and types) is 404.
 const VENDOR_TYPES: Readonly<Record<string, string>> = {
   '.js': 'text/javascript; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.json': 'application/json; charset=utf-8',
-  '.txt': 'text/plain; charset=utf-8',
 }
 
 export const DEFAULT_PARENT_CHECK_MS = 10_000
@@ -199,7 +201,8 @@ export async function runEngine(
 
 // ui/app.ts, built into memory once at start and served as /app.js.
 export async function buildApp() {
-  const built = await Bun.build({ entrypoints: [join(UI_DIR, 'app.ts')], target: 'browser', format: 'esm', minify: true })
+  // The map's library stays a separate file, loaded with import() when the Map tab first opens.
+  const built = await Bun.build({ entrypoints: [join(UI_DIR, 'app.ts')], target: 'browser', format: 'esm', minify: true, external: ['/vendor/*'] })
   const output = built.outputs[0]
   if (!built.success || output === undefined) {
     throw new Error(`ui/app.ts did not build: ${built.logs.map(log => String(log)).join('\n')}`)
@@ -361,6 +364,124 @@ export function getMemory(db: Database | null, id: string): Answer {
   const { metadata_json, ...rest } = row
   const metadata = parseMetadata(metadata_json)
   return { status: 200, body: { ...rest, recall_count: rest.recall_count ?? 0, metadata, tags: tagsOf(metadata) } }
+}
+
+// ---- Map (MAP.1): one drill level per call, read-only, every value bound ----
+
+// GET /api/map?project=&tag=: at most this many memory nodes in one topic.
+export const MAP_MEMORY_LIMIT = 500
+export const MAP_LABEL_CHARS = 80
+// min_recalls: digits only, at most this.
+const MAX_MIN_RECALLS = 1_000_000_000
+
+/** A project's label: Global for the global owner, `<name>` for `project-<name>-<hash>`, else the owner. */
+export function projectLabel(owner: string): string {
+  if (owner === 'global') return 'Global'
+  return /^project-(.+)-[0-9a-z]+$/.exec(owner)?.[1] ?? owner
+}
+
+/** The first non-empty line of a text, at most `max` characters (the last an ellipsis when cut). */
+export function firstLineOf(text: string, max = MAP_LABEL_CHARS): string {
+  const line = text.split('\n').find(part => part.trim() !== '')?.trim() ?? ''
+  const chars = Array.from(line)
+  return chars.length > max ? `${chars.slice(0, max - 1).join('')}…` : line
+}
+
+const RECALLS = 'COALESCE(recall_count, 0)'
+
+/**
+ * GET /api/map: the projects (owners) with their memory count, recall total and newest saved date.
+ * ?project=<owner>: that project's topics (tags, lower-cased) and one Untagged node when any memory has no tag.
+ * ?project=<owner>&tag=<t> or &untagged=1: that topic's memories.
+ * Every level takes min_recalls (a non-negative integer): memories below it are left out,
+ * counts follow, and a project or topic left with none is omitted.
+ */
+export function mapLevel(db: Database | null, params: URLSearchParams, memoryLimit = MAP_MEMORY_LIMIT): Answer {
+  for (const key of params.keys()) {
+    if (!['project', 'tag', 'untagged', 'min_recalls'].includes(key)) return { status: 400, body: { error: `unknown parameter: ${key}` } }
+  }
+  for (const key of ['project', 'tag', 'untagged', 'min_recalls']) {
+    if (params.getAll(key).length > 1) return { status: 400, body: { error: `${key} is given more than once` } }
+  }
+  const minText = params.get('min_recalls')
+  if (minText !== null && (!/^\d{1,10}$/.test(minText) || Number(minText) > MAX_MIN_RECALLS)) {
+    return { status: 400, body: { error: 'min_recalls must be a non-negative integer' } }
+  }
+  const min = minText === null ? 0 : Number(minText)
+  const project = params.get('project')
+  const tagText = params.get('tag')
+  const untagged = params.get('untagged')
+  if (project !== null && (project === '' || project.length > 200)) return { status: 400, body: { error: 'project must be 1 to 200 characters' } }
+  const tag = tagText?.trim() ?? null
+  if (tag !== null && (tag === '' || tag.length > 200)) return { status: 400, body: { error: 'tag must be 1 to 200 characters' } }
+  if (untagged !== null && untagged !== '1') return { status: 400, body: { error: 'untagged must be 1' } }
+  if (tag !== null && untagged !== null) return { status: 400, body: { error: 'tag and untagged cannot be combined' } }
+  if (project === null && (tag !== null || untagged !== null)) return { status: 400, body: { error: 'tag and untagged need a project' } }
+
+  if (project === null) {
+    if (db === null) return { status: 200, body: { level: 'projects', min_recalls: min, nodes: [] } }
+    const rows = db
+      .query(
+        `SELECT session_id AS owner, COUNT(*) AS count, SUM(${RECALLS}) AS recalls, MAX(timestamp) AS newest
+         FROM working_memory WHERE session_id IS NOT NULL AND session_id <> '' AND ${RECALLS} >= ?
+         GROUP BY session_id ORDER BY count DESC, owner`,
+      )
+      .all(min) as { owner: string; count: number; recalls: number | null; newest: string | null }[]
+    const nodes = rows.map(row => ({ id: row.owner, label: projectLabel(row.owner), count: row.count, recalls: row.recalls ?? 0, newest: row.newest }))
+    return { status: 200, body: { level: 'projects', min_recalls: min, nodes } }
+  }
+
+  if (tag === null && untagged === null) {
+    if (db === null) return { status: 200, body: { level: 'topics', project, min_recalls: min, nodes: [] } }
+    // One row per memory and tag (a tag twice in one memory counts once), then grouped.
+    const rows = db
+      .query(
+        `SELECT tag, COUNT(*) AS count, SUM(recalls) AS recalls, MAX(timestamp) AS newest FROM (
+           SELECT DISTINCT w.id AS id, lower(j.value) AS tag, ${RECALLS} AS recalls, w.timestamp AS timestamp
+           FROM working_memory AS w, json_each(${tagsSql('w.metadata_json')}) AS j
+           WHERE w.session_id = ? AND ${RECALLS} >= ? AND j.type = 'text' AND j.value <> ''
+         ) GROUP BY tag ORDER BY count DESC, tag`,
+      )
+      .all(project, min) as { tag: string; count: number; recalls: number | null; newest: string | null }[]
+    const nodes: { id: string; label: string; count: number; recalls: number; newest: string | null; tag: string | null; untagged: boolean }[] = rows.map(row => ({
+      id: `tag:${row.tag}`,
+      label: row.tag,
+      count: row.count,
+      recalls: row.recalls ?? 0,
+      newest: row.newest,
+      tag: row.tag,
+      untagged: false,
+    }))
+    const none = db
+      .query(`SELECT COUNT(*) AS count, SUM(${RECALLS}) AS recalls, MAX(timestamp) AS newest FROM working_memory WHERE session_id = ? AND ${RECALLS} >= ? AND ${untaggedSql()}`)
+      .get(project, min) as { count: number; recalls: number | null; newest: string | null }
+    if (none.count > 0) nodes.push({ id: 'untagged', label: 'Untagged', count: none.count, recalls: none.recalls ?? 0, newest: none.newest, tag: null, untagged: true })
+    return { status: 200, body: { level: 'topics', project, min_recalls: min, nodes } }
+  }
+
+  // The tag is lower-cased by SQLite's lower() on both sides, as the topics
+  // level groups them, so a topic always finds its own memories (lower() folds
+  // ASCII only; JS toLowerCase would fold more and miss them).
+  const topic = tag !== null ? { tag, untagged: false } : { tag: null, untagged: true }
+  if (db === null) return { status: 200, body: { level: 'memories', project, ...topic, min_recalls: min, total: 0, limit: memoryLimit, nodes: [] } }
+  const hasTag = `EXISTS (SELECT 1 FROM json_each(${tagsSql()}) WHERE json_each.type = 'text' AND lower(json_each.value) = lower(?))`
+  const where = `session_id = ? AND ${RECALLS} >= ? AND ${topic.untagged ? untaggedSql() : hasTag}`
+  const args: (string | number)[] = topic.tag !== null ? [project, min, topic.tag] : [project, min]
+  const total = (db.query(`SELECT COUNT(*) AS n FROM working_memory WHERE ${where}`).get(...args) as { n: number }).n
+  const rows = db
+    .query(
+      `SELECT id, substr(content, 1, 2000) AS head, ${RECALLS} AS recall_count, timestamp, metadata_json
+       FROM working_memory WHERE ${where} ORDER BY timestamp DESC, id LIMIT ?`,
+    )
+    .all(...args, memoryLimit) as { id: string; head: string | null; recall_count: number; timestamp: string | null; metadata_json: string | null }[]
+  const nodes = rows.map(row => ({
+    id: row.id,
+    label: firstLineOf(row.head ?? ''),
+    tags: tagsOf(parseMetadata(row.metadata_json)),
+    recall_count: row.recall_count,
+    timestamp: row.timestamp,
+  }))
+  return { status: 200, body: { level: 'memories', project, ...topic, min_recalls: min, total, limit: memoryLimit, nodes } }
 }
 
 /** The store's owners, the largest first. */
@@ -841,6 +962,7 @@ export async function startServer(config: Config, options: ServerOptions = {}): 
         return getMemory((store.db ??= openStore(config.store)), id)
       })
     }
+    if (path === '/api/map') return get(() => mapLevel((store.db ??= openStore(config.store)), url.searchParams))
     if (path === '/api/activity') {
       return get(() => {
         const asked = url.searchParams.get('limit')

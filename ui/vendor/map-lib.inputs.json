@@ -1,0 +1,218 @@
+{
+  "bundle": "map-lib.js",
+  "built_by": "scripts/vendor-map.ts",
+  "bytes": 816677,
+  "gzip_bytes": 216581,
+  "sha256": "222af7da27d14f15718e022be569c2fa037037a9868a6497e886a702b40d5447",
+  "exports": [
+    "ForceGraph3D",
+    "SpriteText"
+  ],
+  "packages": [
+    {
+      "name": "@babel/runtime",
+      "version": "7.29.10",
+      "license": "MIT"
+    },
+    {
+      "name": "@tweenjs/tween.js",
+      "version": "25.0.0",
+      "license": "MIT"
+    },
+    {
+      "name": "3d-force-graph",
+      "version": "1.80.1",
+      "license": "MIT"
+    },
+    {
+      "name": "accessor-fn",
+      "version": "1.5.3",
+      "license": "MIT"
+    },
+    {
+      "name": "d3-array",
+      "version": "3.2.4",
+      "license": "ISC"
+    },
+    {
+      "name": "d3-binarytree",
+      "version": "1.0.2",
+      "license": "MIT"
+    },
+    {
+      "name": "d3-dispatch",
+      "version": "3.0.1",
+      "license": "ISC"
+    },
+    {
+      "name": "d3-force-3d",
+      "version": "3.0.6",
+      "license": "MIT"
+    },
+    {
+      "name": "d3-octree",
+      "version": "1.1.0",
+      "license": "MIT"
+    },
+    {
+      "name": "d3-quadtree",
+      "version": "3.0.1",
+      "license": "ISC"
+    },
+    {
+      "name": "d3-scale",
+      "version": "4.0.2",
+      "license": "ISC"
+    },
+    {
+      "name": "d3-scale-chromatic",
+      "version": "3.1.0",
+      "license": "ISC"
+    },
+    {
+      "name": "d3-selection",
+      "version": "3.0.0",
+      "license": "ISC"
+    },
+    {
+      "name": "d3-timer",
+      "version": "3.0.1",
+      "license": "ISC"
+    },
+    {
+      "name": "data-bind-mapper",
+      "version": "1.0.3",
+      "license": "MIT"
+    },
+    {
+      "name": "float-tooltip",
+      "version": "1.7.5",
+      "license": "MIT"
+    },
+    {
+      "name": "internmap",
+      "version": "2.0.3",
+      "license": "ISC"
+    },
+    {
+      "name": "kapsule",
+      "version": "1.16.3",
+      "license": "MIT"
+    },
+    {
+      "name": "lodash-es",
+      "version": "4.18.1",
+      "license": "MIT"
+    },
+    {
+      "name": "ngraph.events",
+      "version": "1.4.0",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "name": "ngraph.forcelayout",
+      "version": "3.3.1",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "name": "ngraph.graph",
+      "version": "20.1.2",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "name": "ngraph.merge",
+      "version": "1.0.0",
+      "license": "MIT"
+    },
+    {
+      "name": "ngraph.random",
+      "version": "1.2.0",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "name": "polished",
+      "version": "4.3.1",
+      "license": "MIT"
+    },
+    {
+      "name": "preact",
+      "version": "10.29.8",
+      "license": "MIT"
+    },
+    {
+      "name": "three",
+      "version": "0.186.1",
+      "license": "MIT"
+    },
+    {
+      "name": "three-forcegraph",
+      "version": "1.43.6",
+      "license": "MIT"
+    },
+    {
+      "name": "three-render-objects",
+      "version": "1.43.0",
+      "license": "MIT"
+    },
+    {
+      "name": "three-spritetext",
+      "version": "1.10.0",
+      "license": "MIT"
+    },
+    {
+      "name": "tinycolor2",
+      "version": "1.6.0",
+      "license": "MIT"
+    }
+  ],
+  "patches": [
+    {
+      "id": "no-style-3d-force-graph",
+      "package": "3d-force-graph",
+      "file": "dist/3d-force-graph.mjs",
+      "what": "removes the call that injects a <style> element (.graph-info-msg, .scene-container .clickable/.grabbable)",
+      "find": "styleInject(css_248z);",
+      "replace": "/* mnemosyne: style element injection removed (MAP.2); the CSS is in ui/style.css */",
+      "count": 1,
+      "css": ".graph-info-msg {\n  top: 50%;\n  width: 100%;\n  text-align: center;\n  color: lavender;\n  opacity: 0.7;\n  font-size: 22px;\n  position: absolute;\n  font-family: Sans-serif;\n}\n\n.scene-container .clickable {\n  cursor: pointer;\n}\n\n.scene-container .grabbable {\n  cursor: move;\n  cursor: grab;\n  cursor: -moz-grab;\n  cursor: -webkit-grab;\n}\n\n.scene-container .grabbable:active {\n  cursor: grabbing;\n  cursor: -moz-grabbing;\n  cursor: -webkit-grabbing;\n}"
+    },
+    {
+      "id": "no-style-three-render-objects",
+      "package": "three-render-objects",
+      "file": "dist/three-render-objects.mjs",
+      "what": "removes the call that injects a <style> element (.scene-nav-info, .scene-container canvas:focus)",
+      "find": "styleInject(css_248z);",
+      "replace": "/* mnemosyne: style element injection removed (MAP.2); the CSS is in ui/style.css */",
+      "count": 1,
+      "css": ".scene-nav-info {\n  position: absolute;\n  bottom: 5px;\n  width: 100%;\n  text-align: center;\n  color: slategrey;\n  opacity: 0.7;\n  font-size: 10px;\n  font-family: sans-serif;\n  pointer-events: none;\n  user-select: none;\n}\n\n.scene-container canvas:focus {\n  outline: none;\n}"
+    },
+    {
+      "id": "no-style-float-tooltip",
+      "package": "float-tooltip",
+      "file": "dist/float-tooltip.mjs",
+      "what": "removes the call that injects a <style> element (.float-tooltip-kap)",
+      "find": "styleInject(css_248z);",
+      "replace": "/* mnemosyne: style element injection removed (MAP.2); the CSS is in ui/style.css */",
+      "count": 1,
+      "css": ".float-tooltip-kap {\n  position: absolute;\n  width: max-content; /* prevent shrinking near right edge */\n  max-width: max(50%, 150px);\n  padding: 3px 5px;\n  border-radius: 3px;\n  font: 12px sans-serif;\n  color: #eee;\n  background: rgba(0,0,0,0.6);\n  pointer-events: none;\n}\n"
+    },
+    {
+      "id": "tooltip-as-text",
+      "package": "float-tooltip",
+      "file": "dist/float-tooltip.mjs",
+      "what": "a string tooltip is set as text, never parsed as HTML (a second guard: the map passes NO_TOOLTIP, so the tooltip is always empty)",
+      "find": "state.tooltipEl.html(state.content);",
+      "replace": "state.tooltipEl.text(state.content);",
+      "count": 1
+    },
+    {
+      "id": "no-webgpu",
+      "package": "three-render-objects",
+      "file": "dist/three-render-objects.mjs",
+      "what": "drops the import of three/webgpu (a second 2.2 MB build of three's renderers); the map never asks for WebGPU, so the WebGL renderer is always the one made",
+      "find": "import { WebGPURenderer } from 'three/webgpu';",
+      "replace": "const WebGPURenderer = null; /* mnemosyne: three/webgpu not bundled (MAP.2) */",
+      "count": 1
+    }
+  ]
+}

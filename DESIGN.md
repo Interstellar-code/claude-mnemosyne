@@ -201,8 +201,8 @@ gives it as `activity`, `<root>/activity.jsonl`). The dashboard reads it.
 
 - A line: `t` (ISO time), `action` (recall, remember, update, forget, stats,
   rearm), `origin` (hook = first-prompt recall or compaction, trigger = a
-  recall or remember term, tool = Claude's tool call, external = the proxy;
-  ui and backfill come later), `owner`, `text`, `ids`, `count`, `ok`, and
+  recall or remember term, tool = Claude's tool call, external = the proxy,
+  ui = a dashboard search or forget, backfill = `/mnemosyne-tags apply`), `owner`, `text`, `ids`, `count`, `ok`, and
   `error` only when not ok. `ids` holds at most 50; `count` is the full
   number. `hooks/activity-log.ts` builds it and imports nothing, so the hooks,
   the proxy and the server build the same line.
@@ -312,8 +312,9 @@ and a temporary WAL store made by the real engine.
   keyword. No reply carries an `Access-Control-Allow-*` header, and OPTIONS
   gets 405. SQLite (`<store>/mnemopi.db`) is opened read-only with
   `query_only` on; every change goes through the engine. `/favicon.ico` is 204
-  with no body. `/vendor/<name>` serves one plain file name from `ui/vendor/`
-  (`.js` as `text/javascript`), so `/vendor/../server.ts` and
+  with no body. `/vendor/<name>` serves one plain `.js` file name from
+  `ui/vendor/` as `text/javascript` (the folder's notices, inputs list, scan
+  allowlist and types are not served), so `/vendor/../server.ts` and
   `/vendor/..%2fserver.ts` are 404; it serves only a regular file (never a
   link or a folder) whose real path is inside `ui/vendor/`. The page shell, script and style load
   without the token and hold no data. `ui/index.html` has no inline script or
@@ -437,6 +438,230 @@ Keep the browser console open throughout: no error and no CSP violation.
    shows a `forget` line with origin `dashboard`.
 7. Open the bare address `http://127.0.0.1:<port>/` in a private window: it
    says to open the link from /mnemosyne-ui and shows no data.
+
+### 3.4 Topic tags and /mnemosyne-tags (v0.5.0)
+
+A memory's topics live in one place: `metadata.tags`, a list of short
+lowercase strings cleaned by `hooks/tags.ts` (trimmed, lowercased, unique, at
+most 5, each at most 24 characters). There is no side file of tags and no tag
+text inside a memory. Tags are written only through the engine:
+`memory_remember` takes `tags` for a new fact, and `memory_update` merges them
+into an existing one (engine change 1, a shallow metadata merge in one
+transaction; an empty list removes the key).
+
+- New memories: the rules text asks Claude for 2 to 5 short topic tags with
+  each fact it saves.
+- Old memories: `/mnemosyne-tags` tags the existing ones once. With no
+  argument it is a dry run: for each untagged memory it sends the memory's
+  text (as quoted data, at most 4000 characters) to Haiku through
+  `$.model.complete`, 4 calls at a time, and saves the proposals to
+  `<root>/tags-proposed.json` (0600): id, owner, tags and a sha256 of the
+  text, never the text. Nothing changes in the store. `/mnemosyne-tags apply`
+  makes no model call: it re-reads each proposed row and writes only those
+  that still exist, still have no tags and whose text hash is unchanged,
+  through `mnemopi_update`, one engine process per owner. Each run says how
+  many it skipped and why.
+- Privacy: the dry run is the only step that sends memory text to a model;
+  the user runs it on purpose and reads the proposals before `apply`.
+- Files: `bin/memories.ts` (a read-only listing of the store for the
+  backfill, which a hook cannot read, and the tag SQL the dashboard shares),
+  `hooks/backfill.ts` (the pure parts: the prompt, reading the reply, the
+  proposals file, the apply-time re-check and the worker pool; it imports only
+  `hooks/tags.ts`), and the command in `hooks/register.ts`. `hooks/backfill.ts`
+  was added in the TAGS phase although the plan's TAGS file list did not name
+  it; it is recorded here so the file has an owner.
+- "Untagged" means no non-empty text in `metadata.tags`: NULL, `{}`, broken
+  JSON and `tags: []` all count, in the backfill, the Memories filter and the
+  map alike (`untaggedSql()` in `bin/memories.ts`). A real tag named
+  `untagged` is a tag like any other; only `untagged=1` asks for rows with none.
+
+### 3.5 The 3D memory map (v0.5.0)
+
+The Map tab draws the store as a 3D map on the `3d-force-graph` library
+(three.js). It drills down one level at a time: all projects (an owner is a
+project; a sphere's size follows its memory count) → one project's topics
+(its tags, plus an Untagged group) orbiting it, with the other projects drawn
+small aside → one topic's memories orbiting it, with the sibling topics small
+aside → one memory in the inspector (its text, tags, recalls, saved date and
+"Open in Memories"). A path bar goes back up and Reset view returns to All
+memories. The look follows the plan's `design/Main.dc.html` mockup.
+
+- Data: `GET /api/map` answers one level per call, through the read-only
+  handle, with every value bound as a SQL parameter: no parameter gives the
+  projects (id, label, count, recall total, newest saved date; the owner
+  `global` is labelled Global); `?project=<owner>` that project's topics
+  (tags grouped lower-cased, with counts) and one `Untagged` node when any
+  memory has no tag; `?project=<owner>&tag=<t>` or `&untagged=1` that
+  topic's memories (id, first line as label, at most 80 characters, tags,
+  recall_count, timestamp; at most 500 per topic, newest first, with the
+  topic's `total` and the `limit`, so the rail says "Showing 500 of N"). Tags
+  are lower-cased by SQLite's `lower()` on both sides, when topics are
+  grouped and when a topic's memories are asked for, so every topic finds its
+  own memories (`lower()` folds ASCII only; a non-ASCII upper-case tag stays
+  its own topic). `min_recalls` (digits
+  only, else 400) drops memories below it at every level, and a project or
+  topic left with none is omitted. An unknown project or tag is an empty list.
+  Tested in `tests/bun/map-api.spec.ts` on a real store.
+- Logic: `ui/map-state.ts` holds every rule with no DOM and no three.js, so
+  `tests/bun/map-state.spec.ts` tests it directly: the levels, what each level
+  draws and where (positions are fixed by the level, not by forces), the path
+  bar, Reset view, auto-rotate (on at first, paused when the browser asks for
+  reduced motion), colour-by (project, recalls or age), project toggles, the
+  min-recalls slider (0 - 20), the rail list, the inspector, which request
+  each level still needs, and `hasWebGL`. Sibling data comes from the cached
+  reply of the level above; a reply the state no longer needs is dropped.
+- The rail list is the keyboard and screen-reader route: it holds exactly the
+  nodes drawn (the children first, then Other projects or Other topics, then
+  In focus), and pressing an item is the same call as clicking its sphere.
+  After a level change, focus moves to the list's heading and an aria-live
+  region names the level and its count; a redraw keeps focus on the control
+  that had it. Every rail control, the path bar, Reset view and the rotate
+  button are buttons, checkboxes or a range input with visible focus.
+- Labels are never HTML. The library's own tooltip renders HTML, so it is
+  off: `nodeLabel(NO_TOOLTIP)` and `linkLabel(NO_TOOLTIP)`, a function
+  returning an empty string, are the only label setters `ui/map.ts` calls (a
+  spec holds this). Hover text goes into an app-owned element with
+  `textContent`; 3D captions are drawn on a canvas by `three-spritetext`;
+  `plainLabel` (`ui/escape.ts`) cuts a label and removes control and
+  bidirectional-override characters, and never HTML-escapes, since nothing
+  parses it.
+- Loading: the page builds `ui/app.ts` with `ui/vendor/` kept external, and
+  `ui/map.ts` loads `/vendor/map-lib.js` with `import()` only the first time
+  the Map tab opens; the other tabs request nothing under `/vendor/`.
+- Without WebGL: `hasWebGL` asks a fresh canvas for a `webgl2` context (three
+  needs WebGL2). When it gets none, or when the graph constructor throws, the
+  map area shows a plain message, the library is not loaded, and the rail
+  list still drills down to the inspector.
+- The page holds a token that can forget memories, and the map adds a
+  third-party bundle, so the same CSP applies unchanged (no `'unsafe-*'`),
+  the bundle is patched, scanned and pinned (below), and review depth is
+  data-loss.
+
+The vendored library (`ui/vendor/`, committed):
+
+- `scripts/vendor-map.ts` runs one `Bun.build` at dev time over the pinned
+  devDependencies `3d-force-graph` 1.80.1, `three` 0.186.1 and
+  `three-spritetext` 1.10.0 into one minified ESM file, `ui/vendor/map-lib.js`,
+  exporting `ForceGraph3D` and `SpriteText`. It fails when a patch does not
+  match exactly as often as listed, when any package comes from two folders,
+  or when three's core is not bundled exactly once. Beside it it writes
+  `map-lib.d.ts` (the types of the surface `ui/map.ts` uses),
+  `map-lib.inputs.json` (every bundled package with version and licence, the
+  patches with the CSS they removed, the size and a sha256) and
+  `THIRD-PARTY-NOTICES.txt` (each package's licence text). `bun
+  scripts/vendor-map.ts --check` rebuilds in memory and fails when a
+  committed file differs; `bun run test:bun` ends with it, so a hand edit of
+  the bundle (even with `map-lib.inputs.json` edited to match) fails the
+  suite.
+- Measured (2026-10-23, Bun 1.4.3): map-lib.js is 816,677 bytes (797.5 KB),
+  216,581 bytes gzipped, from 31 packages; three's core is about 0.69 MB of
+  it. Bundled: 3d-force-graph 1.80.1, three 0.186.1, three-spritetext 1.10.0,
+  three-forcegraph 1.43.6, three-render-objects 1.43.0, d3-force-3d 3.0.6,
+  float-tooltip 1.7.5, kapsule 1.16.3, preact 10.29.8, polished 4.3.1,
+  lodash-es 4.18.1, @tweenjs/tween.js 25.0.0, the ngraph packages and the
+  d3 helpers; `map-lib.inputs.json` has the full list.
+- Patches, applied by the build plugin as each source loads (ids as in
+  `map-lib.inputs.json`):
+  1. `no-style-3d-force-graph`, `no-style-three-render-objects`,
+     `no-style-float-tooltip`: the style element injection is removed. Each
+     of these three packages' `dist/*.mjs` calls `styleInject(css_248z)`,
+     which creates a `<style>` element; the CSP refuses it, and copying the
+     CSS would not make the injected element allowed. The call is replaced by
+     a comment, so the bundle holds no `createElement('style')` at all, and
+     the CSS each injected is in `ui/style.css` as shipped (a spec checks
+     every selector is there).
+  2. `tooltip-as-text` (float-tooltip): a string tooltip is set with
+     `selection.text()`, not `selection.html()`. A second guard: the map's
+     tooltip is always empty (`NO_TOOLTIP`).
+  3. `no-webgpu` (three-render-objects): its import of `three/webgpu` (a
+     second, 2.2 MB build of three's renderers) is replaced by a null
+     constant. The map never asks for WebGPU, so the WebGL renderer is the
+     one made, and three stays one copy.
+
+#### Vendored code scan
+
+`tests/bun/vendor-scan.spec.ts` scans every `ui/vendor/*.js` for
+`createElement('style')`, `styleInject`, `setAttribute('style')`, `eval(`,
+`new Function`, `Function(`, `new Worker`, `createObjectURL`,
+`importScripts`, `innerHTML`, `fetch(`, `import(` and every `http(s)://`
+literal, and each count
+must equal `ui/vendor/scan-allow.json`, where every entry says why the hit is
+inert. A new hit, or a count that moves, fails until it is reviewed there. The
+reviewed hits of map-lib.js:
+
+1. `Function(` ×7: six are ngraph.forcelayout's code generators (`new
+   Function` in its source; the minifier drops the `new`), which run only
+   when `forceEngine` is `'ngraph'`; `ui/map.ts` sets `forceEngine('d3')`.
+   The seventh is lodash's global lookup, reached only when neither `global`
+   nor `self` exists, never in a browser. A static hit is judged by the
+   runtime: if one ran, the CSP would refuse it and the console would show it
+   (MAP.4 checks the console).
+2. `innerHTML` ×9: d3-selection's `html()` (its only caller is patched to
+   `text()`), preact's `dangerouslySetInnerHTML` handling (preact renders only
+   React elements given to the tooltip, which the map never gives), and two
+   `domNode.innerHTML = ''` that clear the map's own container.
+3. `fetch(` ×1: three-forcegraph's `jsonUrl` property, which fetches graph
+   data from a URL when set. `ui/map.ts` never sets it (it passes
+   `graphData`), and the CSP's `connect-src 'self'` would allow only this
+   server if it did. There is no `import(` in the bundle.
+4. URL literals: XML namespace names (`http://www.w3.org/...`) used with
+   `createElementNS`, a citation inside a three.js shader comment, and
+   polished's error message text. None is fetched; the CSP's `connect-src
+   'self'` would refuse any that were.
+
+A headless Chrome run of the real server on a temporary store (MAP build,
+2026-10-23) loaded the map, drilled down through the rail and by Enter, and
+logged no CSP violation, while a deliberately injected `<style>` in the same
+page was logged as refused (a control that the logging works). That run is
+evidence for this build, not a substitute for the manual check below.
+
+Manual check of the Map tab (plan MAP.4), by the user, with the browser's
+network panel and console open, against `Main.dc.html` in the plan's design
+folder:
+
+1. Open the dashboard on Memories: the network panel shows no request under
+   `/vendor/`. Open Map: `map-lib.js` loads once (switching tabs does not load
+   it again). Turn the network off and repeat the clicks below: no failed
+   request and no CSP violation.
+2. Click a project: it moves to the centre, its topics orbit it and the other
+   projects shrink aside; the path bar reads All memories › project. Click a
+   topic: its memories orbit it. Click a memory: the inspector shows its text,
+   tags, recalls and saved date; "Open in Memories" opens it in the Memories
+   view. Go back with the path bar, then Reset view.
+3. Keyboard only: Tab through colour-by, the project toggles, the rail list,
+   the slider, the path bar, Reset view and the rotate button; each shows
+   focus. Enter on a rail item drills in, focus moves to the list heading, and
+   a screen reader announces the level.
+4. Turn Auto-rotate off and on again (one label; its pressed state shows
+   whether it is on), change colour-by, hide a project, move the
+   min-recalls slider: the map changes at once.
+5. A memory holding `<img src=x onerror=alert(1)>` shows those characters as
+   text in the hover text, the rail list and the inspector.
+6. Firefox with `webgl.disabled = true` in `about:config` (or Chrome started
+   with `--disable-3d-apis`): the map area says the map needs WebGL, and the
+   rail list still drills down to the inspector.
+7. With the system's reduce-motion setting on, the map opens with rotation
+   off: the Auto-rotate button is not pressed.
+
+### 3.6 Release check (MAP.6)
+
+`claude plugin validate .` does not apply the plugin directory's own code
+rules, and 0.5.0 adds about 2 MB of engine source and the 800 KB map bundle.
+Before 0.5.0 ships, the user runs `claude plugin validate --profile directory
+.` and the developer portal's own check on the 0.5.0 tree, and records each
+finding here, fixed or explained.
+
+Builder's run (2026-10-23, MAP build; not the user's sign-off):
+`claude plugin validate --profile directory .` exits 0 ("Validation
+passed") with one directory warning, `ICON_MISSING` (no
+`.claude-plugin/icon.png`; the portal takes the icon only the first time the
+plugin is saved there, so adding one is the user's choice before
+submitting). Its report says it does not run the directory's safety scan
+and policy review, nor check code loaded through `hooks.json` modules. The
+portal's own check was not run. (The first run also listed the
+`mnemosyne-tags` command hook as a gating hook without `.catch`; it now has
+one, returning "Mnemosyne: the tag backfill failed.", and the rerun lists it
+with `.catch`.)
 
 ## 4. Why a plugin, and why mod tools rather than an MCP server
 

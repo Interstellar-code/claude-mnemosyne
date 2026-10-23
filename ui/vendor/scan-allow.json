@@ -1,0 +1,55 @@
+{
+  "about": "Reviewed hits of the vendored code scan (tests/bun/vendor-scan.spec.ts). Each count must equal the scan's count for that file, and each entry says why the hit is inert. A new or changed hit fails the spec until it is reviewed here. DESIGN.md, 'Vendored code scan', has the method.",
+  "files": {
+    "map-lib.js": {
+      "Function(": {
+        "count": 7,
+        "why": "6 are ngraph.forcelayout's code generators (new Function in its source; the minifier drops the new), called only inside createPhysicsSimulator, which three-forcegraph runs only when forceEngine is 'ngraph'. ui/map.ts sets forceEngine('d3'), so they never run, and the CSP would refuse them if they did. The 7th is lodash-es's root lookup `freeGlobal || freeSelf || Function('return this')()`: in a browser `self` is an object, so the Function call is never reached."
+      },
+      "innerHTML": {
+        "count": 9,
+        "why": "4 are d3-selection's selection.html(); its one caller in the bundle, float-tooltip, is patched to selection.text() (patch tooltip-as-text), and the tooltip content is always empty (NO_TOOLTIP). 3 are preact's dangerouslySetInnerHTML prop handling and a container clear to an empty string; preact renders only React elements given to float-tooltip as content, which the map never gives. 2 are `domNode.innerHTML = ''` in the init of 3d-force-graph and three-render-objects: assigning the empty string clears the map's own container and parses no markup."
+      },
+      "url http://www.w3.org/1999/xhtml": {
+        "count": 4,
+        "why": "The XHTML XML namespace name, a string compared or passed to createElementNS by d3-selection and preact; nothing is fetched."
+      },
+      "url http://www.w3.org/2000/svg": {
+        "count": 3,
+        "why": "The SVG XML namespace name (d3-selection's namespace table, preact's svg handling); nothing is fetched."
+      },
+      "url http://www.w3.org/1999/xlink": {
+        "count": 1,
+        "why": "The XLink XML namespace name in d3-selection's namespace table; nothing is fetched."
+      },
+      "url http://www.w3.org/XML/1998/namespace": {
+        "count": 1,
+        "why": "The XML namespace name in d3-selection's namespace table; nothing is fetched."
+      },
+      "url http://www.w3.org/2000/xmlns/": {
+        "count": 1,
+        "why": "The xmlns namespace name in d3-selection's namespace table; nothing is fetched."
+      },
+      "url http://www.w3.org/1998/Math/MathML": {
+        "count": 1,
+        "why": "The MathML namespace name in preact's element creation; nothing is fetched."
+      },
+      "url https://jcgt.org/published/0007/04/01/": {
+        "count": 1,
+        "why": "A citation inside a comment of a three.js GLSL shader string (GGX importance sampling); shader text is compiled by WebGL, never fetched."
+      },
+      "url http://mdn.io/animation": {
+        "count": 2,
+        "why": "Text of polished's error messages for its animation() helper, which the map never calls; a message string, never fetched."
+      },
+      "url http://mdn.io/animation.": {
+        "count": 2,
+        "why": "The same polished error message text with a full stop (its second message table); never fetched."
+      },
+      "fetch(": {
+        "count": 1,
+        "why": "three-forcegraph's jsonUrl property: when set, it fetches graph data from that URL. ui/map.ts never sets jsonUrl (it passes graphData), so the call never runs; if it did, the CSP's connect-src 'self' would allow only this server."
+      }
+    }
+  }
+}

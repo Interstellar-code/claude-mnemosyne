@@ -736,7 +736,7 @@ export const register: Register = (on, options) => {
     } catch (err) {
       return { text: `Mnemosyne tag backfill failed: ${(err as Error).message}` }
     }
-  })
+  }).catch(() => ({ text: 'Mnemosyne: the tag backfill failed.' }))
 
   // The session that started the dashboard ends (exit, /clear, resume...): its server stops.
   on('session.end', async ($, e, next) => {
