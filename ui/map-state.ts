@@ -410,8 +410,8 @@ export function selectStar(state: MapState, galaxy: Galaxy, id: string): MapStat
   return star === undefined || galaxy.gone.has(id) ? state : { ...state, project: star.owner, topic: star.topic, selected: id, moon: state.selected === id ? state.moon : null }
 }
 
-/** Reset view: no focus, no memory, no Find. */
-export const resetView = (state: MapState): MapState => ({ ...state, project: null, topic: null, selected: null, moon: null, query: '' })
+/** Reset view: no focus, no memory, no Find, and no Knowledge chips. */
+export const resetView = (state: MapState): MapState => ({ ...state, project: null, topic: null, selected: null, moon: null, query: '', kinds: state.kinds.size === 0 ? state.kinds : new Set() })
 
 /** Hide or show a project's stars; hiding the focused project clears the focus. */
 export function toggleProject(state: MapState, owner: string): MapState {
@@ -674,9 +674,9 @@ export function usageText(recalls: number, lastRecalled: string | null, now = Da
 
 // ---- Picking and the tooltip ----
 
-export type Hit = { kind: 'star' | 'hub' | 'core' | 'moon'; id: string; sx: number; sy: number }
+export type Hit = { kind: 'star' | 'hub' | 'core' | 'moon' | 'claude'; id: string; sx: number; sy: number }
 export type Candidate = Hit & { radius: number; alpha: number }
-export const PICK_RADIUS = { star: 10, hub: 12, core: 22, moon: MOON_PICK_RADIUS } as const
+export const PICK_RADIUS = { star: 10, hub: 12, core: 22, claude: 22, moon: MOON_PICK_RADIUS } as const
 const PICK_MIN_ALPHA = 0.2
 
 /** The nearest candidate whose screen distance is inside its radius; a faint one (opacity under 0.2) cannot be picked. */
@@ -714,7 +714,11 @@ function savedDay(value: string | null | undefined): string {
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
 
 /** The tooltip for a hit: a memory says topic · project, recalls, saved date and label; a hub or core says how many memories and 'Click to fly in'. */
+/** The Claude core's tooltip: it is not a project, so no click hint. */
+export const CLAUDE_TOOLTIP = { title: 'Claude', sub: 'Recalls start here — gold sparks fly from this core to the memories a recall finds' } as const
+
 export function tooltip(galaxy: Galaxy, hit: Hit): { title: string; sub: string } | null {
+  if (hit.kind === 'claude') return CLAUDE_TOOLTIP
   const layout = galaxy.layout
   if (hit.kind === 'moon') return moonTooltip(galaxy, hit.id)
   if (hit.kind === 'star') {
@@ -804,6 +808,9 @@ export const TIMELINE_CORE_SCALE = 0.5
 export const coreScale = (blend: number) => 1 - (1 - TIMELINE_CORE_SCALE) * blend
 /** Topic hubs, threads, bridges and their particles fade out in Timeline: what is left of them at a blend. */
 export const galaxyOnlyFade = (blend: number) => Math.max(0, 1 - blend)
+/** The links leave faster than the stars move: gone by the first 30% of the morph (and back in during the last 30%), so no streaks trail the glide. */
+export const LINK_FADE_SPAN = 0.3
+export const linkFadeAt = (blend: number) => Math.max(0, 1 - blend / LINK_FADE_SPAN)
 /** Straight-on view of the axis: the camera 800 in front of it, the middle of the axis in view. */
 export const TIMELINE_POSE: { position: Vec3; target: Vec3 } = { position: [-20, 10, 800], target: [-20, 0, 0] }
 /** How fast the range follows a new choice, per second: 1 - e^(-4t) of the way. */
@@ -968,6 +975,38 @@ export function linkFadeToApply(fade: number, applied: number, dirty: boolean): 
   if (fade >= 1 && applied >= 1) return null
   if (fade === applied && !dirty) return null
   return fade
+}
+
+// ---- Label de-overlap ----
+
+/** A label's screen rectangle (top-left corner and size, in pixels) and who wins a clash: a higher rank keeps its place. */
+export type LabelRect = { x: number; y: number; w: number; h: number; rank: number }
+/** Pixels kept free between two labels that were nudged apart. */
+export const LABEL_GAP = 2
+
+const overlapsX = (a: LabelRect, b: LabelRect) => a.x < b.x + b.w && b.x < a.x + a.w
+const overlapsY = (a: LabelRect, b: LabelRect) => a.y < b.y + b.h && b.y < a.y + a.h
+
+/**
+ * Pushes overlapping labels apart, vertically: the higher rank (the Claude label over project labels over topic labels, then the
+ * earlier in the list) stays put and each lower one moves away from the ones already placed by just the height of the overlap.
+ * The same input always gives the same output; labels that do not overlap are returned as they were.
+ */
+export function separateLabels(rects: readonly LabelRect[]): LabelRect[] {
+  const out = rects.map(rect => ({ ...rect }))
+  const order = out.map((_, i) => i).sort((a, b) => out[b]!.rank - out[a]!.rank || a - b)
+  const placed: LabelRect[] = []
+  for (const i of order) {
+    const rect = out[i]!
+    // Each pass moves clear of one blocker; a nudge can land on another, so go again (bounded).
+    for (let pass = 0; pass <= placed.length; pass++) {
+      const blocker = placed.find(other => overlapsX(rect, other) && overlapsY(rect, other))
+      if (blocker === undefined) break
+      rect.y = rect.y + rect.h / 2 >= blocker.y + blocker.h / 2 ? blocker.y + blocker.h + LABEL_GAP : blocker.y - rect.h - LABEL_GAP
+    }
+    placed.push(rect)
+  }
+  return out
 }
 
 /** Where a spark starts: the Claude core's place now (it sits above today in Timeline), the origin before it is drawn. */

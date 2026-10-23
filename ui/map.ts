@@ -70,7 +70,10 @@ import {
   gridOpacity,
   layoutFlight,
   layoutStep,
+  linkFadeAt,
   linkFadeToApply,
+  separateLabels,
+  type LabelRect,
   needsGridLine,
   placesFor,
   type PlacesCache,
@@ -749,7 +752,15 @@ export function createMap(host: MapHost): MapView {
       const number = chip.querySelector('span.mono')
       if (number) number.textContent = String(counts[kind])
     }
-    byId('map-know-note').textContent = any ? knowledgeNote(state) : 'No knowledge extracted yet. Run /mnemosyne-knowledge, then reload.'
+    const note = byId('map-know-note')
+    note.textContent = any ? knowledgeNote(state) : 'No knowledge extracted yet. Run /mnemosyne-knowledge, then reload.'
+    // A chip dims the map: the note carries its own Clear (ui/index.html has none, so it is made here).
+    if (any && state.kinds.size > 0) {
+      const clear = el('button', 'Clear', 'btn map-know-clear')
+      clear.type = 'button'
+      clear.addEventListener('click', () => dispatch(clearKinds(state)))
+      note.append(' ', clear)
+    }
   }
 
   // ---- The scene ----
@@ -831,6 +842,7 @@ export function createMap(host: MapHost): MapView {
     // Fresh links are fully visible.
     linkFade = 1
     visuals = []
+    labelNudge.clear()
     graphNodes = []
     graphLinks = []
     starVisual.clear()
@@ -1198,6 +1210,54 @@ export function createMap(host: MapHost): MapView {
     }
   }
 
+  // ---- Label de-overlap ----
+
+  const LABEL_EVERY = 6
+  let labelFrames = 0
+  // Per visual index: the world-space lift a label is nudged by to clear another label, and where it is now.
+  const labelNudge = new Map<number, { target: number; now: number }>()
+
+  /** A label's own height above its visual, before any nudge. */
+  const labelBaseY = (v: Visual, g: Galaxy, blend: number) => (v.kind === 'core' ? coreLabelOffset(v.labelOffset, g.layout.cores.length, blend) : v.labelOffset)
+
+  /** Projects every shown label to a screen rectangle, lets separateLabels move the lower-ranked apart, and stores the nudge in world units. */
+  function separateScreenLabels(g: Galaxy, blend: number, cam: Vec3, fov: number) {
+    const l = graph as unknown as Loose
+    const camera = l.camera?.() as Any
+    if (!camera || !l.graph2ScreenCoords) return
+    camera.updateMatrixWorld?.()
+    const view: number[] = camera.matrixWorldInverse.elements
+    const rects: LabelRect[] = []
+    const shownVisuals: { v: Visual; scale: number }[] = []
+    for (const v of visuals) {
+      if (!v.label || v.labelAlpha * v.fade < 0.1) continue
+      if (view[2]! * v.position[0] + view[6]! * v.position[1] + view[10]! * v.position[2] + view[14]! >= 0) continue
+      const base = labelBaseY(v, g, blend)
+      const distance = Math.hypot(v.position[0] - cam[0], v.position[1] + base - cam[1], v.position[2] - cam[2])
+      const k = labelScale(distance)
+      const perUnit = pixelsPerUnit(canvasBox.clientHeight, fov, distance)
+      const w = v.labelBase[0] * k * perUnit
+      const h = v.labelBase[1] * k * perUnit
+      const at = l.graph2ScreenCoords(v.position[0], v.position[1] + base, v.position[2]) as { x: number; y: number }
+      rects.push({ x: at.x - w / 2, y: at.y - h / 2, w, h, rank: v.kind === 'claude' ? 3 : v.kind === 'core' ? 2 : 1 })
+      shownVisuals.push({ v, scale: perUnit })
+    }
+    const apart = separateLabels(rects)
+    const seen = new Set<number>()
+    apart.forEach((rect, i) => {
+      const { v, scale } = shownVisuals[i]!
+      seen.add(v.index)
+      // Screen y grows downward, world y upward.
+      const target = -(rect.y - rects[i]!.y) / scale
+      const nudge = labelNudge.get(v.index)
+      if (nudge === undefined) {
+        if (target !== 0) labelNudge.set(v.index, { target, now: 0 })
+      } else nudge.target = target
+    })
+    // A label that is not shown (or no longer clashes) eases back to its own place.
+    for (const [index, nudge] of labelNudge) if (!seen.has(index)) nudge.target = 0
+  }
+
   // ---- Per frame ----
 
   function frame(now: number) {
@@ -1212,7 +1272,7 @@ export function createMap(host: MapHost): MapView {
     stepFlight(dt)
     const blend = morphBlend(morph)
     const galaxyFade = galaxyOnlyFade(blend)
-    fadeLinks(galaxyFade)
+    fadeLinks(linkFadeAt(blend))
     updateFurniture(blend, state.reducedMotion ? 1 : Math.min(1, dt * 5), galaxy)
     const camera = (graph as unknown as Loose).camera?.() as Any
     const cam: Vec3 = camera ? [camera.position.x, camera.position.y, camera.position.z] : HOME
@@ -1230,13 +1290,18 @@ export function createMap(host: MapHost): MapView {
         v.sprite.scale.set(scale, scale, 1)
         v.sprite.material.opacity = Math.min(1, v.alpha) * v.fade
       }
-      if (v.label && v.kind === 'core') v.label.position.y = coreLabelOffset(v.labelOffset, galaxy.layout.cores.length, blend)
       if (v.label) {
-        const k = labelScale(Math.hypot(v.position[0] - cam[0], v.position[1] + (v.kind === 'core' ? v.label.position.y : v.labelOffset) - cam[1], v.position[2] - cam[2]))
+        const base = labelBaseY(v, galaxy, blend)
+        const nudge = labelNudge.get(v.index)
+        if (nudge !== undefined) nudge.now = easeToward(nudge.now, nudge.target, follow)
+        v.label.position.y = base + (nudge?.now ?? 0)
+        const k = labelScale(Math.hypot(v.position[0] - cam[0], v.position[1] + base - cam[1], v.position[2] - cam[2]))
         v.label.scale.set(v.labelBase[0] * k, v.labelBase[1] * k, 1)
         v.label.material.opacity = Math.min(1, v.labelAlpha) * v.fade
       }
     }
+    // The labels' clashes are worked out every few frames, from their un-nudged places; the nudges ease in per frame above.
+    if (++labelFrames % LABEL_EVERY === 0) separateScreenLabels(galaxy, blend, cam, (camera?.fov as number | undefined) ?? 40)
     sparkPool.active.forEach((spark, i) => {
       const sprite = sparkSprites[i]
       if (!sprite) return
@@ -1584,7 +1649,6 @@ export function createMap(host: MapHost): MapView {
     const view: number[] = camera.matrixWorldInverse.elements
     const out: Candidate[] = []
     for (const v of visuals) {
-      if (v.kind === 'claude') continue
       // In front of the camera only.
       if (view[2]! * v.position[0] + view[6]! * v.position[1] + view[10]! * v.position[2] + view[14]! >= 0) continue
       const screen = l.graph2ScreenCoords(v.position[0], v.position[1], v.position[2]) as { x: number; y: number }
@@ -1631,7 +1695,8 @@ export function createMap(host: MapHost): MapView {
 
   function click() {
     const hit = pick()
-    if (hit === null) return
+    // The Claude core has a tooltip but is not a project: nothing to fly to.
+    if (hit === null || hit.kind === 'claude') return
     if (hit.kind === 'star') flyToStar(hit.id)
     else if (hit.kind === 'moon') {
       if (galaxy !== null) dispatch(selectMoon(state, galaxy, hit.id))
