@@ -420,9 +420,18 @@ async function record($: EngineInterface, options: PluginOptions, entries: reado
       $.env.get('MNEMOSYNE_ACTIVITY_APPEND').catch(() => undefined),
       entries.every(entry => entry.owner) ? undefined : owner($, options).catch(() => GLOBAL_OWNER),
     ])
+    // The session id is best-effort: a failure to read it must never drop the line (CTX.3.a3).
+    let session: string | undefined
+    try {
+      session = await $.session.id()
+    } catch {
+      session = undefined
+    }
     const mode = APPEND_MODES.find(m => m === asked) ?? DEFAULT_APPEND
     const argv = ['bun', `${slashes($.plugin.root)}/bin/activity.ts`, log]
-    const stdin = entries.map(entry => `${activityLine({ ...entry, owner: entry.owner ?? me ?? GLOBAL_OWNER })}\n`).join('')
+    const stdin = entries
+      .map(entry => `${activityLine({ ...entry, owner: entry.owner ?? me ?? GLOBAL_OWNER, client: entry.client ?? 'claude-code', session: entry.session ?? session })}\n`)
+      .join('')
     if (mode === 'spawn') {
       void (async () => {
         for await (const _piece of $.process.spawn({ argv, input: stdin })) {
@@ -598,6 +607,7 @@ export async function tagsApply($: EngineInterface, options: PluginOptions, sign
         action: 'update',
         origin: 'backfill',
         owner: id,
+        client: 'mnemosyne-tags',
         text: `tag backfill: ${plural(list.length, 'memory', 'memories')}`,
         ids: done.map(p => p.id),
         count: done.length,

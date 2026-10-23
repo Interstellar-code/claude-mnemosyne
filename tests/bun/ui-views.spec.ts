@@ -321,7 +321,7 @@ describe('the dashboard views on a real store', () => {
     // Across owners: the C3 default owner, and `owners` records how many were searched (review r1 LOW 6).
     const across = logLines().slice(all)
     expect(across).toMatchObject([{ action: 'recall', origin: 'ui', owner: 'global', text: 'apple', ok: true, owners: 3 }])
-    expect(Object.keys(across[0]).sort()).toEqual(['action', 'count', 'ids', 'ok', 'origin', 'owner', 'owners', 't', 'text'])
+    expect(Object.keys(across[0]).sort()).toEqual(['action', 'client', 'count', 'ids', 'ok', 'origin', 'owner', 'owners', 't', 'text'])
   })
 
   test('VIEW.4.a2: a memory holding <script> and <img onerror> comes back as a JSON string, with the CSP on the page', async () => {

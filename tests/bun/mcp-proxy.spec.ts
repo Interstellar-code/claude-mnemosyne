@@ -257,3 +257,84 @@ describe('the proxy against a real installed engine', () => {
     expect(logLines(join(temp.dir, 'logs-4', 'activity.jsonl')).length).toBe(3)
   })
 })
+
+// CTX.2: the proxy reads clientInfo from initialize, forwards the request byte for byte, and
+// stamps the client on every external line. A fake engine records the forwarded bytes; the proxy
+// is the real one over stdio.
+describe('CTX.2: the client names itself at initialize', () => {
+  const temp = tempDir('proxy-client')
+  const capture = join(temp.dir, 'forwarded.txt')
+  const fakeEngine = join(temp.dir, 'fake-engine.ts')
+  // The engine edge: records each forwarded line verbatim and answers so the proxy can exit.
+  writeFileSync(fakeEngine, `
+import { appendFileSync } from 'node:fs'
+const out = process.env.MNEMOSYNE_CAPTURE as string
+const decoder = new TextDecoder()
+let buffer = ''
+for await (const chunk of Bun.stdin.stream()) {
+  buffer += decoder.decode(chunk, { stream: true })
+  let end: number
+  while ((end = buffer.indexOf('\\n')) >= 0) {
+    const line = buffer.slice(0, end)
+    buffer = buffer.slice(end + 1)
+    appendFileSync(out, line + '\\n')
+    let message: any
+    try { message = JSON.parse(line) } catch { continue }
+    if (message?.id === undefined) continue
+    if (message.method === 'initialize') {
+      process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { protocolVersion: '2024-11-05', capabilities: {}, serverInfo: { name: 'mnemopi', version: 'x' } } }) + '\\n')
+    } else if (message.method === 'tools/call') {
+      process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: '{"results":[]}' }] } }) + '\\n')
+    }
+  }
+}
+`)
+  afterAll(() => temp.dispose())
+
+  const readLog = (path: string) => (existsSync(path) ? readFileSync(path, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line)) : [])
+
+  /** The real proxy over raw stdin bytes; returns its forwarded lines and the activity lines it wrote. */
+  async function rawProxy(stdin: string, log: string) {
+    writeFileSync(capture, '')
+    const child = Bun.spawn([process.execPath, PROXY], {
+      env: {
+        ...(process.env as Record<string, string>),
+        ...engineEnv(join(temp.dir, 'store'), 'global'),
+        MNEMOSYNE_CLI: fakeEngine,
+        MNEMOSYNE_ACTIVITY_LOG: log,
+        MNEMOSYNE_CAPTURE: capture,
+      },
+      stdin: 'pipe',
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    child.stdin.write(stdin)
+    child.stdin.end()
+    await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
+    return { forwarded: readFileSync(capture, 'utf8'), log: readLog(log) }
+  }
+
+  const initialize = (clientInfo?: object) =>
+    JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05', capabilities: {}, ...(clientInfo ? { clientInfo } : {}) } })
+  const recall = (id = 2) => JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'memory_recall', arguments: { query: 'heron' } } })
+
+  test('CTX.2.a1: initialize is forwarded byte for byte', async () => {
+    const line = '{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "codex-mcp-client", "version": "1.0.0"}}}'
+    const { forwarded } = await rawProxy(`${line}\n${recall()}\n`, join(temp.dir, 'logs-a1', 'activity.jsonl'))
+    const first = forwarded.split('\n')[0]
+    expect(first).toBe(line)
+  })
+
+  test('CTX.2.a3: clientInfo.name is stamped on the next recall line', async () => {
+    const log = join(temp.dir, 'logs-a3', 'activity.jsonl')
+    const { log: lines } = await rawProxy(`${initialize({ name: 'codex-mcp-client', version: '1.0.0' })}\n${recall()}\n`, log)
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({ action: 'recall', origin: 'external', client: 'codex-mcp-client' })
+  })
+
+  test('CTX.2.a2: a client that sends no clientInfo is logged as unknown', async () => {
+    const log = join(temp.dir, 'logs-a2', 'activity.jsonl')
+    const { log: lines } = await rawProxy(`${initialize()}\n${recall()}\n`, log)
+    expect(lines[0]).toMatchObject({ action: 'recall', client: 'unknown' })
+  })
+})
