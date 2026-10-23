@@ -35,6 +35,8 @@ if (!cli) throw new Error('MNEMOSYNE_CLI is not set: run this through mnemosyne-
 const owner = process.env.MNEMOPI_SESSION_ID || 'global'
 const isGlobalOwner = owner === 'global'
 const activityLog = process.env.MNEMOSYNE_ACTIVITY_LOG ?? ''
+// The client's self-declared name, from its initialize request (CTX.2); unknown until it says.
+let client = 'unknown'
 
 // The installed engine's build, from <engine>/node_modules/@oh-my-pi/pi-mnemopi/package.json.
 function installedBuild(cliPath: string) {
@@ -60,7 +62,7 @@ const pending = new Map<unknown, Pending>()
 function log(call: Pending, outcome: { ok: boolean; ids?: readonly string[]; count?: number; error?: string }) {
   if (!activityLog) return
   try {
-    appendActivity(activityLog, [activityLine({ action: call.action, origin: 'external', owner, text: call.text, ...outcome })])
+    appendActivity(activityLog, [activityLine({ action: call.action, origin: 'external', owner, client, text: call.text, ...outcome })])
   } catch {
     // building the line failed: the client's reply is already sent and stays as it was
   }
@@ -99,6 +101,19 @@ void (async () => {
     try {
       message = JSON.parse(line)
     } catch {
+      continue
+    }
+    if (message?.method === 'initialize') {
+      // The client's self-declared app name (CTX.2); its version is the fallback when no name is given.
+      const info = message?.params?.clientInfo
+      if (info !== null && typeof info === 'object' && !Array.isArray(info)) {
+        const name = typeof info.name === 'string' ? info.name.trim() : ''
+        const version = typeof info.version === 'string' ? info.version.trim() : ''
+        if (name !== '') client = name
+        else if (version !== '') client = version
+      }
+      // Forward the initialize request unchanged, byte for byte (CTX.2.a1).
+      engine.stdin.write(`${line}\n`)
       continue
     }
     if (message?.method === 'tools/list') listIds.add(message.id)
