@@ -11,7 +11,7 @@ import { body, engineCall, ROOT, tempDir, toolCall } from './helpers'
 
 // ui/health.ts is DOM code (checked by ui/tsconfig.json): loaded by a path tsc does not follow.
 const health = (await import(join(ROOT, 'ui', 'health.ts'))) as Record<string, any>
-const { bytes, chartBars, chartText, coverageBars, coverageRows, dayBars, heightClass, hotRows, kpiTiles, kpis, neverRow, neverText, parseHealth, projectRows, storageList, storageRows, widthClass, EMBEDDINGS_ARRIVED } = health
+const { bytes, chartBars, chartText, coverageBars, coverageRows, dayBars, heightClass, hotRows, kpiTiles, kpis, neverRow, neverText, parseHealth, projectRows, storageList, storageRows, widthClass, embeddingsOn } = health
 type HealthHost = { project: (owner: string) => unknown; review: (id: string) => void; forget: (id: string, done: (error?: string) => void) => void; now: () => number }
 
 const CLI = join(ROOT, 'engine', 'src', 'cli.ts')
@@ -176,7 +176,7 @@ describe('VIEWS.2: the Health tab on a real store', () => {
     expect(bytes(3 * 1024 * 1024)).toBe('3.0 MB')
   })
 
-  test('VIEWS.2.a1: coverage bars each carry a note on what they mean and how to turn them on; embeddings read 0 in 0.6.0', () => {
+  test('VIEWS.2.a1: coverage bars each carry a note on what they mean and how to turn them on; with no embeddings the bar reads 0 and gives the embeddings hint', () => {
     const bars = coverageBars(data)
     expect(bars.map((b: { label: string; value: string }) => [b.label, b.value])).toEqual([
       ['Topic tags', '3 of 5'],
@@ -188,7 +188,7 @@ describe('VIEWS.2: the Health tab on a real store', () => {
     expect(bars[0]!.note).toContain('/mnemosyne-tags')
     expect(bars[1]!.note).toContain('extractionModel')
     expect(bars[1]!.note).toContain('/mnemosyne-knowledge')
-    expect(bars[2]).toMatchObject({ pct: 0, note: 'Embeddings arrive in a later version' })
+    expect(bars[2]).toMatchObject({ pct: 0, good: false, note: 'Turn on embeddings, then run /mnemosyne-embed apply' })
     expect(bars[3]!.note).toContain('1 memory records who wrote it')
     // With no provenance yet the note says how to turn it on (VIEWS.2.a1: every bar).
     const none = coverageBars({ ...data, coverage: { ...data.coverage, provenance: 0 } })[3]!.note
@@ -197,9 +197,6 @@ describe('VIEWS.2: the Health tab on a real store', () => {
     expect(none).toContain('/mnemosyne-setup')
     expect(bars[4]).toMatchObject({ pct: 60, good: true, note: 'Healthy: most memories are being used.' })
     expect(bars[0]!.pct).toBe(60)
-    expect(EMBEDDINGS_ARRIVED).toBe(false)
-    // Even if the store held embeddings, 0.6.0 reads 0.
-    expect(coverageBars({ ...data, coverage: { ...data.coverage, embeddings: 5 } })[2]).toMatchObject({ value: '0 of 5', pct: 0 })
     expect(widthClass(60)).toBe('w12')
     expect(widthClass(150)).toBe('w20')
     expect(widthClass(-3)).toBe('w0')
@@ -210,6 +207,29 @@ describe('VIEWS.2: the Health tab on a real store', () => {
       expect(rows[2]!.all().some(n => n.className.includes('bar-fill w0'))).toBe(true)
       expect(rows[0]!.all().some(n => n.className.includes('bar-fill w12'))).toBe(true)
     })
+  })
+
+  test('SEM.2.a3: the embeddings note is the same hint as the Meaning button while there are no vectors, and the bar reads the vectors once there are', () => {
+    const hint = 'Turn on embeddings, then run /mnemosyne-embed apply'
+    expect(embeddingsOn(data)).toBe(false)
+    expect(coverageBars(data)[2]).toMatchObject({ label: 'Embeddings (meaning search)', value: '0 of 5', pct: 0, good: false, note: hint })
+    // The old 0.6.0 sentence is gone, and the text is the one the Map tab shows.
+    expect(coverageBars(data).some((bar: { note: string }) => bar.note.includes('later version'))).toBe(false)
+    withDocumentSync(() => {
+      expect((coverageRows(data) as FakeNode[])[2]!.texts().join('|')).toContain(`Embeddings (meaning search)|0 of 5|${hint}`)
+      expect((coverageRows(data, true) as FakeNode[])[2]!.texts().join('|')).toContain('Memories are placed by meaning.')
+    })
+    // Vectors in the store turn it on: the count, the share and the good mark come from the data.
+    const some = { ...data, coverage: { ...data.coverage, embeddings: 5 } }
+    expect(embeddingsOn(some)).toBe(true)
+    expect(coverageBars(some)[2]).toMatchObject({ value: '5 of 5', pct: 100, good: true, note: 'Memories are placed by meaning.' })
+    expect(coverageBars({ ...data, coverage: { ...data.coverage, embeddings: 2 } })[2]).toMatchObject({ value: '2 of 5', pct: 40, good: true })
+    // A galaxy reply that says meaning: true turns it on too, even when the store count has not reached the report yet.
+    expect(embeddingsOn(data, true)).toBe(true)
+    expect(coverageBars(data, true)[2]).toMatchObject({ note: 'Memories are placed by meaning.' })
+    expect(coverageBars(data, true)[2]!.note).not.toBe(hint)
+    // The other bars do not change either way.
+    expect(coverageBars(data, true).filter((_: unknown, i: number) => i !== 2)).toEqual(coverageBars(data).filter((_: unknown, i: number) => i !== 2))
   })
 
   test('VIEWS.2.a1: recalls per day: 14 bars with the numbers in text, the chart has an aria-label, and the days the log covers are said', () => {

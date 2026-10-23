@@ -241,6 +241,32 @@ import {
   pixelsPerUnit,
   STRIP_EMPTY_TEXT,
 } from '../../ui/map-state'
+import {
+  CLUSTER_LABEL_LIMIT,
+  CLUSTER_MIN,
+  EMBEDDINGS_HINT,
+  layoutPlace,
+  layoutWeights,
+  meaningAway,
+  meaningClusters,
+  MEANING_HINT,
+  meaningPlaces,
+  meaningStep,
+  meaningTarget,
+  NOT_EMBEDDED_LABEL,
+  NOT_EMBEDDED_MIN_RADIUS,
+  NOT_EMBEDDED_RING_FACTOR,
+  notEmbeddedIds,
+  projectDim,
+  ringLabel,
+  SIMILAR_COLOUR,
+  SIMILAR_MEANING_MIN,
+  SIMILAR_NOTE,
+  SIMILAR_PER_STAR,
+  similarOpacity,
+  similarPairs,
+  toggleSimilar,
+} from '../../ui/map-state'
 import { startServer } from '../../ui/server'
 import type { Started } from '../../ui/server'
 import { body, engineCall, ROOT, tempDir, toolCall } from './helpers'
@@ -612,7 +638,7 @@ describe('the galaxy on a real /api/galaxy reply', () => {
 
   test('GAL.2.a6: every setting the scene reacts to is plain data in the state, changed by pure functions', () => {
     const s = base()
-    expect(Object.keys(s).sort()).toEqual(['bridges', 'colourBy', 'hidden', 'kinds', 'layerRecall', 'layerWrite', 'layout', 'live', 'moon', 'moons', 'project', 'query', 'range', 'reducedMotion', 'rotateBefore', 'rotating', 'selected', 'spokes', 'topic'].sort())
+    expect(Object.keys(s).sort()).toEqual(['bridges', 'colourBy', 'hidden', 'kinds', 'layerRecall', 'layerWrite', 'layout', 'live', 'moon', 'moons', 'project', 'query', 'range', 'reducedMotion', 'rotateBefore', 'rotating', 'selected', 'similar', 'spokes', 'topic'].sort())
     expect(setColourBy(s, 'age').colourBy).toBe('age')
     expect(setColourBy(s, 'nope' as never)).toBe(s)
     expect(setRange(s, 7).range).toBe(7)
@@ -3085,5 +3111,423 @@ describe('GLOW: the bloom levels and the Glow control', () => {
       g.HTMLElement = saved.HTMLElement
       g.localStorage = saved.localStorage
     }
+  })
+})
+
+
+// ---- SEM: the Meaning layout, similar-memory links, the inspector list, and Meaning off cleanly ----
+//
+// The reply is the 0.6.1 /api/galaxy field set (projects, memories with id/owner/tags/recalls/lastRecalled/created/label,
+// knowledge, meaning, total, shown) plus SEMX's contract: per memory with a vector `position` [x, y, z] and `similar`
+// [{ id, score }] (top 3, cosine at least 0.65); memories without a vector have neither. Everything goes through the
+// production path parseGalaxy -> buildGalaxy -> the layout functions; only the network edge is faked.
+
+describe('SEM: Meaning layout, similar links, inspector list', () => {
+  const NOW = Date.parse('2026-10-23T12:00:00Z')
+  const daysAgo = (n: number) => new Date(NOW - n * 86_400_000).toISOString()
+  const ALPHA = 'project-alpha-1a2b'
+  const BETA = 'project-beta-3c4d'
+  type Raw = Record<string, unknown>
+  const row = (id: string, owner: string, tag: string | null, age: number, extra: Raw = {}): Raw => ({ id, owner, tags: tag === null ? [] : [tag], recalls: 1, lastRecalled: daysAgo(1), created: daysAgo(age), label: `memory ${id}`, ...extra })
+  const near = (at: [number, number, number], d: number): [number, number, number] => [at[0] + d, at[1] + d / 2, at[2] - d]
+  const ROUTING: [number, number, number] = [200, 10, 0]
+  const DEPLOY: [number, number, number] = [-100, 100, -150]
+  const REVIEW: [number, number, number] = [-100, -100, 150]
+  // Three clusters of stars across projects, with positions and neighbours; two memories without a vector; one lone tagged star.
+  const memories = (): Raw[] => [
+    row('r1', ALPHA, 'routing', 1, { position: near(ROUTING, 0), similar: [{ id: 'r2', score: 0.88 }, { id: 'r3', score: 0.85 }, { id: 'd1', score: 0.66 }] }),
+    row('r2', BETA, 'routing', 2, { position: near(ROUTING, 6), similar: [{ id: 'r1', score: 0.88 }, { id: 'r3', score: 0.8 }] }),
+    row('r3', BETA, 'routing', 40, { position: near(ROUTING, -6), similar: [{ id: 'r1', score: 0.85 }] }),
+    row('d1', ALPHA, 'deploy', 3, { position: near(DEPLOY, 0), similar: [{ id: 'd2', score: 0.9 }, { id: 'd3', score: 0.8 }] }),
+    row('d2', ALPHA, 'deploy', 4, { position: near(DEPLOY, 8), similar: [{ id: 'd1', score: 0.9 }] }),
+    row('d3', 'global', 'deploy', 5, { position: near(DEPLOY, -8), similar: [{ id: 'd1', score: 0.8 }] }),
+    row('v1', BETA, 'review', 6, { position: near(REVIEW, 0), similar: [{ id: 'v2', score: 0.77 }] }),
+    row('v2', ALPHA, 'review', 7, { position: near(REVIEW, 5), similar: [{ id: 'v1', score: 0.77 }] }),
+    row('solo', BETA, 'solo', 8, { position: [0, 300, 0], similar: [] }),
+    row('n1', ALPHA, 'routing', 9),
+    row('n2', BETA, null, 10),
+  ]
+  const raw = (extra: Raw = {}, rows: Raw[] = memories()): Raw => ({
+    projects: [
+      { owner: ALPHA, label: 'alpha', count: rows.filter(r => r.owner === ALPHA).length, recalls: 5 },
+      { owner: BETA, label: 'beta', count: rows.filter(r => r.owner === BETA).length, recalls: 5 },
+      { owner: 'global', label: 'Global', count: rows.filter(r => r.owner === 'global').length, recalls: 1 },
+    ],
+    memories: rows,
+    knowledge: [],
+    meaning: true,
+    total: rows.length,
+    shown: rows.length,
+    ...extra,
+  })
+  const make = (body: Raw = raw()): Galaxy => buildGalaxy(parseGalaxy(body)!, NOW)
+  const state = (layout: 'galaxy' | 'meaning' | 'timeline' = 'galaxy') => setLayout(initialState({ reducedMotion: false }), layout, true)
+  const idx = (g: Galaxy, id: string) => slotOf(g.layout.starById, id)
+  const at = (g: Galaxy, id: string): Vec3 => g.meaningAt.get(id)!
+
+  test('SEM.1.a1: parseGalaxy keeps position and similar only for memories that carry a vector, and nothing at all when the reply says meaning: false', () => {
+    const g = make()
+    expect([...g.meaningAt.keys()].sort()).toEqual(['d1', 'd2', 'd3', 'r1', 'r2', 'r3', 'solo', 'v1', 'v2'])
+    expect(g.meaning).toBe(true)
+    expect(at(g, 'r2')).toEqual(near(ROUTING, 6))
+    expect(g.similar.get('r1')).toEqual([{ id: 'r2', score: 0.88 }, { id: 'r3', score: 0.85 }, { id: 'd1', score: 0.66 }])
+    expect(g.meaningAt.has('n1')).toBe(false)
+    expect(g.similar.has('n1')).toBe(false)
+    // meaning: false (0.6.x, no vectors): whatever the rows carry is not read.
+    const off = make(raw({ meaning: false }))
+    expect(off.meaning).toBe(false)
+    expect(off.meaningAt.size).toBe(0)
+    expect(off.similar.size).toBe(0)
+    // A bad position (not three finite numbers) drops the vector; similar keeps three well-formed neighbours, scores between 0 and 1.
+    const messy = make(
+      raw(
+        {},
+        [
+          row('a', ALPHA, 't', 1, { position: [1, 2], similar: [{ id: 'b', score: 0.9 }] }),
+          row('b', ALPHA, 't', 1, { position: [1, Number.NaN, 3] }),
+          row('c', ALPHA, 't', 1, { position: [1, 2, 3], similar: [{ id: 'a', score: 1.4 }, { id: '', score: 0.7 }, { id: 'a' }, null, { id: 'b', score: -2 }, { id: 'x', score: 0.7 }, { id: 'y', score: 0.7 }, { id: 'z', score: 0.7 }] }),
+          row('d', ALPHA, 't', 1, { position: 'north', similar: 7 }),
+          row('e', ALPHA, 't', 1, { position: [4, 5, 6], similar: 'none' }),
+        ],
+      ),
+    )
+    expect([...messy.meaningAt.keys()]).toEqual(['c', 'e'])
+    expect(messy.similar.get('c')).toEqual([{ id: 'a', score: 1 }, { id: 'b', score: 0 }, { id: 'x', score: 0.7 }])
+    expect(messy.similar.get('e')).toEqual([])
+  })
+
+  test('SEM.1.a1: every star moves to its position: the target of an embedded star is its position, the Meaning morph runs 1.4 s like Timeline, and Galaxy and Timeline are untouched', () => {
+    const g = make()
+    const places = meaningPlaces(g)
+    for (const id of ['r1', 'd2', 'v1', 'solo']) expect(places.stars[idx(g, id)]).toEqual(at(g, id))
+    // Same stars, same slots as the layout's own order.
+    expect(places.stars).toHaveLength(g.layout.stars.length)
+    // The morph weight: 0 outside Meaning, 1 in it; stepped by Timeline's own stepMorph over 1.4 s, none under reduced motion.
+    expect(meaningTarget('meaning')).toBe(1)
+    expect(meaningTarget('galaxy')).toBe(0)
+    expect(meaningTarget('timeline')).toBe(0)
+    expect(meaningStep(0, 'meaning', 0.7, false)).toBeCloseTo(0.5)
+    expect(meaningStep(0, 'meaning', 1.4, false)).toBe(1)
+    expect(meaningStep(0, 'meaning', 0.016, true)).toBe(1)
+    expect(meaningStep(1, 'galaxy', 0.7, false)).toBeCloseTo(0.5)
+    expect(meaningStep(1, 'timeline', 5, false)).toBe(0)
+    expect(meaningStep(0.3, 'meaning', 0.35, false)).toBeCloseTo(stepMorph(0.3, 1, 0.35, morphSeconds(false)))
+    let w = 0
+    let seconds = 0
+    while (w < 1 && seconds < 5) {
+      w = meaningStep(w, 'meaning', 1 / 60, false)
+      seconds += 1 / 60
+    }
+    expect(seconds).toBeGreaterThan(1.39)
+    expect(seconds).toBeLessThan(1.42)
+    // The three layouts' weights always add up to 1 and a pure layout takes it all.
+    expect(layoutWeights(0, 0)).toEqual({ galaxy: 1, meaning: 0, timeline: 0 })
+    expect(layoutWeights(0, 1)).toEqual({ galaxy: 0, meaning: 1, timeline: 0 })
+    expect(layoutWeights(1, 0)).toEqual({ galaxy: 0, meaning: 0, timeline: 1 })
+    for (const [t, m] of [[0.2, 0.3], [0.5, 0.5], [0.9, 0.8], [1, 1], [0, 0.4], [0.7, 0]]) {
+      const x = layoutWeights(t!, m!)
+      expect(x.galaxy + x.meaning + x.timeline).toBeCloseTo(1)
+    }
+    // A place at weight 1 is the layout's own; between them it is the blend; a place a visual lacks stays home.
+    const home: Vec3 = [10, 20, 30]
+    const target = at(g, 'r1')
+    expect(layoutPlace(home, target, null, layoutWeights(0, 1))).toEqual(target)
+    expect(layoutPlace(home, target, null, layoutWeights(0, 0))).toEqual(home)
+    expect(layoutPlace(home, null, null, layoutWeights(0, 1))).toEqual(home)
+    const timelineAt: Vec3 = [-280, 5, 0]
+    expect(layoutPlace(home, target, timelineAt, layoutWeights(1, 0))).toEqual(timelineAt)
+    const half = layoutPlace(home, target, timelineAt, { galaxy: 0, meaning: 0.5, timeline: 0.5 })
+    expect(half[0]).toBeCloseTo((target[0] + timelineAt[0]) / 2)
+    // Only stars have a Meaning place; cores, hubs and the Claude core stay where they are.
+    expect(meaningAway(places, 'star', idx(g, 'r1'))).toEqual(at(g, 'r1'))
+    for (const kind of ['core', 'hub', 'claude', 'cluster'] as const) expect(meaningAway(places, kind, 0)).toBeUndefined()
+  })
+
+  test('SEM.1.a1: project colours stay; cores, hubs, threads and bridges fade out; a cluster label fades in', () => {
+    const g = make()
+    const meaningState = state('meaning')
+    const colours = [ALPHA, BETA, 'global'].map(owner => projectColour(g, owner))
+    expect(new Set(colours).size).toBe(3)
+    for (const id of ['r1', 'r2', 'd3']) expect(starColour(g, idx(g, id), 'project')).toBe(projectColour(g, g.layout.stars[idx(g, id)]!.owner))
+    expect(meaningState.colourBy).toBe('project')
+    const inMeaning = layoutWeights(0, 1)
+    const inGalaxy = layoutWeights(0, 0)
+    expect(visualFade('core', inMeaning.galaxy, inMeaning.meaning)).toBe(0)
+    expect(visualFade('core', inGalaxy.galaxy, inGalaxy.meaning)).toBe(1)
+    expect(visualFade('core', 1, 0.25)).toBeCloseTo(0.75)
+    expect(visualFade('hub', inMeaning.galaxy, inMeaning.meaning)).toBe(0)
+    expect(visualFade('hub', inGalaxy.galaxy, inGalaxy.meaning)).toBe(1)
+    expect(visualFade('cluster', inMeaning.galaxy, inMeaning.meaning)).toBe(1)
+    expect(visualFade('cluster', inGalaxy.galaxy, inGalaxy.meaning)).toBe(0)
+    expect(visualFade('star', 0, 1)).toBe(1)
+    expect(visualFade('claude', 0, 1)).toBe(1)
+    // Threads and bridges leave in the first 30% of the morph, with the hubs.
+    expect(linkFadeAt(1 - inMeaning.galaxy)).toBe(0)
+    expect(linkFadeAt(1 - inGalaxy.galaxy)).toBe(1)
+    expect(linkFadeAt(1 - layoutWeights(0, 0.5).galaxy)).toBe(0)
+  })
+
+  test('SEM.1.a1: a focused project dims the others only lightly in Meaning: 0.14 + 0.6 x the meaning weight', () => {
+    expect(projectDim(0)).toBeCloseTo(0.14)
+    expect(projectDim(1)).toBeCloseTo(0.74)
+    expect(projectDim(0.5)).toBeCloseTo(0.44)
+    expect(projectDim(2)).toBeCloseTo(0.74)
+    expect(projectDim(-1)).toBeCloseTo(0.14)
+    const g = make()
+    const focused = (layout: 'galaxy' | 'meaning' | 'timeline') => focusProject(state(layout), ALPHA)
+    const other = idx(g, 'r2')
+    const own = idx(g, 'r1')
+    const galaxyOther = starTarget(g, other, focused('galaxy'), null)
+    const meaningOther = starTarget(g, other, focused('meaning'), null)
+    const timelineOther = starTarget(g, other, focused('timeline'), null)
+    const plain = starTarget(g, other, state('galaxy'), null)
+    expect(galaxyOther).toBeCloseTo(plain * 0.14)
+    expect(meaningOther).toBeCloseTo(plain * 0.74)
+    expect(timelineOther).toBeCloseTo(plain * 0.14)
+    // The focused project's own stars keep their brightness in every layout.
+    expect(starTarget(g, own, focused('meaning'), null)).toBeCloseTo(starTarget(g, own, state('meaning'), null))
+  })
+
+  test('SEM.1.a1: one label per cluster, at the middle of its stars across projects; no label for Untagged or a lone star; at most 24', () => {
+    const g = make()
+    const clusters = meaningClusters(g)
+    expect(clusters.map(c => [c.name, c.count])).toEqual([['deploy', 3], ['routing', 3], ['review', 2]])
+    const routing = clusters.find(c => c.name === 'routing')!
+    // r1, r2, r3 only: n1 is tagged routing but has no vector, so it is not at the centre.
+    const ids = ['r1', 'r2', 'r3']
+    for (let i = 0; i < 3; i++) expect(routing.centre[i]).toBeCloseTo(ids.reduce((a, id) => a + at(g, id)[i]!, 0) / 3)
+    // The deploy cluster spans two projects and global: one label, not three.
+    expect(clusters.filter(c => c.name === 'deploy')).toHaveLength(1)
+    expect(CLUSTER_MIN).toBe(2)
+    expect(clusters.some(c => c.name === 'solo' || c.name.toLowerCase() === 'untagged')).toBe(false)
+    // A forgotten star leaves its cluster; a cluster down to one star loses its label.
+    const forgotten = make()
+    forgetMemory(forgotten, 'v2')
+    expect(meaningClusters(forgotten).some(c => c.name === 'review')).toBe(false)
+    // No Meaning, no clusters.
+    expect(meaningClusters(make(raw({ meaning: false })))).toEqual([])
+    // 30 clusters of two (three of them of three): the 24 biggest, the rest dropped, in a fixed order.
+    const rows: Raw[] = []
+    for (let c = 0; c < 30; c++) for (let k = 0; k < 2 + (c < 3 ? 1 : 0); k++) rows.push(row(`c${c}-${k}`, ALPHA, `t${String(c).padStart(2, '0')}`, 1, { position: [c * 10, k, 0], similar: [] }))
+    const many = meaningClusters(make(raw({}, rows)))
+    expect(many).toHaveLength(CLUSTER_LABEL_LIMIT)
+    expect(many.slice(0, 3).every(c => c.count === 3)).toBe(true)
+    expect(many.map(c => c.name)).toEqual(meaningClusters(make(raw({}, rows))).map(c => c.name))
+  })
+
+  test('SEM.1.a4: stars without a vector sit on a "Not embedded" ring at the edge of the Meaning layout, evenly spaced, with a count', () => {
+    const g = make()
+    const places = meaningPlaces(g)
+    expect(places.ring.ids).toEqual(['n1', 'n2'])
+    expect(notEmbeddedIds(g)).toEqual(['n1', 'n2'])
+    const reach = Math.max(...[...g.meaningAt.values()].map(p => Math.hypot(p[0], p[2])))
+    expect(places.ring.radius).toBeCloseTo(Math.max(NOT_EMBEDDED_MIN_RADIUS, reach * NOT_EMBEDDED_RING_FACTOR))
+    // The ring lies outside every embedded star.
+    expect(places.ring.radius).toBeGreaterThan(reach)
+    const ring = places.ring.ids.map(id => places.stars[idx(g, id)]!)
+    for (const p of ring) {
+      expect(Math.hypot(p[0], p[2])).toBeCloseTo(places.ring.radius)
+      expect(p[1]).toBe(0)
+    }
+    // Two stars: opposite each other (spaced 2π/2); the first at the top (x 0, z -radius).
+    expect(ring[0]![0]).toBeCloseTo(0)
+    expect(ring[0]![2]).toBeCloseTo(-places.ring.radius)
+    expect(ring[1]![2]).toBeCloseTo(places.ring.radius)
+    expect(ringLabel(2)).toBe(`${NOT_EMBEDDED_LABEL} · 2`)
+    expect(ringLabel(1)).toBe('Not embedded · 1')
+    expect(places.ring.labelAt[2]).toBeCloseTo(places.ring.radius)
+    // Four stars: a quarter turn apart.
+    const four = make(raw({}, [...memories(), row('n3', ALPHA, null, 11), row('n4', BETA, null, 12)]))
+    const fourPlaces = meaningPlaces(four)
+    const quarter = fourPlaces.ring.ids.map(id => fourPlaces.stars[idx(four, id)]!)
+    expect(quarter).toHaveLength(4)
+    for (let i = 0; i < 4; i++) {
+      const a = quarter[i]!
+      const b = quarter[(i + 1) % 4]!
+      expect(Math.hypot(a[0] - b[0], a[2] - b[2])).toBeCloseTo(fourPlaces.ring.radius * Math.SQRT2)
+    }
+    // A forgotten one leaves the ring and the count; a new memory (it has no vector) joins it.
+    const live = make()
+    forgetMemory(live, 'n1')
+    expect(notEmbeddedIds(live)).toEqual(['n2'])
+    addMemory(live, { id: 'new1', owner: ALPHA, tags: [], recalls: 0, lastRecalled: null, created: daysAgo(0), label: 'fresh' })
+    expect(notEmbeddedIds(live)).toEqual(['n2', 'new1'])
+    expect(meaningPlaces(live).ring.ids).toEqual(['n2', 'new1'])
+    // With no vector at all the ring still has a place to stand (the minimum radius).
+    const bare = make(raw({}, [row('x', ALPHA, 't', 1), row('y', BETA, 't', 2)]))
+    expect(meaningPlaces(bare).ring.radius).toBe(NOT_EMBEDDED_MIN_RADIUS)
+    // The Overview in Meaning says how many wait on the ring.
+    expect(inspector(g, state('meaning')).hint).toBe(`${MEANING_HINT} 2 memories are not embedded yet, on the outer ring.`)
+    expect(inspector(make(raw({}, memories().slice(0, 9))), state('meaning')).hint).toBe(MEANING_HINT)
+    expect(inspector(g, state('galaxy')).hint).toBe('Every star is one memory. Click a project core to fly in.')
+  })
+
+  test('SEM.1.a2: the Similar memories toggle: in Meaning every star links to its neighbours (a pair once); in Galaxy and Timeline only the selected star', () => {
+    const g = make()
+    const days = timelineDays(g, 'all')
+    const key = (p: { from: string; to: string }) => [p.from, p.to].sort().join('-')
+    const inMeaning = similarPairs(g, state('meaning'), days)
+    // Two links per star (the third, r1-d1 at 0.66, is the selected star's alone), each pair once.
+    expect(SIMILAR_PER_STAR).toBe(2)
+    expect(inMeaning.map(key).sort()).toEqual(['d1-d2', 'd1-d3', 'r1-r2', 'r1-r3', 'r2-r3', 'v1-v2'])
+    expect(new Set(inMeaning.map(key)).size).toBe(inMeaning.length)
+    expect(inMeaning.find(p => key(p) === 'r1-r2')!.score).toBe(0.88)
+    // Galaxy with nothing selected: no links; with a star selected: all of its (up to 3) links.
+    expect(similarPairs(g, state('galaxy'), days)).toEqual([])
+    const picked = selectStar(state('galaxy'), g, 'r1')
+    expect(similarPairs(g, picked, days).map(key).sort()).toEqual(['d1-r1', 'r1-r2', 'r1-r3'])
+    expect(similarPairs(g, selectStar(state('galaxy'), g, 'r2'), days).map(key).sort()).toEqual(['r1-r2', 'r2-r3'])
+    // A selected star with no vector has no links; in Meaning the selected star adds its third link.
+    expect(similarPairs(g, selectStar(state('galaxy'), g, 'n1'), days)).toEqual([])
+    expect(similarPairs(g, selectStar(state('meaning'), g, 'r1'), days).map(key).sort()).toEqual(['d1-r1', ...inMeaning.map(key)].sort())
+    // Switched off, or no Meaning: nothing.
+    expect(similarPairs(g, { ...picked, similar: false }, days)).toEqual([])
+    const noMeaning = make(raw({ meaning: false }))
+    expect(similarPairs(noMeaning, selectStar(state('galaxy'), noMeaning, 'r1'), days)).toEqual([])
+    // A hidden project, a forgotten memory and a neighbour that is not in the reply are not linked.
+    expect(similarPairs(g, toggleProject(state('meaning'), BETA), days).map(key).sort()).toEqual(['d1-d2', 'd1-d3'])
+    const forgot = make()
+    forgetMemory(forgot, 'd1')
+    expect(similarPairs(forgot, state('meaning'), days).map(key).sort()).toEqual(['r1-r2', 'r1-r3', 'r2-r3', 'v1-v2'])
+    const cut = make(raw({}, memories().filter(m => m.id !== 'r3')))
+    expect(similarPairs(cut, state('meaning'), days).map(key).sort()).toEqual(['d1-d2', 'd1-d3', 'r1-r2', 'v1-v2'])
+    // Timeline: only the selected star's links, and only to stars on the axis (r3 is 40 days old, off a 7-day axis).
+    expect(similarPairs(g, selectStar(state('timeline'), g, 'r1'), 7).map(key).sort()).toEqual(['d1-r1', 'r1-r2'])
+    expect(similarPairs(g, selectStar(state('timeline'), g, 'r1'), days).map(key).sort()).toEqual(['d1-r1', 'r1-r2', 'r1-r3'])
+    expect(similarPairs(g, state('timeline'), days)).toEqual([])
+    // Leaving Meaning the links hold until the weight drops under 0.3, then only the selected star's remain.
+    expect(similarPairs(g, state('galaxy'), days, 0.5)).toHaveLength(inMeaning.length)
+    expect(similarPairs(g, state('galaxy'), days, SIMILAR_MEANING_MIN)).toEqual([])
+    expect(similarPairs(g, picked, days, 0.1)).toHaveLength(3)
+  })
+
+  test('SEM.1.a2: the links are faint cyan #7DE3F4, brightest in Meaning, a little brighter with a star selected, and off with the toggle', () => {
+    expect(SIMILAR_COLOUR).toBe('#7DE3F4')
+    const g = make()
+    expect(similarOpacity(state('galaxy'), 0)).toBeCloseTo(0.12)
+    expect(similarOpacity(state('meaning'), 1)).toBeCloseTo(0.3)
+    expect(similarOpacity(state('meaning'), 0.5)).toBeCloseTo(0.21)
+    expect(similarOpacity(selectStar(state('galaxy'), g, 'r1'), 0)).toBeCloseTo(0.22)
+    expect(similarOpacity(selectStar(state('meaning'), g, 'r1'), 1)).toBeCloseTo(0.4)
+    expect(similarOpacity({ ...state('meaning'), similar: false }, 1)).toBe(0)
+    // The toggle flips only where there are vectors; otherwise the state is returned as it is.
+    const s = state('galaxy')
+    expect(s.similar).toBe(true)
+    expect(toggleSimilar(s, true).similar).toBe(false)
+    expect(toggleSimilar(toggleSimilar(s, true), true).similar).toBe(true)
+    expect(toggleSimilar(s, false)).toBe(s)
+  })
+
+  test('SEM.1.a3: the Memory inspector lists the similar memories (label, project, score as a percentage) and the line from embeddings; each item opens that star', () => {
+    const g = make()
+    const view = inspector(g, selectStar(state('galaxy'), g, 'r1'))
+    expect(view.kind).toBe('Memory')
+    const similar = view.similar!
+    expect(similar.items.map(i => [i.id, i.text, i.project, i.percent, i.score])).toEqual([
+      ['r2', 'memory r2', 'beta', 88, '88% similar'],
+      ['r3', 'memory r3', 'beta', 85, '85% similar'],
+      ['d1', 'memory d1', 'alpha', 66, '66% similar'],
+    ])
+    expect(similar.note).toBe('From embeddings, made on this machine.')
+    expect(SIMILAR_NOTE).toBe('From embeddings, made on this machine.')
+    // The item carries the colour of its project and the id the page opens (selectStar is what flyToStar ends in).
+    expect(similar.items[0]!.colour).toBe(projectColour(g, BETA))
+    const opened = selectStar(selectStar(state('galaxy'), g, 'r1'), g, similar.items[0]!.id)
+    expect(opened.selected).toBe('r2')
+    expect(inspector(g, opened).title).toBe('routing')
+    // A neighbour forgotten since the page loaded is not listed; a rounding of 0.655 is 66.
+    const forgot = make()
+    forgetMemory(forgot, 'r3')
+    expect(inspector(forgot, selectStar(state('galaxy'), forgot, 'r1')).similar!.items.map(i => i.id)).toEqual(['r2', 'd1'])
+    const rounded = make(raw({}, [row('p', ALPHA, 't', 1, { position: [1, 1, 1], similar: [{ id: 'q', score: 0.655 }] }), row('q', ALPHA, 't', 1, { position: [2, 2, 2], similar: [] })]))
+    expect(inspector(rounded, selectStar(state('galaxy'), rounded, 'p')).similar!.items[0]!.percent).toBe(66)
+    // An embedded star with no close neighbour says so.
+    expect(inspector(g, selectStar(state('galaxy'), g, 'solo')).similar).toEqual({ note: 'No other memory is close enough in meaning yet.', items: [] })
+    // A star with no vector in a galaxy that has Meaning says how to get one.
+    const none = inspector(g, selectStar(state('galaxy'), g, 'n1')).similar!
+    expect(none.items).toEqual([])
+    expect(none.note).toContain('/mnemosyne-embed apply')
+    // No Meaning at all: the 0.6.x note, no items.
+    const off = make(raw({ meaning: false }))
+    expect(inspector(off, selectStar(state('galaxy'), off, 'r1')).similar).toEqual({ note: 'Similar memories need embeddings.', items: [] })
+  })
+
+  test('SEM.2.a1 / SEM.2.a2: with meaning: false the Meaning button and the Similar memories toggle are disabled with the hint, and no request or error comes of the missing data', async () => {
+    const html = readFileSync(join(ROOT, 'ui', 'index.html'), 'utf8')
+    expect(EMBEDDINGS_HINT).toBe('Turn on embeddings, then run /mnemosyne-embed apply')
+    // The static page already says it (before any reply), on the button, the toggle and as a line under the layout buttons.
+    expect(html).toContain(`data-layout="meaning" aria-pressed="false" disabled title="${EMBEDDINGS_HINT}"`)
+    expect(html).toContain('id="map-meaning-hint"')
+    // Builds the Map tab on the page markup, with the document stand-in installed for as long as `use` runs.
+    const run = async <T,>(meaning: boolean, use: (page: { calls: string[]; statuses: string[]; node: (id: string) => FakeNode; layout: (name: string) => FakeNode }) => T): Promise<T> => {
+      const fake = fakeDom(html)
+      const g = globalThis as Record<string, unknown>
+      const saved = { document: g.document, CSS: g.CSS, HTMLElement: g.HTMLElement, localStorage: g.localStorage }
+      g.document = fake.document
+      g.HTMLElement = FakeBase
+      g.CSS = { escape: (v: string) => v }
+      g.localStorage = { getItem: () => null, setItem: () => {} }
+      const calls: string[] = []
+      const statuses: string[] = []
+      const rows = meaning ? memories() : memories().map(({ position: _position, similar: _similar, ...rest }) => rest)
+      try {
+        const { createMap } = (await import(join(ROOT, 'ui', 'map.ts'))) as { createMap: (host: unknown) => unknown }
+        createMap({
+          api: async (path: string) => {
+            calls.push(path)
+            return new Response(JSON.stringify(raw(meaning ? {} : { meaning: false }, rows)), { status: 200 })
+          },
+          openMemory: () => {},
+          status: (text: string) => void statuses.push(text),
+        })
+        await Bun.sleep(30)
+        const node = (id: string) => fake.nodes.get(id)!
+        return use({ calls, statuses, node, layout: name => node('map-layout').groups.find(b => b.dataset.layout === name)! })
+      } finally {
+        g.document = saved.document
+        g.CSS = saved.CSS
+        g.HTMLElement = saved.HTMLElement
+        g.localStorage = saved.localStorage
+      }
+    }
+    await run(false, off => {
+      expect(off.calls).toEqual(['/api/galaxy'])
+      expect(off.statuses).toEqual([])
+      expect(off.layout('meaning').disabled).toBe(true)
+      expect(off.layout('meaning').title).toBe(EMBEDDINGS_HINT)
+      expect(off.node('map-similar').disabled).toBe(true)
+      expect(off.node('map-similar').checked).toBe(false)
+      expect(off.node('map-meaning-hint').hidden).toBe(false)
+      expect(off.node('map-meaning-hint').textContent).toBe(EMBEDDINGS_HINT)
+      // Pressing them does nothing and breaks nothing.
+      off.layout('meaning').fire('click')
+      expect(off.layout('meaning').attributes.get('aria-pressed')).toBe('false')
+      off.node('map-similar').fire('change')
+      expect(off.node('map-similar').checked).toBe(false)
+      expect(off.statuses).toEqual([])
+      expect(off.calls).toEqual(['/api/galaxy'])
+    })
+    // With vectors both are live, the hint is gone and the toggle is on by default.
+    await run(true, on => {
+      expect(on.calls).toEqual(['/api/galaxy'])
+      expect(on.statuses).toEqual([])
+      expect(on.layout('meaning').disabled).toBe(false)
+      expect(on.node('map-similar').disabled).toBe(false)
+      expect(on.node('map-similar').checked).toBe(true)
+      expect(on.node('map-meaning-hint').hidden).toBe(true)
+      on.node('map-similar').fire('change')
+      expect(on.node('map-similar').checked).toBe(false)
+      on.layout('meaning').fire('click')
+      expect(on.layout('meaning').attributes.get('aria-pressed')).toBe('true')
+      expect(on.statuses).toEqual([])
+    })
+  })
+
+  test('GUARD (source text, not behaviour): the scene blends the three layouts with the pure helpers, draws the links and labels from them, and never picks a label', () => {
+    // The behaviour of every helper below is tested with real values above; this only guards that the scene file still calls them.
+    const map = readFileSync(join(ROOT, 'ui', 'map.ts'), 'utf8')
+    for (const call of ['layoutWeights(', 'layoutPlace(', 'meaningPlaces(', 'meaningAway(', 'meaningStep(', 'meaningClusters(', 'ringLabel(', 'similarPairs(', 'similarOpacity(', 'toggleSimilar(', 'visualFade(v.kind, galaxyFade, weights.meaning)']) expect(map).toContain(call)
+    expect(map).toContain("if (v.kind === 'cluster') continue")
+    expect(map).not.toMatch(/innerHTML|insertAdjacentHTML|outerHTML/)
   })
 })
