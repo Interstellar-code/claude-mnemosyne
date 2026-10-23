@@ -252,6 +252,15 @@ function health(config: Config, store: Store, engine: string | undefined) {
   }
 }
 
+// The health report's two memory lists: the newest never-recalled and the most recalled.
+export const NEVER_RECALLED_LIST = 50
+export const MOST_RECALLED_LIST = 10
+
+/** A table name from sqlite_master as an SQL identifier: double-quoted, inner quotes doubled. */
+function quoteName(name: string): string {
+  return `"${name.replace(/"/g, '""')}"`
+}
+
 /**
  * GET /api/health-report: token-guarded and read-only.
  * Returns memory counts, per-project split, global count, never-recalled (newest 50),
@@ -333,8 +342,6 @@ export function healthReport(config: Config, store: Store, _engine: string | und
         recallsByDay,
         daysCovered,
         sizes: { store: storeSize, log: logSize },
-        storeSize,
-        logSize,
         tables: {},
         coverage: {
           total: 0,
@@ -356,7 +363,7 @@ export function healthReport(config: Config, store: Store, _engine: string | und
   const tables: Record<string, number> = {}
   for (const name of present) {
     try {
-      tables[name] = (db.query(`SELECT COUNT(*) AS n FROM ${name}`).get() as { n: number })?.n ?? 0
+      tables[name] = (db.query(`SELECT COUNT(*) AS n FROM ${quoteName(name)}`).get() as { n: number })?.n ?? 0
     } catch {
       tables[name] = 0
     }
@@ -397,46 +404,46 @@ export function healthReport(config: Config, store: Store, _engine: string | und
       projects = []
     }
 
+    // A legacy working_memory may lack any of these columns: each reads NULL (or 0 recalls), never an error.
+    const col = (name: string, fallback = 'NULL') => (wmCols.has(name) ? name : fallback)
+    const recallsSql = wmCols.has('recall_count') ? RECALLS : '0'
+    const memorySql = `SELECT id, session_id AS owner, ${col('timestamp')} AS created, ${col('last_recalled')} AS lastRecalled,
+                  substr(${col('content')}, 1, 4000) AS head, ${col('metadata_json')} AS metadata_json, ${recallsSql} AS recalls
+           FROM working_memory`
+    type MemoryRow = { id: string; owner: string; created: string | null; lastRecalled: string | null; head: string | null; metadata_json: string | null; recalls: number }
+    const toMemory = (r: MemoryRow) => ({
+      id: r.id,
+      owner: r.owner,
+      created: r.created,
+      lastRecalled: r.lastRecalled,
+      label: galaxyLabel(r.head),
+      tags: tagsOf(parseMetadata(r.metadata_json)),
+      recalls: r.recalls,
+    })
+
+    // The count and its list are read apart, so a list that fails never zeroes the count.
     try {
-      neverCount = (db.query('SELECT COUNT(*) AS n FROM working_memory WHERE COALESCE(recall_count, 0) = 0').get() as { n: number })?.n ?? 0
-      const neverRows = db
-        .query(
-          `SELECT id, session_id AS owner, timestamp AS created, last_recalled AS lastRecalled,
-                  substr(content, 1, 4000) AS head, metadata_json, COALESCE(recall_count, 0) AS recalls
-           FROM working_memory WHERE COALESCE(recall_count, 0) = 0 ORDER BY timestamp DESC, id LIMIT 50`,
-        )
-        .all() as { id: string; owner: string; created: string | null; lastRecalled: string | null; head: string | null; metadata_json: string | null; recalls: number }[]
-      neverList = neverRows.map(r => ({
-        id: r.id,
-        owner: r.owner,
-        created: r.created,
-        lastRecalled: r.lastRecalled,
-        label: galaxyLabel(r.head),
-        tags: tagsOf(parseMetadata(r.metadata_json)),
-        recalls: r.recalls,
-      }))
+      neverCount = (db.query(`SELECT COUNT(*) AS n FROM working_memory WHERE ${recallsSql} = 0`).get() as { n: number })?.n ?? 0
     } catch {
       neverCount = 0
+    }
+    try {
+      const neverRows = db
+        .query(`${memorySql} WHERE ${recallsSql} = 0 ORDER BY ${col('timestamp')} DESC, id LIMIT ${NEVER_RECALLED_LIST}`)
+        .all() as MemoryRow[]
+      neverList = neverRows.map(toMemory)
+    } catch {
       neverList = []
     }
 
     try {
       const mostRows = db
         .query(
-          `SELECT id, session_id AS owner, timestamp AS created, last_recalled AS lastRecalled,
-                  substr(content, 1, 4000) AS head, metadata_json, COALESCE(recall_count, 0) AS recalls
-           FROM working_memory WHERE COALESCE(recall_count, 0) > 0 ORDER BY COALESCE(recall_count, 0) DESC, last_recalled DESC, timestamp DESC, id LIMIT 10`,
+          `${memorySql} WHERE ${recallsSql} > 0
+           ORDER BY ${recallsSql} DESC, ${col('last_recalled')} DESC, ${col('timestamp')} DESC, id LIMIT ${MOST_RECALLED_LIST}`,
         )
-        .all() as { id: string; owner: string; created: string | null; lastRecalled: string | null; head: string | null; metadata_json: string | null; recalls: number }[]
-      mostRecalled = mostRows.map(r => ({
-        id: r.id,
-        owner: r.owner,
-        created: r.created,
-        lastRecalled: r.lastRecalled,
-        label: galaxyLabel(r.head),
-        tags: tagsOf(parseMetadata(r.metadata_json)),
-        recalls: r.recalls,
-      }))
+        .all() as MemoryRow[]
+      mostRecalled = mostRows.map(toMemory)
     } catch {
       mostRecalled = []
     }
@@ -502,8 +509,6 @@ export function healthReport(config: Config, store: Store, _engine: string | und
       recallsByDay,
       daysCovered,
       sizes: { store: storeSize, log: logSize },
-      storeSize,
-      logSize,
       tables,
       coverage: {
         total,
@@ -755,161 +760,116 @@ export type KnowledgeItem = {
   id: string
   kind: string
   text: string
-  item: string
   owner: string
   source_memory_id: string
   topic: string | null
+  // The source memory's all-time recall_count and last_recalled: "times its source memory was recalled".
   recalls: number
   lastRecalled: string | null
-  usage: {
-    recalls: number
-    lastRecalled: string | null
-  }
+  // Instructions only: memoria_instructions.active (null when a legacy table lacks the column).
+  active?: boolean | null
+  // Relations only: memoria_kg.confidence (null when a legacy table lacks the column).
+  confidence?: number | null
+}
+
+type KnowledgeList = 'facts' | 'preferences' | 'instructions' | 'timelines' | 'relations'
+const KNOWLEDGE_LISTS: Readonly<Record<string, KnowledgeList>> = {
+  fact: 'facts',
+  preference: 'preferences',
+  instruction: 'instructions',
+  timeline: 'timelines',
+  relation: 'relations',
+}
+// The one extra state column a kind carries: an instruction's `active`, a relation's `confidence`.
+const KNOWLEDGE_STATE: Readonly<Partial<Record<KnowledgeList, 'active' | 'confidence'>>> = { instructions: 'active', relations: 'confidence' }
+
+// A knowledge item's text is cut here: the engine stores items of at most 500 characters (KSTORE.1).
+export const KNOWLEDGE_TEXT_CHARS = 500
+// Zero-width characters, which GALAXY_CONTROL leaves in.
+const ZERO_WIDTH = /[\u200b-\u200d\u2060\ufeff]/g
+
+/** A knowledge item's text: one line (line breaks become spaces), control and zero-width characters removed, cut to KNOWLEDGE_TEXT_CHARS. */
+export function knowledgeText(text: unknown): string {
+  const raw = typeof text === 'string' ? text : ''
+  const line = raw
+    .replace(/[\r\n\t\u2028\u2029]+/g, ' ')
+    .replace(GALAXY_CONTROL, '')
+    .replace(ZERO_WIDTH, '')
+    .replace(/ {2,}/g, ' ')
+    .trim()
+  const chars = Array.from(line)
+  return chars.length > KNOWLEDGE_TEXT_CHARS ? `${chars.slice(0, KNOWLEDGE_TEXT_CHARS - 1).join('')}…` : line
 }
 
 /**
- * GET /api/knowledge: every mined item from the five memoria tables, token-guarded and read-only.
- * Returns items mapped by kind with source memory topic and usage, plus extraction status.
+ * GET /api/knowledge: the mined items of the five memoria tables, token-guarded and read-only.
+ * Per kind at most `limit` items, newest first; `total` and `shown` per kind say how many were cut.
+ * A legacy table or working_memory without a column reads NULL there (or 0 recalls), never an error.
  */
-export function knowledgeList(db: Database | null): Answer {
+export function knowledgeList(db: Database | null, limit = GALAXY_LIMIT): Answer {
   const extraction = process.env.MNEMOSYNE_EXTRACTION || 'unknown'
-  if (db === null) {
-    return {
-      status: 200,
-      body: {
-        extraction,
-        facts: [],
-        preferences: [],
-        instructions: [],
-        timelines: [],
-        relations: [],
-        kg: [],
-        items: [],
-      },
-    }
-  }
+  const lists = (): Record<KnowledgeList, KnowledgeItem[]> => ({ facts: [], preferences: [], instructions: [], timelines: [], relations: [] })
+  const counts = (): Record<KnowledgeList, number> => ({ facts: 0, preferences: 0, instructions: 0, timelines: 0, relations: 0 })
+  const result = lists()
+  const total = counts()
+  const shown = counts()
+  if (db === null) return { status: 200, body: { extraction, ...result, kg: [], items: [], total, shown } }
 
   const present = new Set(
     (db.query("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map(row => row.name),
   )
-  const wmPresent = present.has('working_memory')
-
-  const result: Record<'facts' | 'preferences' | 'instructions' | 'timelines' | 'relations', KnowledgeItem[]> = {
-    facts: [],
-    preferences: [],
-    instructions: [],
-    timelines: [],
-    relations: [],
-  }
+  const wmCols = present.has('working_memory') ? tableColumns(db, 'working_memory') : new Set<string>()
+  const joined = wmCols.has('id')
+  const wm = (name: string, fallback = 'NULL') => (joined && wmCols.has(name) ? `wm.${name}` : fallback)
+  const recallsSql = joined && wmCols.has('recall_count') ? 'COALESCE(wm.recall_count, 0)' : '0'
 
   for (const source of KNOWLEDGE_TABLES) {
     if (!present.has(source.table)) continue
     const columns = tableColumns(db, source.table)
     if (!columns.has(source.id) || !columns.has('source_memory_id') || !source.needs.every(col => columns.has(col))) continue
-
-    const listKey =
-      source.table === 'memoria_facts'
-        ? 'facts'
-        : source.table === 'memoria_preferences'
-          ? 'preferences'
-          : source.table === 'memoria_instructions'
-            ? 'instructions'
-            : source.table === 'memoria_timelines'
-              ? 'timelines'
-              : 'relations'
-
-    let query: string
-    if (wmPresent) {
-      query = `SELECT t.${source.id} AS rowid,
-                      ${source.text} AS text,
-                      t.session_id AS owner,
-                      t.source_memory_id AS source_memory_id,
-                      wm.recall_count AS recalls,
-                      wm.last_recalled AS lastRecalled,
-                      wm.metadata_json AS metadata_json
-               FROM ${source.table} t
-               LEFT JOIN working_memory wm ON wm.id = t.source_memory_id
-               ORDER BY t.${source.id}`
-    } else {
-      query = `SELECT t.${source.id} AS rowid,
-                      ${source.text} AS text,
-                      t.session_id AS owner,
-                      t.source_memory_id AS source_memory_id,
-                      0 AS recalls,
-                      NULL AS lastRecalled,
-                      NULL AS metadata_json
-               FROM ${source.table} t
-               ORDER BY t.${source.id}`
-    }
-
-    let rows: {
-      rowid: number
-      text: string | null
-      owner: string | null
-      source_memory_id: string | null
-      recalls: number | null
-      lastRecalled: string | null
-      metadata_json: string | null
-    }[]
+    const list = KNOWLEDGE_LISTS[source.kind]!
     try {
-      rows = db.query(query).all() as {
-        rowid: number
-        text: string | null
-        owner: string | null
-        source_memory_id: string | null
-        recalls: number | null
-        lastRecalled: string | null
-        metadata_json: string | null
-      }[]
+      total[list] = (db.query(`SELECT COUNT(*) AS n FROM ${source.table}`).get() as { n: number }).n
     } catch {
       continue
     }
-
+    const state = KNOWLEDGE_STATE[list]
+    // The newest `limit` rows first, then their source memories; the inner query keeps the text's bare column names unambiguous.
+    const query = `SELECT t.rid AS rid, t.text AS text, t.owner AS owner, t.source_memory_id AS source_memory_id, t.state AS state,
+                          ${recallsSql} AS recalls, ${wm('last_recalled')} AS lastRecalled, ${wm('metadata_json')} AS metadata_json
+                   FROM (SELECT ${source.id} AS rid, ${source.text} AS text, ${columns.has('session_id') ? 'session_id' : 'NULL'} AS owner, source_memory_id,
+                                ${state && columns.has(state) ? state : 'NULL'} AS state
+                         FROM ${source.table} ORDER BY ${source.id} DESC LIMIT ?) t
+                   ${joined ? 'LEFT JOIN working_memory wm ON wm.id = t.source_memory_id' : ''}
+                   ORDER BY t.rid DESC`
+    let rows: { rid: number; text: string | null; owner: string | null; source_memory_id: string | null; state: unknown; recalls: number | null; lastRecalled: string | null; metadata_json: string | null }[]
+    try {
+      rows = db.query(query).all(limit) as typeof rows
+    } catch {
+      continue
+    }
     for (const r of rows) {
-      const cleaned = galaxyLabel(r.text)
-      const topic = tagsOf(parseMetadata(r.metadata_json))[0] ?? null
-      const recalls = r.recalls ?? 0
-      const lastRecalled = r.lastRecalled ?? null
-      const item: KnowledgeItem = {
-        id: `${source.kind}:${r.rowid}`,
+      // A legacy table without the column reads NULL here; a stored value that is no number reads null too.
+      const value = r.state === null || r.state === '' ? null : Number(r.state)
+      const known = value !== null && Number.isFinite(value) ? value : null
+      result[list].push({
+        id: `${source.kind}:${r.rid}`,
         kind: source.kind,
-        text: cleaned,
-        item: cleaned,
+        text: knowledgeText(r.text),
         owner: r.owner ?? '',
         source_memory_id: r.source_memory_id ?? '',
-        topic,
-        recalls,
-        lastRecalled,
-        usage: {
-          recalls,
-          lastRecalled,
-        },
-      }
-      result[listKey].push(item)
+        topic: tagsOf(parseMetadata(r.metadata_json)).map(tag => tag.trim()).find(tag => tag !== '') ?? null,
+        recalls: r.recalls ?? 0,
+        lastRecalled: r.lastRecalled ?? null,
+        ...(state === 'active' ? { active: known === null ? null : known !== 0 } : {}),
+        ...(state === 'confidence' ? { confidence: known } : {}),
+      })
     }
+    shown[list] = result[list].length
   }
 
-  const allItems = [
-    ...result.facts,
-    ...result.preferences,
-    ...result.instructions,
-    ...result.timelines,
-    ...result.relations,
-  ]
-
-  return {
-    status: 200,
-    body: {
-      extraction,
-      facts: result.facts,
-      preferences: result.preferences,
-      instructions: result.instructions,
-      timelines: result.timelines,
-      relations: result.relations,
-      kg: result.relations,
-      items: allItems,
-    },
-  }
+  const items = [...result.facts, ...result.preferences, ...result.instructions, ...result.timelines, ...result.relations]
+  return { status: 200, body: { extraction, ...result, kg: result.relations, items, total, shown } }
 }
 
 // ---- Activity (VIEW.2): the log, read; and its tail, streamed ----

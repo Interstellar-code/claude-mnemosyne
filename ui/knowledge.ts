@@ -36,7 +36,8 @@ export type KnowledgeItem = {
   confidence: number | null
 }
 
-export type KnowledgeData = { extraction: string; items: Record<KnowledgeKind, KnowledgeItem[]> }
+/** `totals` per kind: how many the store holds; the server sends at most 2000 a kind (`items` holds those). */
+export type KnowledgeData = { extraction: string; items: Record<KnowledgeKind, KnowledgeItem[]>; totals: Record<KnowledgeKind, number> }
 
 const TEXT_CHARS = 200
 const text = (value: unknown) => (typeof value === 'string' ? value : '')
@@ -47,6 +48,8 @@ export function parseKnowledge(body: unknown): KnowledgeData | null {
   if (body === null || typeof body !== 'object' || Array.isArray(body)) return null
   const raw = body as Record<string, unknown>
   const items = { fact: [], preference: [], instruction: [], timeline: [], relation: [] } as Record<KnowledgeKind, KnowledgeItem[]>
+  const totals = { fact: 0, preference: 0, instruction: 0, timeline: 0, relation: 0 } as Record<KnowledgeKind, number>
+  const counted = raw.total !== null && typeof raw.total === 'object' ? (raw.total as Record<string, unknown>) : {}
   for (const { kind, list } of KINDS) {
     const rows = raw[list]
     if (!Array.isArray(rows)) continue
@@ -69,10 +72,17 @@ export function parseKnowledge(body: unknown): KnowledgeData | null {
       })
     }
   }
-  return { extraction: text(raw.extraction) || 'unknown', items }
+  // The store's count, never below what arrived.
+  for (const { kind, list } of KINDS) totals[kind] = Math.max(whole(counted[list]), items[kind].length)
+  return { extraction: text(raw.extraction) || 'unknown', items, totals }
 }
 
 export const total = (data: KnowledgeData) => KINDS.reduce((sum, { kind }) => sum + data.items[kind].length, 0)
+/** Every item the store holds, shown or not. */
+export const storeTotal = (data: KnowledgeData) => KINDS.reduce((sum, { kind }) => sum + data.totals[kind], 0)
+
+/** A count, or 'showing n of m' when the server cut the list. */
+export const countText = (shown: number, all: number) => (shown < all ? `showing ${shown} of ${all}` : String(shown))
 
 const DAY_MS = 86_400_000
 
@@ -102,7 +112,7 @@ export function kpis(data: KnowledgeData, now: number): Kpi[] {
     return days !== null && days <= 7
   }).length
   return [
-    { label: 'Items', value: String(all.length) },
+    { label: 'Items', value: countText(all.length, storeTotal(data)) },
     { label: 'Memory recalled in the last 7 days', value: String(recent) },
     { label: 'Memory never recalled', value: String(all.filter(item => item.recalls === 0).length) },
   ]
@@ -122,7 +132,7 @@ export function notice(data: KnowledgeData): { title: string; body: string } | n
   const count = total(data)
   const state = extractionState(data.extraction)
   if (state.mode === 'off') {
-    return { title: 'Extraction is off today.', body: `${count === 0 ? 'The store holds no knowledge items yet.' : `The ${count} items below were mined while it was on.`} Turn it on with extractionModel in the plugin settings, then restart the dashboard (/mnemosyne-ui); then run /mnemosyne-knowledge to backfill older memories.` }
+    return { title: 'Extraction is off.', body: `${count === 0 ? 'The store holds no knowledge items yet.' : `The ${count} items below were mined while it was on.`} Turn it on with extractionModel in the plugin settings, then restart the dashboard (/mnemosyne-ui); then run /mnemosyne-knowledge to backfill older memories.` }
   }
   if (count === 0) {
     return { title: 'No knowledge items yet.', body: 'Items appear here once extraction has run on a saved memory. Check extractionModel in the plugin settings (restart the dashboard after changing it), or run /mnemosyne-knowledge to backfill older memories.' }
@@ -187,18 +197,17 @@ export type KnowledgeHost = {
   now: () => number
 }
 
-/** The kind tabs with their counts. */
+/** The kind tabs with their counts: plain toggle buttons (aria-pressed), not ARIA tabs. */
 export function kindTabs(data: KnowledgeData, selected: KnowledgeKind, pick: (kind: KnowledgeKind) => void): HTMLElement[] {
   return KINDS.map(({ kind, label, colour }) => {
     const button = el('button', undefined, 'chip-btn know-tab')
     button.type = 'button'
-    button.setAttribute('role', 'tab')
-    button.setAttribute('aria-selected', String(kind === selected))
+    button.setAttribute('aria-pressed', String(kind === selected))
     button.dataset.kind = kind
     const dotNode = el('span', undefined, 'lg-dot')
     dotNode.setAttribute('aria-hidden', 'true')
     dotNode.style.backgroundColor = colour
-    button.append(dotNode, el('span', label), el('span', String(data.items[kind].length), 'mono muted'))
+    button.append(dotNode, el('span', label), el('span', countText(data.items[kind].length, data.totals[kind]), 'mono muted'))
     button.addEventListener('click', () => pick(kind))
     return button
   })

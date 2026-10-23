@@ -2,9 +2,10 @@
 // Tests against a real server and a real temp store with known fixture data.
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { Database } from 'bun:sqlite'
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { ping, startServer } from '../../ui/server'
+import { MOST_RECALLED_LIST, NEVER_RECALLED_LIST, ping, startServer } from '../../ui/server'
 import type { Started } from '../../ui/server'
 import { body, engineCall, ROOT, tempDir, toolCall } from './helpers'
 
@@ -34,8 +35,6 @@ type HealthReport = {
   recallsByDay: Record<string, number>
   daysCovered: number
   sizes: { store: number; log: number }
-  storeSize: number
-  logSize: number
   tables: Record<string, number>
   coverage: {
     total: number
@@ -56,6 +55,38 @@ async function remember(store: string, owner: string, content: string, metadata?
 
 const get = (url: string, path: string, token: string, auth = true) =>
   fetch(`${url}${path}`, { headers: auth ? { Authorization: `Bearer ${token}` } : {} })
+
+/** The sha256 of the store's database file and its WAL: unchanged bytes prove nothing was written. */
+function storeHash(store: string): string {
+  const hash = createHash('sha256')
+  for (const file of ['mnemopi.db', 'mnemopi.db-wal']) {
+    const path = join(store, file)
+    hash.update(file).update(existsSync(path) ? readFileSync(path) : Buffer.alloc(0))
+  }
+  return hash.digest('hex')
+}
+
+/** /api/health-report from a real server over a hand-built store (a legacy or large shape). */
+async function reportOf(name: string, setup: (db: Database) => void): Promise<HealthReport> {
+  const temp = tempDir(name)
+  const store = join(temp.dir, 'store')
+  mkdirSync(store, { recursive: true })
+  const db = new Database(join(store, 'mnemopi.db'))
+  try {
+    setup(db)
+  } finally {
+    db.close()
+  }
+  const started = await startServer({ root: join(temp.dir, 'root'), store, cli: CLI, activityLog: '', pluginRoot: ROOT })
+  try {
+    const res = await get(`http://127.0.0.1:${started.port}`, '/api/health-report', started.token)
+    expect(res.status).toBe(200)
+    return (await res.json()) as HealthReport
+  } finally {
+    started.stop()
+    temp.dispose()
+  }
+}
 
 describe('KAPI.2: GET /api/health and /api/health-report', () => {
   const temp = tempDir('health-report-api')
@@ -151,18 +182,20 @@ describe('KAPI.2: GET /api/health and /api/health-report', () => {
     const unauth = await get(url, '/api/health-report', started.token, false)
     expect(unauth.status).toBe(401)
 
-    // With token -> 200
-    const beforeDb = open()
-    const beforeCounts = (beforeDb.query("SELECT COUNT(*) AS n FROM working_memory").get() as { n: number }).n
-    beforeDb.close()
-
-    const res = await get(url, '/api/health-report', started.token)
-    expect(res.status).toBe(200)
-
-    const afterDb = open()
-    const afterCounts = (afterDb.query("SELECT COUNT(*) AS n FROM working_memory").get() as { n: number }).n
-    afterDb.close()
-    expect(afterCounts).toBe(beforeCounts)
+    // With token -> 200, and the file bytes and SQLite's data_version (one held connection) stay the same.
+    const watcher = open()
+    try {
+      const version = () => (watcher.query('PRAGMA data_version').get() as { data_version: number }).data_version
+      const beforeVersion = version()
+      const beforeHash = storeHash(store)
+      const res = await get(url, '/api/health-report', started.token)
+      expect(res.status).toBe(200)
+      await res.json()
+      expect(storeHash(store)).toBe(beforeHash)
+      expect(version()).toBe(beforeVersion)
+    } finally {
+      watcher.close()
+    }
   })
 
   test('KAPI.2.a2 & a3: /api/health-report numbers match fixture data', async () => {
@@ -213,6 +246,7 @@ describe('KAPI.2: GET /api/health and /api/health-report', () => {
     // 6. Sizes in bytes
     expect(report.sizes.store).toBeGreaterThan(0)
     expect(report.sizes.log).toBeGreaterThan(0)
+    expect('storeSize' in report || 'logSize' in report).toBe(false)
 
     // 7. Table counts
     expect(report.tables.working_memory).toBe(6)
@@ -226,6 +260,8 @@ describe('KAPI.2: GET /api/health and /api/health-report', () => {
     expect(report.coverage.knowledge).toBe(2)
     // Memories with vector: a1 -> 1
     expect(report.coverage.embeddings).toBe(1)
+    // vectors is the same number under the name the Health tab's mock used.
+    expect(report.coverage.vectors).toBe(1)
     // Memories with author_type set: a1 ('human'), b1 ('agent') -> 2
     expect(report.coverage.provenance).toBe(2)
   })
@@ -260,5 +296,43 @@ describe('KAPI.2: GET /api/health and /api/health-report', () => {
       emptyStarted.stop()
       emptyTemp.dispose()
     }
+  })
+
+  test('KAPI.2: working_memory without last_recalled still counts and lists its never-recalled memories', async () => {
+    const report = await reportOf('legacy-health', db => {
+      db.run('CREATE TABLE working_memory (id TEXT PRIMARY KEY, session_id TEXT, content TEXT, timestamp TEXT, recall_count INTEGER DEFAULT 0, metadata_json TEXT)')
+      db.run("INSERT INTO working_memory (id, session_id, content, timestamp) VALUES ('m1', 'p1', 'x', '2026-10-01'), ('m2', 'p1', 'y', '2026-10-02')")
+      db.run("INSERT INTO working_memory (id, session_id, content, timestamp, recall_count) VALUES ('m3', 'p1', 'z', '2026-10-03', 5)")
+    })
+    expect(report.total).toBe(3)
+    expect(report.neverRecalled.count).toBe(2)
+    expect(report.neverRecalled.list.map(m => m.id)).toEqual(['m2', 'm1'])
+    expect(report.mostRecalled.map(m => [m.id, m.recalls, m.lastRecalled])).toEqual([['m3', 5, null]])
+  })
+
+  test('KAPI.2: a table whose name needs quoting is counted', async () => {
+    const report = await reportOf('odd-table-health', db => {
+      db.run('CREATE TABLE working_memory (id TEXT PRIMARY KEY, session_id TEXT, content TEXT, timestamp TEXT, recall_count INTEGER, last_recalled TEXT, metadata_json TEXT)')
+      db.run('CREATE TABLE "odd name" (x)')
+      db.run('INSERT INTO "odd name" VALUES (1), (2)')
+    })
+    expect(report.tables['odd name']).toBe(2)
+  })
+
+  test('KAPI.2: the never-recalled list stops at 50 (newest first) and most recalled at 10', async () => {
+    expect([NEVER_RECALLED_LIST, MOST_RECALLED_LIST]).toEqual([50, 10])
+    const report = await reportOf('capped-health', db => {
+      db.run('CREATE TABLE working_memory (id TEXT PRIMARY KEY, session_id TEXT, content TEXT, timestamp TEXT, recall_count INTEGER, last_recalled TEXT, metadata_json TEXT)')
+      const insert = db.prepare('INSERT INTO working_memory VALUES (?, ?, ?, ?, ?, NULL, NULL)')
+      db.transaction(() => {
+        for (let i = 0; i < 60; i++) insert.run(`n${String(i).padStart(2, '0')}`, 'p1', 'never', `2026-10-01T00:00:${String(i).padStart(2, '0')}Z`, 0)
+        for (let i = 1; i <= 12; i++) insert.run(`r${String(i).padStart(2, '0')}`, 'p1', 'recalled', '2026-09-01T00:00:00Z', i)
+      })()
+    })
+    expect(report.neverRecalled.count).toBe(60)
+    expect(report.neverRecalled.list).toHaveLength(50)
+    expect(report.neverRecalled.list[0]!.id).toBe('n59')
+    expect(report.neverRecalled.list.at(-1)!.id).toBe('n10')
+    expect(report.mostRecalled.map(m => m.recalls)).toEqual([12, 11, 10, 9, 8, 7, 6, 5, 4, 3])
   })
 })
