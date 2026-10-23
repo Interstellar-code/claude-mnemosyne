@@ -160,7 +160,7 @@ describe('VIEWS.1: the Knowledge tab on a real store', () => {
     expect(kpis(data, now).map((k: { label: string; value: string }) => [k.label, k.value])).toEqual([
       ['Items', '6'],
       ['Memory recalled in the last 7 days', '4'],
-      ['Memory never recalled', '0'],
+      ['Items whose memory was never recalled', '0'],
     ])
     await withDocument(() => {
       const tabs = kindTabs(data, 'fact', () => {}) as unknown as FakeNode[]
@@ -174,7 +174,7 @@ describe('VIEWS.1: the Knowledge tab on a real store', () => {
       again[3]!.fire('click')
       expect(picked).toEqual(['timeline'])
       const tiles = kpiTiles(data, now) as unknown as FakeNode[]
-      expect(tiles.map(tile => tile.texts())).toEqual([['Items', '6'], ['Memory recalled in the last 7 days', '4'], ['Memory never recalled', '0']])
+      expect(tiles.map(tile => tile.texts())).toEqual([['Items', '6'], ['Memory recalled in the last 7 days', '4'], ['Items whose memory was never recalled', '0']])
     })
   })
 
@@ -226,6 +226,22 @@ describe('VIEWS.1: the Knowledge tab on a real store', () => {
     await withDocument(() => {
       expect(((tableRows(data, 'instruction', host()) as unknown as FakeNode[])[0]!.children[4] as FakeNode).textContent).toBe('active')
       expect(((tableRows(data, 'relation', host()) as unknown as FakeNode[])[0]!.children[4] as FakeNode).textContent).toBe('confidence 0.7')
+    })
+  })
+
+  test('QAPAGE item 3: each cell of a row has the class the phone card rules place it by, and the card labels (kind, Status, Used, Last used)', async () => {
+    const data = await knowledge(started, 'claude-haiku-5-5')
+    await withDocument(() => {
+      for (const [kind, head] of [['instruction', 'Instruction'], ['fact', 'Fact'], ['relation', 'Relation']] as const) {
+        const row = (tableRows(data, kind, host()) as unknown as FakeNode[])[0]!
+        const cells = row.children as FakeNode[]
+        expect(cells.map(cell => cell.className.split(' ').find(name => name.startsWith('k-')))).toEqual(['k-text', 'k-topic', 'k-project', 'k-from', 'k-status', 'k-used', 'k-last'])
+        // The card reads: the kind above the text, then Status / Used / Last used each with its label.
+        expect(cells.map(cell => cell.dataset.label ?? null)).toEqual([head, null, null, null, 'Status', 'Used', 'Last used'])
+      }
+      // A stale item keeps both classes: the amber and the card placement.
+      const old = (tableRows(data, 'timeline', host()) as unknown as FakeNode[])[0]!
+      expect((old.children[6] as FakeNode).className.split(' ')).toEqual(expect.arrayContaining(['is-stale', 'k-last']))
     })
   })
 
@@ -369,7 +385,7 @@ describe('VIEWS.1: the Knowledge tab on a real store', () => {
     const have = new Set([...html.matchAll(/\bid="([^"]+)"/g)].map(m => m[1]!))
     expect(wanted.filter(id => !have.has(id))).toEqual([])
     // Phone width: the table scrolls in its box; no inline style or script.
-    expect(html).toMatch(/<div class="table-wrap">\s*<table class="table">\s*<thead>\s*<tr><th id="know-item-head">/)
+    expect(html).toMatch(/<div class="table-wrap">\s*<table class="table know-table">\s*<thead>\s*<tr><th id="know-item-head">/)
     expect(html.slice(html.indexOf('id="view-knowledge"'), html.indexOf('<footer'))).not.toMatch(/\sstyle=|<script|\son\w+=/)
     const tsconfig = JSON.parse(readFileSync(join(ROOT, 'ui', 'tsconfig.json'), 'utf8')) as { include: string[] }
     expect(tsconfig.include).toEqual(expect.arrayContaining(['knowledge.ts', 'health.ts']))

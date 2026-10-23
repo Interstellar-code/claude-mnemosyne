@@ -116,7 +116,9 @@ describe('VIEWS.2: the Health tab on a real store', () => {
     mkdirSync(store, { recursive: true })
     const line = (daysBack: number, action: string) => JSON.stringify({ t: iso(now - daysBack * DAY), action, origin: 'hook', owner: 'global', text: 'q', ids: [], count: 1, ok: true })
     // Today 3 recalls, 2 days ago 1, 5 days ago 2, and a save; the log covers 6 days.
-    writeFileSync(log, `${[line(5, 'recall'), line(5, 'recall'), line(5, 'remember'), line(2, 'recall'), line(0, 'recall'), line(0, 'recall'), line(0, 'recall')].join('\n')}\n`)
+    // Four dashboard searches today (origin ui): logged as recall lines, the audit trail, but not Claude recalling, so no count includes them.
+    const dashboardSearches = [0, 0, 0, 5].map(daysBack => JSON.stringify({ t: iso(now - daysBack * DAY), action: 'recall', origin: 'ui', owner: 'global', text: 'search', ids: [], count: 1, ok: true }))
+    writeFileSync(log, `${[line(5, 'recall'), line(5, 'recall'), line(5, 'remember'), line(2, 'recall'), line(0, 'recall'), line(0, 'recall'), line(0, 'recall'), ...dashboardSearches].join('\n')}\n`)
     ids.g1 = await remember('global', 1, 'global note', ['topic'])
     ids.a1 = await remember('project-alpha-1a2b', 2, 'alpha note one', ['alpha'])
     ids.a2 = await remember('project-alpha-1a2b', 3, `${MARKUP} never recalled`)
@@ -162,12 +164,12 @@ describe('VIEWS.2: the Health tab on a real store', () => {
     expect(kpis(data).map((k: { label: string; value: string; note: string }) => [k.label, k.value])).toEqual([
       ['Memories', '5'],
       ['Never recalled', '2'],
-      ['Recalls in the log', '6'],
+      ['Claude recalls in the log', '6'],
       ['Store size', bytes(data.storeSize + data.logSize)],
     ])
     expect(kpis(data)[0]!.note).toBe('2 projects, 1 global')
     expect(kpis(data)[1]!.note).toBe('40% of all memories')
-    expect(kpis(data)[2]!.note).toBe('over 6 days of activity log')
+    expect(kpis(data)[2]!.note).toBe('over 6 days of activity log, without dashboard searches')
     expect(bytes(500)).toBe('500 B')
     expect(bytes(2048)).toBe('2 KB')
     expect(bytes(3 * 1024 * 1024)).toBe('3.0 MB')

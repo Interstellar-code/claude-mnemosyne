@@ -308,7 +308,8 @@ export function healthReport(config: Config, store: Store, _engine: string | und
       if (/^\d{4}-\d{2}-\d{2}$/.test(day)) {
         if (minDay === null || day < minDay) minDay = day
         if (maxDay === null || day > maxDay) maxDay = day
-        if (line.action === 'recall') {
+        // A dashboard search is logged as a recall line (origin ui, the audit trail) but is not Claude recalling.
+        if (line.action === 'recall' && line.origin !== 'ui') {
           recallsByDay[day] = (recallsByDay[day] ?? 0) + 1
         }
       }

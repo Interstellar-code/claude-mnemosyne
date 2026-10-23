@@ -277,7 +277,7 @@ describe('ACT: the Activity list on real-shaped lines', () => {
     app.feed.lines = [fake, LINES.uiRecall]
     app.drawFeed()
     expect((els.get('act-app')!.children as Fake[]).map(o => [o.value, o.textContent])).toEqual([
-      ['all', 'All'], ['Claude Code', 'Claude Code'], ['Codex', 'Codex'], ['Cursor', 'Cursor'], ['Dashboard', 'Dashboard'], ['ext:Dashboard', 'Dashboard'],
+      ['all', 'All'], ['Claude Code', 'Claude Code'], ['Codex', 'Codex'], ['Cursor', 'Cursor'], ['Dashboard', 'Dashboard'], ['ext:Dashboard', 'Dashboard (external)'],
     ])
     pickApp('Dashboard')
     expect(shownTimes()).toEqual([app.clock(LINES.uiRecall.t)])

@@ -91,7 +91,7 @@ export function kpis(data: HealthData): Kpi[] {
   return [
     { label: 'Memories', value: String(data.total), note: `${plural(projects, 'project', 'projects')}, ${data.global} global` },
     { label: 'Never recalled', value: String(data.neverCount), note: `${percent(data.neverCount, data.total)}% of all memories` },
-    { label: 'Recalls in the log', value: String(recalls), note: data.daysCovered > 0 ? `over ${plural(data.daysCovered, 'day', 'days')} of activity log` : 'the activity log has no days yet' },
+    { label: 'Claude recalls in the log', value: String(recalls), note: data.daysCovered > 0 ? `over ${plural(data.daysCovered, 'day', 'days')} of activity log, without dashboard searches` : 'the activity log has no days yet' },
     { label: 'Store size', value: bytes(data.storeSize + data.logSize), note: `database ${bytes(data.storeSize)}, log ${bytes(data.logSize)}` },
   ]
 }
