@@ -207,6 +207,28 @@ import {
   wantedTicks,
   type PlacesCache,
 } from '../../ui/map-state'
+import { laneY, rangeDays, tickStep, TICK_MIN_SPACING } from '../../ui/map-layout'
+import {
+  clearKinds,
+  CLICK_MAX_HELD_MS,
+  CLICK_MAX_MOVE,
+  coreLabelOffset,
+  dimNote,
+  LANE_LABEL_LIFT,
+  laneLabelLift,
+  LIVE_PILL_TITLE,
+  MOON_LABEL_GAP,
+  MOON_LABEL_REF,
+  MOON_LABEL_ROW,
+  moonLabelLift,
+  moonLabelRow,
+  moonLabelScale,
+  moonPickRadius,
+  MOON_RENDER_ORDER,
+  needsHover,
+  pixelsPerUnit,
+  STRIP_EMPTY_TEXT,
+} from '../../ui/map-state'
 import { startServer } from '../../ui/server'
 import type { Started } from '../../ui/server'
 import { body, engineCall, ROOT, tempDir, toolCall } from './helpers'
@@ -549,8 +571,8 @@ describe('the galaxy on a real /api/galaxy reply', () => {
     expect(find(many, 'fruit')).toMatchObject({ count: 25, distance: 520 })
   })
 
-  test('GAL.2.a5: a drag over 5 px is an orbit, never a click; the nearest star under the pointer is picked, faint ones are not', () => {
-    expect(isClick({ x: 10, y: 10 }, { x: 13, y: 14 })).toBe(true)
+  test('GAL.2.a5: a drag over 3 px is an orbit, never a click; the nearest star under the pointer is picked, faint ones are not', () => {
+    expect(isClick({ x: 10, y: 10 }, { x: 12, y: 12 })).toBe(true)
     expect(isClick({ x: 10, y: 10 }, { x: 10, y: 16 })).toBe(false)
     const near: Candidate = { kind: 'star', id: 'a', sx: 100, sy: 100, radius: 10, alpha: 1 }
     const nearer: Candidate = { kind: 'star', id: 'b', sx: 104, sy: 100, radius: 10, alpha: 1 }
@@ -834,7 +856,7 @@ describe('the galaxy on a real /api/galaxy reply', () => {
       }
       const callsBefore = asked.length
       expect(node('map-inspector').texts()).toContain('7 memories')
-      expect(strip()).toEqual(['No activity yet.'])
+      expect(strip()).toEqual([STRIP_EMPTY_TEXT])
       expect(stat('Memories')).toBe('7')
       expect(stat('Recalls, all time')).toBe('18')
 
@@ -1836,7 +1858,7 @@ describe('MOON: moons on a clicked star and the knowledge filter', () => {
       await Bun.sleep(40)
       expect(asked).toEqual(['/api/galaxy'])
       expect(picture()).toBe(before)
-      expect(feed()).toEqual(['No activity yet.'])
+      expect(feed()).toEqual([STRIP_EMPTY_TEXT])
       // Control: the page IS listening, and a recall line from the same stream does reach it.
       push(activity('recall', beta, [ids.mixed!]))
       await Bun.sleep(40)
@@ -2369,7 +2391,7 @@ describe('TIME: the Timeline layout', () => {
     expect(rangeTicks(7, 7)).toEqual(ticks(7, 7))
     expect(rangeTicks(7, 7).map(t => t.label)).toEqual(['today', '1 day ago', '2 days ago', '3 days ago', '4 days ago', '5 days ago', '6 days ago', '7 days ago'])
     expect(rangeTicks(30, 30).map(t => t.days)).toEqual([0, 7, 14, 21, 28])
-    expect(rangeTicks('all', 42).map(t => t.days)).toEqual([0, 14, 28, 42])
+    expect(rangeTicks('all', 42).map(t => t.days)).toEqual([0, 7, 14, 21, 28, 35, 42])
     // A gridline runs from y -160 to 160 at the tick, behind the stars, faint.
     expect(gridLine(100)).toEqual([[100, GRID_Y[0], GRID_Z], [100, GRID_Y[1], GRID_Z]])
     expect(GRID_Y).toEqual([-160, 160])
@@ -2689,7 +2711,7 @@ describe('TIME: the Timeline layout', () => {
     expect(wantedTicks(7, 7, 0.01).map(t => t.days)).toEqual([0, 1, 2, 3, 4, 5, 6, 7])
     expect(wantedTicks(30, 30, 1).map(t => t.days)).toEqual([0, 7, 14, 21, 28])
     const all = wantedTicks('all', 42, 1)
-    expect(all.map(t => t.days)).toEqual([0, 14, 28, 42])
+    expect(all.map(t => t.days)).toEqual([0, 7, 14, 21, 28, 35, 42])
     expect(wantedTicks('all', 42, 0.5)).toBe(all)
     // A tick of the old range that the new one does not have is not wanted (and gets released once faded); one both have stays.
     const seven = wantedTicks(7, 7, 1)
@@ -2746,5 +2768,149 @@ describe('TIME: the Timeline layout', () => {
     expect(draw).toContain('disposeTicks()')
     const dispose = map.slice(map.indexOf('function disposeTicks()'), map.indexOf('function updateFurniture('))
     expect(dispose).toContain('tickItems.clear()')
+  })
+})
+
+// ---- QAMAP R1: what the real-browser QA found on the map (138 memories, ages up to 300 days) ----
+
+describe('QAMAP: timeline ticks, lane labels, moons, drag and strings, with the QA numbers', () => {
+  // A tick label's width in world units: SpriteText letters are about 0.55 of the label height wide.
+  const widthOf = (text: string) => text.length * TICK_LABEL_HEIGHT * 0.55
+  const overlaps = (list: { x: number; label: string }[]) => {
+    const sorted = [...list].sort((a, b) => a.x - b.x)
+    return sorted.slice(1).filter((tick, i) => tick.x - sorted[i]!.x < (widthOf(tick.label) + widthOf(sorted[i]!.label)) / 2)
+  }
+
+  test('QAMAP.1: tickStep is 1 for 7 days and 7 for 30 (the plan), and grows round with the range', () => {
+    expect(tickStep(7)).toBe(1)
+    expect(tickStep(30)).toBe(7)
+    expect(tickStep(90)).toBe(14)
+    expect(tickStep(302)).toBe(30)
+    expect(tickStep(1000)).toBe(90)
+    expect(tickStep(3000)).toBe(365)
+    // The axis width is a parameter: a narrower axis takes a larger step.
+    expect(tickStep(30, 200)).toBe(14)
+  })
+
+  test('QAMAP.1: for ranges 7, 30, 90, 300 and All = oldest + 2 days, no two tick labels touch and there are at most 12', () => {
+    for (const [range, days] of [[7, 7], [30, 30], ['all', 90], ['all', 300], ['all', rangeDays('all', 300)], ['all', rangeDays('all', 12)], ['all', rangeDays('all', 0)], ['all', 1500]] as const) {
+      const list = rangeTicks(range, days)
+      expect(list.length).toBeLessThanOrEqual(12)
+      expect(overlaps(list)).toEqual([])
+      // Neighbours are never closer than the minimum spacing (the plan's 7 and 30 day rules are looser than it, so only All is held to it).
+      if (range === 'all') {
+        const xs = list.map(tick => tick.x).sort((a, b) => a - b)
+        for (let i = 1; i < xs.length; i++) expect(xs[i]! - xs[i - 1]!).toBeGreaterThanOrEqual(TICK_MIN_SPACING - 1e-9)
+      }
+    }
+  })
+
+  test('QAMAP.1: All with the oldest memory 300 days old: round steps, short labels, and the oldest edge says the range', () => {
+    const days = rangeDays('all', 300)
+    expect(days).toBe(302)
+    const list = rangeTicks('all', days)
+    expect(list.map(tick => tick.days)).toEqual([0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 302])
+    expect(list.map(tick => tick.label)).toEqual(['today', '30d', '2mo', '3mo', '4mo', '5mo', '6mo', '7mo', '8mo', '9mo', '302d'])
+    expect(list[0]!.x).toBe(TIMELINE_TODAY_X)
+    expect(list.at(-1)!.x).toBeCloseTo(TIMELINE_TODAY_X - TIMELINE_DAYS_X, 9)
+    // The 7 and 30 day ranges are unchanged.
+    expect(rangeTicks(7, 7).map(tick => tick.label)).toEqual(['today', '1 day ago', '2 days ago', '3 days ago', '4 days ago', '5 days ago', '6 days ago', '7 days ago'])
+    expect(rangeTicks(30, 30).map(tick => tick.days)).toEqual([0, 7, 14, 21, 28])
+  })
+
+  test('QAMAP.2: each project label sits on its own lane, never nearer another lane than its own (2, 3 and 4 lanes, and 10)', () => {
+    for (const lanes of [1, 2, 3, 4, 10]) {
+      const lift = coreLabelOffset(60, lanes, 1)
+      expect(lift).toBeCloseTo(laneLabelLift(lanes), 9)
+      expect(lift).toBeGreaterThan(0)
+      expect(lift).toBeLessThanOrEqual(LANE_LABEL_LIFT)
+      for (let lane = 0; lane < lanes; lane++) {
+        const labelY = laneY(lane, lanes) + lift
+        const own = Math.abs(labelY - laneY(lane, lanes))
+        for (let other = 0; other < lanes; other++) {
+          if (other !== lane) expect(Math.abs(labelY - laneY(other, lanes))).toBeGreaterThan(own * 1.4)
+        }
+      }
+    }
+    // The Galaxy offset (the core's radius, 60 here) was the old Timeline offset: with 4 lanes (80 apart) it put the label nearer the lane above.
+    expect(60).toBeGreaterThan(80 / 2)
+    // In Galaxy the label keeps its offset; between the two layouts it moves with the blend.
+    expect(coreLabelOffset(60, 4, 0)).toBe(60)
+    expect(coreLabelOffset(60, 4, 0.5)).toBeCloseTo((60 + laneLabelLift(4)) / 2)
+  })
+
+  test('QAMAP.3a: a moon is picked within its drawn size at the camera it is drawn from (zoomed in, zoomed out)', () => {
+    // 620 px tall view, 40 degree camera: at the flight distance 170 a 6.5 glow is about 24 px across; zoomed in to 50 it is about 80 px.
+    const far = pixelsPerUnit(620, 40, 170)
+    const near = pixelsPerUnit(620, 40, 50)
+    expect(far).toBeCloseTo(5.0, 1)
+    expect(near).toBeGreaterThan(far * 3)
+    expect(moonPickRadius(6.5, 1)).toBe(MOON_PICK_RADIUS)
+    expect(moonPickRadius(6.5, far)).toBeCloseTo((6.5 * far) / 2, 9)
+    expect(moonPickRadius(6.5, near)).toBeCloseTo((6.5 * near) / 2, 9)
+    expect(moonPickRadius(6.5, near)).toBeGreaterThan(MOON_PICK_RADIUS * 4)
+    // The picked moon at 50 units: a pointer at its drawn edge hits, a pointer 3 radii away does not.
+    const radius = moonPickRadius(MOON_SIZE_SELECTED, near)
+    const moon: Candidate = { kind: 'moon', id: 'k1', sx: 300, sy: 300, radius, alpha: 0.95 }
+    expect(pickNearest([moon], 300 + radius * 0.9, 300)).toMatchObject({ kind: 'moon', id: 'k1' })
+    expect(pickNearest([moon], 300 + radius * 3, 300)).toBeNull()
+    // A moon orbits under a resting pointer, so a frame re-picks while moons are shown.
+    expect(needsHover(false, true, true)).toBe(true)
+    expect(needsHover(false, true, false)).toBe(false)
+    expect(needsHover(false, false, true)).toBe(false)
+    expect(needsHover(true, false, false)).toBe(true)
+  })
+
+  test('QAMAP.3b: a moon label keeps one size on screen when zoomed in, and neighbours take different rows', () => {
+    expect(moonLabelScale(MOON_LABEL_REF)).toBe(1)
+    expect(moonLabelScale(900)).toBe(1)
+    expect(moonLabelScale(50)).toBeCloseTo(50 / MOON_LABEL_REF, 9)
+    expect(moonLabelScale(1)).toBe(0.25)
+    // Its size on screen (world size times scale over distance) is the same from 170 down to 43.
+    const onScreen = (distance: number) => moonLabelScale(distance) / distance
+    expect(onScreen(60)).toBeCloseTo(onScreen(170), 9)
+    expect(onScreen(43)).toBeCloseTo(onScreen(170), 9)
+    // Rows: neighbours differ, in the 8-moon ring and the 7-moon ring (where the last meets the first).
+    for (const n of [2, 3, 5, 7, 8]) {
+      for (let i = 0; i < n; i++) expect(moonLabelRow(i, n)).not.toBe(moonLabelRow((i + 1) % n, n))
+    }
+    // Two rows are a label height apart at every scale, so labels of neighbours never share height.
+    for (const k of [0.25, 0.5, 1]) {
+      const lift0 = moonLabelLift(0, 8, k)
+      const lift1 = moonLabelLift(1, 8, k)
+      expect(lift0).toBe(MOON_LABEL_GAP)
+      expect(lift1 - lift0).toBeGreaterThan(4.4 * k)
+      expect(lift1 - lift0).toBeCloseTo(MOON_LABEL_ROW * k, 9)
+    }
+  })
+
+  test('QAMAP.3c: moons, their lines and labels are drawn after everything else', () => {
+    expect(MOON_RENDER_ORDER.line).toBeGreaterThan(0)
+    expect(MOON_RENDER_ORDER.sprite).toBeGreaterThan(MOON_RENDER_ORDER.line)
+    expect(MOON_RENDER_ORDER.label).toBeGreaterThan(MOON_RENDER_ORDER.sprite)
+  })
+
+  test('QAMAP.4: only a quick, still press is a click: a long hold or a move over 3 px is a drag, even back on the same pixel', () => {
+    expect(CLICK_MAX_MOVE).toBe(3)
+    expect(CLICK_MAX_HELD_MS).toBe(250)
+    expect(isClick({ x: 50, y: 50, t: 1000 }, { x: 50, y: 50, t: 1120 })).toBe(true)
+    expect(isClick({ x: 50, y: 50, t: 1000 }, { x: 52, y: 51, t: 1200 })).toBe(true)
+    // Pointer down and up on the same pixel after a drag: held 900 ms.
+    expect(isClick({ x: 50, y: 50, t: 1000 }, { x: 50, y: 50, t: 1900 })).toBe(false)
+    expect(isClick({ x: 50, y: 50, t: 1000 }, { x: 50, y: 50, t: 1000 + CLICK_MAX_HELD_MS + 1 })).toBe(false)
+    expect(isClick({ x: 50, y: 50, t: 1000 }, { x: 54, y: 50, t: 1100 })).toBe(false)
+  })
+
+  test('QAMAP.5: the strip, the Live pill and the dim note say what they do', () => {
+    expect(STRIP_EMPTY_TEXT).toBe('No new activity since you opened this page.')
+    expect(LIVE_PILL_TITLE).toBe('Press to switch live updates on or off')
+    const none = initialState({ reducedMotion: false })
+    expect(dimNote(none)).toBeNull()
+    const facts = toggleKind(none, 'fact')
+    expect(dimNote(facts)).toBe('Dimmed by: Facts. Click to clear.')
+    expect(dimNote(toggleKind(toggleKind(facts, 'relation'), 'preference'))).toBe('Dimmed by: Preferences, Relations. Click to clear.'.replace('Preferences, Relations', 'Facts, Preferences, Relations'))
+    expect(clearKinds(facts).kinds.size).toBe(0)
+    expect(dimNote(clearKinds(facts))).toBeNull()
+    expect(clearKinds(none)).toBe(none)
   })
 })

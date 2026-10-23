@@ -370,17 +370,39 @@ export function timelinePosition(node: TimelineNode, days: number): Vec3 {
 
 export type Tick = { days: number; x: number; label: string }
 
-/** The axis ticks of a range: every day (7), every 7 days (30), every 14 days (all). */
+/** The least world distance between two neighbouring tick labels (about 12 across the 560-unit axis). */
+export const TICK_MIN_SPACING = 48
+// Round steps a tick can take, in days.
+const TICK_STEPS = [1, 7, 14, 30, 60, 90, 180, 365]
+
+/** The days between ticks: the smallest round step that keeps neighbouring labels TICK_MIN_SPACING apart on an axis `axisWidth` wide. 7 days gives 1, 30 gives 7 (the plan's rule); 90 gives 14, 300 gives 30. */
+export function tickStep(rangeDays: number, axisWidth = TIMELINE_DAYS_X): number {
+  const days = Math.max(1, rangeDays)
+  for (const step of TICK_STEPS) if ((step * axisWidth) / days >= TICK_MIN_SPACING) return step
+  return Math.ceil((TICK_MIN_SPACING * days) / axisWidth / 365) * 365
+}
+
+/** A short label for the range "All": "today", "30d", "2mo". */
+const shortLabel = (day: number) => (day === 0 ? 'today' : day < 60 ? `${day}d` : `${Math.round(day / 30)}mo`)
+
+/** The axis ticks of a range: every day (7), every 7 days (30), and for "all" a round step chosen from the range length (tickStep) so labels never overlap; the oldest edge is labelled with the range itself. */
 export function ticks(range: TimelineRange, days = range === 'all' ? 0 : range): Tick[] {
-  const step = range === 7 ? 1 : range === 30 ? 7 : 14
+  const step = range === 7 ? 1 : range === 30 ? 7 : tickStep(days)
   const scale = TIMELINE_DAYS_X / Math.max(1, days)
+  const at = (day: number) => TIMELINE_TODAY_X - day * scale
   const out: Tick[] = []
   for (let day = 0; day <= days; day += step) {
     out.push({
       days: day,
-      x: TIMELINE_TODAY_X - day * scale,
-      label: day === 0 ? 'today' : day === 1 ? '1 day ago' : `${day} days ago`,
+      x: at(day),
+      label: range === 'all' ? shortLabel(day) : day === 0 ? 'today' : day === 1 ? '1 day ago' : `${day} days ago`,
     })
+  }
+  // The oldest edge says the range; the step tick that sits too close to it gives way.
+  const last = out[out.length - 1]!
+  if (range === 'all' && last.days < days) {
+    if (last.days > 0 && (days - last.days) * scale < TICK_MIN_SPACING) out.pop()
+    out.push({ days, x: at(days), label: `${days}d` })
   }
   return out
 }
