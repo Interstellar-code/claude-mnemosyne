@@ -44,7 +44,6 @@ import {
   enqueueSparks,
   eventStars,
   forgetMemory,
-  galaxyOnlyFade,
   GRID_COLOUR,
   gridLine,
   laneLines,
@@ -195,6 +194,23 @@ import {
   tooltip,
   topicRows,
   type Hit,
+  EMBEDDINGS_HINT,
+  SIMILAR_MEANING_MIN,
+  SIMILAR_COLOUR,
+  layoutPlace,
+  layoutWeights,
+  meaningAway,
+  meaningClusters,
+  meaningPlaces,
+  meaningStep,
+  meaningTarget,
+  ringLabel,
+  similarOpacity,
+  similarPairs,
+  toggleSimilar,
+  type LayoutWeights,
+  type MeaningPlaces,
+  type SimilarPair,
 } from './map-state'
 
 type MapLib = typeof import('./vendor/map-lib.js')
@@ -315,7 +331,7 @@ function glowTextures(three: Three): { glow: Any; ring: Any } {
 // ---- The scene's pieces ----
 
 type Visual = {
-  kind: 'star' | 'hub' | 'core' | 'claude'
+  kind: 'star' | 'hub' | 'core' | 'claude' | 'cluster'
   /** The id the state uses: a memory id, a hub key, an owner, or ''. */
   key: string
   owner: string
@@ -330,7 +346,7 @@ type Visual = {
   slot: number
   /** The library node this is drawn at (positions are written to it). */
   node: Any
-  /** What is left of it in Timeline: 1, or the share a topic hub keeps while it fades. */
+  /** What is left of it in the other layouts: 1, the share a topic hub or project core keeps while it fades, or a Meaning label's weight. */
   fade: number
   size: number
   alpha: number
@@ -385,6 +401,17 @@ export function createMap(host: MapHost): MapView {
   // Timeline: the morph weight (0 Galaxy, 1 Timeline), the days the axis shows, and the furniture.
   let morph: number = morphTarget(state.layout)
   let shownDays = 0
+  // Meaning: its own morph weight beside Timeline's (0 elsewhere, 1 in Meaning), the star places it holds, and the cyan links.
+  let meaningMorph: number = meaningTarget(state.layout)
+  let meaningCache: { galaxy: Galaxy; places: MeaningPlaces } | null = null
+  let weights: LayoutWeights = layoutWeights(morph, meaningMorph)
+  let similarLines: Any = null
+  let similarCapacity = 0
+  let similarKey: unknown[] = []
+  let similarShown: SimilarPair[] = []
+  // Counts the frames some visual moved on, so the links follow the stars they join.
+  let moves = 0
+  let similarMoves = -1
   let placeDirty = true
   let linkFade = 1
   // The links were rebuilt or restyled since the fade was last written.
@@ -689,12 +716,12 @@ export function createMap(host: MapHost): MapView {
       stats.append(item)
     }
     parts.push(stats)
-    for (const [title, section] of [['Knowledge from this memory', view.knowledge], ['Similar memories', view.similar]] as const) {
-      if (!section) continue
+    if (view.knowledge) {
+      const section = view.knowledge
       const block = el('section', undefined, 'insp-section')
-      block.append(el('h3', title, 'insp-section-title'), el('p', section.note, 'insp-note'))
+      block.append(el('h3', 'Knowledge from this memory', 'insp-section-title'), el('p', section.note, 'insp-note'))
       // Knowledge text comes from the store: textContent only (el), never markup.
-      if ('items' in section && section.items.length > 0) {
+      if (section.items.length > 0) {
         const list = el('div', undefined, 'rail-list')
         for (const item of section.items) {
           const button = el('button', undefined, item.selected ? 'rail-item is-selected' : 'rail-item')
@@ -708,6 +735,29 @@ export function createMap(host: MapHost): MapView {
         }
         block.append(list)
       }
+      parts.push(block)
+    }
+    if (view.similar) {
+      const section = view.similar
+      const block = el('section', undefined, 'insp-section')
+      block.append(el('h3', 'Similar memories', 'insp-section-title'))
+      // Each line opens that star. The text is the other memory's label: textContent only.
+      if (section.items.length > 0) {
+        const list = el('div', undefined, 'rail-list')
+        for (const item of section.items) {
+          const button = el('button', undefined, 'rail-item sim-item')
+          button.type = 'button'
+          button.dataset.similar = item.id
+          button.title = `${item.text} (${item.project}, ${item.score})`
+          const meta = el('span', undefined, 'sim-meta')
+          meta.append(dot(item.colour), el('span', `${item.project} · ${item.score}`, 'small muted'))
+          button.append(el('span', item.text, 'sim-text'), meta)
+          button.addEventListener('click', () => flyToStar(item.id))
+          list.append(button)
+        }
+        block.append(list)
+      }
+      block.append(el('p', section.note, 'insp-note'))
       parts.push(block)
     }
     if (view.memory) {
@@ -732,8 +782,19 @@ export function createMap(host: MapHost): MapView {
   function renderControls(g: Galaxy) {
     for (const button of byId('map-layout').querySelectorAll<HTMLButtonElement>('button[data-layout]')) {
       button.setAttribute('aria-pressed', String(button.dataset.layout === state.layout))
-      if (button.dataset.layout === 'meaning') button.disabled = !g.meaning
+      if (button.dataset.layout === 'meaning') {
+        button.disabled = !g.meaning
+        button.title = g.meaning ? '' : EMBEDDINGS_HINT
+      }
     }
+    // Meaning and Similar memories need vectors; without them both say how to get them, in words on the page.
+    const similar = byId<HTMLInputElement>('map-similar')
+    similar.disabled = !g.meaning
+    similar.checked = g.meaning && state.similar
+    similar.closest?.('label')?.setAttribute('title', g.meaning ? '' : EMBEDDINGS_HINT)
+    const hint = byId('map-meaning-hint')
+    hint.hidden = g.meaning
+    hint.textContent = g.meaning ? '' : EMBEDDINGS_HINT
     byId('map-range-box').hidden = state.layout !== 'timeline'
     for (const button of byId('map-range').querySelectorAll<HTMLButtonElement>('button[data-range]')) button.setAttribute('aria-pressed', String(button.dataset.range === String(state.range)))
     for (const button of byId('map-colour').querySelectorAll<HTMLButtonElement>('button[data-colour]')) button.setAttribute('aria-pressed', String(button.dataset.colour === state.colourBy))
@@ -866,6 +927,9 @@ export function createMap(host: MapHost): MapView {
     coreVisual.clear()
     // A fresh drawing opens on the layout in state, without a morph.
     morph = morphTarget(state.layout)
+    meaningMorph = meaningTarget(state.layout)
+    weights = layoutWeights(morph, meaningMorph)
+    meaningCache = null
     shownDays = timelineDays(g, state.range)
     placeDirty = true
     const layout = g.layout
@@ -874,6 +938,12 @@ export function createMap(host: MapHost): MapView {
     layout.stars.forEach((star, i) => addStar(g, star, i))
     for (const bridge of layout.bridges) graphLinks.push({ source: `h:${bridge.a}`, target: `h:${bridge.b}`, kind: 'bridge', owner: '' })
     claudeVisual = addVisual('claude', [0, 0, 0], 0, { kind: 'claude', key: '', owner: '', sprite: makeSprite('glow', CLAUDE_COLOUR), size: CLAUDE_SIZE, ...labelFor('Claude', 16.8, '#FFFFFF', 18) })
+    // Meaning: one label per cluster, and the "Not embedded" ring's own, each a label with no star; they show only in Meaning.
+    if (g.meaning) {
+      meaningClusters(g).forEach((cluster, i) => addVisual(`m:${cluster.name}`, cluster.centre, i, { kind: 'cluster', key: cluster.name, owner: '', sprite: null, size: 0, ...labelFor(cluster.name, 14, '#E8EEF4', 0) }))
+      const ring = meaningPlaces(g).ring
+      if (ring.ids.length > 0) addVisual('m:ring', ring.labelAt, 0, { kind: 'cluster', key: '', owner: '', sprite: null, size: 0, ...labelFor(ringLabel(ring.ids.length), 12.6, '#A9B8C8', 0) })
+    }
     // One hidden node the library draws as its default sphere: that mesh is where the starfield's classes come from.
     graphNodes.push({ id: 'probe', vi: -1, fx: 0, fy: 0, fz: 0 })
 
@@ -1044,6 +1114,7 @@ export function createMap(host: MapHost): MapView {
       v.target = hubTarget(state, v.owner, key)
       v.labelTarget = hubLabelTarget(state, v.owner)
     }
+    for (const v of visuals) if (v.kind === 'cluster') v.labelTarget = 0.9
     const claude = visuals.find(v => v.kind === 'claude')
     if (claude) {
       claude.target = 0.9
@@ -1079,15 +1150,23 @@ export function createMap(host: MapHost): MapView {
     const g = galaxy
     if (g === null) return
     const blend = morphBlend(morph)
+    weights = layoutWeights(morph, meaningMorph)
     let places: TimelinePlaces | null = null
     if (blend > 0) {
       const made = placesFor(placesCache, g, shownDays, placeDirty)
       placesCache = made.cache
       places = made.places
     }
+    // Meaning's places are made once per galaxy (and again when a star arrives or goes), only while some Meaning is blended in.
+    let meaningAt: MeaningPlaces | null = null
+    if (weights.meaning > 0) {
+      if (meaningCache === null || meaningCache.galaxy !== g || placeDirty) meaningCache = { galaxy: g, places: meaningPlaces(g) }
+      meaningAt = meaningCache.places
+    }
     let moved = false
     for (const v of visuals) {
-      const next = visualPlace(v.home, places === null ? null : awayPlace(places, v.kind, v.slot), blend)
+      const timelineAt = places === null ? null : awayPlace(places, v.kind, v.slot)
+      const next = meaningAt === null ? visualPlace(v.home, timelineAt, blend) : layoutPlace(v.home, meaningAway(meaningAt, v.kind, v.slot), timelineAt, weights)
       if (!samePlace(next, v.position)) moved = true
       v.position = next
       const node = v.node as Any
@@ -1096,6 +1175,7 @@ export function createMap(host: MapHost): MapView {
       node.z = node.fz = next[2]
     }
     placeDirty = false
+    if (moved) moves++
     // The library copies node places to its objects and links only while its engine counts as running (cooldownTicks is 0): this arms one pass, with no d3 tick, so the move shows.
     if (moved) loose().d3ReheatSimulation?.()
   }
@@ -1105,7 +1185,72 @@ export function createMap(host: MapHost): MapView {
     const step = layoutStep(morph, shownDays, state.layout, timelineDays(g, state.range), dt, state.reducedMotion, placeDirty)
     morph = step.morph
     shownDays = step.days
-    if (step.place) placeVisuals()
+    // Meaning's weight moves the same way, at the same speed.
+    const meaningNext = meaningStep(meaningMorph, state.layout, dt, state.reducedMotion)
+    const meaningMoved = meaningNext !== meaningMorph
+    meaningMorph = meaningNext
+    weights = layoutWeights(morph, meaningMorph)
+    if (step.place || meaningMoved) placeVisuals()
+  }
+
+  /** The cyan links between neighbours: one line object drawn as segments, its pairs chosen again only when what they depend on changed, its points written only when a star moved. */
+  function updateSimilar(g: Galaxy) {
+    const opacity = g.meaning ? similarOpacity(state, weights.meaning) : 0
+    let changed = false
+    if (opacity <= 0) {
+      if (similarShown.length > 0) changed = true
+      similarShown = []
+      similarKey = []
+    } else {
+      const key: unknown[] = [g, state.similar, state.layout, state.selected, state.hidden, g.gone.size, shownDays, weights.meaning > SIMILAR_MEANING_MIN]
+      if (key.some((value, i) => value !== similarKey[i])) {
+        similarKey = key
+        similarShown = similarPairs(g, state, shownDays, weights.meaning)
+        changed = true
+      }
+    }
+    if (similarShown.length === 0 && similarLines === null) return
+    if (similarShown.length > similarCapacity && !makeSimilarLines(Math.max(64, similarShown.length * 2))) return
+    if (similarLines === null) return
+    if (changed || similarMoves !== moves) {
+      similarMoves = moves
+      const array = similarLines.geometry.attributes.position.array as Float32Array
+      let n = 0
+      for (const pair of similarShown) {
+        const a = starVisual.get(pair.from)
+        const b = starVisual.get(pair.to)
+        if (a === undefined || b === undefined) continue
+        array.set(a.position, n * 6)
+        array.set(b.position, n * 6 + 3)
+        n++
+      }
+      similarLines.geometry.setDrawRange(0, n * 2)
+      similarLines.geometry.attributes.position.needsUpdate = true
+      similarLines.userData.segments = n
+    }
+    similarLines.material.opacity = opacity
+    similarLines.visible = opacity > 0.003 && (similarLines.userData.segments ?? 0) > 0
+  }
+
+  /** The links' line object, made once the library has drawn a line to copy the class from; false while there is none. */
+  function makeSimilarLines(segments: number): boolean {
+    const scene = (graph as unknown as Loose | null)?.scene?.() as Any
+    const T = three
+    if (!scene || T === null || lineClasses === null) return false
+    releaseParts(similarLines)
+    const geometry = new T.BufferGeometry()
+    geometry.setAttribute('position', new T.BufferAttribute(new Float32Array(segments * 6), 3))
+    const line = new lineClasses.Line(geometry, new lineClasses.Material({ color: Number.parseInt(SIMILAR_COLOUR.slice(1), 16), transparent: true, opacity: 0, depthWrite: false, blending: ADDITIVE }))
+    // The library's Line is one strip; flagged as segments the renderer draws each pair as its own line, as LineSegments does.
+    line.isLineSegments = true
+    line.frustumCulled = false
+    line.visible = false
+    scene.add(line)
+    similarLines = line
+    similarCapacity = segments
+    similarKey = []
+    similarMoves = -1
+    return true
   }
 
   /** Threads, bridges and their particles fade with the topic hubs: each link's own line material (cloned once) carries the fade. */
@@ -1287,8 +1432,10 @@ export function createMap(host: MapHost): MapView {
     stepLayout(dt, galaxy)
     stepFlight(dt)
     const blend = morphBlend(morph)
-    const galaxyFade = galaxyOnlyFade(blend)
-    fadeLinks(linkFadeAt(blend))
+    // Hubs, threads and bridges leave in Timeline and in Meaning alike: what is left of the Galaxy weight.
+    const galaxyFade = weights.galaxy
+    fadeLinks(linkFadeAt(1 - weights.galaxy))
+    updateSimilar(galaxy)
     updateFurniture(blend, state.reducedMotion ? 1 : Math.min(1, dt * 5), galaxy)
     const camera = (graph as unknown as Loose).camera?.() as Any
     const cam: Vec3 = camera ? [camera.position.x, camera.position.y, camera.position.z] : HOME
@@ -1297,7 +1444,7 @@ export function createMap(host: MapHost): MapView {
     for (const spark of stepSparks(sparkPool, dt)) arrive(spark)
     updateMoons(follow, cam, (camera?.fov as number | undefined) ?? 40)
     for (const v of visuals) {
-      v.fade = visualFade(v.kind, galaxyFade)
+      v.fade = visualFade(v.kind, galaxyFade, weights.meaning)
       v.alpha += (v.target - v.alpha) * follow
       v.labelAlpha += (v.labelTarget - v.labelAlpha) * follow
       v.pulse = v.kind === 'star' && v.key === selectedKey ? selectedPulse(clock) : v.kind === 'core' || v.kind === 'claude' ? 0.1 + 0.07 * Math.sin(clock * 1.5 + v.index) : v.pulse * Math.exp(-dt * 2.2)
@@ -1665,6 +1812,8 @@ export function createMap(host: MapHost): MapView {
     const view: number[] = camera.matrixWorldInverse.elements
     const out: Candidate[] = []
     for (const v of visuals) {
+      // A Meaning label is only a label: nothing to pick.
+      if (v.kind === 'cluster') continue
       // In front of the camera only.
       if (view[2]! * v.position[0] + view[6]! * v.position[1] + view[10]! * v.position[2] + view[14]! >= 0) continue
       const screen = l.graph2ScreenCoords(v.position[0], v.position[1], v.position[2]) as { x: number; y: number }
@@ -1776,6 +1925,7 @@ export function createMap(host: MapHost): MapView {
   byId('map-spokes').addEventListener('change', () => dispatch(toggleSpokes(state)))
   byId('map-bridges').addEventListener('change', () => dispatch(toggleBridges(state)))
   byId('map-moons').addEventListener('change', () => dispatch(toggleMoons(state)))
+  byId('map-similar').addEventListener('change', () => dispatch(toggleSimilar(state, galaxy?.meaning ?? false)))
   for (const chip of byId('map-know').querySelectorAll<HTMLButtonElement>('button[data-kind]')) {
     chip.addEventListener('click', () => {
       // A chip is inert until the page holds some knowledge.

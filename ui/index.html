@@ -33,9 +33,10 @@
         <h2 id="map-layout-title" class="rail-title">Layout</h2>
         <div id="map-layout" class="segmented" role="group" aria-label="Layout">
           <button type="button" class="seg-btn" data-layout="galaxy" aria-pressed="true">Galaxy</button>
-          <button type="button" class="seg-btn" data-layout="meaning" aria-pressed="false" disabled title="Needs embeddings">Meaning</button>
+          <button type="button" class="seg-btn" data-layout="meaning" aria-pressed="false" disabled title="Turn on embeddings, then run /mnemosyne-embed apply">Meaning</button>
           <button type="button" class="seg-btn" data-layout="timeline" aria-pressed="false">Timeline</button>
         </div>
+        <p id="map-meaning-hint" class="muted small" hidden>Turn on embeddings, then run /mnemosyne-embed apply</p>
         <div id="map-range-box" class="range-box" hidden>
           <span class="rail-sub">Time range</span>
           <div id="map-range" class="segmented" role="group" aria-label="Time range">
@@ -59,7 +60,7 @@
         <h2 id="map-links-title" class="rail-title">Links</h2>
         <label class="toggle"><input id="map-spokes" type="checkbox" checked><span class="toggle-text">Topic threads</span></label>
         <label class="toggle"><input id="map-bridges" type="checkbox" checked><span class="toggle-text">Bridges</span><span class="swatch sw-gold" aria-hidden="true"></span></label>
-        <label class="toggle" title="Needs embeddings"><input id="map-similar" type="checkbox" disabled><span class="toggle-text">Similar memories</span><span class="swatch sw-cyan" aria-hidden="true"></span></label>
+        <label class="toggle" title="Turn on embeddings, then run /mnemosyne-embed apply"><input id="map-similar" type="checkbox" disabled><span class="toggle-text">Similar memories</span><span class="swatch sw-cyan" aria-hidden="true"></span></label>
         <label class="toggle" title="Needs knowledge extraction"><input id="map-moons" type="checkbox" disabled><span class="toggle-text">Knowledge moons</span><span class="swatch-dots" aria-hidden="true"><span class="lg-dot d-moon-blue"></span><span class="lg-dot d-moon-pink"></span><span class="lg-dot d-moon-green"></span></span></label>
       </section>
 
