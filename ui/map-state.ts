@@ -182,7 +182,7 @@ export type Galaxy = {
   oldestAge: number
   maxRecalls: number
   /** Project colour by owner. */
-  colours: Record<string, string>
+  colours: Map<string, string>
   /** Memories forgotten while the page is open: their stars fade out and no count holds them. */
   gone: Set<string>
 }
@@ -197,9 +197,9 @@ export function buildGalaxy(reply: GalaxyReply, now = Date.now()): Galaxy {
     const saved = star.created ? Date.parse(star.created) : Number.NaN
     return Number.isFinite(saved) ? Math.max(0, Math.floor((now - saved) / DAY_MS)) : 0
   })
-  const colours: Record<string, string> = {}
+  const colours = new Map<string, string>()
   layout.cores.forEach((core, i) => {
-    colours[core.owner] = core.owner === 'global' ? GLOBAL_COLOUR : PALETTE[i % PALETTE.length]!
+    colours.set(core.owner, core.owner === 'global' ? GLOBAL_COLOUR : PALETTE[i % PALETTE.length]!)
   })
   return {
     layout,
@@ -218,7 +218,7 @@ export function buildGalaxy(reply: GalaxyReply, now = Date.now()): Galaxy {
 export const liveStars = (galaxy: Galaxy) => galaxy.layout.stars.filter(star => !galaxy.gone.has(star.id))
 
 /** A project's colour (grey for one the galaxy does not hold). */
-export const projectColour = (galaxy: Galaxy, owner: string) => galaxy.colours[owner] ?? GLOBAL_COLOUR
+export const projectColour = (galaxy: Galaxy, owner: string) => galaxy.colours.get(owner) ?? GLOBAL_COLOUR
 
 /** A star's colour in a mode. */
 export function starColour(galaxy: Galaxy, index: number, mode: ColourBy): string {
@@ -231,17 +231,20 @@ export function starColour(galaxy: Galaxy, index: number, mode: ColourBy): strin
 
 /** The topic name a star belongs to (its hub's). */
 function topicName(galaxy: Galaxy, star: GalaxyStar): string {
-  return galaxy.layout.hubs[galaxy.layout.hubByKey[star.topic] ?? -1]?.name ?? 'Untagged'
+  return galaxy.layout.hubs[slotOf(galaxy.layout.hubByKey, star.topic)]?.name ?? 'Untagged'
 }
 
-const coreLabel = (galaxy: Galaxy, owner: string) => galaxy.layout.cores[galaxy.layout.coreByOwner[owner] ?? -1]?.label ?? owner
+/** The index a layout map holds for a key, or -1: an owner or id named like an Object member (constructor, toString) has no slot unless it was given one. */
+export const slotOf = (map: Record<string, number>, key: string): number => (Object.hasOwn(map, key) ? (map[key] as number) : -1)
+
+const coreLabel = (galaxy: Galaxy, owner: string) => galaxy.layout.cores[slotOf(galaxy.layout.coreByOwner, owner)]?.label ?? owner
 
 /** Topics two projects share, by hub key: the other end of every bridge. */
 export function sharedWith(galaxy: Galaxy, hubKey: string): string[] {
   const owners = new Set<string>()
   for (const bridge of galaxy.layout.bridges) {
     const other = bridge.a === hubKey ? bridge.b : bridge.b === hubKey ? bridge.a : null
-    const hub = other === null ? undefined : galaxy.layout.hubs[galaxy.layout.hubByKey[other] ?? -1]
+    const hub = other === null ? undefined : galaxy.layout.hubs[slotOf(galaxy.layout.hubByKey, other)]
     if (hub !== undefined) owners.add(hub.project)
   }
   return [...owners].map(owner => coreLabel(galaxy, owner)).sort((a, b) => a.localeCompare(b))
@@ -264,8 +267,8 @@ export type MapState = {
   live: boolean
   rotating: boolean
   reducedMotion: boolean
-  /** Owners whose stars are hidden. */
-  hidden: Record<string, true>
+  /** Owners whose stars are hidden (a Set: an owner may be named like an Object member). */
+  hidden: ReadonlySet<string>
   /** The focused project (owner), topic (hub key) and selected memory (id). */
   project: string | null
   topic: string | null
@@ -285,7 +288,7 @@ export function initialState(options: { reducedMotion: boolean; layout?: LayoutN
     live: !options.reducedMotion,
     rotating: !options.reducedMotion,
     reducedMotion: options.reducedMotion,
-    hidden: {},
+    hidden: new Set<string>(),
     project: null,
     topic: null,
     selected: null,
@@ -335,13 +338,13 @@ export const focusProject = (state: MapState, owner: string): MapState => ({ ...
 
 /** Focus a topic (a hub key `<owner>/<tag>`): its project comes into focus too. */
 export function focusTopic(state: MapState, galaxy: Galaxy, key: string): MapState {
-  const hub = galaxy.layout.hubs[galaxy.layout.hubByKey[key] ?? -1]
+  const hub = galaxy.layout.hubs[slotOf(galaxy.layout.hubByKey, key)]
   return hub === undefined ? state : { ...state, project: hub.project, topic: key, selected: null }
 }
 
 /** Select a memory: its project and topic come into focus. */
 export function selectStar(state: MapState, galaxy: Galaxy, id: string): MapState {
-  const star = galaxy.layout.stars[galaxy.layout.starById[id] ?? -1]
+  const star = galaxy.layout.stars[slotOf(galaxy.layout.starById, id)]
   return star === undefined || galaxy.gone.has(id) ? state : { ...state, project: star.owner, topic: star.topic, selected: id }
 }
 
@@ -350,10 +353,10 @@ export const resetView = (state: MapState): MapState => ({ ...state, project: nu
 
 /** Hide or show a project's stars; hiding the focused project clears the focus. */
 export function toggleProject(state: MapState, owner: string): MapState {
-  const hidden = { ...state.hidden }
-  if (hidden[owner]) delete hidden[owner]
-  else hidden[owner] = true
-  const hiding = hidden[owner] === true
+  const hidden = new Set(state.hidden)
+  if (hidden.has(owner)) hidden.delete(owner)
+  else hidden.add(owner)
+  const hiding = hidden.has(owner)
   return hiding && state.project === owner ? { ...state, hidden, project: null, topic: null, selected: null } : { ...state, hidden }
 }
 
@@ -367,7 +370,7 @@ export function pathBar(state: MapState, galaxy: Galaxy): Crumb[] {
   const crumbs: Crumb[] = [{ label: 'All memories', level: 'all', current: state.project === null }]
   if (state.project !== null) crumbs.push({ label: coreLabel(galaxy, state.project), level: 'project', current: state.topic === null })
   if (state.topic !== null) {
-    const hub = galaxy.layout.hubs[galaxy.layout.hubByKey[state.topic] ?? -1]
+    const hub = galaxy.layout.hubs[slotOf(galaxy.layout.hubByKey, state.topic)]
     crumbs.push({ label: hub?.name ?? state.topic, level: 'topic', current: state.selected === null })
   }
   return crumbs
@@ -404,6 +407,15 @@ export function find(galaxy: Galaxy, query: string): Found {
   return { ids, count: n, centre: n === 0 ? null : (centre.map(v => v / n) as Vec3), distance: n > 20 ? 520 : 260 }
 }
 
+export const FIND_FLY_DELAY_MS = 250
+
+/** Whether Find should fly the camera: only to a match centre it has not already flown to (a keystroke that leaves the centre where it was does not restart the flight). */
+export function shouldFlyToFound(found: Found, lastFlown: Vec3 | null): boolean {
+  if (found.centre === null) return false
+  if (lastFlown === null) return true
+  return Math.hypot(found.centre[0] - lastFlown[0], found.centre[1] - lastFlown[1], found.centre[2] - lastFlown[2]) > 1
+}
+
 /** The Find box's count: '' for an empty query, else 'n found'. */
 export const foundText = (query: string, found: Found) => (query.trim() === '' ? '' : `${found.count} found`)
 
@@ -417,7 +429,7 @@ const DIM_NO_MATCH = 0.08
 export function starTarget(galaxy: Galaxy, index: number, state: MapState, found: Found | null): number {
   const star = galaxy.layout.stars[index]
   if (star === undefined) return 0
-  if (state.hidden[star.owner] || galaxy.gone.has(star.id)) return 0
+  if (state.hidden.has(star.owner) || galaxy.gone.has(star.id)) return 0
   if (state.selected === star.id) return 1
   let a = starBrightness(galaxy.ages[index] ?? 0, galaxy.oldestAge)
   if (state.project !== null && star.owner !== state.project) a *= DIM_OTHER_PROJECT
@@ -427,18 +439,18 @@ export function starTarget(galaxy: Galaxy, index: number, state: MapState, found
 }
 
 /** A project core's opacity: 0 hidden, 0.35 beside the focused project, else 1. */
-export const coreTarget = (state: MapState, owner: string) => (state.hidden[owner] ? 0 : state.project !== null && state.project !== owner ? 0.35 : 1)
+export const coreTarget = (state: MapState, owner: string) => (state.hidden.has(owner) ? 0 : state.project !== null && state.project !== owner ? 0.35 : 1)
 
 /** A topic hub's opacity: 0 hidden; 1 in the focused project (0.5 beside the focused topic), 0.1 in another, 0.55 with no focus. */
 export function hubTarget(state: MapState, project: string, key: string): number {
-  if (state.hidden[project]) return 0
+  if (state.hidden.has(project)) return 0
   if (state.project === null) return 0.55
   if (state.project !== project) return 0.1
   return state.topic !== null && state.topic !== key ? 0.5 : 1
 }
 
 /** Topic labels show only for the focused project. */
-export const hubLabelTarget = (state: MapState, project: string) => (state.project === project && !state.hidden[project] ? 0.95 : 0)
+export const hubLabelTarget = (state: MapState, project: string) => (state.project === project && !state.hidden.has(project) ? 0.95 : 0)
 
 // ---- Picking and the tooltip ----
 
@@ -462,6 +474,9 @@ export function pickNearest(candidates: readonly Candidate[], mx: number, my: nu
   return best
 }
 
+/** Only the main button picks or flies: a right or middle click is not a click on a star. */
+export const isPrimary = (event: { button: number }) => event.button === 0
+
 /** A pointer that moved more than 5 px between press and release was an orbit, never a click. */
 export const isClick = (down: { x: number; y: number }, up: { x: number; y: number }) => Math.hypot(up.x - down.x, up.y - down.y) <= 5
 
@@ -480,16 +495,16 @@ const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
 export function tooltip(galaxy: Galaxy, hit: Hit): { title: string; sub: string } | null {
   const layout = galaxy.layout
   if (hit.kind === 'star') {
-    const star = layout.stars[layout.starById[hit.id] ?? -1]
+    const star = layout.stars[slotOf(layout.starById, hit.id)]
     if (star === undefined || galaxy.gone.has(star.id)) return null
     const saved = savedDay(star.created)
     return { title: `${topicName(galaxy, star)} · ${coreLabel(galaxy, star.owner)}`, sub: `${plural(star.recalls, 'recall')}${saved ? ` · saved ${saved}` : ''}${star.label ? ` — ${star.label}` : ''}` }
   }
   if (hit.kind === 'hub') {
-    const hub = layout.hubs[layout.hubByKey[hit.id] ?? -1]
+    const hub = layout.hubs[slotOf(layout.hubByKey, hit.id)]
     return hub === undefined ? null : { title: `Topic: ${hub.name}`, sub: `${plural(hub.count, 'memory').replace('memorys', 'memories')} in ${coreLabel(galaxy, hub.project)}. Click to fly in.` }
   }
-  const core = layout.cores[layout.coreByOwner[hit.id] ?? -1]
+  const core = layout.cores[slotOf(layout.coreByOwner, hit.id)]
   const topics = layout.hubs.filter(hub => hub.project === hit.id).length
   return core === undefined ? null : { title: core.label, sub: `${core.count} ${core.count === 1 ? 'memory' : 'memories'}, ${plural(topics, 'topic')}. Click to fly in.` }
 }
@@ -509,14 +524,14 @@ export function flightTo(galaxy: Galaxy, kind: 'core' | 'hub' | 'star' | 'reset'
   const layout = galaxy.layout
   if (kind === 'reset') return { target: [0, 0, 0], distance: RESET_DISTANCE }
   if (kind === 'core') {
-    const core = layout.cores[layout.coreByOwner[id] ?? -1]
+    const core = layout.cores[slotOf(layout.coreByOwner, id)]
     return core === undefined ? null : { target: core.position, distance: core.radius * CORE_DISTANCE_FACTOR }
   }
   if (kind === 'hub') {
-    const hub = layout.hubs[layout.hubByKey[id] ?? -1]
+    const hub = layout.hubs[slotOf(layout.hubByKey, id)]
     return hub === undefined ? null : { target: hub.position, distance: HUB_DISTANCE }
   }
-  const star = layout.stars[layout.starById[id] ?? -1]
+  const star = layout.stars[slotOf(layout.starById, id)]
   return star === undefined ? null : { target: star.position, distance: STAR_DISTANCE }
 }
 
@@ -552,7 +567,7 @@ export function projectRows(galaxy: Galaxy, state: MapState): ProjectRow[] {
     label: core.label,
     colour: projectColour(galaxy, core.owner),
     count: liveStars(galaxy).filter(star => star.owner === core.owner).length,
-    shown: !state.hidden[core.owner],
+    shown: !state.hidden.has(core.owner),
     focused: state.project === core.owner,
   }))
 }
@@ -585,7 +600,7 @@ const sum = (values: readonly number[]) => values.reduce((a, b) => a + b, 0)
 
 export function inspector(galaxy: Galaxy, state: MapState): Inspector {
   const layout = galaxy.layout
-  const star = state.selected === null || galaxy.gone.has(state.selected) ? undefined : layout.stars[layout.starById[state.selected] ?? -1]
+  const star = state.selected === null || galaxy.gone.has(state.selected) ? undefined : layout.stars[slotOf(layout.starById, state.selected)]
   if (star !== undefined) {
     const saved = savedDay(star.created)
     return {
@@ -605,7 +620,7 @@ export function inspector(galaxy: Galaxy, state: MapState): Inspector {
       similar: { note: 'Similar memories need embeddings.' },
     }
   }
-  const hub = state.topic === null ? undefined : layout.hubs[layout.hubByKey[state.topic] ?? -1]
+  const hub = state.topic === null ? undefined : layout.hubs[slotOf(layout.hubByKey, state.topic)]
   if (hub !== undefined) {
     const members = liveStars(galaxy).filter(s => s.topic === hub.key)
     const shared = sharedWith(galaxy, hub.key)
@@ -623,7 +638,7 @@ export function inspector(galaxy: Galaxy, state: MapState): Inspector {
       hint: 'Click a star to read that memory.',
     }
   }
-  const core = state.project === null ? undefined : layout.cores[layout.coreByOwner[state.project] ?? -1]
+  const core = state.project === null ? undefined : layout.cores[slotOf(layout.coreByOwner, state.project)]
   if (core !== undefined) {
     const members = liveStars(galaxy).filter(s => s.owner === core.owner)
     return {
@@ -690,25 +705,25 @@ export function leanRow(detail: unknown): GalaxyMemory | null {
 }
 
 /** The ids of an event that are stars of the galaxy now (a forgotten one is not). */
-export const eventStars = (galaxy: Galaxy, event: MapEvent): string[] => event.ids.filter(id => galaxy.layout.starById[id] !== undefined && !galaxy.gone.has(id))
+export const eventStars = (galaxy: Galaxy, event: MapEvent): string[] => event.ids.filter(id => slotOf(galaxy.layout.starById, id) >= 0 && !galaxy.gone.has(id))
 
 /** Places one new star by the layout's rule and counts it everywhere; its index, or -1 when the memory is already on the map. */
 export function addMemory(galaxy: Galaxy, row: GalaxyMemory): number {
-  if (galaxy.layout.starById[row.id] !== undefined) return -1
+  if (slotOf(galaxy.layout.starById, row.id) >= 0) return -1
   const star = placeOne(galaxy.layout, row)
-  const core = galaxy.layout.cores[galaxy.layout.coreByOwner[star.owner] ?? -1]
+  const core = galaxy.layout.cores[slotOf(galaxy.layout.coreByOwner, star.owner)]
   if (core) core.count++
   galaxy.ages.push(0)
   galaxy.total++
   galaxy.shown++
   galaxy.maxRecalls = Math.max(galaxy.maxRecalls, star.recalls)
-  if (galaxy.colours[star.owner] === undefined) galaxy.colours[star.owner] = PALETTE[(galaxy.layout.cores.length - 1) % PALETTE.length]!
-  return galaxy.layout.starById[row.id] ?? -1
+  if (!galaxy.colours.has(star.owner)) galaxy.colours.set(star.owner, PALETTE[(galaxy.layout.cores.length - 1) % PALETTE.length]!)
+  return slotOf(galaxy.layout.starById, row.id)
 }
 
 /** A recall raises the star's count (its size and colour follow); false when it is not on the map. */
 export function recallMemory(galaxy: Galaxy, id: string): boolean {
-  const star = galaxy.layout.stars[galaxy.layout.starById[id] ?? -1]
+  const star = galaxy.layout.stars[slotOf(galaxy.layout.starById, id)]
   if (star === undefined || galaxy.gone.has(id)) return false
   star.recalls++
   galaxy.maxRecalls = Math.max(galaxy.maxRecalls, star.recalls)
@@ -717,20 +732,20 @@ export function recallMemory(galaxy: Galaxy, id: string): boolean {
 
 /** An update makes the memory new again: age 0. */
 export function touchMemory(galaxy: Galaxy, id: string): boolean {
-  const index = galaxy.layout.starById[id]
-  if (index === undefined || galaxy.gone.has(id)) return false
+  const index = slotOf(galaxy.layout.starById, id)
+  if (index < 0 || galaxy.gone.has(id)) return false
   galaxy.ages[index] = 0
   return true
 }
 
 /** A forget removes the star from every count; false when it is not on the map. */
 export function forgetMemory(galaxy: Galaxy, id: string): boolean {
-  const star = galaxy.layout.stars[galaxy.layout.starById[id] ?? -1]
+  const star = galaxy.layout.stars[slotOf(galaxy.layout.starById, id)]
   if (star === undefined || galaxy.gone.has(id)) return false
   galaxy.gone.add(id)
-  const hub = galaxy.layout.hubs[galaxy.layout.hubByKey[star.topic] ?? -1]
+  const hub = galaxy.layout.hubs[slotOf(galaxy.layout.hubByKey, star.topic)]
   if (hub) hub.count = Math.max(0, hub.count - 1)
-  const core = galaxy.layout.cores[galaxy.layout.coreByOwner[star.owner] ?? -1]
+  const core = galaxy.layout.cores[slotOf(galaxy.layout.coreByOwner, star.owner)]
   if (core) core.count = Math.max(0, core.count - 1)
   galaxy.total = Math.max(0, galaxy.total - 1)
   galaxy.shown = Math.max(0, galaxy.shown - 1)
@@ -753,6 +768,9 @@ type Layer = 'recall' | 'write'
 export const layerOf = (kind: MapEventKind): Layer => (kind === 'recall' ? 'recall' : 'write')
 export const layerOn = (state: MapState, kind: MapEventKind) => (layerOf(kind) === 'recall' ? state.layerRecall : state.layerWrite)
 export const toggleLive = (state: MapState): MapState => ({ ...state, live: !state.live })
+
+/** The Live pill: On only while the page's stream is connected and Live is on; otherwise Paused, so it never says On over a feed that cannot fill. */
+export const liveLabel = (state: MapState, connected: boolean): 'On' | 'Paused' => (state.live && connected ? 'On' : 'Paused')
 
 /** The app a client name stands for: Codex, Cursor, Claude Code, a demo, else the name itself ('' when unknown). */
 export function appName(client: string): string {
@@ -778,7 +796,7 @@ const clockOf = (value: string) => {
 
 /** One row of the strip: time, kind badge, a sentence naming the topic and project, the app, and whether it is a demo. */
 export function stripRow(galaxy: Galaxy, event: MapEvent, hits: number): StripRow {
-  const first = galaxy.layout.stars[galaxy.layout.starById[event.ids[0] ?? ''] ?? -1]
+  const first = galaxy.layout.stars[slotOf(galaxy.layout.starById, event.ids[0] ?? '')]
   const topic = first ? topicName(galaxy, first) : (event.topic ?? '')
   const owner = first?.owner ?? event.owner ?? ''
   const where = [topic, owner === '' ? '' : coreLabel(galaxy, owner)].filter(part => part !== '').join(' · ')

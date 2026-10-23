@@ -510,7 +510,7 @@ function show(view: View) {
     if (view === 'activity') startActivity()
     if (view === 'search') byId<HTMLInputElement>('search-query').focus()
     // The map (and its library, under /vendor/) loads only when the Map tab first opens.
-    if (view === 'map') map = createMap({ api: path => api(path), openMemory: openInMemories, status: setStatus, events: listener => useEvents().subscribe(listener) })
+    if (view === 'map') map = createMap({ api: path => api(path), openMemory: openInMemories, status: setStatus, events: listener => useEvents().subscribe(listener), streamStatus: watcher => useEvents().onStatus(status => watcher(status)) })
   }
   if (view === 'activity' && feedDirty) {
     feedDirty = false

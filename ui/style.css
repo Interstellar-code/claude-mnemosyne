@@ -414,10 +414,8 @@ button.toggle-name:focus-visible { outline: 2px solid var(--accent); outline-off
 .chip-btn[aria-disabled='true'] { opacity: 0.6; cursor: not-allowed; }
 
 .map-dot { display: inline-block; flex: none; width: 10px; height: 10px; border-radius: 50%; }
-.rail-items .map-dot { width: 8px; height: 8px; }
 .map-dot.big { width: 10px; height: 10px; }
 .rail-list { display: flex; flex-direction: column; gap: 2px; }
-.rail-items { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 2px; }
 .rail-item {
   width: 100%;
   display: flex;
@@ -619,26 +617,6 @@ button.toggle-name:focus-visible { outline: 2px solid var(--accent); outline-off
 .insp-section { display: flex; flex-direction: column; gap: 8px; padding-top: 12px; border-top: 1px solid var(--line); }
 .insp-section-title { margin: 0; font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
 .insp-note { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
-.insp-items { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; }
-.insp-item { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; overflow-wrap: anywhere; }
-.insp-item-kind { font-size: 12px; font-weight: 600; }
-.insp-item-text { font-size: 13px; }
-.insp-item .mono { font-size: 11px; }
-.insp-items .link {
-  width: 100%;
-  min-height: 36px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 8px;
-  border-radius: 8px;
-  color: var(--text);
-  text-align: left;
-  text-decoration: none;
-  overflow-wrap: anywhere;
-}
-.insp-items .link:hover { background: #F2F8F7; color: var(--text); }
-.insp-items .link .mono { margin-left: auto; flex: none; }
 
 /* Narrow screens: the rail, the stage and the inspector stack, with 16px gutters. */
 @media (max-width: 900px) {
