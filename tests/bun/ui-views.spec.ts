@@ -9,10 +9,17 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { join } from 'node:path'
 import { appendActivity } from '../../bin/activity'
 import { CSP, mergeHits, PREVIEW_CHARS, startServer } from '../../ui/server'
+import { buildGalaxy, GLOBAL_COLOUR } from '../../ui/map-state'
 import type { Started } from '../../ui/server'
 import { body, engineCall, ROOT, tempDir, toolCall } from './helpers'
 
 const CLI = join(ROOT, 'engine', 'src', 'cli.ts')
+/** The Map's project palette in the order buildGalaxy hands it out, read off a galaxy of 24 projects (so it wraps). */
+const PALETTE = [
+  ...new Set(
+    buildGalaxy({ projects: Array.from({ length: 24 }, (_, i) => ({ owner: `p${String(i).padStart(2, '0')}`, label: '', count: 0, recalls: 0 })), memories: [], knowledge: [], meaning: false, total: 0, shown: 0 }).colours.values(),
+  ),
+]
 const MARKUP = '<script>alert(1)</script> and <img src=x onerror=alert(1)>'
 const LONG = `long ${'word '.repeat(100)}end`
 
@@ -321,9 +328,19 @@ describe('the dashboard views on a real store', () => {
     // Across owners: the C3 default owner, and `owners` records how many were searched (review r1 LOW 6).
     const across = logLines().slice(all)
     expect(across).toMatchObject([{ action: 'recall', origin: 'ui', owner: 'global', text: 'apple', ok: true, owners: 3 }])
-    expect(Object.keys(across[0]).sort()).toEqual(['action', 'count', 'ids', 'ok', 'origin', 'owner', 'owners', 't', 'text'])
+    expect(Object.keys(across[0]).sort()).toEqual(['action', 'client', 'count', 'ids', 'ok', 'origin', 'owner', 'owners', 't', 'text'])
   })
 
+
+  test('QAPAGE item 5: dashboard searches stay in the log (origin ui) but the health report does not count them as recalls', async () => {
+    const total = async () => ((await (await get('/api/health-report')).json()) as { recallsPerDay: { count: number }[] }).recallsPerDay.reduce((sum, day) => sum + day.count, 0)
+    const before = await total()
+    const linesBefore = logLines().length
+    for (const query of ['apple', 'durian', 'cherry', 'apple pie']) expect((await post('/api/search', { query })).status).toBe(200)
+    const added = logLines().slice(linesBefore)
+    expect(added.map(line => [line.action, line.origin])).toEqual([['recall', 'ui'], ['recall', 'ui'], ['recall', 'ui'], ['recall', 'ui']])
+    expect(await total()).toBe(before)
+  })
   test('VIEW.4.a2: a memory holding <script> and <img onerror> comes back as a JSON string, with the CSP on the page', async () => {
     const response = await get(`/api/memories/${ids.markup}`)
     expect(response.headers.get('content-type')).toBe('application/json; charset=utf-8')
@@ -339,6 +356,40 @@ describe('the dashboard views on a real store', () => {
     expect(page.headers.get('content-security-policy')).toBe(CSP)
     expect(CSP).toContain("script-src 'self'")
     expect(CSP).not.toContain('unsafe-')
+  })
+
+  test('ACT.1.a1/a3, ACT.2: the served Activity page has the header row, the key, the App drop-down and the session chip; header and rows share one CSS rule', async () => {
+    const html = await (await fetch(`${base}/`)).text()
+    const css = await (await fetch(`${base}/style.css`)).text()
+    const view = html.slice(html.indexOf('id="view-activity"'), html.indexOf('id="view-search"'))
+    const head = /<div class="feed-head">([\s\S]*?)<\/div>/.exec(view)?.[1] ?? ''
+    expect([...head.matchAll(/<span>([^<]*)<\/span>/g)].map(m => m[1])).toEqual(['Time', 'Action', 'Source', 'Project', 'What', 'Result'])
+    // The header sits above the rows inside one box, and the key under it.
+    expect(view.indexOf('class="feed-head"')).toBeLessThan(view.indexOf('id="act-list"'))
+    expect(view.indexOf('id="act-list"')).toBeLessThan(view.indexOf('id="act-key"'))
+    const key = view.slice(view.indexOf('id="act-key"'), view.indexOf('</dl>', view.indexOf('id="act-key"')))
+    // The mockup's words (design/Activity.dc.html), term by term.
+    expect([...key.matchAll(/<dt class="mono">([^<]*)<\/dt><dd>([^<]*)<\/dd>/g)].map(m => [m[1], m[2]])).toEqual([
+      ['hook', 'automatic recall on a first prompt or after a compaction'],
+      ['tool', 'Claude called a memory tool in Claude Code'],
+      ['trigger', 'you typed a trigger phrase, such as \u201cremember that\u201d'],
+      ['external', 'another MCP client, through mnemosyne-mcp'],
+      ['ui', 'this dashboard (search or forget)'],
+      ['backfill', 'the one-time tagging run, /mnemosyne-tags'],
+    ])
+    expect([...view.matchAll(/<option value="([^"]*)"/g)].map(m => m[1])).toEqual(['all', 'Claude Code', 'Codex', 'Cursor', 'Dashboard'])
+    expect(/<option value="all">All<\/option>/.test(view)).toBe(true)
+    expect(view).toContain('id="act-session"')
+    // One rule gives the header and the rows the same columns, and one rule inside one media query changes both.
+    const columns = [...css.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}]*)\{[^{}]*grid-template-columns[^{}]*\}/g)].map(m => m[1]!.replace(/@media[^{]*\{/, '').trim())
+    expect(columns.filter(selector => /\.(feed-head|event)\b/.test(selector))).toEqual(['.feed-head, .event', '.feed-head, .event'])
+    // The header and the rows change together: both rules sit inside one media query, and the stylesheet may hold more.
+    expect(css.match(/@media \([^)]*\)/g)?.length).toBeGreaterThan(0)
+    const phone = /@media[^{]*\{((?:[^{}]*\{[^{}]*\})*)\s*\}/g
+    const together = [...css.matchAll(phone)].filter(m => /\.feed-head, \.event\s*\{[^}]*grid-template-columns/.test(m[1]!))
+    expect(together.length).toBe(1)
+    // The header is uppercase with spaced letters, like the mockup.
+    expect(/\.feed-head \{[^}]*text-transform: uppercase;[^}]*letter-spacing: 0\.06em/.test(css)).toBe(true)
   })
 
   test('VIEW.2.a1: GET /api/activity returns the last N lines, newest first', async () => {
@@ -528,3 +579,744 @@ function readLines(response: Response) {
     },
   }
 }
+
+// ---- VIEWS.3: the Activity tab shows who wrote each memory ----
+
+describe('VIEWS.3: provenance badges on saved memories in the Activity tab', () => {
+  let app: Record<string, any>
+  let saved: unknown
+
+  class Node {
+    children: (Node | { data: string; textContent: string })[] = []
+    attributes = new Map<string, string>()
+    className = ''
+    hidden = false
+    title = ''
+    type = ''
+    constructor(public tagName: string) {}
+    get textContent(): string {
+      return this.children.map(child => child.textContent).join('')
+    }
+    set textContent(value: string) {
+      this.children = value === '' ? [] : [{ data: String(value), textContent: String(value) }]
+    }
+    append(...nodes: (Node | string)[]) {
+      for (const node of nodes) this.children.push(typeof node === 'string' ? { data: node, textContent: node } : node)
+    }
+    setAttribute(name: string, value: string) {
+      this.attributes.set(name, value)
+    }
+    addEventListener() {}
+    all(): Node[] {
+      return [this, ...this.children.flatMap(child => (child instanceof Node ? child.all() : []))]
+    }
+    style = {}
+  }
+
+  beforeAll(async () => {
+    // A path tsc does not follow: ui/app.ts is DOM code, checked by ui/tsconfig.json.
+    app = await import(join(ROOT, 'ui', 'app.ts'))
+    saved = (globalThis as Record<string, unknown>).document
+    ;(globalThis as Record<string, unknown>).document = { createElement: (tag: string) => new Node(tag), createTextNode: (data: string) => ({ data, textContent: data }) }
+  })
+  afterAll(() => {
+    ;(globalThis as Record<string, unknown>).document = saved
+  })
+
+  // Real-shaped save lines of the CTX format with the KNOWX.1 fields.
+  const save = { t: '2026-10-23T10:00:00.000Z', action: 'remember', origin: 'trigger', owner: 'project-x-1a2b', text: 'always use bun', ids: ['m1'], count: 1, ok: true, client: 'claude-code', session: 'a1b2c3d4-0000-4000-8000-aaaaaaaaaaaa', veracity: 'stated' }
+
+  test('VIEWS.3.a1: you said (human), Claude (agent in Claude Code), Codex or the outside app\'s name (agent), nothing without author_type', () => {
+    expect(app.provenanceBadge({ ...save, author_type: 'human' })).toBe('you said')
+    expect(app.provenanceBadge({ ...save, origin: 'tool', author_type: 'agent' })).toBe('Claude')
+    expect(app.provenanceBadge({ ...save, origin: 'external', client: 'codex-mcp-client', author_type: 'agent' })).toBe('Codex')
+    expect(app.provenanceBadge({ ...save, origin: 'external', client: 'cursor-vscode', author_type: 'agent' })).toBe('Cursor')
+    expect(app.provenanceBadge({ ...save, origin: 'external', client: 'zed', author_type: 'agent' })).toBe('zed')
+    expect(app.provenanceBadge({ ...save, origin: 'external', client: undefined, author_type: 'agent' })).toBe('agent')
+    expect(app.provenanceBadge({ ...save, author_type: 'system' })).toBe('system')
+    // No author_type, or a value the engine does not use: no badge.
+    expect(app.provenanceBadge(save)).toBe('')
+    expect(app.provenanceBadge({ ...save, author_type: 'robot' })).toBe('')
+    // Only a save has an author.
+    expect(app.provenanceBadge({ ...save, action: 'recall', author_type: 'human' })).toBe('')
+    expect(app.provenanceBadge({ ...save, action: 'update', author_type: 'agent' })).toBe('')
+  })
+
+  test('VIEWS.3.a1: a save row shows the badge before its text, the other rows show none, and the row keeps its six cells', () => {
+    const row = (line: unknown) => app.activityItem(line, () => {}) as Node
+    const human = row({ ...save, author_type: 'human' })
+    expect(human.children).toHaveLength(6)
+    const what = human.children[4] as Node
+    expect(what.className).toBe('what')
+    expect((what.children[0] as Node).textContent).toBe('you said')
+    expect((what.children[0] as Node).className).toContain('prov-human')
+    expect(what.textContent).toBe('you saidalways use bun')
+    const agent = row({ ...save, origin: 'tool', author_type: 'agent' })
+    expect(((agent.children[4] as Node).children[0] as Node).className).toContain('prov-agent')
+    // An old save and a recall have no badge, and the text is alone in the cell.
+    for (const line of [save, { ...save, action: 'recall', author_type: 'human' }]) {
+      const plain = row(line)
+      expect(plain.children).toHaveLength(6)
+      expect((plain.children[4] as Node).textContent).toBe('always use bun')
+      expect((plain.children[4] as Node).all().filter(n => n.className.includes('prov'))).toEqual([])
+    }
+  })
+
+  test('VIEWS.3.a1: an outside app\'s name in the badge is text, never markup', () => {
+    const MARKUP = '<img src=x onerror=alert(1)>'
+    const line = { ...save, origin: 'external', client: MARKUP, author_type: 'agent' }
+    expect(app.provenanceBadge(line)).toBe(MARKUP)
+    const what = (app.activityItem(line, () => {}) as Node).children[4] as Node
+    expect(what.all().map(n => n.tagName).filter(tag => tag !== 'span')).toEqual([])
+    expect((what.children[0] as Node).textContent).toBe(MARKUP)
+    expect(what.all().some(n => [...n.attributes.keys()].some(name => /^on/i.test(name)))).toBe(false)
+  })
+
+  test('VIEWS.3.a2: the key under the list explains the badges, and the original key is still there', () => {
+    const html = readFileSync(join(ROOT, 'ui', 'index.html'), 'utf8')
+    const view = html.slice(html.indexOf('id="view-activity"'), html.indexOf('id="view-search"'))
+    const prov = view.slice(view.indexOf('id="act-prov-key"'), view.indexOf('</dl>', view.indexOf('id="act-prov-key"')))
+    expect(prov).toContain('you said')
+    expect(prov).toContain('Claude')
+    expect(prov).toContain('Codex')
+    expect(prov).toContain('no badge')
+    expect(view.indexOf('id="act-key"')).toBeLessThan(view.indexOf('id="act-prov-key"'))
+    expect(view.indexOf('id="act-list"')).toBeLessThan(view.indexOf('id="act-prov-key"'))
+    expect(readFileSync(join(ROOT, 'ui', 'style.css'), 'utf8')).toMatch(/\.prov-human \{/)
+  })
+})
+
+// VIEWS R2: the app.ts glue of the Knowledge and Health tabs (loadKnowledge, loadHealthReport,
+// drawKnowledge, drawHealth, forgetById), run without a browser: a stand-in document whose
+// elements are the ids of the real index.html, and fetch routed to a real server over a real
+// engine store. Only the network edge (the token and Origin the page would send) and the DOM are faked.
+describe('VIEWS R2: the Knowledge and Health glue in app.ts', () => {
+  const temp = tempDir('ui-views-glue')
+  const store = join(temp.dir, 'store')
+  const ids: string[] = []
+  let server: Started
+  let app: Record<string, any>
+  let saved: unknown
+  const realFetch = globalThis.fetch
+  let mode: 'real' | 'fail500' | 'throw' = 'real'
+  const calls: { path: string; method: string; body: string }[] = []
+  const focused: AppNode[] = []
+
+  class AppText {
+    constructor(public data: string) {}
+    get textContent() {
+      return this.data
+    }
+  }
+  class AppNode {
+    children: (AppNode | AppText)[] = []
+    attributes = new Map<string, string>()
+    dataset: Record<string, string> = {}
+    style: Record<string, string> = {}
+    className = ''
+    hidden = false
+    disabled = false
+    type = ''
+    title = ''
+    colSpan = 1
+    listeners = new Map<string, ((event: unknown) => void)[]>()
+    constructor(public tagName: string) {}
+    get textContent(): string {
+      return this.children.map(child => child.textContent).join('')
+    }
+    set textContent(value: string) {
+      this.children = value === '' ? [] : [new AppText(String(value))]
+    }
+    append(...nodes: (AppNode | AppText | string)[]) {
+      for (const node of nodes) this.children.push(typeof node === 'string' ? new AppText(node) : node)
+    }
+    replaceChildren(...nodes: (AppNode | AppText | string)[]) {
+      this.children = []
+      this.append(...nodes)
+    }
+    setAttribute(name: string, value: string) {
+      this.attributes.set(name, String(value))
+    }
+    removeAttribute(name: string) {
+      this.attributes.delete(name)
+    }
+    addEventListener(type: string, listener: (event: unknown) => void) {
+      this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener])
+    }
+    fire(type: string) {
+      for (const listener of this.listeners.get(type) ?? []) listener({})
+    }
+    // The focus spy.
+    focus() {
+      focused.push(this)
+    }
+    querySelector(selector: string) {
+      return this.all().find(node => node !== this && node.tagName === selector) ?? null
+    }
+    querySelectorAll() {
+      return []
+    }
+    all(): AppNode[] {
+      return [this, ...this.children.flatMap(child => (child instanceof AppNode ? child.all() : []))]
+    }
+    buttons() {
+      return this.all().filter(node => node.tagName === 'button')
+    }
+  }
+
+  // One node per id of the real page, hidden as the markup has it.
+  const page = new Map<string, AppNode>()
+  const html = readFileSync(join(ROOT, 'ui', 'index.html'), 'utf8')
+  for (const tag of html.matchAll(/<(\w+)\b[^>]*\bid="([^"]+)"[^>]*>/g)) {
+    const node = new AppNode(tag[1]!)
+    node.hidden = /\shidden[\s>]/.test(tag[0])
+    page.set(tag[2]!, node)
+  }
+  const byId = (id: string) => page.get(id)!
+
+  /** Waits until `check` holds (the page's forget and reload run in the background). */
+  async function until(check: () => boolean, what: string) {
+    for (let i = 0; i < 200 && !check(); i++) await Bun.sleep(10)
+    if (!check()) throw new Error(`timed out waiting for ${what}`)
+  }
+
+  beforeAll(async () => {
+    mkdirSync(store, { recursive: true })
+    for (const [i, content] of ['first never recalled note', 'second never recalled note', 'third never recalled note', 'fourth note, forgotten from Memories'].entries()) {
+      const reply = body((await engineCall(CLI, store, 'project-glue-1a2b', [toolCall(1, 'mnemopi_remember', { content })])).get(1)) as { memory_id: string }
+      ids[i] = reply.memory_id
+      await Bun.sleep(15)
+    }
+    const prompt = body((await engineCall(CLI, store, 'project-glue-1a2b', [toolCall(2, 'mnemopi_knowledge_prompt', { memory_id: ids[3] })])).get(2)) as { sha256: string }
+    const reply = JSON.stringify({ facts: ['Glue fact'], preferences: [], instructions: ['Always glue'], timelines: [], kg: [{ subject: 'glue', predicate: 'holds', object: 'tabs' }] })
+    await engineCall(CLI, store, 'project-glue-1a2b', [toolCall(3, 'mnemopi_knowledge_store', { memory_id: ids[3], reply, sha256: prompt.sha256 })])
+    server = await startServer({ root: join(temp.dir, 'root'), store, cli: CLI, activityLog: '', pluginRoot: ROOT })
+    app = await import(join(ROOT, 'ui', 'app.ts'))
+    const g = globalThis as Record<string, unknown>
+    saved = g.document
+    g.document = { createElement: (tag: string) => new AppNode(tag.toLowerCase()), createTextNode: (data: string) => new AppText(data), getElementById: (id: string) => page.get(id) ?? null }
+    g.fetch = async (path: string, init: RequestInit = {}) => {
+      calls.push({ path, method: init.method ?? 'GET', body: typeof init.body === 'string' ? init.body : '' })
+      if (mode === 'fail500') return new Response(JSON.stringify({ error: 'boom' }), { status: 500 })
+      if (mode === 'throw') throw new TypeError('network down')
+      const headers = { ...(init.headers as Record<string, string>), Authorization: `Bearer ${server.token}`, Origin: `http://127.0.0.1:${server.port}` }
+      return realFetch(`http://127.0.0.1:${server.port}${path}`, { ...init, headers })
+    }
+  }, 180_000)
+
+  afterAll(() => {
+    const g = globalThis as Record<string, unknown>
+    g.document = saved
+    g.fetch = realFetch
+    server?.stop()
+    temp.dispose()
+  })
+
+  test('item 3: a failed load writes the error in the tab\'s own status line with Try again; the body stays hidden; Try again loads it', async () => {
+    const globalStatus = byId('status').textContent
+    mode = 'fail500'
+    await app.loadKnowledge()
+    expect(byId('know-status').textContent).toBe('Could not load the knowledge: the server answered 500')
+    expect(byId('know-status').className).toContain('is-error')
+    expect(byId('know-status').hidden).toBe(false)
+    expect(byId('know-retry').hidden).toBe(false)
+    expect(byId('know-body').hidden).toBe(true)
+    mode = 'throw'
+    await app.loadHealthReport()
+    expect(byId('health-status').textContent).toBe('Could not load the health report: network down')
+    expect(byId('health-status').className).toContain('is-error')
+    expect(byId('health-status').hidden).toBe(false)
+    expect(byId('health-retry').hidden).toBe(false)
+    expect(byId('health-body').hidden).toBe(true)
+    // The page's global status line is left alone.
+    expect(byId('status').textContent).toBe(globalStatus)
+
+    mode = 'real'
+    app.wireKnowledgeHealth()
+    byId('know-retry').fire('click')
+    byId('health-retry').fire('click')
+    await until(() => !byId('know-body').hidden && !byId('health-body').hidden, 'both tabs to load')
+    expect(byId('know-retry').hidden).toBe(true)
+    expect(byId('know-status').className).not.toContain('is-error')
+    expect(byId('know-status').textContent).toContain('cannot say whether extraction is on')
+    expect(byId('health-retry').hidden).toBe(true)
+    expect(byId('health-status').hidden).toBe(true)
+  })
+
+  test('drawKnowledge: the real reply drawn, the kind buttons are aria-pressed toggles, picking Instructions shows its status', async () => {
+    await app.loadKnowledge()
+    const tabs = byId('know-tabs').children as AppNode[]
+    expect(tabs.map(tab => tab.attributes.get('aria-pressed'))).toEqual(['true', 'false', 'false', 'false', 'false'])
+    expect(tabs.map(tab => tab.textContent)).toEqual(['Facts1', 'Preferences0', 'Instructions1', 'Timeline0', 'Relations1'])
+    expect((byId('know-rows').children[0] as AppNode).textContent).toContain('Glue fact')
+    tabs[2]!.fire('click')
+    expect(byId('know-item-head').textContent).toBe('Instruction')
+    const row = byId('know-rows').children[0] as AppNode
+    expect((row.children[4] as AppNode).textContent).toBe('active')
+    expect((byId('know-tabs').children as AppNode[]).map(tab => tab.attributes.get('aria-pressed'))).toEqual(['false', 'false', 'true', 'false', 'false'])
+  })
+
+  test('items 6 and 7: a Health forget goes through the shared forget; the focus moves to the next row, the new last row, then the heading', async () => {
+    await app.loadHealthReport()
+    const rows = () => byId('health-never').children as AppNode[]
+    const label = (row: AppNode) => (row.children[0] as AppNode).textContent
+    const lastFocus = () => focused.at(-1)
+    // Three memories never recalled; the fourth too (its knowledge does not count as a recall).
+    expect(rows().map(label)).toEqual(['fourth note, forgotten from Memories', 'third never recalled note', 'second never recalled note', 'first never recalled note'])
+    const forget = async (index: number) => {
+      const before = rows().length
+      const target = rows()[index]!
+      const [, ask, yes] = target.buttons()
+      ask!.fire('click')
+      yes!.fire('click')
+      await until(() => rows().length === before - 1 && !rows().includes(target), 'the list to redraw')
+    }
+    const forgets = () => calls.filter(call => call.path === '/api/forget' && call.method === 'POST')
+
+    // The second row: focus goes to the row that took its place.
+    await forget(1)
+    expect(rows().map(label)).toEqual(['fourth note, forgotten from Memories', 'second never recalled note', 'first never recalled note'])
+    expect(lastFocus()).toBe(rows()[1]!.buttons()[0]!)
+    expect(lastFocus()!.textContent).toBe('Review')
+    expect(JSON.parse(forgets().at(-1)!.body)).toEqual({ memory_id: ids[2] })
+
+    // The last row: focus goes to the new last row.
+    await forget(2)
+    expect(lastFocus()).toBe(rows()[1]!.buttons()[0]!)
+
+    // The Memories tab's Forget goes through the same function and the same call.
+    const before = forgets().length
+    let result: string | undefined = 'pending'
+    app.forgetMemory({ id: ids[3] }, (error?: string) => {
+      result = error
+    })
+    await until(() => result !== 'pending', 'the Memories forget')
+    expect(result).toBeUndefined()
+    expect(forgets()).toHaveLength(before + 1)
+    expect(JSON.parse(forgets().at(-1)!.body)).toEqual({ memory_id: ids[3] })
+    expect((await realFetch(`http://127.0.0.1:${server.port}/api/memories/${ids[3]}`, { headers: { Authorization: `Bearer ${server.token}` } })).status).toBe(404)
+    await app.loadHealthReport()
+    expect(rows().map(label)).toEqual(['second never recalled note'])
+
+    // The only row: the list is empty, so the heading takes the focus.
+    await forget(0)
+    expect(byId('health-never-box').hidden).toBe(true)
+    expect(lastFocus()).toBe(byId('health-title'))
+    // The page has one /api/forget call, and both tabs' forgets are it.
+    const source = readFileSync(join(ROOT, 'ui', 'app.ts'), 'utf8')
+    expect(source.match(/'\/api\/forget'/g)).toHaveLength(1)
+    expect(source).toMatch(/forgetMemory = \(memory: Memory, done: \(error\?: string\) => void\) => forgetById\(memory\.id, done\)/)
+    expect(source).toMatch(/const healthHost: HealthHost = \{[^}]*forget: forgetById/)
+    expect(html).toMatch(/<h1 id="health-title" tabindex="-1">/)
+  })
+
+  test('item 3: a forget whose reload fails puts the focus on Try again, not the body', async () => {
+    // A failed forget keeps the row and says why; nothing is redrawn.
+    const fresh = body((await engineCall(CLI, store, 'project-glue-1a2b', [toolCall(1, 'mnemopi_remember', { content: 'fifth note' })])).get(1)) as { memory_id: string }
+    await app.loadHealthReport()
+    const row = byId('health-never').children[0] as AppNode
+    const [, ask, yes] = row.buttons()
+    ask!.fire('click')
+    mode = 'fail500'
+    yes!.fire('click')
+    await until(() => row.all().some(node => node.textContent === 'Forget failed: boom'), 'the failure text')
+    mode = 'real'
+    // A forget that succeeds but whose reload fails: the focus goes to Try again.
+    const calledBefore = calls.length
+    const original = globalThis.fetch
+    ;(globalThis as Record<string, unknown>).fetch = async (path: string, init: RequestInit = {}) => {
+      if (path === '/api/health-report') {
+        calls.push({ path, method: 'GET', body: '' })
+        return new Response('{}', { status: 503 })
+      }
+      return original(path, init)
+    }
+    try {
+      yes!.fire('click')
+      await until(() => byId('health-status').textContent === 'Could not load the health report: the server answered 503', 'the reload failure')
+      expect(focused.at(-1)).toBe(byId('health-retry'))
+      expect(calls.length).toBeGreaterThan(calledBefore)
+    } finally {
+      ;(globalThis as Record<string, unknown>).fetch = original
+    }
+    expect((await realFetch(`http://127.0.0.1:${server.port}/api/memories/${fresh.memory_id}`, { headers: { Authorization: `Bearer ${server.token}` } })).status).toBe(404)
+  })
+
+  // ---- QAPAGE R1: the glue items, on the same stand-in document ----
+
+  /** A memory of project-glue-1a2b with one fact and one instruction mined from it (real engine tools); its id. */
+  async function memoryWithKnowledge(content: string) {
+    const made = body((await engineCall(CLI, store, 'project-glue-1a2b', [toolCall(1, 'mnemopi_remember', { content })])).get(1)) as { memory_id: string }
+    const prompt = body((await engineCall(CLI, store, 'project-glue-1a2b', [toolCall(2, 'mnemopi_knowledge_prompt', { memory_id: made.memory_id })])).get(2)) as { sha256: string }
+    const reply = JSON.stringify({ facts: [`Fact of ${content}`], preferences: [], instructions: [`Rule of ${content}`], timelines: [], kg: [] })
+    await engineCall(CLI, store, 'project-glue-1a2b', [toolCall(3, 'mnemopi_knowledge_store', { memory_id: made.memory_id, reply, sha256: prompt.sha256 })])
+    ids.push(made.memory_id)
+    return made.memory_id
+  }
+
+  test('QAPAGE item 4: a project dot has its Map colour on the Knowledge and Health tabs, the same as buildGalaxy gives it', async () => {
+    const owners = ['global', 'project-glue-1a2b', 'project-atlas-1a2b', 'project-borealis-3c4d', 'project-cobalt-5e6f']
+    const galaxy = buildGalaxy({
+      projects: owners.map(owner => ({ owner, label: owner, count: 1, recalls: 0 })),
+      memories: owners.map((owner, i) => ({ id: `m${i}`, owner, tags: [], recalls: 0, lastRecalled: null, created: '2026-10-01T00:00:00.000Z', label: owner })),
+      knowledge: [],
+      meaning: false,
+      total: owners.length,
+      shown: owners.length,
+    })
+    await memoryWithKnowledge('colour check memory')
+    app.useOwners(owners)
+    const dotOf = (owner: string) => ((app.project(owner) as AppNode).children[0] as AppNode).className
+    const expected = (owner: string) => (galaxy.colours.get(owner) === GLOBAL_COLOUR ? 'dot c-global' : `dot c${PALETTE.indexOf(galaxy.colours.get(owner)!)}`)
+    // The QA's three projects, by the Map's rule: atlas orange (slot 2 of the sorted owners), borealis purple, cobalt teal.
+    expect(owners.map(dotOf)).toEqual(owners.map(expected))
+    expect(['project-atlas-1a2b', 'project-borealis-3c4d', 'project-cobalt-5e6f'].map(owner => galaxy.colours.get(owner))).toEqual(['#F0773A', '#9B7BE3', '#2FB3AE'])
+    expect(dotOf('project-atlas-1a2b')).toBe('dot c1')
+    // The tabs draw through the same function.
+    await app.loadKnowledge()
+    const knowledgeRow = byId('know-rows').children[0] as AppNode
+    expect(((knowledgeRow.children[2] as AppNode).children[0] as AppNode).children[0]).toMatchObject({ className: expected('project-glue-1a2b') })
+    await app.loadHealthReport()
+    const neverRow = byId('health-never').children[0] as AppNode
+    expect(((neverRow.children[1] as AppNode).children[0] as AppNode).children[0]).toMatchObject({ className: expected('project-glue-1a2b') })
+    // A group label ("all projects") and an owner the store does not list are grey.
+    expect(((app.project('all', 'project', 'all projects (3)') as AppNode).children[0] as AppNode).className).toBe('dot c-global')
+    expect(dotOf('project-unlisted-9z9z')).toBe('dot c-global')
+  })
+
+  test('QAPAGE item 5: a dashboard search (origin ui) is not counted in Recalls today; Claude recalls are', () => {
+    const t = new Date().toISOString()
+    const recall = (origin: string, extra: Record<string, unknown> = {}) => ({ t, action: 'recall', origin, owner: 'global', text: 'q', ok: true, ...extra })
+    app.feed.lines = [recall('hook'), recall('tool'), recall('external', { client: 'codex-mcp' }), recall('ui'), recall('ui'), recall('ui'), recall('ui'), recall('hook', { ok: false })]
+    app.drawFeed()
+    expect(byId('tile-recall').textContent).toBe('2')
+    // The log lines themselves stay in the feed: the audit trail.
+    expect((byId('act-list').children as AppNode[]).length).toBe(8)
+    app.feed.lines = []
+  })
+
+  test('QAPAGE R2 item 1: the Activity tile counts the QA mix as 9 Claude recalls (the same lines tests/bun/health-report-api.spec.ts gives the server)', () => {
+    const t = new Date().toISOString()
+    const recall = (origin: string, extra: Record<string, unknown> = {}) => ({ t, action: 'recall', origin, owner: 'global', text: 'q', ids: [], count: 0, ok: true, ...extra })
+    app.feed.lines = [
+      ...[1, 2, 3, 4].map(() => recall('hook', { client: 'claude-code' })),
+      ...[1, 2, 3].map(() => recall('tool', { client: 'claude-code' })),
+      ...[1, 2].map(() => recall('trigger', { client: 'claude-code' })),
+      recall('external', { client: 'codex-mcp-client' }),
+      recall('external', { client: 'codex-mcp-client' }),
+      ...[1, 2, 3, 4].map(() => recall('ui', { client: 'dashboard' })),
+      recall('hook', { client: 'claude-code', ok: false }),
+    ]
+    app.drawFeed()
+    expect(byId('tile-recall').textContent).toBe('9')
+    app.feed.lines = []
+  })
+
+  test('QAPAGE item 7a: an outside client called Dashboard is "Dashboard (external)" in the App filter and the Source cell; the real dashboard and Codex keep their names', () => {
+    const t = new Date().toISOString()
+    const external = { t, action: 'recall', origin: 'external', client: 'Dashboard', owner: 'global', ok: true }
+    const own = { t, action: 'recall', origin: 'ui', owner: 'global', ok: true }
+    const codex = { t, action: 'recall', origin: 'external', client: 'codex-mcp', owner: 'global', ok: true }
+    expect(app.appKey(external)).toBe('ext:Dashboard')
+    expect(app.appKey(own)).toBe('Dashboard')
+    expect(app.appOptions([external, own, codex]).map(app.appName)).toEqual(['Claude Code', 'Codex', 'Cursor', 'Dashboard', 'Dashboard (external)'])
+    expect(app.originLabel(external)).toBe('Dashboard (external)')
+    expect(app.originLabel(own)).toBe('dashboard')
+    expect(app.originLabel(codex)).toBe('Codex')
+    // Drawn: the drop-down has two entries, told apart, and the external line's Source cell says so.
+    app.feed.lines = [external, own]
+    app.drawFeed()
+    expect(byId('act-app').children.map((option: AppNode | AppText) => option.textContent)).toEqual(['All', 'Claude Code', 'Codex', 'Cursor', 'Dashboard', 'Dashboard (external)'])
+    expect((byId('act-list').children[0] as AppNode).textContent).toContain('Dashboard (external)')
+    app.feed.lines = []
+  })
+
+  test('QAPAGE item 7b: the "Forgot memory" status goes when the tab changes', async () => {
+    await memoryWithKnowledge('status check memory')
+    await app.loadHealthReport()
+    const row = byId('health-never').children[0] as AppNode
+    const [, ask, yes] = row.buttons()
+    ask!.fire('click')
+    yes!.fire('click')
+    await until(() => byId('status').textContent.startsWith('Forgot memory'), 'the forget status')
+    app.show('search')
+    expect(byId('status').textContent).toBe('Connected to the local Mnemosyne server.')
+    expect(byId('status').className).toBe('status is-ok')
+    // The same tab again leaves a message alone.
+    ;(byId('status') as AppNode).textContent = 'something on search'
+    app.show('search')
+    expect(byId('status').textContent).toBe('something on search')
+  })
+
+  test('QAPAGE item 1: a newly selected star brings the inspector into view on a phone, a refresh of the same star and a wide screen do not', () => {
+    expect(app.revealNeeded('', 'accessibility', true)).toBe(true)
+    expect(app.revealNeeded('accessibility', 'accessibility', true)).toBe(false)
+    expect(app.revealNeeded('accessibility', 'style', true)).toBe(true)
+    expect(app.revealNeeded('style', '', true)).toBe(false)
+    expect(app.revealNeeded('', 'accessibility', false)).toBe(false)
+  })
+})
+
+// QAPAGE R1: the page itself, without a browser: the served markup read as a tree (Bun's HTMLRewriter),
+// the stylesheet parsed into rules and media queries, and the layout rules applied to that tree by a small
+// cascade (class/id/tag selectors, specificity, source order). It answers what the rules SAY; only a
+// real browser can say how they LOOK (the orchestrator's browser QA re-runs that).
+type Rule = { media: string | null; selector: string; decls: Record<string, string> }
+
+function parseCss(css: string): Rule[] {
+  const rules: Rule[] = []
+  const walk = (text: string, media: string | null) => {
+    let i = 0
+    while (i < text.length) {
+      const open = text.indexOf('{', i)
+      if (open < 0) break
+      const prelude = text.slice(i, open).trim()
+      let depth = 1
+      let j = open + 1
+      while (j < text.length && depth > 0) {
+        if (text[j] === '{') depth++
+        else if (text[j] === '}') depth--
+        j++
+      }
+      const inner = text.slice(open + 1, j - 1)
+      if (prelude.startsWith('@media')) walk(inner, prelude.slice(6).trim())
+      else if (!prelude.startsWith('@')) {
+        const decls: Record<string, string> = {}
+        for (const part of inner.split(';')) {
+          const colon = part.indexOf(':')
+          if (colon > 0) decls[part.slice(0, colon).trim()] = part.slice(colon + 1).trim()
+        }
+        for (const selector of prelude.split(',')) rules.push({ media, selector: selector.trim(), decls })
+      }
+      i = j
+    }
+  }
+  walk(css.replace(/\/\*[\s\S]*?\*\//g, ''), null)
+  return rules
+}
+
+type PageNode = { tag: string; id: string; classes: string[]; children: PageNode[]; parent: PageNode | null }
+
+async function pageTree(html: string): Promise<PageNode> {
+  const root: PageNode = { tag: '#root', id: '', classes: [], children: [], parent: null }
+  let at = root
+  const VOID = new Set(['meta', 'link', 'input', 'br', 'img', 'hr'])
+  await new HTMLRewriter()
+    .on('*', {
+      element(element) {
+        const node: PageNode = { tag: element.tagName, id: element.getAttribute('id') ?? '', classes: (element.getAttribute('class') ?? '').split(/\s+/).filter(Boolean), children: [], parent: at }
+        at.children.push(node)
+        if (VOID.has(element.tagName)) return
+        at = node
+        element.onEndTag(() => {
+          at = node.parent!
+        })
+      },
+    })
+    .transform(new Response(html))
+    .text()
+  return root
+}
+
+const allNodes = (node: PageNode): PageNode[] => [node, ...node.children.flatMap(allNodes)]
+const byIdIn = (root: PageNode, id: string) => allNodes(root).find(node => node.id === id)!
+const hasAncestor = (node: PageNode, test: (n: PageNode) => boolean): boolean => node.parent !== null && (test(node.parent) || hasAncestor(node.parent, test))
+
+/** Whether a simple selector (tag, .class and #id parts, no combinators) matches a node; its specificity, or null. */
+function specificity(selector: string, node: PageNode): number | null {
+  if (/[\s>+~:\[]/.test(selector)) return null
+  const parts = selector.match(/[.#]?[A-Za-z0-9_-]+/g) ?? []
+  if (parts.join('') !== selector) return null
+  let score = 0
+  for (const part of parts) {
+    if (part.startsWith('#')) {
+      if (node.id !== part.slice(1)) return null
+      score += 100
+    } else if (part.startsWith('.')) {
+      if (!node.classes.includes(part.slice(1))) return null
+      score += 10
+    } else {
+      if (node.tag !== part) return null
+      score += 1
+    }
+  }
+  return score
+}
+
+/** The value of a property on a node: the winning declaration (highest specificity, then latest) among the rules whose media is in `active`. */
+function styleOf(node: PageNode, rules: Rule[], property: string, active: string[]): string | undefined {
+  let best: { score: number; at: number; value: string } | undefined
+  rules.forEach((rule, at) => {
+    if (rule.media !== null && !active.includes(rule.media)) return
+    const value = rule.decls[property]
+    const score = specificity(rule.selector, node)
+    if (value === undefined || score === null) return
+    if (best === undefined || score > best.score || (score === best.score && at > best.at)) best = { score, at, value }
+  })
+  return best?.value
+}
+
+/** The boxes of a flex container in their visual order: display:contents children give their own children, out-of-flow ones are left out, then `order`, then the page order. */
+function flowOf(container: PageNode, rules: Rule[], active: string[]): string[] {
+  const items: PageNode[] = []
+  const take = (node: PageNode) => {
+    for (const child of node.children) {
+      if (styleOf(child, rules, 'display', active) === 'contents') take(child)
+      else if (styleOf(child, rules, 'display', active) !== 'none' && styleOf(child, rules, 'position', active) !== 'absolute') items.push(child)
+    }
+  }
+  take(container)
+  return items
+    .map((node, at) => ({ node, at, order: Number(styleOf(node, rules, 'order', active) ?? 0) }))
+    .sort((a, b) => a.order - b.order || a.at - b.at)
+    .map(({ node }) => node.id || node.classes[0] || node.tag)
+}
+
+const PHONE = '(max-width: 900px)'
+const SMALL = '(max-width: 760px)'
+
+describe('QAPAGE R1: the page, read as a tree and a stylesheet', () => {
+  const html = readFileSync(join(ROOT, 'ui', 'index.html'), 'utf8')
+  const rules = parseCss(readFileSync(join(ROOT, 'ui', 'style.css'), 'utf8'))
+  let tree: PageNode
+  beforeAll(async () => {
+    tree = await pageTree(html)
+  })
+
+  test('item 1: on a phone the canvas is first, 60vh tall, with the inspector right under it; wide screens keep the three columns', () => {
+    const view = byIdIn(tree, 'view-map')
+    // The markup the order rules rely on: the stage lives in .map-centre, the inspector is a child of the view.
+    expect(view.children.map(node => node.id || node.classes[0] || node.tag)).toEqual(['sr-only', 'map-rail', 'map-centre', 'map-back', 'map-inspector'])
+    expect(byIdIn(tree, 'map-stage').parent!.classes).toContain('map-centre')
+    expect(byIdIn(tree, 'map-live-strip').parent!.classes).toContain('map-centre')
+    expect(byIdIn(tree, 'map-legend').parent!.classes).toContain('map-centre')
+    // 900px and narrower: one column, the canvas first, then the inspector, the live strip, the legend, the rail's controls.
+    expect(flowOf(view, rules, [PHONE])).toEqual(['map-stage', 'map-back', 'map-inspector', 'map-live-strip', 'map-legend', 'map-rail'])
+    expect(styleOf(view, rules, 'flex-direction', [PHONE])).toBe('column')
+    expect(styleOf(view, rules, 'flex-wrap', [PHONE])).toBe('nowrap')
+    const stage = byIdIn(tree, 'map-stage')
+    expect(styleOf(stage, rules, 'height', [PHONE])).toBe('60vh')
+    expect(styleOf(stage, rules, 'max-height', [PHONE])).toBe('none')
+    // On the QA's 390x844 phone: 60vh is 506px, so the canvas ends well above the fold of a 844px screen once the header (about 150px) is counted.
+    expect(Math.round(0.6 * 844)).toBe(506)
+    // Wide screens: the old arrangement, untouched: rail, centre, inspector in a row; the stage 620px.
+    expect(flowOf(view, rules, [])).toEqual(['map-rail', 'map-centre', 'map-inspector'])
+    // The Back link is hidden outside the phone query, and starts hidden in the markup.
+    expect(styleOf(byIdIn(tree, 'map-back'), rules, 'display', [])).toBe('none')
+    expect(styleOf(view, rules, 'flex-direction', [])).toBeUndefined()
+    expect(styleOf(stage, rules, 'height', [])).toBe('620px')
+    expect(styleOf(byIdIn(tree, 'map-inspector'), rules, 'order', [])).toBeUndefined()
+    expect(rules.filter(rule => rule.media === null && 'order' in rule.decls)).toEqual([])
+    // Nothing inside the phone query reaches a wide screen: every rule it holds is in that one media query.
+    expect(rules.some(rule => rule.media === PHONE && rule.selector === '.map-centre' && rule.decls.display === 'contents')).toBe(true)
+  })
+
+  test('item 2: the never-recalled table fits its card (min-width 0, the .table 720px is overridden) and the lists in a card size to their rows', () => {
+    const never = allNodes(tree).find(node => node.tag === 'table' && node.classes.includes('compact'))!
+    expect(hasAncestor(never, node => node.id === 'health-never-box')).toBe(true)
+    expect(styleOf({ ...never, classes: ['table'] }, rules, 'min-width', [])).toBe('720px')
+    expect(styleOf(never, rules, 'min-width', [])).toBe('0')
+    // The stretched chart card: the Projects, Most recalled and Storage lists are .list inside a .card; .list alone has a 640px flex basis (the Memories list).
+    expect(rules.find(rule => rule.selector === '.list' && rule.decls.flex !== undefined)?.decls.flex).toBe('999 1 640px')
+    for (const id of ['health-projects', 'health-hot', 'health-storage']) {
+      const list = byIdIn(tree, id)
+      expect(list.classes).toContain('list')
+      expect(hasAncestor(list, node => node.classes.includes('card'))).toBe(true)
+    }
+    expect(rules.find(rule => rule.selector === '.card .list')?.decls.flex).toBe('none')
+    // The actions column keeps its two links on one line (nowrap), and only the confirm step wraps.
+    expect(rules.find(rule => rule.selector === '.row-actions')?.decls['white-space']).toBe('nowrap')
+  })
+
+  test('item 3: on a small screen a Knowledge row is a card: the kind and item, topic and project, then Status, Used and Last used share one line', () => {
+    const phone = rules.filter(rule => rule.media === SMALL)
+    const of = (selector: string) => phone.find(rule => rule.selector === selector)?.decls
+    expect(of('.know-table thead')?.display).toBe('none')
+    expect(of('.know-table')?.['min-width']).toBe('0')
+    expect(of('.know-table tr')?.display).toBe('grid')
+    expect(of('.know-table tr')?.['grid-template-columns']).toBe('repeat(4, minmax(0, 1fr))')
+    expect(of('.know-table td')?.display).toBe('block')
+    expect(of('.know-table td[data-label]::before')?.content).toBe('attr(data-label)')
+    const span = (cell: string) => Number(/^span (\d)$/.exec(of(`.know-table td.k-${cell}`)?.['grid-column'] ?? '')?.[1])
+    // Status 1 + Used 2 + Last used 1 = the 4 columns of one grid row; topic 2 + project 2 likewise.
+    expect(span('status') + span('used') + span('last')).toBe(4)
+    expect(span('topic') + span('project')).toBe(4)
+    expect(of('.know-table td.k-text')?.['grid-column']).toBe('1 / -1')
+    expect(of('.know-table td.k-from')?.order).toBe('9')
+    // Wide screens: no card rule outside the query.
+    expect(rules.filter(rule => rule.media === null && rule.selector.includes('.know-table'))).toEqual([])
+    // The served table carries the class the rules hang on.
+    const table = allNodes(tree).find(node => node.tag === 'table' && node.classes.includes('know-table'))!
+    expect(hasAncestor(table, node => node.id === 'know-body')).toBe(true)
+  })
+
+  test('item 4: the dot classes paint the Map palette: .c0 to .c7 are PALETTE in order and .c-global is the Map grey', () => {
+    const colour = (cls: string) => rules.find(rule => rule.selector === `.${cls}`)?.decls.background?.toUpperCase()
+    expect(PALETTE).toHaveLength(8)
+    expect(PALETTE[0]).toBe('#4C8DDB')
+    expect(PALETTE.map((_, i) => colour(`c${i}`))).toEqual(PALETTE.map(hex => hex.toUpperCase()))
+    expect(colour('c-global')).toBe(GLOBAL_COLOUR.toUpperCase())
+  })
+
+  test('item 7c, 7d: the Overview\'s lone colour dot is hidden, and an inspector field never gets narrower than 120px nor breaks inside a word', () => {
+    expect(rules.find(rule => rule.selector === '.insp-sub > .map-dot:only-child')?.decls.display).toBe('none')
+    expect(rules.find(rule => rule.selector === '.insp-stats')?.decls['grid-template-columns']).toBe('repeat(auto-fit, minmax(min(100%, 120px), 1fr))')
+    expect(rules.find(rule => rule.selector === '.insp-stats dd')?.decls['overflow-wrap']).toBe('break-word')
+    // The real numbers: a 252px-wide inspector body holds two 120px fields and a 12px gap (120 + 12 + 120 = 252); a narrower one stacks them.
+    const fields = (width: number) => Math.max(1, Math.floor((width + 12) / (120 + 12)))
+    expect([fields(264), fields(252), fields(204)]).toEqual([2, 2, 1])
+  })
+
+  test('QAPAGE R2 item 2: the content is centred up to 1280px, and the Health project cell keeps its name whole (no wrap, ellipsis when long)', () => {
+    const wide = rules.find(rule => rule.selector === '.wide')!.decls
+    expect(wide['max-width']).toBe('1280px')
+    expect(wide['margin-left']).toBe('auto')
+    expect(wide['margin-right']).toBe('auto')
+    // Real numbers: at 1440px the 1280px column leaves 80px each side instead of ~240px on the right.
+    expect((1440 - 1280) / 2).toBe(80)
+    const never = allNodes(tree).find(node => node.tag === 'table' && node.classes.includes('compact'))!
+    expect(hasAncestor(never, node => node.classes.includes('wide'))).toBe(true)
+    expect(rules.find(rule => rule.selector === '.table.compact .project')?.decls['white-space']).toBe('nowrap')
+    expect(rules.find(rule => rule.selector === '.table.compact td.col-project')?.decls['min-width']).toBe('120px')
+    expect(rules.find(rule => rule.selector === '.table.compact .project > span:last-child')?.decls['text-overflow']).toBe('ellipsis')
+    // No rule lets the project name break inside a word.
+    expect(rules.filter(rule => rule.selector.includes('.project') && rule.decls['overflow-wrap'] === 'anywhere')).toEqual([])
+  })
+
+  test('QAPAGE R2 item 3: on a phone the Find box sits above the canvas, and the inspector has a Back to the map button', () => {
+    // All the phone rules of one selector, merged in order.
+    const of = (selector: string) => Object.assign({}, ...rules.filter(rule => rule.media === PHONE && rule.selector === selector).map(rule => rule.decls)) as Record<string, string>
+    // The strip is the stage's own margin: the Find box (36px high) is placed 46px above the stage box, so it never covers a star.
+    expect(of('.stage')?.['margin-top']).toBe('46px')
+    expect(of('.stage')?.overflow).toBe('visible')
+    expect(of('.stage-find')?.top).toBe('-46px')
+    expect(of('.stage-canvas')?.overflow).toBe('hidden')
+    expect(36 + 10).toBe(46)
+    // Wide screens keep the Find box over the canvas, top right.
+    expect(rules.find(rule => rule.selector === '.stage-find' && rule.media === null)?.decls.top).toBe('14px')
+    // The button: in the markup right before the inspector, hidden until it has content (app.ts), shown on a phone only.
+    const back = byIdIn(tree, 'map-back')
+    expect(back.tag).toBe('button')
+    expect(back.parent!.id).toBe('view-map')
+    expect(of('.back-to-map')?.display).toBe('inline-flex')
+    expect(styleOf(back, rules, 'display', [])).toBe('none')
+    expect(styleOf(back, rules, 'display', [PHONE])).toBe('inline-flex')
+  })
+
+  test('QAPAGE R2 item 4: on a phone the Knowledge topic and project cells share one centred 20px line', () => {
+    const of = (selector: string) => Object.assign({}, ...rules.filter(rule => rule.media === SMALL && rule.selector === selector).map(rule => rule.decls)) as Record<string, string>
+    for (const cell of ['.know-table td.k-topic', '.know-table td.k-project']) {
+      expect(of(cell).display).toBe('flex')
+      expect(of(cell)['align-items']).toBe('center')
+      expect(of(cell)['line-height']).toBe('20px')
+      expect(of(cell)['min-height']).toBe('20px')
+    }
+    expect(of('.know-table td.k-project .project')?.['line-height']).toBe('20px')
+  })
+
+  test('items 5 and 7a: the Activity tile reads "Claude recalls today" and Health says "Claude recalls"', () => {
+    expect(html).toContain('<div class="tile-label">Claude recalls today</div>')
+    expect(html).toContain('Claude recalls per day, last 14 days')
+    expect(html).toContain('Searching here does not count as a recall.')
+  })
+})

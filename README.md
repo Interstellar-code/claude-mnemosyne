@@ -32,6 +32,8 @@ claude plugin update mnemosyne@mnemosyne
 
 Restart Claude Code afterwards. The plugin carries its own copy of the engine; when an update brings a new engine build, session start shows a notice, and `/mnemosyne-setup` installs it. Until then the older engine keeps working, and only `memory_update` asks for the setup.
 
+After updating to 0.6.0, run `/mnemosyne-setup` once: it installs engine build `18.12.3-mnemosyne.4`, which has the knowledge tools. Without it, extraction, `/mnemosyne-knowledge` and the dashboard stay off and say so (see [What 0.6.0 does not do yet](#what-060-does-not-do-yet)).
+
 ## Uninstall
 
 ```sh
@@ -76,12 +78,14 @@ Recall matches words, not meaning: "deploy Fridays" finds the fact above, "relea
 /mnemosyne-ui
 ```
 
-Starts a small local web page for your memories and opens it in your default browser. The reply shows the full link, with its key after `#`, and the link is on the clipboard too, so you can open it in another browser. The page has four tabs:
+Starts a small local web page for your memories and opens it in your default browser. The reply shows the full link, with its key after `#`, and the link is on the clipboard too, so you can open it in another browser. The page has six tabs and opens on Memories:
 
-- **Map:** a 3D map of your memories (see below).
+- **Map:** every memory as a star in a glowing 3D galaxy, with what was learned from each as moons, a Timeline layout and live sparks (see [The galaxy](#the-galaxy)).
 - **Memories:** every memory, with a project filter, sorting (newest, most recalled, never recalled), a text and tag filter, and a detail panel with a Forget button that asks before it deletes.
-- **Activity:** the activity log, live.
+- **Activity:** the activity log, live, with the app and the session that made each call (see [Activity log](#activity-log)).
 - **Search:** the same recall Claude uses, with scores. Searching here does not change any memory's recall count.
+- **Knowledge:** the facts, preferences, instructions, dated events and relations that extraction pulled out of your memories (see [The Knowledge and Health tabs](#the-knowledge-and-health-tabs)).
+- **Health:** how much of your memory is used, how much has never been recalled, and which features are switched on.
 
 One dashboard runs at a time: running `/mnemosyne-ui` again, in this session or another, hands over the same link. It stops when the session that started it ends; `/clear` in that session counts as an end. Run `/mnemosyne-ui` again for a fresh one.
 
@@ -89,11 +93,26 @@ One dashboard runs at a time: running `/mnemosyne-ui` again, in this session or 
 
 The dashboard and the activity log are tested on macOS and Linux, not on Windows.
 
-### The 3D map
+### The galaxy
 
-The Map tab shows your projects as spheres, sized by how many memories each holds. Click a project to fly in: its topics (from tags, plus an Untagged group) orbit it, and the other projects move aside. Click a topic to see its memories, and a memory to read it in the inspector, with its tags, recall count, saved date and "Open in Memories". The path bar above the map goes back up; Reset view returns to all projects. The map rotates on its own while the Auto-rotate button is pressed; press it to stop or start rotation (it starts off when your system asks for reduced motion). The left rail colours the map by project, recalls or age, hides or shows projects, and sets a minimum recall count.
+The Map tab draws every memory as a star in a glowing galaxy (the newest 2000; past that the inspector says "showing 2000 of N"). Each project is a bright core, and a memory sits in a cluster around it for its topic: its first tag, or Untagged. A star grows with each recall, newer stars are brighter, and a hollow ring marks a memory that was never recalled. A soft bloom (a glow pass) makes it shine. The white star in the middle is Claude: recalls and saves start there.
 
-The rail's list holds exactly what the map shows, and choosing an item there does the same as clicking it in the map: it is the keyboard and screen-reader route through the map. The map needs WebGL; without it the map area says so and the list still drills down. The map's 3D library (three.js and `3d-force-graph`, about 800 KB) loads only when you first open the Map tab.
+1. Links. Topic threads join each project core to its topics and each topic to its stars. Gold bridges join the same topic name in two different projects; Untagged never bridges. Both can be switched off in the left rail.
+2. Moving around. Drag to orbit, scroll to zoom, click a project, a topic or a star to fly in. The path bar above the map (All memories › project › topic) goes back up and Reset view returns to everything. Find dims every star except those whose tag, project or label holds the text. Colour by switches between project, recalls and age, and the project toggles hide a project. Auto-rotate turns the map on its own; it starts off when your system asks for reduced motion, and in the Timeline.
+3. The inspector. A star shows its text, project, recalls, saved date and tags, what was learned from it, and "Open in Memories". A project or topic shows its totals.
+4. Knowledge moons. The knowledge mined from the selected memory (at most 8 items) orbits its star as small moons, coloured by kind: blue facts, pink preferences, green instructions, amber dated events, violet relations. A moon is clickable, and the inspector lists every item. Under reduced motion the moons stand still. The "Knowledge moons" switch turns them off.
+5. The knowledge filter. The Knowledge chips (Facts, Preferences, Instructions, Timeline, Relations) count the memories that have each kind. Pick one or more and every memory without any of them dims to a tenth, so you see what was learned where. The chips and the moons stay disabled until the store holds extracted knowledge.
+6. Layouts. Galaxy is the default. Timeline lines the memories up by saved date: today on the right, one lane per project, with a range of 7 days, 30 days or All (the oldest memory) and an axis of day marks. Memories older than the range, or with no saved date, are hidden. Switching morphs the stars into place; the layout you last used is remembered in your browser. Meaning (a layout by what memories say) and the Similar memories links are in the rail but disabled: they arrive in 0.7.0.
+7. Live. Recalls and saves from the activity log light the map as they happen: a gold spark flies from the Claude core to each recalled star, a teal one to a saved or updated star, a red one to a forgotten star. A memory saved while the page is open is added to the map as a new star. The Recall and Write layer switches turn each kind off, the Live pill pauses the whole stream (it starts paused under reduced motion), and the live strip under the map lists the last few events.
+8. Simulate. "Simulate a recall" and "Simulate a write" play demo sparks on the map so you can see the live view on a quiet day. They are demo only: they make no request, never touch the store and never write a line to the activity log. After the first press the demo repeats every few seconds while Live is on.
+
+The map needs WebGL; without it the map area says so, and the other tabs still work. Its 3D library (three.js, `3d-force-graph` and the bloom passes, about 830 KB) loads only when you first open the Map tab.
+
+### The Knowledge and Health tabs
+
+Knowledge lists what extraction pulled out of your memories (see [Knowledge extraction](#knowledge-extraction-what-claude-learned)), one table per kind: Facts, Preferences, Instructions, Timeline and Relations. A row shows the item, its topic (the memory's first tag), its project, the memory it came from, its status (an instruction is active or retired, a relation shows its confidence), how many times that memory was recalled and when it was last used. Show on map selects the source star on the Map tab. A notice at the top says when extraction is off, or when the store holds no items yet.
+
+Health shows four numbers (memories, never recalled, recalls in the log, store size), the share of memories that have topic tags, knowledge, a recorded author and at least one recall, recalls per day over the last 14 days, the projects, the 50 newest memories never recalled with Review and Forget (which asks again before deleting) and the 10 most recalled. The "Embeddings" bar always reads 0 in 0.6.0, because embeddings arrive in 0.7.0.
 
 ### Topic tags: /mnemosyne-tags
 
@@ -103,7 +122,7 @@ Claude is asked to add 2 to 5 topic tags when it saves a new memory. To tag the 
 /mnemosyne-tags
 ```
 
-This is a dry run: it sends the text of each untagged memory to Claude's Haiku model, shows the tags it proposes, and saves the proposals (ids, tags and a hash of each text, never the text) to `~/.claude/mnemosyne/tags-proposed.json`. It changes no memory. Read the proposals, then write them:
+This is a dry run: it sends the text of each untagged memory to the `extractionModel` (Haiku by default), shows the tags it proposes, and saves the proposals (ids, tags and a hash of each text, never the text) to `~/.claude/mnemosyne/tags-proposed.json`. It changes no memory. Read the proposals, then write them:
 
 ```
 /mnemosyne-tags apply
@@ -111,9 +130,49 @@ This is a dry run: it sends the text of each untagged memory to Claude's Haiku m
 
 `apply` makes no model call. It writes the saved tags through `memory_update`, and skips any memory that was deleted, already got tags, or whose text changed since the dry run.
 
+### Knowledge extraction: what Claude learned
+
+After each save, and after an update that changes a memory's text, Mnemosyne asks the `extractionModel` (Haiku by default) to pull out the facts, preferences, instructions, dated events and relations in that memory. The save returns at once; the call runs in the background. The engine's own prompt builds the request, and the engine checks and stores the answer. Every run is one line in the activity log, action `extract`.
+
+Only the memory's text goes to the model, through Claude Code's own model channel; nothing leaves your machine for another service. One model call per save is the cost. The setting `extractionModel` picks the model (a short name such as `haiku`, the default, or a full model id). It also drives `/mnemosyne-tags`. Set it to `off` and nothing is extracted, no model call is made, and `/mnemosyne-tags` and `/mnemosyne-knowledge` say that extraction is off.
+
+If Claude Code cancels the background call (Esc on that turn, or the session ends), a small pending file under `~/.claude/mnemosyne/knowledge-pending/` usually records which memory needs it. The file is written by two background steps that start after the save's reply, so a save made right before the session ends may leave no pending file and no `extract` line at all. Nothing is lost for good: `/mnemosyne-knowledge` also lists every memory with no knowledge, whether or not it has a pending file, and its dry run is the check. Finish the pending ones, and extract the older memories, with:
+
+```
+/mnemosyne-knowledge
+```
+
+That is a dry run: it counts, per project, the memories with no knowledge and the pending entries, and changes nothing. Then:
+
+```
+/mnemosyne-knowledge apply
+```
+
+`apply` finishes the pending entries first (each from its current text and hash, so a memory you edited is redone, never stored stale), then extracts the older memories with no knowledge. It makes one model call per memory (a few at a time), batches the engine work per project, 40 memories at a time, and never edits or deletes a memory. A memory whose extraction found nothing is noted in `~/.claude/mnemosyne/knowledge-empty.json` and skipped while its text is unchanged. Only `apply` makes that note: a live extraction that finds nothing is not recorded as tried, so the first `apply` after many such saves may make one more model call for each of those memories. Saving text that already exists (a dedupe) starts a fresh extraction for the same memory and replaces its knowledge rows with equal ones; that costs one model call and changes nothing you see.
+
+Outside agents' saves (Codex, Cursor and other clients, through the MCP proxy) get no automatic extraction: the proxy has no model channel. Run `/mnemosyne-knowledge apply` to cover them.
+
+Try `apply` on a copy of the store first.
+
+The extracted items are stored in the engine's own tables (facts, preferences, instructions, timelines, relations), replaced whenever a memory is extracted again, and deleted with the memory when you forget it. The Map and Knowledge tabs show them.
+
+### What 0.6.0 does not do yet
+
+1. Meaning layout and Similar memories arrive in 0.7.0, with embeddings. Until then recall matches words only, the Meaning button and the Similar memories switch are disabled, and the Health tab's embeddings bar reads 0.
+2. Moons for a memory saved or extracted after the page loaded show only after you reload the dashboard page: the map reads the knowledge once, when the page loads.
+3. The dashboard keeps the `extractionModel` it started with. After you change the setting, `/mnemosyne-ui` on the running dashboard says it must be restarted: end the session that started it, then run `/mnemosyne-ui` again.
+4. Saves by outside agents (Codex, Cursor and others, through the proxy) get no automatic extraction. They need `/mnemosyne-knowledge apply`.
+5. This update needs the plugin's newer engine build (`18.12.3-mnemosyne.4`, which has the knowledge tools): run `/mnemosyne-setup` once after updating. Until then extraction stays off and says so in the activity log (`engine out of date`).
+
+### Who wrote a memory
+
+A save records who wrote it. When a prompt starts with a remember term, the first save that turn is yours: it is stored with `author_type` `human` and veracity `stated`. Claude's own saves are `agent`; so are outside agents' saves, named by their MCP client. `stated` ranks a little higher in recall than the default `unknown` (1.0 against 0.8), which is why a fact you asked for is found first.
+
 ### Activity log
 
-With `activityLog` on (the default), each memory call adds one line to `~/.claude/mnemosyne/activity.jsonl`: recalls, saves, updates, forgets and stats, from Claude, from the plugin's own lookups, from the dashboard and from other MCP clients. The Activity tab reads it.
+With `activityLog` on (the default), each memory call adds one line to `~/.claude/mnemosyne/activity.jsonl`: recalls, saves, updates, forgets and stats, from Claude, from the plugin's own lookups, from the dashboard and from other MCP clients, plus one `extract` line for every knowledge extraction run. Since 0.6.0 a line also names the app that made the call (`client`, for example Claude Code, or the name an MCP client gave when it connected) and the Claude Code session (`session`), and a save records who wrote it (`author_type` and `veracity`, see above). Older lines have none of these.
+
+The Activity tab reads the log and follows it live. Its list has column headers (Time, Action, Source, Project, What, Result) and a key under the list that says what each Source means (`hook`, `tool`, `trigger`, `external`, `ui`, `backfill`). The filter chips pick one action, or Outside agents; the App drop-down picks one app (Claude Code, Codex, Cursor, Dashboard, or another client by its own name); pressing the short session id on a line shows only that session, and a chip clears it. A saved memory carries a badge for who wrote it: "you said" for a save you asked for with a remember term, "Claude" for Claude's own save, the app's name for another agent's, and no badge for a save that does not say. An older memory takes the author of the first save after the update: after any re-save of the same text, a memory from 0.5.1 reads "Claude" or the app's name, even if you wrote it. Four tiles count today's recalls, saves, updates and failed calls.
 
 Privacy: a line holds the query or the start of the memory text (at most 200 characters). Text that looks like a secret (API keys, tokens, `password=` values, long hex or base64 runs) is replaced by `[redacted]` before it is written, by pattern, so an unusual secret can slip through. The file is owner-only, capped at 1 MB with one older copy kept. Set `activityLog` to `off` to write nothing.
 
@@ -130,6 +189,7 @@ Change any time from `/plugin` → Mnemosyne → configure.
 | `activityLog` | `on` | `on`: each memory call adds one line to `~/.claude/mnemosyne/activity.jsonl` (see [Activity log](#activity-log)). `off`: nothing is written. |
 | `memoryDir` | `~/.claude/mnemosyne/store` | Where memories are stored. |
 | `externalMcp` | off | Lets other MCP clients use the same memory (see below). |
+| `extractionModel` | `haiku` | The model that pulls facts, preferences, instructions, dated events and relations out of each saved memory in the background (an alias or a full model id). It also drives `/mnemosyne-tags`. `off` turns extraction off: no model call, and `/mnemosyne-tags` and `/mnemosyne-knowledge` say so. |
 
 ## Use the memory from other tools
 
@@ -149,7 +209,7 @@ For Cursor, Codex and others, use the same path as the server command. It offers
 
 The plugin hooks into Claude Code at four points:
 
-- **Session start:** adds the memory tools and the `/mnemosyne-setup`, `/mnemosyne-ui` and `/mnemosyne-tags` commands, and says so if the installed engine is older than the plugin's.
+- **Session start:** adds the memory tools and the `/mnemosyne-setup`, `/mnemosyne-ui`, `/mnemosyne-tags` and `/mnemosyne-knowledge` commands, and says so if the installed engine is older than the plugin's.
 - **System prompt:** adds a short, fixed set of rules telling Claude when to save and recall.
 - **Your prompt:** on the first prompt (again after a compaction), or one starting with a term above, looks up memories and attaches them to that prompt.
 - **Tool calls:** when Claude calls a memory tool, runs the engine once and returns the answer.

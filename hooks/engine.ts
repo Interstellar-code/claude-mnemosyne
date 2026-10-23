@@ -23,6 +23,11 @@ export function engineEnv(store: string, owner: string): Record<string, string> 
     // The env is layered over the caller's: an exported LLM URL would let the engine call out.
     MNEMOPI_LLM_BASE_URL: '',
     MNEMOPI_HOST_LLM_ENABLED: '',
+    // Empty counts as unset in the engine; the plugin sets the author per call instead.
+    MNEMOPI_AUTHOR_ID: '',
+    MNEMOPI_AUTHOR_TYPE: '',
+    // Polyphonic recall writes consolidated_facts, which a forget does not purge.
+    MNEMOPI_POLYPHONIC_RECALL: '0',
   }
 }
 

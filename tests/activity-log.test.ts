@@ -62,6 +62,57 @@ test('the five tools map to their actions', () => {
   expect(TOOL_ACTIONS).toEqual({ memory_remember: 'remember', memory_recall: 'recall', memory_update: 'update', memory_forget: 'forget', memory_stats: 'stats' })
 })
 
+// CTX.1.a1: client and session are optional, bounded, and control-free; author_type and veracity
+// pass only the engine's values; each new field is written only when set.
+
+test('CTX.1.a1: client and session are written bounded and control-free', () => {
+  const entry = activityEntry({
+    action: 'recall', origin: 'external', owner: 'global', ok: true,
+    client: `codex-mcp-client\u0000\t \n`, session: `s\u001f${'x'.repeat(80)}`,
+  })
+  expect(entry.client).toBe('codex-mcp-client')
+  expect(entry.session).toBe(`s${'x'.repeat(63)}`)
+  expect(entry.session).toHaveLength(64)
+  expect(entry.client).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/)
+  expect(entry.session).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/)
+  expect(activityEntry({ action: 'stats', origin: 'ui', owner: 'global', ok: true, client: 'x'.repeat(100) }).client).toBe('x'.repeat(60))
+})
+
+test('CTX.1.a1: author_type and veracity pass only the engine values, else dropped', () => {
+  expect(activityEntry({ action: 'remember', origin: 'tool', owner: 'global', ok: true, author_type: 'human', veracity: 'stated' }))
+    .toMatchObject({ author_type: 'human', veracity: 'stated' })
+  expect(activityEntry({ action: 'remember', origin: 'tool', owner: 'global', ok: true, author_type: 'AGENT', veracity: 'Inferred' }))
+    .toMatchObject({ author_type: 'agent', veracity: 'inferred' })
+  const dropped = activityEntry({ action: 'remember', origin: 'tool', owner: 'global', ok: true, author_type: 'robot', veracity: 'maybe' })
+  expect(dropped.author_type).toBeUndefined()
+  expect(dropped.veracity).toBeUndefined()
+  expect(dropped.client).toBeUndefined()
+  expect(dropped.session).toBeUndefined()
+})
+
+test('CTX.1.a2: the extract action is part of the line format', () => {
+  const entry = activityEntry({ action: 'extract', origin: 'hook', owner: 'global', ok: true, text: 'mined 3 items' })
+  expect(entry.action).toBe('extract')
+  expect(JSON.parse(activityLine({ action: 'extract', origin: 'hook', owner: 'global', ok: true })).action).toBe('extract')
+})
+
+test('review 2 LOW 4: client and session drop bidi and zero-width characters too', () => {
+  const entry = activityEntry({
+    action: 'recall', origin: 'external', owner: 'global', ok: true,
+    client: 'code\u202Ex-mcp\u200Bclient\u200E',
+    session: 's\u202A1\u200C\u2066x\u2069',
+  })
+  expect(entry.client).toBe('codex-mcpclient')
+  expect(entry.session).toBe('s1x')
+  expect(entry.client).not.toMatch(/[\u061c\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/)
+  expect(entry.session).not.toMatch(/[\u061c\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/)
+})
+
+test('CTX.1.a3: a line without the new fields parses and renders exactly as before', () => {
+  const line = activityLine({ action: 'recall', origin: 'hook', owner: 'global', text: 'q', ids: ['a'], count: 1, ok: true, t: '2026-10-23T00:00:00.000Z' })
+  expect(JSON.parse(line)).toEqual({ t: '2026-10-23T00:00:00.000Z', action: 'recall', origin: 'hook', owner: 'global', text: 'q', ids: ['a'], count: 1, ok: true })
+})
+
 test('a call preview: the query, the fact, or what an update sets', () => {
   expect(callText('recall', { query: 'pnpm' })).toBe('pnpm')
   expect(callText('remember', { content: 'we use pnpm' })).toBe('we use pnpm')

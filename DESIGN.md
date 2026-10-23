@@ -156,8 +156,13 @@ of the plugin:
   `metadata` object in one `BEGIN IMMEDIATE` transaction (a key set to `null`
   is removed; a row whose `metadata_json` is not an object is refused and left
   unchanged); change 2, `mnemopi_recall` takes `update_recall_counts`
-  (default true); change 3, the build number (`18.12.3-mnemosyne.2`) in
-  `engine/package.json`.
+  (default true); change 3, the build number in `engine/package.json`; change 4,
+  the two knowledge tools `mnemopi_knowledge_prompt` and
+  `mnemopi_knowledge_store` (v0.6.0, §3.7); change 5, a dedupe re-save keeps the
+  first author and veracity (v0.6.0). The build 0.6.0 expects is
+  `18.12.3-mnemosyne.4` (`.1` had changes 1 to 3, `.2` a metadata-merge fix, `.3` added 4 and 5, `.4` is
+  their review fix round; `engine/UPSTREAM.md` lists the `engine/src` hash of
+  each build).
 - `bun scripts/engine-diff.ts` downloads the tarball, checks its integrity, and
   fails unless every file that differs from `engine/` is listed in a change and
   the recorded `engine/src` hash for the current build is the real one. So an
@@ -191,7 +196,10 @@ of the plugin:
   `$.fs.read` and compares. Session start with a stale engine shows a toast
   asking for `/mnemosyne-setup`; it does not reinstall on its own (an install
   can take minutes and needs the network). The four older tools keep working
-  on a stale engine; `memory_update` refuses, and so does the proxy (§5.8).
+  on a stale engine; `memory_update` refuses, and so does the proxy (§5.8). In
+  0.6.0 the dashboard command, the extraction after a save and
+  `/mnemosyne-knowledge` refuse too (they need the knowledge tools), each with
+  a message that says to run `/mnemosyne-setup`.
 
 ### 3.2 The activity log: activity.jsonl (v0.5.0)
 
@@ -200,10 +208,12 @@ proxy, adds one JSON line to `~/.claude/mnemosyne/activity.jsonl` (`paths()`
 gives it as `activity`, `<root>/activity.jsonl`). The dashboard reads it.
 
 - A line: `t` (ISO time), `action` (recall, remember, update, forget, stats,
-  rearm), `origin` (hook = first-prompt recall or compaction, trigger = a
+  rearm, extract), `origin` (hook = first-prompt recall or compaction, trigger = a
   recall or remember term, tool = Claude's tool call, external = the proxy,
-  ui = a dashboard search or forget, backfill = `/mnemosyne-tags apply`), `owner`, `text`, `ids`, `count`, `ok`, and
-  `error` only when not ok. `ids` holds at most 50; `count` is the full
+  ui = a dashboard search or forget, backfill = `/mnemosyne-tags apply` and `/mnemosyne-knowledge apply`), `owner`, `text`, `ids`, `count`, `ok`, and
+  `error` only when not ok. v0.6.0 adds four optional fields (§3.7, C1) and the
+  action `extract` (one line per knowledge extraction run: `ids` is the memory,
+  `count` the items stored, `error` the reason when it did not store). `ids` holds at most 50; `count` is the full
   number. `hooks/activity-log.ts` builds it and imports nothing, so the hooks,
   the proxy and the server build the same line.
 - `text` is the query (as the engine gets it, 300 characters at most), the
@@ -287,18 +297,30 @@ and a temporary WAL store made by the real engine.
 - Files: `ui/server.ts` (the server, Bun), `ui/index.html`, `ui/style.css` and
   `ui/app.ts` (the page; `app.ts` is built by `Bun.build` into memory at server
   start and served as `/app.js`), `hooks/ui-launch.ts` (the command's start,
-  reuse, hand-over and stop), `hooks/engine.ts` (the engine call, shared).
+  reuse, hand-over and stop), `hooks/engine.ts` (the engine call, shared). The
+  page also loads `ui/map.ts`, `ui/map-state.ts`, `ui/map-layout.ts`,
+  `ui/map-live.ts`, `ui/stream.ts`, `ui/knowledge.ts`, `ui/health.ts` and
+  `ui/escape.ts` (§3.5, §3.7), all bundled into `/app.js`.
+- Routes (all `GET` but the last two, all behind the token): `/api/health`
+  (the launcher's liveness ping and the header facts), `/api/memories` and
+  `/api/memories/<id>`, `/api/activity` and `/api/activity/stream`,
+  `/api/galaxy`, `/api/knowledge`, `/api/health-report`, then `POST
+  /api/search` and `POST /api/forget`. The v1 `GET /api/map` (one drill level
+  per call) was removed in 0.6.0; it now answers 404 like any unknown route.
 - One engine-call module: `hooks/engine.ts` exports `buildRequests`,
   `engineEnv(store, owner)` and `parseReplies` and imports nothing (no
   `claude-code`, no Bun API), so the hooks run it through `$.process.run` and
   the server through `Bun.spawn` with its own environment and `engineEnv` laid
-  over it. `engineEnv` is the one place the seven engine variables live
-  (`MNEMOPI_DATA_DIR`, `SESSION_ID`, `CHANNEL_ID`, `NO_EMBEDDINGS` and the
-  blanked `MCP_BANK`, `LLM_BASE_URL`, `HOST_LLM_ENABLED`). `paths()` stays in
+  over it. `engineEnv` is the one place the ten engine variables live
+  (`MNEMOPI_DATA_DIR`, `SESSION_ID`, `CHANNEL_ID`, `NO_EMBEDDINGS`, the
+  blanked `MCP_BANK`, `LLM_BASE_URL`, `HOST_LLM_ENABLED`, and since 0.6.0 the
+  blanked `AUTHOR_ID` and `AUTHOR_TYPE`, so the plugin sets the author per
+  call, and `POLYPHONIC_RECALL` set to `0`, because that recall path writes
+  `consolidated_facts`, which a forget does not purge). `paths()` stays in
   `register.ts`: the hook resolves root, store and cli and passes them to the
   server as `MNEMOSYNE_ROOT`, `MNEMOSYNE_STORE`, `MNEMOSYNE_CLI`,
-  `MNEMOSYNE_ACTIVITY_LOG` (empty when the log is off) and
-  `MNEMOSYNE_PLUGIN_ROOT`.
+  `MNEMOSYNE_ACTIVITY_LOG` (empty when the log is off),
+  `MNEMOSYNE_PLUGIN_ROOT` and, since 0.6.0, `MNEMOSYNE_EXTRACTION` (§3.7).
 - Guards: it binds `127.0.0.1` only, on a port the OS picks. It makes a
   32-byte random token at each start. Every `/api` route wants
   `Authorization: Bearer <token>` (compared in constant time); no token, a
@@ -396,6 +418,9 @@ Manual check (plan SRV.4), in a real terminal session and in the desktop app:
    `/mnemosyne-ui` in B (same address). Close B: the port still listens. Close
    A: the port is gone and `ui.json` is gone.
 
+That check was written for the four v0.5.0 tabs; the Map, Knowledge and
+Health tabs of 0.6.0 are described in §3.7.
+
 Manual check of the four views (plan VIEW.5), in a browser, by the user or a
 browser agent. The mockups to compare with are `Memories.dc.html`,
 `Activity.dc.html` and `Search.dc.html` in the plan's design folder
@@ -476,48 +501,16 @@ transaction; an empty list removes the key).
   map alike (`untaggedSql()` in `bin/memories.ts`). A real tag named
   `untagged` is a tag like any other; only `untagged=1` asks for rows with none.
 
-### 3.5 The 3D memory map (v0.5.0)
+### 3.5 The 3D memory map: library and rules (v0.5.0; the map itself is v0.6.0, §3.7)
 
-The Map tab draws the store as a 3D map on the `3d-force-graph` library
-(three.js). It drills down one level at a time: all projects (an owner is a
-project; a sphere's size follows its memory count) → one project's topics
-(its tags, plus an Untagged group) orbiting it, with the other projects drawn
-small aside → one topic's memories orbiting it, with the sibling topics small
-aside → one memory in the inspector (its text, tags, recalls, saved date and
-"Open in Memories"). A path bar goes back up and Reset view returns to All
-memories. The look follows the plan's `design/Main.dc.html` mockup.
+The Map tab draws the store on the `3d-force-graph` library (three.js). v0.5.0
+drew four spheres and drilled down one `GET /api/map` level at a time (projects
+→ a project's topics → a topic's memories → one memory). v0.6.0 removed that
+route and the drill-down: the map is now the galaxy of §3.7, fed by one
+`GET /api/galaxy`. What this section keeps is what did not change with it: the
+vendored library, the rule that no label is ever HTML, how the library loads,
+and what happens without WebGL.
 
-- Data: `GET /api/map` answers one level per call, through the read-only
-  handle, with every value bound as a SQL parameter: no parameter gives the
-  projects (id, label, count, recall total, newest saved date; the owner
-  `global` is labelled Global); `?project=<owner>` that project's topics
-  (tags grouped lower-cased, with counts) and one `Untagged` node when any
-  memory has no tag; `?project=<owner>&tag=<t>` or `&untagged=1` that
-  topic's memories (id, first line as label, at most 80 characters, tags,
-  recall_count, timestamp; at most 500 per topic, newest first, with the
-  topic's `total` and the `limit`, so the rail says "Showing 500 of N"). Tags
-  are lower-cased by SQLite's `lower()` on both sides, when topics are
-  grouped and when a topic's memories are asked for, so every topic finds its
-  own memories (`lower()` folds ASCII only; a non-ASCII upper-case tag stays
-  its own topic). `min_recalls` (digits
-  only, else 400) drops memories below it at every level, and a project or
-  topic left with none is omitted. An unknown project or tag is an empty list.
-  Tested in `tests/bun/map-api.spec.ts` on a real store.
-- Logic: `ui/map-state.ts` holds every rule with no DOM and no three.js, so
-  `tests/bun/map-state.spec.ts` tests it directly: the levels, what each level
-  draws and where (positions are fixed by the level, not by forces), the path
-  bar, Reset view, auto-rotate (on at first, paused when the browser asks for
-  reduced motion), colour-by (project, recalls or age), project toggles, the
-  min-recalls slider (0 - 20), the rail list, the inspector, which request
-  each level still needs, and `hasWebGL`. Sibling data comes from the cached
-  reply of the level above; a reply the state no longer needs is dropped.
-- The rail list is the keyboard and screen-reader route: it holds exactly the
-  nodes drawn (the children first, then Other projects or Other topics, then
-  In focus), and pressing an item is the same call as clicking its sphere.
-  After a level change, focus moves to the list's heading and an aria-live
-  region names the level and its count; a redraw keeps focus on the control
-  that had it. Every rail control, the path bar, Reset view and the rotate
-  button are buttons, checkboxes or a range input with visible focus.
 - Labels are never HTML. The library's own tooltip renders HTML, so it is
   off: `nodeLabel(NO_TOOLTIP)` and `linkLabel(NO_TOOLTIP)`, a function
   returning an empty string, are the only label setters `ui/map.ts` calls (a
@@ -530,9 +523,9 @@ memories. The look follows the plan's `design/Main.dc.html` mockup.
   `ui/map.ts` loads `/vendor/map-lib.js` with `import()` only the first time
   the Map tab opens; the other tabs request nothing under `/vendor/`.
 - Without WebGL: `hasWebGL` asks a fresh canvas for a `webgl2` context (three
-  needs WebGL2). When it gets none, or when the graph constructor throws, the
-  map area shows a plain message, the library is not loaded, and the rail
-  list still drills down to the inspector.
+  needs WebGL2). When it gets none, or when the library cannot load or the
+  graph constructor throws, the map area shows a plain message and the other
+  tabs are unaffected.
 - The page holds a token that can forget memories, and the map adds a
   third-party bundle, so the same CSP applies unchanged (no `'unsafe-*'`),
   the bundle is patched, scanned and pinned (below), and review depth is
@@ -543,7 +536,10 @@ The vendored library (`ui/vendor/`, committed):
 - `scripts/vendor-map.ts` runs one `Bun.build` at dev time over the pinned
   devDependencies `3d-force-graph` 1.80.1, `three` 0.186.1 and
   `three-spritetext` 1.10.0 into one minified ESM file, `ui/vendor/map-lib.js`,
-  exporting `ForceGraph3D` and `SpriteText`. It fails when a patch does not
+  exporting `ForceGraph3D`, `SpriteText` and, since v0.6.0, three's bloom
+  pipeline: `EffectComposer`, `RenderPass`, `UnrealBloomPass` and `OutputPass`
+  (C3; they come from the same `three` package, so the core is still bundled
+  once). It fails when a patch does not
   match exactly as often as listed, when any package comes from two folders,
   or when three's core is not bundled exactly once. Beside it it writes
   `map-lib.d.ts` (the types of the surface `ui/map.ts` uses),
@@ -554,9 +550,9 @@ The vendored library (`ui/vendor/`, committed):
   committed file differs; `bun run test:bun` ends with it, so a hand edit of
   the bundle (even with `map-lib.inputs.json` edited to match) fails the
   suite.
-- Measured (2026-10-23, Bun 1.4.3): map-lib.js is 816,677 bytes (797.5 KB),
-  216,581 bytes gzipped, from 31 packages; three's core is about 0.69 MB of
-  it. Bundled: 3d-force-graph 1.80.1, three 0.186.1, three-spritetext 1.10.0,
+- Measured (v0.6.0 build, Bun 1.4.3): map-lib.js is 829,100 bytes (809.7 KB),
+  219,482 bytes gzipped, from 31 packages (v0.5.0: 816,677 bytes); three's core
+  is most of it. Bundled: 3d-force-graph 1.80.1, three 0.186.1, three-spritetext 1.10.0,
   three-forcegraph 1.43.6, three-render-objects 1.43.0, d3-force-3d 3.0.6,
   float-tooltip 1.7.5, kapsule 1.16.3, preact 10.29.8, polished 4.3.1,
   lodash-es 4.18.1, @tweenjs/tween.js 25.0.0, the ngraph packages and the
@@ -611,38 +607,10 @@ reviewed hits of map-lib.js:
    'self'` would refuse any that were.
 
 A headless Chrome run of the real server on a temporary store (MAP build,
-2026-10-23) loaded the map, drilled down through the rail and by Enter, and
-logged no CSP violation, while a deliberately injected `<style>` in the same
-page was logged as refused (a control that the logging works). That run is
-evidence for this build, not a substitute for the manual check below.
-
-Manual check of the Map tab (plan MAP.4), by the user, with the browser's
-network panel and console open, against `Main.dc.html` in the plan's design
-folder:
-
-1. Open the dashboard on Memories: the network panel shows no request under
-   `/vendor/`. Open Map: `map-lib.js` loads once (switching tabs does not load
-   it again). Turn the network off and repeat the clicks below: no failed
-   request and no CSP violation.
-2. Click a project: it moves to the centre, its topics orbit it and the other
-   projects shrink aside; the path bar reads All memories › project. Click a
-   topic: its memories orbit it. Click a memory: the inspector shows its text,
-   tags, recalls and saved date; "Open in Memories" opens it in the Memories
-   view. Go back with the path bar, then Reset view.
-3. Keyboard only: Tab through colour-by, the project toggles, the rail list,
-   the slider, the path bar, Reset view and the rotate button; each shows
-   focus. Enter on a rail item drills in, focus moves to the list heading, and
-   a screen reader announces the level.
-4. Turn Auto-rotate off and on again (one label; its pressed state shows
-   whether it is on), change colour-by, hide a project, move the
-   min-recalls slider: the map changes at once.
-5. A memory holding `<img src=x onerror=alert(1)>` shows those characters as
-   text in the hover text, the rail list and the inspector.
-6. Firefox with `webgl.disabled = true` in `about:config` (or Chrome started
-   with `--disable-3d-apis`): the map area says the map needs WebGL, and the
-   rail list still drills down to the inspector.
-7. With the system's reduce-motion setting on, the map opens with rotation
-   off: the Auto-rotate button is not pressed.
+2026-10-23, the v0.5.0 map) loaded the map and logged no CSP violation, while a
+deliberately injected `<style>` in the same page was logged as refused (a
+control that the logging works). That run is evidence for that build only; the
+v0.6.0 map has the manual check in §3.7.
 
 ### 3.6 Release check (MAP.6)
 
@@ -663,6 +631,228 @@ portal's own check was not run. (The first run also listed the
 `mnemosyne-tags` command hook as a gating hook without `.catch`; it now has
 one, returning "Mnemosyne: the tag backfill failed.", and the rerun lists it
 with `.catch`.)
+
+### 3.7 v0.6.0: the galaxy, live sparks and knowledge
+
+v0.6.0 replaces the v0.5.0 map with a galaxy of every memory, adds live sparks
+for recalls and saves, a knowledge extraction that runs after each save, and
+the Knowledge and Health tabs. The activity log learns which app and session
+made each call. The numbers C1 to C12 are the contracts of the build plan
+(`mnemosyne-ui-v2`); C8 (embeddings and the waits for them) is v0.7.0 and
+described here only as coming. Where the plan and the code disagree, this
+section records the code.
+
+- C1, the activity line (`hooks/activity-log.ts`, which still imports
+  nothing). Four optional fields join the line of §3.2: `client` (the app, at
+  most 60 code points), `session` (the Claude Code session id, at most 64),
+  `author_type` (`human`, `agent` or `system`; anything else is dropped) and
+  `veracity` (the engine's labels; anything else is dropped); control,
+  bidirectional and zero-width characters are removed from `client` and
+  `session`. The hooks stamp `client` `claude-code` and the session id; the
+  proxy stamps the `clientInfo.name` the client sent in `initialize` (`unknown`
+  until it says; the `initialize` request is still forwarded byte for byte);
+  the dashboard server stamps `dashboard`; the two backfills stamp
+  `mnemosyne-tags` and `mnemosyne-knowledge`. The action `extract` is one line
+  per extraction run. A save records its author: the first save of a turn that
+  began with a remember term is `human` with veracity `stated` (consumed
+  inside one state update, so of two saves at once only one takes it, and a
+  subagent's save never does); Claude's own save is `agent` with author id
+  `claude-code`; an outside client's save is `agent` with its client name as
+  author id, and the proxy deletes any `veracity` or `trust_tier` it sent. The
+  engine keeps the first author on a dedupe re-save (engine change 5). Lines
+  written before 0.6.0 have none of these fields.
+- C2, `GET /api/galaxy` (`galaxyLevel` in `ui/server.ts`, read-only handle):
+  `{ projects: [{ owner, label, count, recalls }], memories: [{ id, owner,
+  tags, recalls, lastRecalled, created, label }], knowledge: [{ id:
+  '<kind>:<rowid>', kind, text, memory }], meaning, total, shown }`. At most
+  `GALAXY_LIMIT` (2000) memories, newest first; `total` and `shown` say how many
+  were cut. `label` is the first non-empty line, control characters removed, cut
+  to 80 characters; knowledge text is cut the same way. A missing store, a
+  missing memoria table or a legacy table without a needed column gives empty
+  lists or skips that table, never an error. In 0.6.0 `meaning` is always
+  `false` and a memory has no `position` or `similar` (the plan gives those to
+  the 0.7.0 SEMX phase).
+- C3, the bloom passes: `ui/vendor/map-lib.js` exports `EffectComposer`,
+  `RenderPass`, `UnrealBloomPass` and `OutputPass` besides `ForceGraph3D` and
+  `SpriteText` (§3.5). `ui/map.ts` adds an `UnrealBloomPass` (strength 0.95,
+  radius 0.55, threshold 0.12) and then an `OutputPass` to the library's own
+  composer (`postProcessingComposer()`); if the library has no composer, the
+  map draws without bloom and says so in the status line.
+- C4, `ui/map-layout.ts`: pure, seeded math with no imports and no three.js.
+  `galaxyLayout(data)` returns cores (one per project, on a golden-angle
+  sphere), hubs (one per topic, on a ring around its core), stars and bridges;
+  a memory's topic is its first tag, lower-cased, or `Untagged`, keyed
+  `<owner>/<tag>`, and a bridge joins the same tag name in two projects
+  (Untagged never bridges). Every random draw is seeded from the memory or
+  topic id (FNV-1a into mulberry32; Box-Muller for the normal draw), and the
+  input is sorted first, so the same data gives the same numbers in any order.
+  `placeOne(layout, memory)` adds one star without moving any other.
+  `timelinePosition(node, days)`, `rangeDays(range, oldestDays = 0)` and
+  `ticks(range, days)` place the Timeline: today at x = 280, the range 560 wide
+  (`all` is the oldest memory's age plus two days), one lane per project, ticks
+  every 1, 7 or 14 days for 7 days, 30 days and All. Positions are pinned, so
+  layouts are stable and morph into each other.
+- C5, `ui/stream.ts` and `ui/map-live.ts`. `createStream({ api })` returns
+  `{ subscribe, unsubscribe, status, onStatus, close, polls }`; `api` is the
+  page's token-bearing fetch, passed in because the token lives in `ui/app.ts`
+  and `ui/stream.ts` never imports it. The first subscriber opens
+  `GET /api/activity/stream` (NDJSON; a blank line is the keep-alive; a 404
+  means the log is off) and the last one closes it, so the Activity tab and the
+  map share one reader. When the stream ends it reconnects with a backoff of 1 s
+  doubling to 30 s, re-reads `/api/activity` for a fresh cursor and hands on
+  only the lines after the last one it delivered. `toMapEvent(line)` turns a
+  line into `{ kind: recall | save | update | forget, ids, client, t, owner?,
+  topic?, demo? }`, or null for a failed line and for `stats`, `rearm` and
+  `extract`. `simulate(kind, galaxy)` makes a demo event (`demo: true`) from the
+  galaxy the page already holds; it makes no request, so the Simulate buttons
+  never touch the store or the activity log.
+- The map itself (`ui/map.ts` draws, `ui/map-state.ts` holds every rule, no DOM
+  and no three.js, tested by `tests/bun/map-state.spec.ts`): stars, cores, hubs
+  and the Claude core as glow sprites; topic threads (core to hub, hub to star)
+  and gold bridges as the library's links; the Galaxy and Timeline layouts
+  (Meaning is in the rail but disabled until 0.7.0) with the layout remembered
+  in `localStorage`; Find, the path bar, Colour by, project toggles, the
+  inspector; knowledge moons (the selected memory's first 8 items on a circle
+  of radius 18, flattened to 0.45, turning at 0.45 rad/s) and the Knowledge
+  chips (a memory without a picked kind keeps a tenth of its brightness); sparks
+  from the Claude core on the Recall and Write layers and a live strip. Under
+  reduced motion the moons stand still (speed 0; the build plan says they
+  orbit, the code and the design mockup stand still), Live starts paused and
+  Auto-rotate off. The page reads its settings from the state once per frame
+  and needs no framework update hook. Every label still goes through
+  `textContent` or a canvas (§3.5).
+- C6, the knowledge store. Rows are written only by `mnemopi_knowledge_store`,
+  replaced per memory in one transaction, owned by `session_id` and purged with
+  the memory by the engine's forget. Column map: a fact is
+  `memoria_facts.value` (`fact_type` `fact`, `key` NULL, importance 0.7); a
+  preference `memoria_preferences.preference`; an instruction
+  `memoria_instructions.instruction` (`active` 1); a timeline event
+  `memoria_timelines.description` (id column `event_id`, `date` NULL unless the
+  text parses as a date, `source` `extraction`); a relation
+  `memoria_kg.subject`, `predicate` and `object` (`confidence` 0.7). Every row
+  carries `source_memory_id`. Nothing is written to `facts` or `triples` (the
+  engine's own writers `insertFactRows` and `insertKg` also write those, so the
+  plugin never calls them, and `triples` has no owner for a forget to purge).
+- C7, `GET /api/knowledge` and `GET /api/health-report` (`knowledgeList` and
+  `healthReport`, read-only, behind the token; `GET /api/health` is unchanged).
+  `/api/knowledge` answers `{ extraction, facts, preferences, instructions,
+  timelines, relations, kg, items, total, shown }`: per kind the newest 2000
+  items, `kg` is `relations` again, `items` all five lists in one, `total` and
+  `shown` count per kind. An item is `{ id: '<kind>:<rowid>', kind, text (one
+  line, at most 500 characters), owner, source_memory_id, topic (the memory's
+  first tag or null), recalls, lastRecalled, active (instructions),
+  confidence (relations) }`; `recalls` and `lastRecalled` are the source
+  memory's all-time numbers, since the engine keeps no usage count for items.
+  `extraction` is the server's `MNEMOSYNE_EXTRACTION` or `unknown`.
+  `/api/health-report` answers `{ ok, total, global, projects, owners,
+  neverRecalled: { count, list }, mostRecalled, recallsPerDay, recallsByDay,
+  daysCovered, sizes: { store, log }, tables, coverage }` (with the never-recalled
+  list also flat as `neverRecalledCount` and `neverRecalledList`): the newest 50
+  never recalled and the 10 most recalled, recalls per day from the activity log
+  and its backup, row counts of every table, and `coverage` as counts of
+  memories with tags, with knowledge, with an embedding (`embeddings`, also
+  `vectors`; nothing writes embeddings in 0.6.0, and the Health tab shows 0
+  whatever the store holds) and with an author (`provenance`, also
+  `author_type`).
+- C9, order: each UI phase of the build started after the backend phases it
+  needed had merged and the full suite was green; nothing in 0.6.0 depends on
+  embeddings.
+- C10, `createMap()` returns `MapView { visible(shown), show(memoryId) }`. The
+  Knowledge and Health tabs call `show` for Show on map; the Map tab then
+  selects that star. Open in Memories goes the other way.
+- C11, dashboard options. `hooks/ui-launch.ts` starts the server with
+  `MNEMOSYNE_EXTRACTION` set to the `extractionModel` setting (`off` when
+  off, `unknown` when the hook could not read it); the server reads it for
+  `/api/knowledge` and it is fixed for that server's life, so a changed
+  setting needs a dashboard restart. The hook records `{ pid, extraction }` in
+  `<root>/ui-extraction.json` for the server it started, and `/mnemosyne-ui` on
+  a reused server whose recorded value differs says so (a server with no
+  record predates the setting). The plan's second option,
+  `MNEMOSYNE_EMBEDDINGS`, belongs to 0.7.0 and does not exist yet.
+- C12, the extraction flow. The hooks cannot import engine code (it lives in
+  the engine's `node_modules`, which an installed plugin's root does not have),
+  so the engine has two tools and the plugin only carries text between them.
+  `mnemopi_knowledge_prompt { memory_id }` returns `{ prompt, sha256 }` (the
+  engine's own prompt over the content clipped to 8192 characters, and the
+  hash of the stored content) and is read-only. `mnemopi_knowledge_store {
+  memory_id, reply, sha256 }` refuses a reply over 256 KB, parses it with the
+  engine's own parser, allows at most 20 items per kind and 60 in all, cleans
+  each item (control characters, zero-width and bidirectional marks, whitespace,
+  500 characters, duplicates), and answers `{ stored: { facts, preferences,
+  instructions, timelines, kg } }` or `{ refused: 'gone' | 'stale' |
+  'unparseable' | 'invalid' }`; `stale` is a changed hash. Both act only on the
+  caller's own row (`session_id` is `MNEMOPI_SESSION_ID`), and neither is in the
+  proxy's allow-list of five tools. After a save (or a `memory_update` that
+  changes the text) `hooks/register.ts` replies at once and then, per session in
+  the order of the saves: gets the prompt, writes the pending file, calls
+  `$.model.complete` with the `extractionModel` (2000 tokens, 60 s, low effort),
+  stores the reply and removes the pending file; each outcome (stored, empty,
+  failed, stale, gone) is one `extract` line. `hooks/knowledge.ts` takes the
+  engine, memory-file and model calls as parameters and imports nothing;
+  `register.ts` imports it, never the reverse. A call lost to Esc, a session end
+  or a failure usually leaves its pending file, `<root>/knowledge-pending/<memory
+  id>.json` (`{ id, owner, sha256 }`, mode 0600 in a 0700 folder, the memory id
+  being 1 to 64 hex characters), written, listed and removed by `bin/memories.ts
+  pending write|remove|remove-many|list`, and a removal that names a hash leaves
+  a newer update's entry alone. The file exists only after two background
+  process spawns (the engine's `knowledge_prompt`, then `memories.ts pending
+  write`) have finished, which happens after the tool reply, so a save made
+  right before exit may leave no pending file and no `extract` line. Nothing is
+  lost for good: `/mnemosyne-knowledge` works from `list --no-knowledge` (the
+  store state), not only from pending files, and its dry run is the check.
+  Making the reply wait for the model would be a one-line change, but the 60 s
+  model timeout (`hooks/knowledge.ts`) and the 120 s engine timeout
+  (`hooks/register.ts`) would then hold the tool reply, so a timeout change goes
+  with it. `/mnemosyne-knowledge` lists the pending files; `apply`
+  finishes the pending entries from the memory's current text and hash first,
+  then extracts memories with no knowledge, 40 memories to a batch per owner
+  and 4 model calls at a time, and notes a memory whose extraction found nothing
+  in `<root>/knowledge-empty.json` (`{ empty: [{ id, sha256 }] }`, mode 0600),
+  skipped while its hash is unchanged. `<root>` is `~/.claude/mnemosyne` (the
+  data root from `paths()`), never `$.plugin.root`, which an update replaces.
+  Outside agents' saves reach the engine through the proxy, which has no model
+  channel, so they get no extraction until `/mnemosyne-knowledge apply`.
+  `extractionModel` `off` stops all of it, and `/mnemosyne-tags` too (it shares
+  the setting), with a message instead of a model call.
+- C8, coming in 0.7.0: embeddings (`memory_embeddings`, computed on this
+  machine), the Meaning layout, similar-memory links, and the dashboard option
+  that turns them on. None of it exists in 0.6.0; `MNEMOPI_NO_EMBEDDINGS` stays
+  `1` (§2.5).
+
+The Knowledge tab (`ui/knowledge.ts`) and the Health tab (`ui/health.ts`) are
+page code over C7 with no server logic of their own; the Activity tab
+(`ui/app.ts`) gains column headers, the Source key, an App filter, a session
+filter and the author badges from C1. The Memories and Search tabs behave as in
+v0.5.0.
+
+Where the build plan and the code disagree (the code is what these notes
+record): under reduced motion the moons stand still; `rangeDays`, `ticks` and
+`timelinePosition` take a second argument the plan's C4 line leaves out;
+`bin/memories.ts pending` also has `remove-many`, which the plan's C12 does not
+list; the hook's `<root>/ui-extraction.json` is not in C11; and C11's
+`MNEMOSYNE_EMBEDDINGS` is not passed, because embeddings are 0.7.0.
+
+Manual check of the v0.6.0 dashboard, in a browser, by the user, with the
+console open throughout (no error and no CSP violation):
+
+1. `/mnemosyne-ui`, then open Map: the galaxy appears with a bloom glow; Reset
+   view, Colour by, Find and the project toggles change it at once. Click a
+   star: the inspector shows its text, recalls and saved date; Open in Memories
+   opens it in the Memories tab.
+2. Switch to Timeline and the 7 days, 30 days and All ranges: stars move to
+   their saved dates, older ones leave the axis, auto-rotate pauses. Reload:
+   the Timeline is still the layout. Meaning and Similar memories are disabled.
+3. Press Simulate a recall and Simulate a write: sparks fly from the Claude
+   core and the live strip lists them; `~/.claude/mnemosyne/activity.jsonl`
+   gains no line and the Memories tab's counts do not change.
+4. In Claude Code, save a memory (`remember that ...`): an activity line shows
+   the app and session, the badge `you said`, and a new star appears. After a
+   few seconds an `extract` line follows; reload the page and the memory has
+   moons, the Knowledge chips count it, and the Knowledge tab lists its items.
+5. Set `extractionModel` to `off` and run `/mnemosyne-ui` again: it says the
+   dashboard must be restarted; after a restart the Knowledge tab says
+   extraction is off, and `/mnemosyne-tags` and `/mnemosyne-knowledge` refuse.
+6. Health: the counts match the Memories tab, and the Embeddings bar reads 0.
 
 ## 4. Why a plugin, and why mod tools rather than an MCP server
 

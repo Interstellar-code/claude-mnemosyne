@@ -35,6 +35,15 @@ if (!cli) throw new Error('MNEMOSYNE_CLI is not set: run this through mnemosyne-
 const owner = process.env.MNEMOPI_SESSION_ID || 'global'
 const isGlobalOwner = owner === 'global'
 const activityLog = process.env.MNEMOSYNE_ACTIVITY_LOG ?? ''
+// The client's self-declared name, from its initialize request (CTX.2); unknown until it says.
+let client = 'unknown'
+
+// The name is stamped into author_id on every save, so it is bounded here as the activity line bounds
+// it (60 code points, hooks/activity-log.ts CLIENT_LIMIT): control characters, bidirectional marks and
+// zero-width characters removed (the set activity-log.ts removes), the ends trimmed, the rest cut.
+const CLIENT_LIMIT = 60
+const CLIENT_CONTROL = /[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g
+const cleanClient = (name: string) => Array.from(name.replace(CLIENT_CONTROL, '').trim()).slice(0, CLIENT_LIMIT).join('').trim()
 
 // The installed engine's build, from <engine>/node_modules/@oh-my-pi/pi-mnemopi/package.json.
 function installedBuild(cliPath: string) {
@@ -60,7 +69,7 @@ const pending = new Map<unknown, Pending>()
 function log(call: Pending, outcome: { ok: boolean; ids?: readonly string[]; count?: number; error?: string }) {
   if (!activityLog) return
   try {
-    appendActivity(activityLog, [activityLine({ action: call.action, origin: 'external', owner, text: call.text, ...outcome })])
+    appendActivity(activityLog, [activityLine({ action: call.action, origin: 'external', owner, client, text: call.text, ...outcome })])
   } catch {
     // building the line failed: the client's reply is already sent and stays as it was
   }
@@ -101,6 +110,18 @@ void (async () => {
     } catch {
       continue
     }
+    if (message?.method === 'initialize') {
+      // The client's self-declared app name (CTX.2). No name means unknown: the
+      // version is never used as a label (review 2 LOW 3).
+      const info = message?.params?.clientInfo
+      if (info !== null && typeof info === 'object' && !Array.isArray(info)) {
+        const name = typeof info.name === 'string' ? cleanClient(info.name) : ''
+        if (name !== '') client = name
+      }
+      // Forward the initialize request unchanged, byte for byte (CTX.2.a1).
+      engine.stdin.write(`${line}\n`)
+      continue
+    }
     if (message?.method === 'tools/list') listIds.add(message.id)
     if (message?.method === 'tools/call') {
       const name = message.params?.name
@@ -139,10 +160,16 @@ void (async () => {
       message.params.arguments = args
       if (name === 'memory_stats') statsIds.add(message.id)
       if (name === 'memory_remember') {
+        // An outside client never sets how far its save is trusted: no veracity, no trust tier (the plugin's own trigger save is the only 'stated').
+        delete args.veracity
+        delete args.trust_tier
         message.params.arguments = {
           ...args,
           source: 'imported',
           scope: args.scope === 'global' || isGlobalOwner ? 'global' : 'channel',
+          // KNOWX.1.a3: an outside agent's save is an agent's, named by its client.
+          author_id: client === 'unknown' ? 'unknown' : client,
+          author_type: 'agent',
         }
       }
     }

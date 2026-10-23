@@ -340,3 +340,124 @@ describe('the backfill apply path on a real store: only rows that did not change
     expect(left).toEqual([ids.edited])
   })
 })
+
+// ---- KNOWX.2.a4 / KNOWX.3.a2: the pending entries and the no-knowledge list ----
+
+describe('bin/memories.ts pending and --no-knowledge', () => {
+  const temp = tempDir('memories-knowledge')
+  const store = join(temp.dir, 'store')
+  const root = join(temp.dir, 'root')
+  const ID = 'a1b2c3d4e5f60718'
+  const OTHER = '0011223344556677'
+
+  beforeAll(async () => {
+    mkdirSync(store, { recursive: true })
+    const reply = body((await engineCall(CLI, store, 'global', [toolCall(1, 'mnemopi_remember', { content: 'a fact with known knowledge' })])).get(1))
+    if (typeof reply?.memory_id !== 'string') throw new Error('remember failed')
+    expect(reply.memory_id).toMatch(/^[0-9a-f]{16}$/)
+  }, 60_000)
+  afterAll(() => temp.dispose())
+
+  const pendingDir = join(root, 'knowledge-pending')
+
+  test('KNOWX.2.a4: pending write makes a 0600 file, list names it, remove drops it', async () => {
+    const written = await memories(['pending', 'write', root], JSON.stringify({ id: ID, owner: 'global', sha256: sha('x') }))
+    expect(written.exitCode).toBe(0)
+    const file = join(pendingDir, `${ID}.json`)
+    expect(existsSync(file)).toBe(true)
+    if (process.platform !== 'win32') expect(statSync(file).mode & 0o777).toBe(0o600)
+    const listed = await memories(['pending', 'list', root])
+    expect(JSON.parse(listed.stdout)).toEqual([{ id: ID, owner: 'global', sha256: sha('x') }])
+  })
+
+  test('KNOWX.2.a4: remove keeps a newer entry (different sha) and drops the matching one', async () => {
+    await memories(['pending', 'write', root], JSON.stringify({ id: OTHER, owner: 'global', sha256: sha('old') }))
+    // A newer update's entry replaced it; this run's sha must not remove it.
+    await memories(['pending', 'write', root], JSON.stringify({ id: OTHER, owner: 'global', sha256: sha('new') }))
+    const kept = await memories(['pending', 'remove', root, OTHER, sha('old')])
+    expect(kept.exitCode).toBe(0)
+    const keptEntries = JSON.parse((await memories(['pending', 'list', root])).stdout) as { id: string; sha256: string }[]
+    expect(keptEntries.map(entry => [entry.id, entry.sha256])).toContainEqual([OTHER, sha('new')])
+    await memories(['pending', 'remove', root, OTHER, sha('new')])
+    const gone = JSON.parse((await memories(['pending', 'list', root])).stdout) as { id: string }[]
+    expect(gone.some(entry => entry.id === OTHER)).toBe(false)
+  })
+
+  test('KNOWX R2: pending write takes a list and remove-many drops each entry like remove, in one process', async () => {
+    const A = '1111111111111111'
+    const B = '2222222222222222'
+    const C = '3333333333333333'
+    const written = await memories(['pending', 'write', root], JSON.stringify([A, B, C].map((id, i) => ({ id, owner: i === 2 ? 'other' : 'global', sha256: sha(id) }))))
+    expect(written.exitCode).toBe(0)
+    for (const id of [A, B, C]) if (process.platform !== 'win32') expect(statSync(join(pendingDir, `${id}.json`)).mode & 0o777).toBe(0o600)
+    // A holds its own sha (removed), B is asked with a stale sha (kept), C with no sha (removed whatever it holds).
+    const removed = await memories(['pending', 'remove-many', root], JSON.stringify([{ id: A, sha256: sha(A) }, { id: B, sha256: sha('stale') }, { id: C }]))
+    expect(removed.exitCode).toBe(0)
+    const left = (JSON.parse((await memories(['pending', 'list', root])).stdout) as { id: string }[]).map(entry => entry.id)
+    expect(left).toContain(B)
+    expect(left).not.toContain(A)
+    expect(left).not.toContain(C)
+    await memories(['pending', 'remove-many', root], JSON.stringify([{ id: B }]))
+  })
+
+  test('KNOWX R2: a bad list is refused whole: pending write writes nothing, remove-many removes nothing', async () => {
+    const GOOD = '4444444444444444'
+    const bad = await memories(['pending', 'write', root], JSON.stringify([{ id: GOOD, owner: 'global', sha256: sha('x') }, { id: 'nope', owner: 'global' }]))
+    expect(bad.exitCode).toBe(1)
+    expect(existsSync(join(pendingDir, `${GOOD}.json`))).toBe(false)
+    await memories(['pending', 'write', root], JSON.stringify({ id: GOOD, owner: 'global', sha256: sha('x') }))
+    const refused = await memories(['pending', 'remove-many', root], JSON.stringify([{ id: GOOD }, { id: 7 }]))
+    expect(refused.exitCode).toBe(1)
+    expect(existsSync(join(pendingDir, `${GOOD}.json`))).toBe(true)
+    expect((await memories(['pending', 'remove-many', root], '{"id":"x"}')).exitCode).toBe(1)
+    await memories(['pending', 'remove', root, GOOD])
+  })
+
+  test('KNOWX R2 finding 1: pending refuses --store, which is why the hook must not send one', async () => {
+    const refused = await memories(['--store', store, 'pending', 'list', root])
+    expect(refused.exitCode).toBe(1)
+    expect(refused.stderr).toContain('pending does not take --store')
+  })
+
+  test('KNOWX.2.a4: a non-hex id is refused, never joined into a path', async () => {
+    for (const id of ['../../etc/passwd', 'ABCDEF', '../x', '']) {
+      const wrote = await memories(['pending', 'write', root], JSON.stringify({ id, owner: 'global', sha256: sha('x') }))
+      expect({ id, exitCode: wrote.exitCode }).toEqual({ id, exitCode: 1 })
+    }
+    const removed = await memories(['pending', 'remove', root, '../x'])
+    expect(removed.exitCode).toBe(1)
+  })
+
+  test('KNOWX.3.a2: list --no-knowledge names every memory with no memoria row', async () => {
+    const listed = await memories(['--store', store, 'list', '--no-knowledge'])
+    expect(listed.exitCode).toBe(0)
+    const rows = JSON.parse(listed.stdout) as { id: string; owner: string; sha256: string }[]
+    expect(rows.length).toBeGreaterThan(0)
+    for (const row of rows) {
+      expect(row.sha256).toMatch(/^[0-9a-f]{64}$/)
+      expect(row.owner).toBe('global')
+    }
+    // Once knowledge rows exist for a memory, it leaves the list.
+    const id = rows[0]!.id
+    const db = new Database(join(store, 'mnemopi.db'))
+    try {
+      db.run("INSERT INTO memoria_facts (session_id, fact_type, key, value, source_memory_id) VALUES ('global', 'fact', NULL, 'f', ?)", [id])
+    } finally {
+      db.close()
+    }
+    const after = await memories(['--store', store, 'list', '--no-knowledge'])
+    const left = JSON.parse(after.stdout) as { id: string }[]
+    expect(left.some(row => row.id === id)).toBe(false)
+  })
+
+  test('KNOWX.3.a2: the sha256 is of the stored content, the same bytes knowledge_prompt hashes', async () => {
+    // A non-ASCII memory: the engine hashes utf-8 content; so must bin/memories.ts.
+    const text = 'naïve café — ünïcode fact'
+    const reply = body((await engineCall(CLI, store, 'global', [toolCall(1, 'mnemopi_remember', { content: text })])).get(1))
+    const id = reply.memory_id as string
+    const got = parseRows((await memories(['--store', store, 'get', id])).stdout)[0]!
+    const promptReply = body((await engineCall(CLI, store, 'global', [toolCall(1, 'mnemopi_knowledge_prompt', { memory_id: id })])).get(1))
+    expect(got.sha256).toBe(promptReply.sha256)
+    expect(got.sha256).toBe(sha(text))
+  })
+})

@@ -23,6 +23,8 @@ type Options = {
   openers?: string[]
   // What ui.json holds before any server of the test starts.
   state?: { port: number; token: string; pid: number }
+  // What ui-extraction.json holds before any server of the test starts (the setting the running dashboard started with).
+  startedWith?: { pid: number; extraction: string }
   // Exit code of the health ping.
   ping?: number
   // What the spawned holder does: print a ready line (in two pieces) and run, or fail first.
@@ -42,6 +44,10 @@ function world(on: On, o: Options = {}) {
   const seen = {
     session: 's1',
     state: o.state as Options['state'],
+    // The text of ui-extraction.json, as the hook last wrote it.
+    startedWith: o.startedWith === undefined ? undefined : JSON.stringify(o.startedWith),
+    // The script the hook ran to write it.
+    startedWithScript: undefined as string | undefined,
     runs: [] as { argv: readonly string[]; init?: ProcessRunInit }[],
     // The ping's exit code, and whether `kill -0` finds a process.
     ping: o.ping ?? 0,
@@ -59,6 +65,7 @@ function world(on: On, o: Options = {}) {
   on('fs.read', (_$, e) => {
     if (e.path === INSTALLED_PACKAGE && o.installed !== false) return { value: JSON.stringify({ version: o.build ?? ENGINE_BUILD }) } as never
     if (e.path === UI_JSON && seen.state) return { value: JSON.stringify(seen.state) } as never
+    if (e.path === `${ROOT}/ui-extraction.json` && seen.startedWith !== undefined) return { value: seen.startedWith } as never
     return { deny: 'ENOENT' } as never
   })
   on('process.run', (_$, e) => {
@@ -66,6 +73,11 @@ function world(on: On, o: Options = {}) {
     if (e.argv[0] === 'bun' && e.argv[1] === '--version') {
       if (o.bun === false) throw new Error('spawn bun ENOENT')
       return { value: { exitCode: 0, stdout: '1.4.3\n', stderr: '' } } as never
+    }
+    if (e.argv[0] === 'bun' && e.argv[1] === '-e' && e.argv[3] === `${ROOT}/ui-extraction.json`) {
+      seen.startedWithScript = e.argv[2]
+      seen.startedWith = e.argv[4]
+      return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
     }
     if (isPing(e.argv)) return { value: { exitCode: seen.ping, stdout: '', stderr: '' } } as never
     if (e.argv[0] === 'kill' && e.argv[1] === '-0') return { value: { exitCode: seen.alive ? 0 : 1, stdout: '', stderr: '' } } as never
@@ -167,6 +179,7 @@ test('the first call starts one server, reads the ready line in pieces and the t
     MNEMOSYNE_STORE: `${ROOT}/store`,
     MNEMOSYNE_CLI: `${ROOT}/engine/node_modules/@oh-my-pi/pi-mnemopi/src/cli.ts`,
     MNEMOSYNE_ACTIVITY_LOG: `${ROOT}/activity.jsonl`,
+    MNEMOSYNE_EXTRACTION: 'haiku',
   })
   expect(`${child.env?.MNEMOSYNE_PLUGIN_ROOT}/ui/server.ts`).toBe(child.argv[1]!)
   // No ui.json at first: nothing to ping.
@@ -380,3 +393,44 @@ test('a ready line that is not JSON fails the start and ends its loop, with no k
   expect(kills(seen)).toEqual([])
   expect(seen.copied).toEqual([])
 })
+
+// ---- KNOWX.2.a9 (R2 finding 11): a reused dashboard keeps the setting it started with ----
+
+test('a started dashboard records the extraction setting it started with, in a 0600 file written over a fresh temp', async ($, on) => {
+  const seen = world(on)
+  await openUi($)
+  expect(JSON.parse(seen.startedWith ?? 'null')).toEqual({ pid: 901, extraction: 'haiku' })
+  // The temp file is removed first and written with mode 0600, as the other plugin files are.
+  expect(seen.startedWithScript).toContain('rmSync')
+  expect(seen.startedWithScript).toContain('0o600')
+  await $.session.end(end('s1', 'other'))
+})
+
+test('a reused dashboard that started with the same setting says nothing about a restart', async ($, on) => {
+  const seen = world(on, { state: { port: 5555, token: TOKEN_A, pid: 42 }, startedWith: { pid: 42, extraction: 'haiku' } })
+  seen.session = 's2'
+  const text = textOf(await openUi($))
+  expect(text).toContain('Mnemosyne dashboard running')
+  expect(text).not.toContain('restart')
+})
+
+test('a reused dashboard that started with another extractionModel says it must be restarted, and still gives the link', async ($, on) => {
+  const seen = world(on, { state: { port: 5555, token: TOKEN_A, pid: 42 }, startedWith: { pid: 42, extraction: 'off' } })
+  seen.session = 's2'
+  const text = textOf(await openUi($))
+  expect(text).toContain('started with extractionModel "off"')
+  expect(text).toContain('extractionModel is "haiku" now')
+  expect(text).toContain('end the session that started it, then run /mnemosyne-ui again')
+  expect(text).toContain(`Link: http://127.0.0.1:5555/#token=${TOKEN_A}`)
+})
+
+for (const [why, startedWith] of [
+  ['no record', undefined],
+  ['a record for another pid', { pid: 7, extraction: 'haiku' }],
+] as const) {
+  test(`a reused dashboard with ${why} is told to restart`, async ($, on) => {
+    const seen = world(on, { state: { port: 5555, token: TOKEN_A, pid: 42 }, ...(startedWith === undefined ? {} : { startedWith }) })
+    seen.session = 's2'
+    expect(textOf(await openUi($))).toContain('restart')
+  })
+}

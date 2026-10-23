@@ -15,14 +15,18 @@
 // Styles live in style.css: the CSP refuses inline ones.
 
 import { createMap, type MapView } from './map'
+import { extractionState, itemHead, kindTabs, kpiTiles as knowledgeKpiTiles, notice as knowledgeNotice, dotClass, ownerColour, ownerColours, parseKnowledge, tableRows, type KnowledgeData, type KnowledgeHost, type KnowledgeKind } from './knowledge'
+import { chartBars, chartText, coverageRows, dayBars, hotRows, kpiTiles as healthKpiTiles, neverRow, neverText, parseHealth, projectRows as healthProjectRows, storageList, type HealthData, type HealthHost } from './health'
+import { isClaudeRecall } from './recalls'
+import { createStream, type StreamApi, type StreamHandle, type StreamListener, type StreamStatus } from './stream'
 
 const TOKEN_KEY = 'mnemosyne.token'
-const VIEWS = ['map', 'memories', 'activity', 'search'] as const
+const VIEWS = ['map', 'memories', 'activity', 'search', 'knowledge', 'health'] as const
 type View = (typeof VIEWS)[number]
-const VIEW_NAMES: Record<View, string> = { map: 'Map', memories: 'Memories', activity: 'Activity', search: 'Search' }
+const VIEW_NAMES: Record<View, string> = { map: 'Map', memories: 'Memories', activity: 'Activity', search: 'Search', knowledge: 'Knowledge', health: 'Health' }
 const FEED_KEEP = 1000
 const FEED_SHOW = 300
-const OWNER_COLOURS = 8
+const CONNECTED = 'Connected to the local Mnemosyne server.'
 
 type Owner = { owner: string; count: number }
 
@@ -68,6 +72,12 @@ export type ActivityLine = {
   error?: string
   // A dashboard search across owners: how many it searched.
   owners?: number
+  // The calling app's clientInfo name, and the Claude Code session (written from v0.6; older lines have neither).
+  client?: string
+  session?: string
+  // Who wrote a saved memory (from v0.6: 'human', 'agent' or 'system') and how sure the engine is of it.
+  author_type?: string
+  veracity?: string
 }
 
 // ---- Pure helpers (exported for tests/bun/inert.spec.ts) ----
@@ -127,6 +137,49 @@ export function clock(value: string | undefined): string {
   return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
 }
 
+const textOf = (value: unknown) => (typeof value === 'string' ? value.trim() : '')
+
+const EXTERNAL_KNOWN = ['Codex', 'Cursor', 'Claude Code']
+
+/** The app a clientInfo name belongs to when it is a known one, else undefined. */
+function knownApp(client: string): string | undefined {
+  if (/codex/i.test(client)) return 'Codex'
+  if (/cursor/i.test(client)) return 'Cursor'
+  if (/^claude[-_ ]?code/i.test(client)) return 'Claude Code'
+  return undefined
+}
+
+/** The app an activity line came from: 'Claude Code', 'Codex', 'Cursor', 'Dashboard', another client's own name, or '' when unknown. */
+export function appOf(line: ActivityLine): string {
+  const client = textOf(line.client)
+  // An outside client names itself, so its name may not pass for the dashboard or a fixed group of the filter (see appKey).
+  if (line.origin === 'external') return client ? (knownApp(client) ?? firstLine(client, 40)) : ''
+  if (line.origin === 'ui') return 'Dashboard'
+  if (client) return knownApp(client) ?? firstLine(client, 40)
+  // Hook, tool and trigger lines are Claude Code's; a backfill line names its own client or none.
+  return line.origin === 'hook' || line.origin === 'tool' || line.origin === 'trigger' ? 'Claude Code' : ''
+}
+
+/** The badge on a saved memory's row: 'you said' (a human, by a trigger phrase), 'Claude' (an agent in Claude Code), 'Codex' or the outside app's own name (an agent), 'system'; none for a row without author_type or one that is not a save. */
+export function provenanceBadge(line: ActivityLine): string {
+  if (line.action !== 'remember') return ''
+  const author = textOf(line.author_type)
+  if (author === 'human') return 'you said'
+  if (author === 'system') return 'system'
+  if (author !== 'agent') return ''
+  const app = appOf(line)
+  return app === 'Claude Code' ? 'Claude' : app || 'agent'
+}
+
+/** What the App filter compares: an outside client's raw name is namespaced, so "Dashboard" from an MCP client is never the dashboard. */
+export function appKey(line: ActivityLine): string {
+  const app = appOf(line)
+  return line.origin === 'external' && app !== '' && !EXTERNAL_KNOWN.includes(app) ? `ext:${app}` : app
+}
+
+/** A session id cut to its first 8 characters. */
+export const shortSession = (session: string) => Array.from(session).slice(0, 8).join('')
+
 /** Where an activity line came from, in words. */
 export function originLabel(line: ActivityLine): string {
   switch (line.origin) {
@@ -137,7 +190,7 @@ export function originLabel(line: ActivityLine): string {
     case 'tool':
       return 'Claude tool'
     case 'external':
-      return 'outside agent'
+      return appName(appKey(line)) || 'outside agent'
     case 'ui':
       return 'dashboard'
     case 'backfill':
@@ -149,6 +202,10 @@ export function originLabel(line: ActivityLine): string {
 
 /** What an activity line's call came to, in words. */
 export function resultLabel(line: ActivityLine): string {
+  if (line.action === 'extract') {
+    if (line.ok === false) return textOf(line.error) ? `failed: ${firstLine(textOf(line.error), 60)}` : 'failed'
+    return `${line.count ?? 0} ${line.count === 1 ? 'item' : 'items'}`
+  }
   if (line.ok === false) return 'failed'
   switch (line.action) {
     case 'recall':
@@ -166,7 +223,8 @@ export function resultLabel(line: ActivityLine): string {
   }
 }
 
-const actionLabel = (action: string | undefined) => (action === 'rearm' ? 're-arm' : (action ?? ''))
+/** An action in words: 'rearm' shows as 're-arm', 'extract' (knowledge learned from a save) as 'learn'. */
+export const actionLabel = (action: string | undefined) => (action === 'rearm' ? 're-arm' : action === 'extract' ? 'learn' : (action ?? ''))
 
 // The bar's width, in twentieths (style.css has .w0 … .w20).
 const barClass = (score: number) => `w${Math.round(Math.min(1, Math.max(0, score)) * 20)}`
@@ -180,23 +238,20 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, text?: string, classN
   return element
 }
 
-const ownerColour = new Map<string, string>()
+// Every tab draws a project in its Map colour (ownerColours, ui/knowledge.ts): set when the page learns the owners.
+let colours = new Map<string, string>()
 
-/** A colour class per owner: global grey, the others in the order the server lists them. */
-function colourOf(owner: string | undefined) {
-  if (!owner || owner === 'global' || owner === 'all') return 'c-global'
-  let colour = ownerColour.get(owner)
-  if (colour === undefined) {
-    colour = `c${ownerColour.size % OWNER_COLOURS}`
-    ownerColour.set(owner, colour)
-  }
-  return colour
+/** Takes the store's owners: from now on every project dot has its Map colour. */
+export function useOwners(list: readonly string[]) {
+  colours = ownerColours(list)
 }
 
-function project(owner: string | undefined, className = 'project', label?: string) {
+/** A project's name with its colour dot; `label` stands for a group of projects (grey). */
+export function project(owner: string | undefined, className = 'project', label?: string) {
   const span = el('span', undefined, className)
   span.title = label ?? owner ?? ''
-  span.append(el('span', undefined, `dot ${label ? 'c-global' : colourOf(owner)}`), el('span', label ?? ownerName(owner)))
+  const dot = el('span', undefined, `dot ${dotClass(label ? ownerColour(colours, undefined) : ownerColour(colours, owner))}`)
+  span.append(dot, el('span', label ?? ownerName(owner)))
   return span
 }
 
@@ -320,19 +375,36 @@ export function memoryDetail(memory: Memory, forget: (memory: Memory, done: (err
   return panel
 }
 
-/** One line of the Activity feed. */
-export function activityItem(line: ActivityLine) {
+/** One line of the Activity feed; `pickSession` is called with the full session id when its button is pressed. */
+export function activityItem(line: ActivityLine, pickSession: (session: string) => void) {
   const item = el('li', undefined, 'event')
   const action = line.action ?? ''
   const what = line.text || (action === 'forget' ? (line.ids ?? []).join(', ') : action === 'rearm' ? 'will recall on next prompt' : '')
   const result = el('span', resultLabel(line), line.ok === false ? 'result is-failed' : 'result')
   if (line.ok === false && line.error) result.title = line.error
+  const source = el('span', undefined, 'source')
+  const raw = el('span', undefined, 'origin-raw mono muted')
+  if (line.origin) raw.append(el('span', String(line.origin)))
+  const session = textOf(line.session)
+  if (session) {
+    const button = el('button', shortSession(session), 'link mono session')
+    button.type = 'button'
+    button.title = 'Show only this session'
+    button.setAttribute('aria-label', `Show only session ${shortSession(session)}`)
+    button.addEventListener('click', () => pickSession(session))
+    raw.append(button)
+  }
+  source.append(el('span', originLabel(line), 'muted origin'), raw)
+  const badge = provenanceBadge(line)
+  const whatCell = el('span', undefined, 'what')
+  if (badge !== '') whatCell.append(el('span', badge, line.author_type === 'human' ? 'prov prov-human' : 'prov prov-agent'))
+  whatCell.append(document.createTextNode(what))
   item.append(
     el('span', clock(line.t), 'mono muted time'),
     el('span', actionLabel(action), `badge a-${/^[a-z]+$/.test(action) ? action : 'other'}`),
-    el('span', originLabel(line), 'muted origin'),
+    source,
     project(line.owner, 'project owner-col', typeof line.owners === 'number' && line.owners > 1 ? `all projects (${line.owners})` : undefined),
-    el('span', what, 'what'),
+    whatCell,
     result,
   )
   return item
@@ -443,7 +515,9 @@ function drawTabs() {
   }
 }
 
-function show(view: View) {
+export function show(view: View) {
+  // A message about the last tab (Forgot memory …) does not follow the page to another one.
+  if (view !== current && !expired) setStatus(CONNECTED, 'ok')
   current = view
   for (const name of VIEWS) byId(`view-${name}`).hidden = name !== view
   for (const tab of byId('tabs').querySelectorAll<HTMLButtonElement>('button.tab')) {
@@ -453,11 +527,18 @@ function show(view: View) {
   if (!opened.has(view)) {
     opened.add(view)
     if (view === 'memories') void loadMemories()
-    if (view === 'activity') void startActivity()
+    if (view === 'activity') startActivity()
     if (view === 'search') byId<HTMLInputElement>('search-query').focus()
     // The map (and its library, under /vendor/) loads only when the Map tab first opens.
-    if (view === 'map') map = createMap({ api: path => api(path), openMemory: openInMemories, status: setStatus })
+    if (view === 'map') map = createMap({ api: path => api(path), openMemory: openInMemories, status: setStatus, events: listener => useEvents().subscribe(listener), streamStatus: watcher => useEvents().onStatus(status => watcher(status)) })
   }
+  if (view === 'activity' && feedDirty) {
+    feedDirty = false
+    drawFeed()
+  }
+  // Knowledge and Health read fresh numbers every time they are opened.
+  if (view === 'knowledge') void loadKnowledge()
+  if (view === 'health') void loadHealthReport()
   map?.visible(view === 'map')
 }
 
@@ -465,10 +546,181 @@ function show(view: View) {
 
 let map: MapView | null = null
 
+const NARROW = '(max-width: 900px)'
+
+/** On a phone the inspector sits under the canvas: a newly selected star (a new title in it) brings it into view; a refresh of the same star does not. */
+export const revealNeeded = (shown: string, next: string, narrow: boolean) => narrow && next !== '' && next !== shown
+
+function wireInspectorReveal() {
+  if (typeof MutationObserver === 'undefined' || typeof matchMedia !== 'function') return
+  const inspector = byId('map-inspector')
+  const back = byId('map-back')
+  // The link to the canvas shows only with something in the inspector (the CSS shows it on narrow screens alone).
+  back.addEventListener('click', () => byId('map-stage').scrollIntoView({ block: 'start', behavior: 'smooth' }))
+  let shown = ''
+  new MutationObserver(() => {
+    back.hidden = inspector.childElementCount === 0
+    const next = inspector.querySelector('.insp-title')?.textContent ?? ''
+    if (revealNeeded(shown, next, matchMedia(NARROW).matches)) inspector.scrollIntoView({ block: 'start', behavior: 'smooth' })
+    shown = next
+  }).observe(inspector, { childList: true, subtree: true })
+}
+
 /** The map inspector's Open in Memories: the Memories view, with that memory open. */
 function openInMemories(id: string) {
   show('memories')
   void openMemory(id)
+}
+
+// ---- Knowledge and Health ----
+
+/** Show on map: the Map tab, with that memory's star selected. */
+function showOnMap(id: string) {
+  show('map')
+  map?.show(id)
+}
+
+const knowledgeView = { kind: 'fact' as KnowledgeKind, data: null as KnowledgeData | null }
+
+/** A tab's own status line (Knowledge and Health): the text, as an error or not, and its Try again button. */
+function tabStatus(name: 'know' | 'health', text: string, error = false) {
+  const line = byId(`${name}-status`)
+  line.textContent = text
+  line.className = error ? 'notice-line small is-error' : 'notice-line small muted'
+  line.hidden = text === ''
+  byId(`${name}-retry`).hidden = !error
+}
+const knowledgeHost: KnowledgeHost = { project: owner => project(owner, 'project'), showOnMap, now: () => Date.now() }
+
+export function drawKnowledge() {
+  const data = knowledgeView.data
+  if (data === null) return
+  tabStatus('know', extractionState(data.extraction).status)
+  const note = knowledgeNotice(data)
+  const box = byId('know-notice')
+  box.hidden = note === null
+  box.replaceChildren(...(note === null ? [] : [el('strong', note.title), el('span', note.body)]))
+  byId('know-tabs').replaceChildren(
+    ...kindTabs(data, knowledgeView.kind, kind => {
+      knowledgeView.kind = kind
+      drawKnowledge()
+    }),
+  )
+  byId('know-kpis').replaceChildren(...knowledgeKpiTiles(data, Date.now()))
+  byId('know-item-head').textContent = itemHead(knowledgeView.kind)
+  byId('know-rows').replaceChildren(...tableRows(data, knowledgeView.kind, knowledgeHost))
+  byId('know-body').hidden = false
+}
+
+export async function loadKnowledge() {
+  if (knowledgeView.data === null) tabStatus('know', 'Loading…')
+  try {
+    const response = await api('/api/knowledge')
+    if (!response.ok) throw new Error(`the server answered ${response.status}`)
+    const data = parseKnowledge(await readJson<unknown>(response))
+    if (data === null) throw new Error('the reply was not a knowledge list')
+    knowledgeView.data = data
+    drawKnowledge()
+  } catch (err) {
+    if (!(err instanceof Expired)) tabStatus('know', `Could not load the knowledge: ${failure(err)}`, true)
+  }
+}
+
+/**
+ * The guarded forget, the one /api/forget call of the page: the Memories tab's button
+ * (forgetMemory) and the Health tab's never-recalled list both go through it. `done()`
+ * on success or when the memory was already gone, `done(error)` on failure.
+ */
+export function forgetById(id: string, done: (error?: string) => void) {
+  void (async () => {
+    try {
+      const response = await api('/api/forget', { method: 'POST', body: { memory_id: id } })
+      const body = await readJson<{ status?: string; error?: string; note?: string }>(response)
+      const deleted = response.ok && body.status === 'deleted'
+      if (!deleted && response.status !== 404) {
+        done(`Forget failed: ${body.error ?? `the server answered ${response.status}`}`)
+        return
+      }
+      memories.rows = memories.rows.filter(row => row.id !== id)
+      if (memories.selected === id) {
+        memories.selected = ''
+        emptyDetail(deleted ? undefined : 'That memory is already gone.')
+      }
+      drawRows()
+      if (deleted) setStatus(`Forgot memory ${id}.${body.note ? ` ${body.note}` : ''}`, 'ok')
+      else setStatus(`Memory ${id} is already gone; nothing was deleted.`, 'error')
+      if (deleted) void loadHealth().catch(() => undefined)
+      if (opened.has('memories')) void loadMemories()
+      done()
+    } catch (err) {
+      if (!(err instanceof Expired)) done(`Forget failed: ${failure(err)}`)
+    }
+  })()
+}
+
+// After a Health forget, the row index whose successor gets the focus once the list is redrawn.
+const healthView = { data: null as HealthData | null, refocus: null as number | null }
+const healthHost: HealthHost = { project: owner => project(owner, 'project'), review: id => openInMemories(id), forget: forgetById, now: () => Date.now() }
+
+export function drawHealth() {
+  const data = healthView.data
+  if (data === null) return
+  const now = Date.now()
+  byId('health-kpis').replaceChildren(...healthKpiTiles(data))
+  byId('health-coverage').replaceChildren(...coverageRows(data))
+  const days = dayBars(data, now)
+  const words = chartText(days, data)
+  const chart = byId('health-chart')
+  chart.setAttribute('aria-label', words.label)
+  chart.replaceChildren(...chartBars(days))
+  byId('health-chart-text').textContent = words.summary
+  byId('health-projects').replaceChildren(...healthProjectRows(data, healthHost))
+  byId('health-never-text').textContent = neverText(data)
+  const rows = data.neverList.map((memory, index) =>
+    neverRow(memory, healthHost, () => {
+      healthView.refocus = index
+      void loadHealthReport()
+    }),
+  )
+  byId('health-never').replaceChildren(...rows)
+  byId('health-never-box').hidden = data.neverList.length === 0
+  byId('health-hot').replaceChildren(...hotRows(data, healthHost))
+  byId('health-hot-box').hidden = data.mostRecalled.length === 0
+  byId('health-storage').replaceChildren(...storageList(data))
+  tabStatus('health', '')
+  byId('health-body').hidden = false
+  // The redrawn list lost the focused button: the next row's Review (the new last row's when the
+  // last was forgotten), else the tab's heading when the list is now empty.
+  if (healthView.refocus !== null) {
+    const row = rows[Math.min(healthView.refocus, rows.length - 1)]
+    healthView.refocus = null
+    ;(row?.querySelector<HTMLButtonElement>('button') ?? byId('health-title')).focus()
+  }
+}
+
+export async function loadHealthReport() {
+  if (healthView.data === null) tabStatus('health', 'Loading…')
+  try {
+    const response = await api('/api/health-report')
+    if (!response.ok) throw new Error(`the server answered ${response.status}`)
+    const data = parseHealth(await readJson<unknown>(response))
+    if (data === null) throw new Error('the reply was not a health report')
+    healthView.data = data
+    drawHealth()
+  } catch (err) {
+    if (err instanceof Expired) return
+    tabStatus('health', `Could not load the health report: ${failure(err)}`, true)
+    if (healthView.refocus !== null) {
+      healthView.refocus = null
+      byId('health-retry').focus()
+    }
+  }
+}
+
+/** The Try again buttons of the Knowledge and Health status lines. */
+export function wireKnowledgeHealth() {
+  byId('know-retry').addEventListener('click', () => void loadKnowledge())
+  byId('health-retry').addEventListener('click', () => void loadHealthReport())
 }
 
 // ---- Header and footer ----
@@ -478,7 +730,7 @@ let owners: Owner[] = []
 async function loadHealth() {
   const health = await readJson<Health>(await api('/api/health'))
   owners = health.owners ?? []
-  for (const { owner } of owners) colourOf(owner)
+  useOwners(owners.map(row => row.owner))
   const projects = owners.length
   byId('summary').textContent = `${health.total} ${health.total === 1 ? 'memory' : 'memories'} · ${projects} ${projects === 1 ? 'project' : 'projects'}`
   byId('engine').textContent = health.engine ? `engine ${health.engine}` : ''
@@ -576,33 +828,8 @@ async function openMemory(id: string) {
   }
 }
 
-function forgetMemory(memory: Memory, done: (error?: string) => void) {
-  void (async () => {
-    try {
-      const response = await api('/api/forget', { method: 'POST', body: { memory_id: memory.id } })
-      const body = await readJson<{ status?: string; error?: string; note?: string }>(response)
-      if (response.ok && body.status === 'deleted') {
-        memories.rows = memories.rows.filter(row => row.id !== memory.id)
-        memories.selected = ''
-        drawRows()
-        emptyDetail()
-        setStatus(`Forgot memory ${memory.id}.${body.note ? ` ${body.note}` : ''}`, 'ok')
-        void loadHealth().catch(() => undefined)
-        void loadMemories()
-        return
-      }
-      if (response.status === 404) {
-        emptyDetail('That memory is already gone.')
-        setStatus(`Memory ${memory.id} is already gone; nothing was deleted.`, 'error')
-        void loadMemories()
-        return
-      }
-      done(`Forget failed: ${body.error ?? `the server answered ${response.status}`}`)
-    } catch (err) {
-      if (!(err instanceof Expired)) done(`Forget failed: ${failure(err)}`)
-    }
-  })()
-}
+/** The memory panel's Forget: the shared guarded forget. */
+export const forgetMemory = (memory: Memory, done: (error?: string) => void) => forgetById(memory.id, done)
 
 function wireMemories() {
   byId('mem-owner').addEventListener('change', () => void loadMemories())
@@ -687,26 +914,84 @@ export function receiveChunk(feed: Feed, buffer: string, draw: () => void): stri
   return rest
 }
 
-const feed = newFeed()
-const feedView = { filter: 'all', started: false, live: 'Connecting' }
+/** The Activity filters; they combine: a line must pass all three. */
+export type FeedFilter = { action: string; app: string; session: string }
+
+export const newFilter = (): FeedFilter => ({ action: 'all', app: 'all', session: '' })
+
+/** Whether a line passes the action chip ('all', 'external' or an action), the App drop-down ('all' or an app) and the clicked session ('' for any). */
+export function showLine(line: ActivityLine, filter: FeedFilter): boolean {
+  if (filter.action === 'external' ? line.origin !== 'external' : filter.action !== 'all' && line.action !== filter.action) return false
+  if (filter.app !== 'all' && appKey(line) !== filter.app) return false
+  return filter.session === '' || textOf(line.session) === filter.session
+}
+
+const FIXED_APPS = ['Claude Code', 'Codex', 'Cursor', 'Dashboard']
+
+/** The App drop-down's values (appKey): the four fixed apps, then any other client seen (and the one picked), by name. */
+export function appOptions(lines: readonly ActivityLine[], picked = 'all'): string[] {
+  const others = new Set<string>()
+  for (const key of [...lines.map(appKey), picked]) if (key !== '' && key !== 'all' && !FIXED_APPS.includes(key)) others.add(key)
+  const name = (key: string) => key.replace(/^ext:/, '')
+  return [...FIXED_APPS, ...[...others].sort((a, b) => name(a).localeCompare(name(b)))]
+}
+
+/** An outside client that calls itself like one of the fixed apps (a client named "Dashboard") is told apart by this suffix. */
+export function externalName(name: string): string {
+  return FIXED_APPS.some(fixed => fixed.toLowerCase() === name.toLowerCase()) ? `${name} (external)` : name
+}
+
+/** The words an App drop-down value shows. */
+export const appName = (key: string) => (key.startsWith('ext:') ? externalName(key.slice(4)) : key)
+
+export const feed = newFeed()
+export const feedView = { filter: newFilter(), started: false, live: 'Connecting', apps: '' }
 
 const isToday = (t: string | undefined) => day(t) === day(new Date().toISOString())
 
-function shown(line: ActivityLine) {
-  if (feedView.filter === 'all') return true
-  if (feedView.filter === 'external') return line.origin === 'external'
-  return line.action === feedView.filter
+/** Picks one session ('' clears it): the chip shows it and the list narrows to it. */
+function setSessionFilter(session: string) {
+  feedView.filter.session = session
+  const chip = byId('act-session')
+  chip.hidden = session === ''
+  chip.textContent = session === '' ? '' : `Session: ${shortSession(session)} ×`
+  chip.title = session === '' ? '' : 'Showing only this session. Press to show all.'
+  chip.setAttribute('aria-label', session === '' ? 'Clear session filter' : `Clear session filter: ${shortSession(session)}`)
+  drawFeed()
 }
 
-function drawFeed() {
+/** Keeps the App drop-down's entries current without resetting it while the stream adds lines. */
+function drawApps() {
+  const names = appOptions(feed.lines, feedView.filter.app)
+  const key = names.join('\n')
+  if (key === feedView.apps) return
+  feedView.apps = key
+  const select = byId<HTMLSelectElement>('act-app')
+  const all = el('option', 'All')
+  all.value = 'all'
+  select.replaceChildren(
+    all,
+    ...names.map(name => {
+      const option = el('option', appName(name))
+      option.value = name
+      return option
+    }),
+  )
+  select.value = feedView.filter.app
+}
+
+export function drawFeed() {
   const today = feed.lines.filter(line => isToday(line.t))
   const count = (test: (line: ActivityLine) => boolean) => String(today.filter(test).length)
-  byId('tile-recall').textContent = count(line => line.action === 'recall' && line.ok !== false)
+  // Claude's recalls only (ui/recalls.ts, the same rule as the Health tab): a dashboard search or another app's recall is not one.
+  byId('tile-recall').textContent = count(isClaudeRecall)
   byId('tile-remember').textContent = count(line => line.action === 'remember' && line.ok !== false)
   byId('tile-update').textContent = count(line => line.action === 'update' && line.ok !== false)
   byId('tile-failed').textContent = count(line => line.ok === false)
-  const list = feed.lines.filter(shown).slice(0, FEED_SHOW)
-  byId('act-list').replaceChildren(...(list.length > 0 ? list.map(activityItem) : [el('li', 'No activity yet.', 'event muted')]))
+  drawApps()
+  const list = feed.lines.filter(line => showLine(line, feedView.filter)).slice(0, FEED_SHOW)
+  const none = feed.lines.length > 0 ? 'No activity matches these filters.' : 'No activity yet.'
+  byId('act-list').replaceChildren(...(list.length > 0 ? list.map(line => activityItem(line, setSessionFilter)) : [el('li', none, 'event empty muted')]))
 }
 
 function setLive(text: string) {
@@ -723,61 +1008,137 @@ async function loadActivity() {
   return body.off === true
 }
 
-const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+// ---- The one activity stream, shared by the Activity tab and the Map tab ----
 
-async function follow() {
-  let attempt = 0
-  for (;;) {
-    try {
-      const from = feed.cursor ? `?cursor=${encodeURIComponent(feed.cursor)}` : ''
-      const response = await api(`/api/activity/stream${from}`)
-      if (response.status === 404) {
-        setLive('Log off')
-        return
+/** How many delivered lines a reader remembers to recognise a replay. */
+const REPLAY_KEEP = 20_000
+
+/**
+ * Drops the lines a reconnect sends again. The shared reader restarts from the cursor it
+ * began at, so after a drop it first repeats what this page already took in: `reconnecting()`
+ * starts the comparison and `accept()` skips each repeated line, then lets the first new one through.
+ */
+export function replayFilter() {
+  const seen: string[] = []
+  let at = -1
+  return {
+    reconnecting() {
+      at = 0
+    },
+    accept(line: Record<string, unknown>): boolean {
+      const key = JSON.stringify(line)
+      if (at >= 0) {
+        if (at < seen.length && seen[at] === key) {
+          at++
+          return false
+        }
+        at = -1
       }
-      if (!response.ok || response.body === null) throw new Error(`the server answered ${response.status}`)
-      setLive('Live')
-      attempt = 0
-      const reader = response.body.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ''
-      for (;;) {
-        const { value, done } = await reader.read()
-        if (done) break
-        buffer = receiveChunk(feed, buffer + decoder.decode(value, { stream: true }), drawFeed)
-      }
-    } catch (err) {
-      if (err instanceof Expired) return
-    }
-    // The stream ended (the server's time cap, a restart, the network): catch up, then follow again from the new cursor.
-    setLive('Reconnecting')
-    await sleep(Math.min(30_000, 1_000 * 2 ** attempt++))
-    if (expired) return
-    try {
-      await loadActivity()
-    } catch (err) {
-      if (err instanceof Expired) return
-    }
+      if (seen.length < REPLAY_KEEP) seen.push(key)
+      return true
+    },
   }
 }
 
-async function startActivity() {
+/**
+ * The page's one stream: `prepare` runs once, when the first tab needs lines, and answers the cursor to follow
+ * from (the Activity tab reads its history there); then ONE createStream reader serves every subscriber.
+ */
+export function shareStream(api: StreamApi, prepare: () => Promise<string>) {
+  const listeners = new Set<StreamListener>()
+  const watchers = new Set<(status: StreamStatus) => void>()
+  let handle: StreamHandle | null = null
+  let starting: Promise<StreamHandle> | null = null
+  const ensure = () =>
+    (starting ??= prepare()
+      .catch(() => '')
+      .then(cursor => {
+        const reader = createStream({ api, cursor })
+        const filter = replayFilter()
+        reader.onStatus(status => {
+          if (status === 'reconnecting') filter.reconnecting()
+          for (const watcher of watchers) watcher(status)
+        })
+        reader.subscribe(line => {
+          if (!filter.accept(line)) return
+          for (const listener of listeners) listener(line)
+        })
+        handle = reader
+        return reader
+      }))
+  return {
+    /** Every new line goes to the listener; returns the way to stop. */
+    subscribe(listener: StreamListener) {
+      listeners.add(listener)
+      void ensure()
+      return () => void listeners.delete(listener)
+    },
+    onStatus(watcher: (status: StreamStatus) => void) {
+      watchers.add(watcher)
+      if (handle !== null) watcher(handle.status())
+      return () => void watchers.delete(watcher)
+    },
+    /** The reader once it exists (a spec counts its polls). */
+    reader: () => handle,
+  }
+}
+
+const LIVE_WORDS: Record<StreamStatus, string> = { idle: 'Connecting', connecting: 'Connecting', live: 'Live', off: 'Log off', reconnecting: 'Reconnecting', expired: 'Connecting' }
+
+// The reader calls api() for the token; a link that stopped working ends it quietly (api() has already said so).
+const streamApi: StreamApi = async (path, init) => {
+  if (expired) return new Response(null, { status: 401 })
+  try {
+    return await api(path, init)
+  } catch (err) {
+    if (err instanceof Expired) return new Response(null, { status: 401 })
+    throw err
+  }
+}
+
+const events = shareStream(streamApi, async () => {
+  try {
+    await loadActivity()
+  } catch (err) {
+    if (!(err instanceof Expired)) setStatus(`Could not load the activity log: ${failure(err)}`, 'error')
+  }
+  return feed.cursor
+})
+
+let eventsWired = false
+let feedDirty = false
+let drawQueued = false
+
+// Lines of one chunk are drawn once, after the whole chunk is in; a hidden tab draws when it is shown.
+function scheduleDraw() {
+  if (drawQueued) return
+  drawQueued = true
+  queueMicrotask(() => {
+    drawQueued = false
+    if (current === 'activity') drawFeed()
+    else feedDirty = true
+  })
+}
+
+/** Starts the shared stream for the first tab that needs it, with the Activity feed listening from the first line. */
+function useEvents() {
+  if (!eventsWired) {
+    eventsWired = true
+    events.onStatus(status => setLive(LIVE_WORDS[status]))
+    events.subscribe(line => {
+      if (feedAdd(feed, [line as ActivityLine])) scheduleDraw()
+    })
+  }
+  return events
+}
+
+function startActivity() {
   if (feedView.started) return
   feedView.started = true
-  try {
-    const off = await loadActivity()
-    if (off) {
-      setLive('Log off')
-      return
-    }
-  } catch (err) {
-    if (err instanceof Expired) return
-    setStatus(`Could not load the activity log: ${failure(err)}`, 'error')
-  }
-  void follow()
+  useEvents()
 }
 
-function wireActivity() {
+export function wireActivity() {
   const pause = byId<HTMLButtonElement>('pause')
   pause.addEventListener('click', () => {
     const redraw = feedPause(feed, !feed.paused)
@@ -788,11 +1149,16 @@ function wireActivity() {
   const filters = byId('act-filters')
   for (const button of filters.querySelectorAll<HTMLButtonElement>('button[data-filter]')) {
     button.addEventListener('click', () => {
-      feedView.filter = button.dataset.filter ?? 'all'
+      feedView.filter.action = button.dataset.filter ?? 'all'
       for (const other of filters.querySelectorAll<HTMLButtonElement>('button[data-filter]')) other.setAttribute('aria-pressed', String(other === button))
       drawFeed()
     })
   }
+  byId<HTMLSelectElement>('act-app').addEventListener('change', event => {
+    feedView.filter.app = (event.target as HTMLSelectElement).value || 'all'
+    drawFeed()
+  })
+  byId('act-session').addEventListener('click', () => setSessionFilter(''))
 }
 
 // ---- Search: one at a time ----
@@ -863,10 +1229,12 @@ async function main() {
     if (!(err instanceof Expired)) setStatus(`Could not reach the Mnemosyne server: ${failure(err)}. Run /mnemosyne-ui again.`, 'error')
     return
   }
-  setStatus('Connected to the local Mnemosyne server.', 'ok')
+  setStatus(CONNECTED, 'ok')
   wireMemories()
   wireActivity()
   wireSearch()
+  wireKnowledgeHealth()
+  wireInspectorReveal()
   show(current)
 }
 

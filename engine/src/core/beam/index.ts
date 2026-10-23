@@ -23,6 +23,12 @@ import {
 import { factRecall, formatContext, recall, recallEnhanced } from "./recall";
 import { initBeam } from "./schema";
 import {
+	knowledgePrompt,
+	storeKnowledge,
+	type KnowledgePromptResult,
+	type KnowledgeStoreResult,
+} from "./knowledge";
+import {
 	exportToDict,
 	forgetWorking,
 	get,
@@ -60,6 +66,7 @@ import type {
 
 export { clipRecallContent } from "./recall";
 export { initBeam } from "./schema";
+export * from "./knowledge";
 export type * from "./types";
 
 const DEFAULT_CONFIG: BeamConfig = {
@@ -354,6 +361,14 @@ export class BeamMemory implements BeamMemoryState {
 
 	importFromDict(data: Record<string, unknown>, force = false): ImportStats {
 		return importFromDict(this, data, force);
+	}
+
+	knowledgePrompt(memoryId: string): KnowledgePromptResult {
+		return knowledgePrompt(this, memoryId);
+	}
+
+	storeKnowledge(memoryId: string, reply: string, sha256: string): KnowledgeStoreResult {
+		return storeKnowledge(this, memoryId, reply, sha256);
 	}
 	protected emitEvent(type: string, data: Omit<BeamEvent, "type" | "sessionId" | "timestamp"> = {}): void {
 		const event: BeamEvent = {

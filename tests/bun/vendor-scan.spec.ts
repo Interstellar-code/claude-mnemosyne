@@ -17,6 +17,7 @@ type Inputs = {
   bundle: string
   bytes: number
   sha256: string
+  exports?: string[]
   packages: { name: string; version: string; license: string }[]
   patches: { id: string; package: string; file: string; find: string; replace: string; count: number; css?: string }[]
 }
@@ -180,6 +181,20 @@ describe('MAP.2.a1 and a2: pins, one copy of three, the patches and their CSS', 
     const dts = read('map-lib.d.ts')
     expect(dts).toContain('export declare const ForceGraph3D')
     expect(dts).toContain('export declare class SpriteText')
+  })
+
+  test('GDATA.2.a1 and a2: the bundle exports the bloom passes, typed in map-lib.d.ts', () => {
+    const text = read('map-lib.js')
+    for (const name of ['EffectComposer', 'RenderPass', 'UnrealBloomPass', 'OutputPass']) {
+      expect({ name, exported: new RegExp(`export\\s*\\{[^}]*\\b${name}\\b[^}]*\\}`).test(text) || new RegExp(`\\b${name}\\s+as\\s+${name}\\b`).test(text) }).toEqual({ name, exported: true })
+    }
+    const dts = read('map-lib.d.ts')
+    for (const name of ['EffectComposer', 'RenderPass', 'UnrealBloomPass', 'OutputPass']) {
+      expect({ name, typed: new RegExp(`export declare class ${name}\\b`).test(dts) }).toEqual({ name, typed: true })
+    }
+    // The bloom passes are three's own, from the one copy already in the bundle.
+    expect(inputs().packages.filter(pkg => pkg.name === 'three')).toHaveLength(1)
+    expect(inputs().exports).toEqual(expect.arrayContaining(['EffectComposer', 'RenderPass', 'UnrealBloomPass', 'OutputPass']))
   })
 })
 

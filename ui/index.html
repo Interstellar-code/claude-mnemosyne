@@ -28,40 +28,118 @@
   <main id="view-map" class="main view map-view" hidden>
     <h1 class="sr-only">Memory map</h1>
     <aside class="map-rail" aria-label="Map controls">
-      <section class="rail-card">
-        <h2 class="rail-title">Colour by</h2>
-        <div role="group" aria-label="Colour by" class="segmented" id="map-colour"></div>
+      <section class="rail-card" aria-labelledby="map-layout-title">
+        <h2 id="map-layout-title" class="rail-title">Layout</h2>
+        <div id="map-layout" class="segmented" role="group" aria-label="Layout">
+          <button type="button" class="seg-btn" data-layout="galaxy" aria-pressed="true">Galaxy</button>
+          <button type="button" class="seg-btn" data-layout="meaning" aria-pressed="false" disabled title="Needs embeddings">Meaning</button>
+          <button type="button" class="seg-btn" data-layout="timeline" aria-pressed="false">Timeline</button>
+        </div>
+        <div id="map-range-box" class="range-box" hidden>
+          <span class="rail-sub">Time range</span>
+          <div id="map-range" class="segmented" role="group" aria-label="Time range">
+            <button type="button" class="seg-btn" data-range="7" aria-pressed="false">7 days</button>
+            <button type="button" class="seg-btn" data-range="30" aria-pressed="false">30 days</button>
+            <button type="button" class="seg-btn" data-range="all" aria-pressed="true">All</button>
+          </div>
+        </div>
       </section>
-      <section class="rail-card">
-        <h2 class="rail-title">Projects</h2>
+
+      <section class="rail-card" aria-labelledby="map-colour-title">
+        <h2 id="map-colour-title" class="rail-title">Colour by</h2>
+        <div id="map-colour" class="segmented" role="group" aria-label="Colour by">
+          <button type="button" class="seg-btn" data-colour="project" aria-pressed="true">Project</button>
+          <button type="button" class="seg-btn" data-colour="recalls" aria-pressed="false">Recalls</button>
+          <button type="button" class="seg-btn" data-colour="age" aria-pressed="false">Age</button>
+        </div>
+      </section>
+
+      <section class="rail-card" aria-labelledby="map-links-title">
+        <h2 id="map-links-title" class="rail-title">Links</h2>
+        <label class="toggle"><input id="map-spokes" type="checkbox" checked><span class="toggle-text">Topic threads</span></label>
+        <label class="toggle"><input id="map-bridges" type="checkbox" checked><span class="toggle-text">Bridges</span><span class="swatch sw-gold" aria-hidden="true"></span></label>
+        <label class="toggle" title="Needs embeddings"><input id="map-similar" type="checkbox" disabled><span class="toggle-text">Similar memories</span><span class="swatch sw-cyan" aria-hidden="true"></span></label>
+        <label class="toggle" title="Needs knowledge extraction"><input id="map-moons" type="checkbox" disabled><span class="toggle-text">Knowledge moons</span><span class="swatch-dots" aria-hidden="true"><span class="lg-dot d-moon-blue"></span><span class="lg-dot d-moon-pink"></span><span class="lg-dot d-moon-green"></span></span></label>
+      </section>
+
+      <section class="rail-card" aria-labelledby="map-know-title">
+        <h2 id="map-know-title" class="rail-title">Knowledge</h2>
+        <div id="map-know" class="know-chips" role="group" aria-label="Show memories with this knowledge">
+          <button type="button" class="chip-btn know-chip" data-kind="fact" aria-pressed="false" aria-disabled="true"><span class="lg-dot d-fact" aria-hidden="true"></span>Facts <span class="mono muted">0</span></button>
+          <button type="button" class="chip-btn know-chip" data-kind="preference" aria-pressed="false" aria-disabled="true"><span class="lg-dot d-preference" aria-hidden="true"></span>Preferences <span class="mono muted">0</span></button>
+          <button type="button" class="chip-btn know-chip" data-kind="instruction" aria-pressed="false" aria-disabled="true"><span class="lg-dot d-instruction" aria-hidden="true"></span>Instructions <span class="mono muted">0</span></button>
+          <button type="button" class="chip-btn know-chip" data-kind="timeline" aria-pressed="false" aria-disabled="true"><span class="lg-dot d-timeline" aria-hidden="true"></span>Timeline <span class="mono muted">0</span></button>
+          <button type="button" class="chip-btn know-chip" data-kind="relation" aria-pressed="false" aria-disabled="true"><span class="lg-dot d-relation" aria-hidden="true"></span>Relations <span class="mono muted">0</span></button>
+        </div>
+        <p id="map-know-note" class="rail-note">Pick a kind to light up only the memories it was mined from.</p>
+      </section>
+
+      <section class="rail-card" aria-labelledby="map-layers-title">
+        <h2 id="map-layers-title" class="rail-title">Activity layers</h2>
+        <label class="toggle"><input id="map-layer-recall" type="checkbox" checked><span class="toggle-text">Recall</span><span class="swatch-dot sw-recall" aria-hidden="true"></span></label>
+        <label class="toggle"><input id="map-layer-write" type="checkbox" checked><span class="toggle-text">Write</span><span class="swatch-dot sw-write" aria-hidden="true"></span></label>
+      </section>
+
+      <section class="rail-card" aria-labelledby="map-projects-title">
+        <h2 id="map-projects-title" class="rail-title">Projects</h2>
         <div id="map-toggles" class="toggles"></div>
       </section>
-      <section class="rail-card" aria-labelledby="map-list-heading">
-        <h2 id="map-list-heading" class="rail-title" tabindex="-1">Projects to open</h2>
-        <div id="map-list" class="rail-list"></div>
-        <span class="rail-note">The same as clicking in the map, for keyboard and screen readers.</span>
-      </section>
-      <section class="rail-card">
-        <label for="map-min" class="rail-title">Min recalls <span id="map-min-value" class="mono">0</span></label>
-        <input id="map-min" class="range" type="range" min="0" max="20" value="0">
+
+      <section id="map-topics-box" class="rail-card" hidden>
+        <h2 id="map-topics-title" class="rail-title" tabindex="-1"></h2>
+        <div id="map-topics" class="rail-list"></div>
       </section>
     </aside>
 
     <section class="map-centre" aria-label="3D memory map">
-      <nav id="map-path" class="path" aria-label="Drill-down path"></nav>
       <div id="map-stage" class="stage">
         <div id="map-canvas" class="stage-canvas"></div>
         <p id="map-message" class="stage-message" hidden></p>
         <div id="map-tip" class="stage-tip" hidden></div>
+        <nav id="map-path" class="path" aria-label="Path"></nav>
+        <div class="stage-find">
+          <svg class="find-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path></svg>
+          <label for="map-find" class="sr-only">Find</label>
+          <input id="map-find" class="find-input" type="search" maxlength="80" placeholder="Find tag, project or label" autocomplete="off">
+          <span id="map-found" class="found muted small mono" aria-live="polite"></span>
+        </div>
         <div class="stage-controls">
           <button id="map-rotate" type="button" class="stage-btn" aria-pressed="true">Auto-rotate</button>
           <button id="map-reset" type="button" class="stage-btn">Reset view</button>
+          <button id="map-sim-recall" type="button" class="stage-btn sim-recall">Simulate a recall</button>
+          <button id="map-sim-write" type="button" class="stage-btn sim-write">Simulate a write</button>
         </div>
-        <span class="stage-hint" aria-hidden="true">Drag to orbit · scroll to zoom · click to drill in</span>
+        <span class="stage-hint" aria-hidden="true">Drag to orbit · scroll to zoom · click to fly in</span>
+        <p id="map-live" class="sr-only" aria-live="polite"></p>
       </div>
-      <p id="map-live" class="sr-only" aria-live="polite"></p>
+
+      <section id="map-live-strip" class="live-strip" aria-label="Live activity">
+        <div class="live-head">
+          <h2 class="rail-title">Live</h2>
+          <span class="live-pill"><span class="live-dot"></span><span id="map-live-state">Paused</span></span>
+          <span class="rail-note">Recalls and saves from the activity log light up the map as they happen.</span>
+        </div>
+        <ol id="map-feed" class="mini-feed">
+          <li class="mini-empty">No activity yet.</li>
+        </ol>
+      </section>
+
+      <section id="map-legend" class="rail-card" aria-labelledby="map-legend-title">
+        <h2 id="map-legend-title" class="rail-title">Reading the map</h2>
+        <dl class="legend">
+          <div class="legend-row"><dt><span class="lg"><span class="lg-dot d-size"></span></span>Size</dt><dd>A star grows with each recall.</dd></div>
+          <div class="legend-row"><dt><span class="lg"><span class="lg-dot d-faint"></span></span>Brightness</dt><dd>Newer memories are brighter.</dd></div>
+          <div class="legend-row"><dt><span class="lg"><span class="lg-dot d-ring"></span></span>Hollow ring</dt><dd>A memory that was never recalled.</dd></div>
+          <div class="legend-row"><dt><span class="lg"><span class="lg-bar sw-gold"></span></span>Gold arc</dt><dd>A topic shared by two projects.</dd></div>
+          <div class="legend-row"><dt><span class="lg"><span class="lg-bar sw-cyan"></span></span>Cyan link</dt><dd>Similar memories, found from embeddings.</dd></div>
+          <div class="legend-row"><dt><span class="lg"><span class="lg-dot d-core"></span></span>Claude core</dt><dd>The white star in the centre: where recalls and saves start.</dd></div>
+          <div class="legend-row"><dt><span class="lg"><span class="lg-dot d-spark-recall"></span><span class="lg-dot d-spark-write"></span><span class="lg-dot d-spark-forget"></span></span>Sparks</dt><dd>Gold is a recall, teal is a save or an update, red is a forget.</dd></div>
+          <div class="legend-row"><dt><span class="lg"><span class="lg-dot d-moon-blue"></span><span class="lg-dot d-moon-pink"></span><span class="lg-dot d-moon-green"></span></span>Moons</dt><dd>Knowledge extracted from a memory, orbiting its star.</dd></div>
+        </dl>
+      </section>
     </section>
 
+    <button id="map-back" type="button" class="btn back-to-map" hidden>Back to the map</button>
     <aside id="map-inspector" class="inspector" aria-label="Inspector"></aside>
   </main>
 
@@ -104,20 +182,50 @@
       <button id="pause" type="button" class="btn push-right">Pause</button>
     </div>
     <div class="tiles">
-      <div class="tile"><div class="tile-label">Recalls today</div><div id="tile-recall" class="tile-value">0</div></div>
+      <div class="tile"><div class="tile-label">Claude recalls today</div><div id="tile-recall" class="tile-value">0</div></div>
       <div class="tile"><div class="tile-label">Saved today</div><div id="tile-remember" class="tile-value">0</div></div>
       <div class="tile"><div class="tile-label">Updated today</div><div id="tile-update" class="tile-value">0</div></div>
       <div class="tile"><div class="tile-label">Failed calls</div><div id="tile-failed" class="tile-value">0</div></div>
     </div>
-    <div role="group" aria-label="Show" class="chips" id="act-filters">
-      <button type="button" class="chip-btn" data-filter="all" aria-pressed="true">All</button>
-      <button type="button" class="chip-btn" data-filter="recall" aria-pressed="false">Recall</button>
-      <button type="button" class="chip-btn" data-filter="remember" aria-pressed="false">Remember</button>
-      <button type="button" class="chip-btn" data-filter="update" aria-pressed="false">Update</button>
-      <button type="button" class="chip-btn" data-filter="forget" aria-pressed="false">Forget</button>
-      <button type="button" class="chip-btn" data-filter="external" aria-pressed="false">Outside agents</button>
+    <div class="act-bar">
+      <div role="group" aria-label="Show" class="chips" id="act-filters">
+        <button type="button" class="chip-btn" data-filter="all" aria-pressed="true">All</button>
+        <button type="button" class="chip-btn" data-filter="recall" aria-pressed="false">Recall</button>
+        <button type="button" class="chip-btn" data-filter="remember" aria-pressed="false">Remember</button>
+        <button type="button" class="chip-btn" data-filter="update" aria-pressed="false">Update</button>
+        <button type="button" class="chip-btn" data-filter="forget" aria-pressed="false">Forget</button>
+        <button type="button" class="chip-btn" data-filter="external" aria-pressed="false">Outside agents</button>
+      </div>
+      <label class="field">App
+        <select id="act-app" class="input">
+          <option value="all">All</option>
+          <option value="Claude Code">Claude Code</option>
+          <option value="Codex">Codex</option>
+          <option value="Cursor">Cursor</option>
+          <option value="Dashboard">Dashboard</option>
+        </select>
+      </label>
+      <button id="act-session" type="button" class="chip-btn" aria-label="Clear session filter" hidden></button>
     </div>
-    <ol id="act-list" class="feed"></ol>
+    <div class="feed-box">
+      <div class="feed-head">
+        <span>Time</span><span>Action</span><span>Source</span><span>Project</span><span>What</span><span>Result</span>
+      </div>
+      <ol id="act-list" class="feed"></ol>
+    </div>
+    <dl id="act-key" class="key" aria-label="Where a line comes from">
+      <dt class="mono">hook</dt><dd>automatic recall on a first prompt or after a compaction</dd>
+      <dt class="mono">tool</dt><dd>Claude called a memory tool in Claude Code</dd>
+      <dt class="mono">trigger</dt><dd>you typed a trigger phrase, such as “remember that”</dd>
+      <dt class="mono">external</dt><dd>another MCP client, through mnemosyne-mcp</dd>
+      <dt class="mono">ui</dt><dd>this dashboard (search or forget)</dd>
+      <dt class="mono">backfill</dt><dd>the one-time tagging run, /mnemosyne-tags</dd>
+    </dl>
+    <dl id="act-prov-key" class="key" aria-label="Who wrote a saved memory">
+      <dt class="prov prov-human">you said</dt><dd>a human wrote it, with a trigger phrase such as “remember that”</dd>
+      <dt class="prov prov-agent">Claude</dt><dd>Claude saved it in Claude Code; Codex or another app's name means an agent in that app saved it</dd>
+      <dt class="mono">no badge</dt><dd>an older save, or one that does not say who wrote it</dd>
+    </dl>
     <p class="muted small">From the activity log on this machine. Text previews are cut short and secrets are masked.</p>
   </main>
 
@@ -138,6 +246,78 @@
     </p>
     <p id="search-note" class="muted small" hidden></p>
     <ol id="search-results" class="hits"></ol>
+  </main>
+
+  <main id="view-knowledge" class="main view column wide" hidden>
+    <div class="titlebar">
+      <h1>Knowledge</h1>
+      <span class="muted small">Facts, preferences and instructions the engine mined from your memories, and whether they are used and kept up to date.</span>
+    </div>
+    <div class="status-row">
+      <p id="know-status" class="notice-line small muted" role="status">Loading…</p>
+      <button id="know-retry" class="btn" type="button" hidden>Try again</button>
+    </div>
+    <div id="know-notice" class="notice" role="status" hidden></div>
+    <div id="know-body" hidden>
+      <div id="know-tabs" class="chips" role="group" aria-label="Knowledge kind"></div>
+      <div id="know-kpis" class="tiles"></div>
+      <div class="table-wrap">
+        <table class="table know-table">
+          <thead>
+            <tr><th id="know-item-head">Fact</th><th>Topic</th><th>Project</th><th>From memory</th><th>Status</th><th>Used</th><th>Last used</th></tr>
+          </thead>
+          <tbody id="know-rows"></tbody>
+        </table>
+      </div>
+      <p class="muted small">Used: how many times the memory an item came from was recalled (all time); the engine keeps no usage count of its own for these items. Status: an instruction is active or retired, a relation shows its confidence. Last used turns amber after 30 days. Show on map opens the source star.</p>
+    </div>
+  </main>
+
+  <main id="view-health" class="main view column wide" hidden>
+    <div class="titlebar">
+      <h1 id="health-title" tabindex="-1">Memory health</h1>
+      <span class="muted small">How much of your memory is used, how much is going stale, and which engine features are switched on.</span>
+    </div>
+    <div class="status-row">
+      <p id="health-status" class="notice-line small muted" role="status">Loading…</p>
+      <button id="health-retry" class="btn" type="button" hidden>Try again</button>
+    </div>
+    <div id="health-body" hidden>
+      <div id="health-kpis" class="tiles"></div>
+      <div class="health-grid">
+        <section class="card" aria-labelledby="health-cov-title">
+          <h2 id="health-cov-title" class="card-title">Engine features in use</h2>
+          <div id="health-coverage" class="cov"></div>
+        </section>
+        <section class="card" aria-labelledby="health-days-title">
+          <h2 id="health-days-title" class="card-title">Claude recalls per day, last 14 days</h2>
+          <div id="health-chart" class="days" role="img" aria-label="Bar chart of recalls per day"></div>
+          <p id="health-chart-text" class="muted small"></p>
+          <h2 class="card-title">Projects</h2>
+          <div id="health-projects" class="list"></div>
+        </section>
+      </div>
+      <div class="health-grid">
+        <section id="health-never-box" class="card" aria-labelledby="health-never-title">
+          <h2 id="health-never-title" class="card-title">Never recalled</h2>
+          <p id="health-never-text" class="muted small"></p>
+          <div class="table-wrap">
+            <table class="table compact">
+              <thead><tr><th>Memory</th><th>Project</th><th>Saved</th><th>Actions</th></tr></thead>
+              <tbody id="health-never"></tbody>
+            </table>
+          </div>
+        </section>
+        <section class="card" aria-labelledby="health-store-title">
+          <div id="health-hot-box">
+            <h2 id="health-hot-title" class="card-title">Most recalled</h2>
+            <div id="health-hot" class="list"></div>
+          </div>
+          <h2 id="health-store-title" class="card-title">Storage</h2>
+          <div id="health-storage" class="list"></div>
+        </section>
+      </div>
+    </div>
   </main>
 
   <footer id="foot" class="foot" hidden>

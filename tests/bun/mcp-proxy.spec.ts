@@ -257,3 +257,176 @@ describe('the proxy against a real installed engine', () => {
     expect(logLines(join(temp.dir, 'logs-4', 'activity.jsonl')).length).toBe(3)
   })
 })
+
+// CTX.2: the proxy reads clientInfo from initialize, forwards the request byte for byte, and
+// stamps the client on every external line. A fake engine records the forwarded bytes; the proxy
+// is the real one over stdio.
+describe('CTX.2: the client names itself at initialize', () => {
+  const temp = tempDir('proxy-client')
+  const capture = join(temp.dir, 'forwarded.txt')
+  const fakeEngine = join(temp.dir, 'fake-engine.ts')
+  // The engine edge: records each forwarded line verbatim and answers so the proxy can exit.
+  writeFileSync(fakeEngine, `
+import { appendFileSync } from 'node:fs'
+const out = process.env.MNEMOSYNE_CAPTURE as string
+const decoder = new TextDecoder()
+let buffer = ''
+for await (const chunk of Bun.stdin.stream()) {
+  buffer += decoder.decode(chunk, { stream: true })
+  let end: number
+  while ((end = buffer.indexOf('\\n')) >= 0) {
+    const line = buffer.slice(0, end)
+    buffer = buffer.slice(end + 1)
+    appendFileSync(out, line + '\\n')
+    let message: any
+    try { message = JSON.parse(line) } catch { continue }
+    if (message?.id === undefined) continue
+    if (message.method === 'initialize') {
+      process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { protocolVersion: '2024-11-05', capabilities: {}, serverInfo: { name: 'mnemopi', version: 'x' } } }) + '\\n')
+    } else if (message.method === 'tools/call') {
+      process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: '{"results":[]}' }] } }) + '\\n')
+    } else if (message.method === 'tools/list') {
+      const tool = (name: string) => ({ name: 'mnemopi_' + name, description: 'Mnemopi ' + name, inputSchema: { type: 'object', properties: { content: { type: 'string' } } } })
+      const tools = ['remember', 'recall', 'update', 'forget', 'stats', 'get', 'knowledge_prompt', 'knowledge_store'].map(tool)
+      process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { tools } }) + '\\n')
+    }
+  }
+}
+`)
+  afterAll(() => temp.dispose())
+
+  const readLog = (path: string) => (existsSync(path) ? readFileSync(path, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line)) : [])
+
+  /** The real proxy over raw stdin bytes; returns its forwarded lines, its replies to the client, and the activity lines it wrote. */
+  async function rawProxy(stdin: string, log: string) {
+    writeFileSync(capture, '')
+    const child = Bun.spawn([process.execPath, PROXY], {
+      env: {
+        ...(process.env as Record<string, string>),
+        ...engineEnv(join(temp.dir, 'store'), 'global'),
+        MNEMOSYNE_CLI: fakeEngine,
+        MNEMOSYNE_ACTIVITY_LOG: log,
+        MNEMOSYNE_CAPTURE: capture,
+      },
+      stdin: 'pipe',
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    child.stdin.write(stdin)
+    child.stdin.end()
+    const [stdout] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
+    const replies = new Map<unknown, any>()
+    for (const line of stdout.split('\n')) {
+      try {
+        const message = JSON.parse(line)
+        if (message?.id !== undefined) replies.set(message.id, message)
+      } catch {
+        // not JSON
+      }
+    }
+    return { forwarded: readFileSync(capture, 'utf8'), replies, log: readLog(log) }
+  }
+
+  const initialize = (clientInfo?: object) =>
+    JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05', capabilities: {}, ...(clientInfo ? { clientInfo } : {}) } })
+  const recall = (id = 2) => JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'memory_recall', arguments: { query: 'heron' } } })
+
+  test('CTX.2.a1: initialize is forwarded byte for byte', async () => {
+    const line = '{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "codex-mcp-client", "version": "1.0.0"}}}'
+    const { forwarded } = await rawProxy(`${line}\n${recall()}\n`, join(temp.dir, 'logs-a1', 'activity.jsonl'))
+    const first = forwarded.split('\n')[0]
+    expect(first).toBe(line)
+  })
+
+  test('CTX.2.a3: clientInfo.name is stamped on the next recall line', async () => {
+    const log = join(temp.dir, 'logs-a3', 'activity.jsonl')
+    const { log: lines } = await rawProxy(`${initialize({ name: 'codex-mcp-client', version: '1.0.0' })}\n${recall()}\n`, log)
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({ action: 'recall', origin: 'external', client: 'codex-mcp-client' })
+  })
+
+  test('CTX.2.a2: a client that sends no clientInfo is logged as unknown', async () => {
+    const log = join(temp.dir, 'logs-a2', 'activity.jsonl')
+    const { log: lines } = await rawProxy(`${initialize()}\n${recall()}\n`, log)
+    expect(lines[0]).toMatchObject({ action: 'recall', client: 'unknown' })
+  })
+
+  test('review 2 LOW 3: an empty name with a version is logged as unknown, never the version', async () => {
+    const log = join(temp.dir, 'logs-version', 'activity.jsonl')
+    const { log: lines } = await rawProxy(`${initialize({ name: '   ', version: '9.9.9' })}\n${recall()}\n`, log)
+    expect(lines[0]).toMatchObject({ action: 'recall', client: 'unknown' })
+    const named = join(temp.dir, 'logs-named', 'activity.jsonl')
+    const { log: namedLines } = await rawProxy(`${initialize({ name: 'codex-mcp-client', version: '9.9.9' })}\n${recall()}\n`, named)
+    expect(namedLines[0]).toMatchObject({ client: 'codex-mcp-client' })
+  })
+
+  // KNOWX.2.a8: the proxy offers only the five memory_* tools, so an external agent can never
+  // reach the engine's own knowledge extraction, and a remember it forwards is authored by the
+  // client that named itself at initialize.
+  const remember = (id = 2) =>
+    JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'memory_remember', arguments: { content: 'a heron waded here' } } })
+  /** The params.arguments the engine actually received for the tools/call with `id`. */
+  const forwardedCall = (forwarded: string, id: number) =>
+    forwarded
+      .split('\n')
+      .filter(Boolean)
+      .map(line => JSON.parse(line))
+      .find(message => message?.method === 'tools/call' && message?.id === id)?.params?.arguments
+
+  test('KNOWX.2.a8: tools/list through the proxy shows only the five memory_* tools, never the engine knowledge tools', async () => {
+    const { replies, forwarded } = await rawProxy(
+      `${initialize({ name: 'codex-mcp-client', version: '1.0.0' })}\n${JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' })}\n`,
+      join(temp.dir, 'logs-a8-list', 'activity.jsonl'),
+    )
+    const tools = replies.get(2).result.tools as { name: string }[]
+    const names = tools.map(tool => tool.name).sort()
+    expect(names).toEqual(['memory_forget', 'memory_recall', 'memory_remember', 'memory_stats', 'memory_update'])
+    expect(names).not.toContain('mnemopi_knowledge_prompt')
+    expect(names).not.toContain('mnemopi_knowledge_store')
+    // The list the client saw came from the fake engine's eight tools, knowledge ones included.
+    const listed = forwarded
+      .split('\n')
+      .filter(Boolean)
+      .map(line => JSON.parse(line))
+      .find(message => message?.method === 'tools/list')
+    expect(listed).toMatchObject({ jsonrpc: '2.0', id: 2, method: 'tools/list' })
+  })
+
+  test('KNOWX.2.a8: a forwarded remember is authored by the client, or unknown without clientInfo', async () => {
+    const named = await rawProxy(
+      `${initialize({ name: 'codex-mcp-client', version: '1.0.0' })}\n${remember()}\n`,
+      join(temp.dir, 'logs-a8-author', 'activity.jsonl'),
+    )
+    expect(forwardedCall(named.forwarded, 2)).toMatchObject({ author_type: 'agent', author_id: 'codex-mcp-client' })
+
+    const anonymous = await rawProxy(`${initialize()}\n${remember()}\n`, join(temp.dir, 'logs-a8-unknown', 'activity.jsonl'))
+    expect(forwardedCall(anonymous.forwarded, 2)).toMatchObject({ author_type: 'agent', author_id: 'unknown' })
+  })
+
+  // FINAL R1: the self-declared name is stamped into author_id on every save, so it is bounded to 60
+  // code points with control characters removed, as the activity line bounds it.
+  test('FINAL.2: a 1 MB or control-character client name arrives bounded and clean in author_id', async () => {
+    const huge = await rawProxy(
+      `${initialize({ name: 'x'.repeat(1_000_000), version: '1' })}\n${remember()}\n`,
+      join(temp.dir, 'logs-final-huge', 'activity.jsonl'),
+    )
+    const hugeAuthor = forwardedCall(huge.forwarded, 2).author_id as string
+    expect(hugeAuthor).toBe('x'.repeat(60))
+    expect(huge.log[0]).toMatchObject({ action: 'remember', origin: 'external', client: 'x'.repeat(60) })
+
+    const dirty = await rawProxy(
+      `${initialize({ name: '\u202ecodex\u0000\n\u200b-client\u007f', version: '1' })}\n${remember()}\n`,
+      join(temp.dir, 'logs-final-control', 'activity.jsonl'),
+    )
+    expect(forwardedCall(dirty.forwarded, 2).author_id).toBe('codex-client')
+    expect(dirty.log[0]).toMatchObject({ client: 'codex-client' })
+
+    // 100 emoji (one code point each, two UTF-16 units) are cut on a code point, never mid-pair.
+    const wide = await rawProxy(`${initialize({ name: '😀'.repeat(100) })}\n${remember()}\n`, join(temp.dir, 'logs-final-wide', 'activity.jsonl'))
+    expect(forwardedCall(wide.forwarded, 2).author_id).toBe('😀'.repeat(60))
+
+    // A name of only control characters names nothing: the client stays unknown.
+    const empty = await rawProxy(`${initialize({ name: '\u0000\u202e ' })}\n${remember()}\n`, join(temp.dir, 'logs-final-empty', 'activity.jsonl'))
+    expect(forwardedCall(empty.forwarded, 2).author_id).toBe('unknown')
+  })
+})

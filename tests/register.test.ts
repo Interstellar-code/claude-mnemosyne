@@ -4,7 +4,7 @@ import type { On, ProcessRunInit, SessionCompactResult } from 'claude-code'
 import { afterTerm, ENGINE_BUILD, ENGINE_VERSION, tagsApply, tagsDryRun } from '../hooks/register'
 import { ENGINE_BUILD as BUILD_FILE, INSTALL_CHECK_TIMEOUT_MS, INSTALL_STEP_TIMEOUT_MS, SETUP_TIMEOUT_MS } from '../hooks/engine-build'
 import { engineTool, mnemosyneStats, publicTool } from '../hooks/surface'
-import { parseProposals, parseTags, pool, SYSTEM_PROMPT } from '../hooks/backfill'
+import { extractionModelOf, extractionOff, parseProposals, parseTags, pool, SYSTEM_PROMPT } from '../hooks/backfill'
 import type { Row } from '../hooks/backfill'
 import { cleanTags } from '../hooks/tags'
 
@@ -20,13 +20,20 @@ const isAppend = (argv: readonly string[]) => (argv[1] ?? '').endsWith('/bin/act
 // appends (`bun bin/activity.ts <log>`, by $.process.spawn or $.process.run) are
 // kept apart, in `runs.appends`, with `via` and the lines as `init.stdin`;
 // `extra.append` makes each append hang forever or throw, `extra.env` sets variables.
-type Extra = { append?: 'ok' | 'hang' | 'throw'; env?: Record<string, string> }
+type Extra = {
+  append?: 'ok' | 'hang' | 'throw'
+  env?: Record<string, string>
+  session?: 'ok' | 'throw'
+}
 function world(on: On, reply: string, isInstalled = true, exitCode = 0, build: string = ENGINE_BUILD, extra: Extra = {}) {
   const runs: Run[] & { appends: Run[] } = Object.assign([] as Run[], { appends: [] as Run[] })
   on('env.get', (_$, e) => ({ value: extra.env?.[(e as { name: string }).name] ?? '/home/u' }))
   on('fs.stat', () => (isInstalled ? { value: { kind: 'file' } } : { deny: 'ENOENT' }) as never)
   on('fs.read', (_$, e) => (e.path === INSTALLED_PACKAGE && isInstalled ? { value: JSON.stringify({ name: '@oh-my-pi/pi-mnemopi', version: build }) } : { deny: 'ENOENT' }) as never)
-  on('session.id', () => ({ value: 's1' }))
+  on('session.id', () => {
+    if (extra.session === 'throw') throw new Error('session store unavailable')
+    return { value: 's1' }
+  })
   on('session.repo', () => ({ value: { root: '/work/My Repo' } }) as never)
   on('process.run', (_$, e) => {
     if (isAppend(e.argv)) {
@@ -37,7 +44,12 @@ function world(on: On, reply: string, isInstalled = true, exitCode = 0, build: s
     }
     runs.push(e)
     const ids = (e.init?.stdin ?? '').split('\n').filter(Boolean).map(line => JSON.parse(line).id)
-    const stdout = exitCode !== 0 ? '' : ids.map(id => `${JSON.stringify({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: reply }] } })}\n`).join('')
+    const stdout =
+      exitCode !== 0
+        ? ''
+        : ids
+            .map(id => `${JSON.stringify({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: reply }] } })}\n`)
+            .join('')
     return { value: { exitCode, stdout, stderr: '' } } as never
   })
   on('process.spawn', async function* (_$: unknown, e: { argv: readonly string[]; input?: string }) {
@@ -66,11 +78,14 @@ test('remember runs the private engine against the private store, global bank', 
     MNEMOPI_MCP_BANK: '',
     MNEMOPI_LLM_BASE_URL: '',
     MNEMOPI_HOST_LLM_ENABLED: '',
+    MNEMOPI_AUTHOR_ID: '',
+    MNEMOPI_AUTHOR_TYPE: '',
+    MNEMOPI_POLYPHONIC_RECALL: '0',
   })
   // `imported`: the durable tier the engine's 24h working-memory trim skips.
   expect(request(run)).toEqual({
     name: 'mnemopi_remember',
-    arguments: { content: 'fact', importance: 0.5, source: 'imported', scope: 'global' },
+    arguments: { content: 'fact', importance: 0.5, source: 'imported', scope: 'global', author_id: 'claude-code', author_type: 'agent' },
   })
 })
 
@@ -599,6 +614,44 @@ test('the first-prompt recall logs action recall, origin hook, its queries and r
   expect(Number.isNaN(Date.parse(line.t))).toBe(false)
 })
 
+// CTX.3: record() names the app and the session; the backfill names itself; a session-id
+// failure never drops the line.
+
+test('CTX.3.a1: hook, trigger and tool lines carry client claude-code and the session id', async ($, on) => {
+  const runs = world(on, RECALL_REPLY)
+  on('prompt.submit', (_$, e) => ({ text: e.text, context: e.context }))
+  await $.prompt.submit({ text: 'How do I install deps?' } as never)
+  await $.prompt.submit({ text: 'recall: pnpm', origin: { kind: 'composer' } } as never)
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_recall', query: 'pnpm' })
+
+  const got = lines(runs)
+  expect(got.map(l => [l.origin, l.client, l.session])).toEqual([
+    ['hook', 'claude-code', 's1'],
+    ['trigger', 'claude-code', 's1'],
+    ['tool', 'claude-code', 's1'],
+  ])
+})
+
+test('CTX.3.a2: the tags backfill stamps client mnemosyne-tags', async ($, on) => {
+  const state = await dryThenChange(on, $, fakeRows(2, ['global']), () => {})
+  state.appends.length = 0
+  await tagsRun($, 'apply')
+  const logged = state.appends.flatMap(run => (run.init?.stdin ?? '').split('\n').filter(Boolean).map(line => JSON.parse(line)))
+  expect(logged).toHaveLength(1)
+  expect(logged[0]).toMatchObject({ action: 'update', origin: 'backfill', client: 'mnemosyne-tags', session: 's1' })
+})
+
+test('CTX.3.a3: a session-id failure never drops the line; it is written without session', async ($, on) => {
+  const runs = world(on, RECALL_REPLY, true, 0, ENGINE_BUILD, { session: 'throw' })
+  // The tool path reads the session id only inside record(), so a failure there must not drop the line.
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_recall', query: 'pnpm' })
+
+  const got = lines(runs)
+  expect(got).toHaveLength(1)
+  expect(got[0]).toMatchObject({ action: 'recall', origin: 'tool', client: 'claude-code' })
+  expect(got[0].session).toBeUndefined()
+})
+
 test('a recall term and a remember term log origin trigger', async ($, on) => {
   const runs = world(on, RECALL_REPLY)
   on('prompt.submit', (_$, e) => ({ text: e.text, context: e.context }))
@@ -863,6 +916,8 @@ test('TAGS.1.a3: the engine call carries metadata {tags}, cleaned by hooks/tags.
     importance: 0.5,
     source: 'imported',
     scope: 'global',
+    author_id: 'claude-code',
+    author_type: 'agent',
     metadata: { tags: ['build', 'ci', 'a-very-long-tag-name-tha', 'x', 'y'] },
   })
   expect(request(runs[0]!).arguments.metadata.tags).toEqual(cleanTags(tags))
@@ -874,7 +929,7 @@ test('TAGS.1.a4: a call without tags, with an empty or all-blank list, or with t
   await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'two', tags: [] })
   await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'three', tags: ['', '  ', 4] })
   await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'four', tags: 'git' })
-  for (const run of runs) expect(Object.keys(request(run).arguments).sort()).toEqual(['content', 'importance', 'scope', 'source'])
+  for (const run of runs) expect(Object.keys(request(run).arguments).sort()).toEqual(['author_id', 'author_type', 'content', 'importance', 'scope', 'source'])
   expect(runs.length).toBe(4)
 })
 
@@ -1482,4 +1537,117 @@ test('r2 LOW 3: aborting apply between owners leaves the later owners unwritten 
   expect(host.seen.engine).toEqual(['global'])
   expect(text).toContain('Tagged 2 memories of 4 proposed')
   expect(text).toContain('Stopped early: 2 memories not reached')
+})
+
+// ---- KNOWX.3: /mnemosyne-knowledge ----
+
+const knowledgeRun = ($: Engine, args = '') => $.command.run({ command: 'mnemosyne-knowledge', args } as never)
+
+test('KNOWX.3.a1: /mnemosyne-knowledge is registered at session start', async ($, on) => {
+  const names: string[] = []
+  world(on, '{}', true, 0, ENGINE_BUILD)
+  on('command.register', (_$, e) => {
+    names.push((e as { name: string }).name)
+    return { value: {} } as never
+  })
+  on('tool.register', () => ({ value: {} }) as never)
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/w', surface: null, isInteractive: false } as never)
+  expect(names).toContain('mnemosyne-knowledge')
+})
+
+test('KNOWX.3.a1: with extractionModel off both modes refuse and say so, with no model call', { options: { extractionModel: 'off' } }, async ($, on) => {
+  const state = tagsWorld(on, fakeRows(3))
+  const dry = await knowledgeRun($)
+  expect(dry.text).toContain('extractionModel')
+  expect(dry.text).toContain('off')
+  const apply = await knowledgeRun($, 'apply')
+  expect(apply.text).toContain('off')
+  expect(state.model).toEqual([])
+})
+
+test('KNOWX.3.a1: an argument other than apply gets the usage line and runs nothing', async ($, on) => {
+  const state = tagsWorld(on, fakeRows(3))
+  const ran = await knowledgeRun($, 'nonsense')
+  expect(ran.text).toContain('Usage: /mnemosyne-knowledge')
+  expect(state.model).toEqual([])
+  expect(state.memories).toEqual([])
+})
+
+// ---- KNOWX.1: who wrote a memory, tied to the trigger phrase ----
+
+/** The remember arguments each engine run carried, in order. */
+const remembers = (runs: Run[]) =>
+  runs
+    .flatMap(run => (run.init?.stdin ?? '').split('\n').filter(Boolean).map(line => JSON.parse(line)))
+    .filter(call => call.params?.name === 'mnemopi_remember')
+    .map(call => call.params.arguments as Record<string, unknown>)
+
+const trigger = (text = 'remember that we deploy on Fridays') => ({ text, origin: { kind: 'composer' } })
+
+test('KNOWX.1.a1 and a2: a trigger then a save gives human and stated; a save with no trigger gives agent', async ($, on) => {
+  const runs = world(on, '{"status":"stored","memory_id":"a1b2c3d4e5f60718"}')
+  on('prompt.submit', (_$, e) => ({ text: e.text, context: e.context }))
+  await $.prompt.submit({ text: 'hello' } as never) // first prompt, no term
+  await $.prompt.submit(trigger() as never)
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'we deploy on Fridays' })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'a second fact' })
+  const saved = remembers(runs)
+  expect(saved[0]).toMatchObject({ author_type: 'human', veracity: 'stated' })
+  // The second save of the turn is not the human's: Claude's own, agent and no veracity.
+  expect(saved[1]).toMatchObject({ author_type: 'agent' })
+  expect(saved[1]!.veracity).toBeUndefined()
+})
+
+test('KNOWX.1.a1: a turn that ends with no save leaves the next turn agent', async ($, on) => {
+  const runs = world(on, '{"status":"stored","memory_id":"a1b2c3d4e5f60718"}')
+  on('prompt.submit', (_$, e) => ({ text: e.text, context: e.context }))
+  on('turn.complete', (_$, e) => ({ text: e.answer }))
+  await $.prompt.submit(trigger() as never)
+  await $.turn.complete({ answer: 'nothing saved', turnId: 't1', durationMs: 1, isAborted: false } as never)
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'next turn agent save' })
+  expect(remembers(runs)[0]).toMatchObject({ author_type: 'agent' })
+  expect(remembers(runs)[0]!.veracity).toBeUndefined()
+})
+
+test('KNOWX.1.a1: a subagent save never consumes the trigger; the main thread\'s next save is human', async ($, on) => {
+  const runs = world(on, '{"status":"stored","memory_id":"a1b2c3d4e5f60718"}')
+  on('prompt.submit', (_$, e) => ({ text: e.text, context: e.context }))
+  await $.prompt.submit(trigger() as never)
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'subagent save', agentId: 'agent-1' } as never)
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'main thread save' })
+  const saved = remembers(runs)
+  expect(saved[0]).toMatchObject({ author_type: 'agent' })
+  expect(saved[0]!.veracity).toBeUndefined()
+  expect(saved[1]).toMatchObject({ author_type: 'human', veracity: 'stated' })
+})
+
+test('KNOWX.1.a3 and a7: a save line carries author_type and veracity; memory_update sends neither', async ($, on) => {
+  const runs = world(on, '{"status":"stored","memory_id":"a1b2c3d4e5f60718"}')
+  on('prompt.submit', (_$, e) => ({ text: e.text, context: e.context }))
+  await $.prompt.submit(trigger() as never)
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'a human fact' })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'a1b2c3d4e5f60718', content: 'edited' })
+  const line = lines(runs).find(entry => entry.action === 'remember' && entry.origin === 'tool')
+  expect(line).toMatchObject({ author_type: 'human', veracity: 'stated' })
+  // An update sends no provenance at all.
+  const update = runs.flatMap(run => (run.init?.stdin ?? '').split('\n').filter(Boolean).map(text => JSON.parse(text))).find(call => call.params?.name === 'mnemopi_update')
+  expect(Object.keys(update.params.arguments).sort()).toEqual(['content', 'memory_id'])
+})
+
+test('KNOWX.2.a1: extractionModelOf defaults to haiku, takes a model id, and off turns it off', () => {
+  expect(extractionModelOf({})).toBe('haiku')
+  expect(extractionModelOf({ extractionModel: 'claude-sonnet-4' })).toBe('claude-sonnet-4')
+  expect(extractionModelOf({ extractionModel: '  ' })).toBe('haiku')
+  expect(extractionOff('off')).toBe(true)
+  expect(extractionOff('haiku')).toBe(false)
+})
+
+test('KNOWX.2.a1: /mnemosyne-tags with extractionModel off makes no model call and says so', { options: { extractionModel: 'off' } }, async ($, on) => {
+  const state = tagsWorld(on, fakeRows(3))
+  const ran = await tagsRun($)
+  expect(ran.text).toContain('extractionModel')
+  expect(ran.text).toContain('off')
+  expect(state.model).toEqual([])
 })

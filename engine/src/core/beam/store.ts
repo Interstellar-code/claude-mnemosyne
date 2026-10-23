@@ -455,8 +455,8 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 				SET importance = MAX(importance, ?), timestamp = ?, source = ?,
 					valid_until = COALESCE(?, valid_until),
 					scope = COALESCE(?, scope),
-					author_id = COALESCE(?, author_id),
-					author_type = COALESCE(?, author_type),
+					author_id = CASE WHEN author_id IS NULL AND author_type IS NULL THEN ? ELSE author_id END,
+					author_type = CASE WHEN author_id IS NULL AND author_type IS NULL THEN ? ELSE author_type END,
 					channel_id = COALESCE(?, channel_id),
 					memory_type = COALESCE(?, memory_type),
 					veracity = CASE WHEN ? != 'unknown' THEN ? ELSE veracity END,
@@ -742,7 +742,7 @@ export function mergeMetadataJson(stored: unknown, patch: MetadataPatch, memoryI
 }
 
 /** Runs `fn` in one BEGIN IMMEDIATE transaction, or inside the caller's open one. */
-function immediateTransaction<T>(db: Database, fn: () => T): T {
+export function immediateTransaction<T>(db: Database, fn: () => T): T {
 	if (db.inTransaction) return fn();
 	db.exec("BEGIN IMMEDIATE");
 	try {

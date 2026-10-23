@@ -10,6 +10,18 @@ export const BACKFILL_MODEL = 'haiku'
 export const BACKFILL_CONCURRENCY = 4
 export const BACKFILL_MAX_TOKENS = 120
 export const BACKFILL_CALL_TIMEOUT_MS = 60_000
+
+/**
+ * The extraction model setting (KNOWX.2.a1): `extractionModel`, default 'haiku'.
+ * It drives the tags backfill too, so 'off' turns both off.
+ */
+export function extractionModelOf(options: { extractionModel?: unknown }): string {
+  return typeof options.extractionModel === 'string' && options.extractionModel.trim() !== '' ? options.extractionModel.trim() : BACKFILL_MODEL
+}
+
+/** True when extraction is off: no model call, no pending file, no extract line. */
+export const extractionOff = (model: string) => model.trim().toLowerCase() === 'off'
+
 // How much of a memory's text the model is shown (code points).
 export const BACKFILL_TEXT_LIMIT = 4000
 // Where the dry run saves its proposals, in <root>.
