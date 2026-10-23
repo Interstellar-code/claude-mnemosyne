@@ -52,6 +52,7 @@ import {
 } from 'node:fs'
 import { dirname, join, sep } from 'node:path'
 import { appendActivity } from '../bin/activity'
+import { hasTagSql, untaggedSql } from '../bin/memories'
 import { activityEntry, preview } from '../hooks/activity-log'
 import type { ActivityFields } from '../hooks/activity-log'
 import { buildRequests, engineEnv, parseReplies } from '../hooks/engine'
@@ -265,6 +266,12 @@ export function isMemoryId(value: unknown): value is string {
   return typeof value === 'string' && /^[^\u0000-\u001f\u007f]{1,64}$/.test(value)
 }
 
+/** The tags in a parsed metadata object: non-empty strings only, as the SQL filters count them. */
+export function tagsOf(metadata: Record<string, unknown> | null | undefined): string[] {
+  const tags = metadata?.tags
+  return Array.isArray(tags) ? tags.filter((tag): tag is string => typeof tag === 'string' && tag !== '') : []
+}
+
 /** A row's metadata_json as a plain object; null when empty, broken or not an object. */
 export function parseMetadata(text: unknown): Record<string, unknown> | null {
   if (typeof text !== 'string' || text === '') return null
@@ -289,7 +296,7 @@ type ListRow = {
   metadata_json: string | null
 }
 
-/** GET /api/memories?owner=&sort=newest|recalled|never&q=&limit= */
+/** GET /api/memories?owner=&sort=newest|recalled|never&q=&tag=&untagged=1&limit= */
 export function listMemories(db: Database | null, params: URLSearchParams): Answer {
   const owner = params.get('owner') ?? ''
   const sortName = params.get('sort') || 'newest'
@@ -300,6 +307,12 @@ export function listMemories(db: Database | null, params: URLSearchParams): Answ
   if (sort === undefined || !Object.hasOwn(SORTS, sortName)) return { status: 400, body: { error: 'sort must be newest, recalled or never' } }
   if (!Number.isInteger(limit) || limit < 1 || limit > LIST_LIMIT) return { status: 400, body: { error: `limit must be 1 to ${LIST_LIMIT}` } }
   if (owner.length > 200 || q.length > 200) return { status: 400, body: { error: 'owner and q are at most 200 characters' } }
+  // Trimmed first, so a tag of only spaces is empty (refused), as a stored tag never has spaces around it.
+  const tag = params.get('tag')?.trim() ?? null
+  const untaggedText = params.get('untagged')
+  if (tag !== null && (tag === '' || tag.length > 200)) return { status: 400, body: { error: 'tag must be 1 to 200 characters' } }
+  if (untaggedText !== null && untaggedText !== '1') return { status: 400, body: { error: 'untagged must be 1' } }
+  if (tag !== null && untaggedText !== null) return { status: 400, body: { error: 'tag and untagged cannot be combined' } }
   if (db === null) return { status: 200, body: { total: 0, count: 0, memories: [] } }
   const where: string[] = []
   const args: (string | number)[] = []
@@ -311,6 +324,12 @@ export function listMemories(db: Database | null, params: URLSearchParams): Answ
     where.push("(instr(lower(content), lower(?)) > 0 OR instr(lower(COALESCE(metadata_json, '')), lower(?)) > 0)")
     args.push(q, q)
   }
+  // A tag named "untagged" is a tag like any other; only untagged=1 asks for rows with none.
+  if (tag !== null) {
+    where.push(hasTagSql())
+    args.push(tag.toLowerCase())
+  }
+  if (untaggedText !== null) where.push(untaggedSql())
   if (sort.where) where.push(sort.where)
   const clause = where.length > 0 ? `WHERE ${where.join(' AND ')}` : ''
   const total = (db.query(`SELECT COUNT(*) AS n FROM working_memory ${clause}`).get(...args) as { n: number }).n
@@ -321,12 +340,10 @@ export function listMemories(db: Database | null, params: URLSearchParams): Answ
        FROM working_memory ${clause} ORDER BY ${sort.order} LIMIT ?`,
     )
     .all(PREVIEW_CHARS, ...args, limit) as ListRow[]
-  const memories = rows.map(({ metadata_json, length, ...row }) => ({
-    ...row,
-    recall_count: row.recall_count ?? 0,
-    truncated: length > PREVIEW_CHARS,
-    metadata: parseMetadata(metadata_json),
-  }))
+  const memories = rows.map(({ metadata_json, length, ...row }) => {
+    const metadata = parseMetadata(metadata_json)
+    return { ...row, recall_count: row.recall_count ?? 0, truncated: length > PREVIEW_CHARS, metadata, tags: tagsOf(metadata) }
+  })
   return { status: 200, body: { total, count: memories.length, memories } }
 }
 
@@ -342,7 +359,8 @@ export function getMemory(db: Database | null, id: string): Answer {
     .get(id) as (Omit<ListRow, 'preview' | 'length'> & { content: string; source: string | null; memory_type: string | null; veracity: string | null; created_at: string | null }) | null
   if (row === null) return { status: 404, body: { error: 'not found' } }
   const { metadata_json, ...rest } = row
-  return { status: 200, body: { ...rest, recall_count: rest.recall_count ?? 0, metadata: parseMetadata(metadata_json) } }
+  const metadata = parseMetadata(metadata_json)
+  return { status: 200, body: { ...rest, recall_count: rest.recall_count ?? 0, metadata, tags: tagsOf(metadata) } }
 }
 
 /** The store's owners, the largest first. */
@@ -519,6 +537,7 @@ type Hit = {
   timestamp: string | null
   importance: number | null
   metadata: Record<string, unknown> | null
+  tags: string[]
 }
 
 // A JSON body that is one plain object holding only `allowed` keys; else the reason.
@@ -544,6 +563,7 @@ export function mergeHits(runs: readonly (readonly Record<string, unknown>[])[],
       const score = typeof row.score === 'number' && Number.isFinite(row.score) ? row.score : 0
       const seen = best.get(row.id)
       if (seen !== undefined && seen.score >= score) continue
+      const metadata = parseMetadata(row.metadata_json)
       best.set(row.id, {
         id: row.id,
         owner: String(row.session_id ?? ''),
@@ -555,7 +575,8 @@ export function mergeHits(runs: readonly (readonly Record<string, unknown>[])[],
         last_recalled: typeof row.last_recalled === 'string' ? row.last_recalled : null,
         timestamp: typeof row.timestamp === 'string' ? row.timestamp : null,
         importance: typeof row.importance === 'number' ? row.importance : null,
-        metadata: parseMetadata(row.metadata_json),
+        metadata,
+        tags: tagsOf(metadata),
       })
     }
   }
@@ -582,6 +603,8 @@ type Views = {
   run: (config: Pick<Config, 'cli' | 'store'>, requests: readonly EngineRequest[], owner: string) => Promise<(string | Error)[]>
   // True while a search runs: one at a time.
   searching: boolean
+  // Forgets reach the engine one at a time: two engine processes deleting at once can fail with "database is locked".
+  forgets: ReturnType<typeof limiter>
 }
 
 // What the page gets when the engine fails: the detail goes to the activity log only.
@@ -644,6 +667,10 @@ async function search(views: Views, text: string): Promise<Answer> {
   }
 }
 
+// A forget the engine answered with SQLite's "database is locked" (an Error, or an error reply).
+export const LOCK_RETRY_MS = 250
+const isLocked = (answer: string | Error | undefined) => /database is locked/i.test(answer instanceof Error ? answer.message : (answer ?? ''))
+
 /** POST /api/forget {memory_id}: the engine's forget, as the owner the database names. */
 async function forget(views: Views, text: string): Promise<Answer> {
   const body = plainBody(text, ['memory_id'])
@@ -657,7 +684,13 @@ async function forget(views: Views, text: string): Promise<Answer> {
   if (row === null || row === undefined) return gone
   const owner = row.owner
   if (typeof owner !== 'string' || owner === '') return { status: 409, body: { error: 'this memory has no owner to forget it as' } }
-  const [answer] = await views.run(views.config, [['mnemopi_forget', { memory_id: id }]], owner)
+  // One at a time (and once more if the store was busy with a write from outside this server).
+  const forgetOnce = () => views.forgets.run(async () => (await views.run(views.config, [['mnemopi_forget', { memory_id: id }]], owner))[0])
+  let answer = await forgetOnce()
+  if (isLocked(answer)) {
+    await new Promise(resolve => setTimeout(resolve, LOCK_RETRY_MS))
+    answer = await forgetOnce()
+  }
   const logged = { action: 'forget', origin: 'ui', owner, ids: [id] } as const
   const reply = typeof answer === 'string' ? parseMetadata(answer) : null
   if (reply?.status === 'deleted') {
@@ -720,6 +753,7 @@ export async function startServer(config: Config, options: ServerOptions = {}): 
     log,
     run: (cfg, requests, owner) => engines.run(() => runEngine(cfg, requests, owner, process.env, engineTimeoutMs)),
     searching: false,
+    forgets: limiter(1),
   }
   const streams = new Set<() => void>()
 

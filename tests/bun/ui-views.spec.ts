@@ -106,7 +106,7 @@ describe('the dashboard views on a real store', () => {
     expect(list.total).toBe(7)
     expect(list.count).toBe(7)
     for (const memory of list.memories) {
-      expect(Object.keys(memory).sort()).toEqual(['id', 'importance', 'last_recalled', 'metadata', 'owner', 'preview', 'recall_count', 'scope', 'timestamp', 'truncated'])
+      expect(Object.keys(memory).sort()).toEqual(['id', 'importance', 'last_recalled', 'metadata', 'owner', 'preview', 'recall_count', 'scope', 'tags', 'timestamp', 'truncated'])
     }
     const apple = list.memories.find(memory => memory.id === ids.globalApple)!
     expect(apple).toMatchObject({ owner: 'global', preview: 'apple pie recipe from grandma', importance: 0.7, recall_count: 0, last_recalled: null, scope: 'global', metadata: null, truncated: false })

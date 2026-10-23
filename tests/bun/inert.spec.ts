@@ -232,6 +232,48 @@ describe('VIEW.4: the real render helpers keep markup as text', () => {
     expectInert(odd, 'x" onclick="alert(1)')
   })
 
+  test('an Activity line for an all-owner search shows "all projects (n)", not the global project', () => {
+    made.length = 0
+    const search = { t: '2026-10-22T10:00:00.000Z', action: 'recall', origin: 'ui', owner: 'global', text: 'apples', ids: [], count: 0, ok: true }
+    const all = app.activityItem({ ...search, owners: 3 }) as FakeElement
+    expect(all.texts()).toContain('all projects (3)')
+    expect(all.texts()).not.toContain('global')
+    expect(all.all().some(element => element.title === 'all projects (3)')).toBe(true)
+    // One owner searched, or no count: the owner's own name.
+    for (const line of [{ ...search, owners: 1 }, search]) {
+      const single = app.activityItem(line) as FakeElement
+      expect(single.texts()).toContain('global')
+      expect(single.texts().some(text => text.startsWith('all projects'))).toBe(false)
+    }
+  })
+
+  test('TAGS.4: a row\'s tag chips are buttons with the tag as text; a click picks the tag and does not open the row', () => {
+    made.length = 0
+    const opened: string[] = []
+    const picked: string[] = []
+    const row = app.memoryRow({ ...memory, tags: ['fruit', '<b>x</b>'] }, (id: string) => opened.push(id), (tag: string) => picked.push(tag)) as FakeElement
+    const chips = row.all().filter(element => element.tagName === 'button')
+    expect(chips.map(chip => chip.textContent)).toEqual(['fruit', '<b>x</b>'])
+    expectInert(row, 'fruit', '<b>x</b>')
+    let stopped = 0
+    const event = { stopPropagation: () => stopped++ }
+    for (const listener of chips[1]!.listeners.get('click')!) listener(event)
+    expect(picked).toEqual(['<b>x</b>'])
+    expect(stopped).toBe(1)
+    expect(opened).toEqual([])
+    // Enter on a chip must not reach the row's own keydown handler.
+    for (const listener of chips[0]!.listeners.get('keydown')!) listener(event)
+    expect(stopped).toBe(2)
+    // The row itself still opens it.
+    for (const listener of row.listeners.get('click')!) listener({})
+    expect(opened).toEqual([memory.id])
+    // Without a picker, or in the metadata only, chips are plain text.
+    const plain = app.memoryRow(memory, () => {}) as FakeElement
+    expect(plain.all().some(element => element.tagName === 'button')).toBe(false)
+    expect(app.tagsOfMemory({ metadata: { tags: ['m'] } })).toEqual(['m'])
+    expect(app.tagsOfMemory({ metadata: { tags: ['m'] }, tags: ['s'] })).toEqual(['s'])
+  })
+
   test('a Search hit, with the query words marked as text', () => {
     made.length = 0
     const hit = app.searchHit({ ...memory, content: MARKUP, score: 0.42 }, 1, 'script onerror', () => {}) as FakeElement

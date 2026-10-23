@@ -17,6 +17,22 @@ import type { EngineInterface, PluginOptions, Register } from 'claude-code'
 import type { Recalled } from '../types'
 import { activityLine, callOutcome, callText, TOOL_ACTIONS } from './activity-log'
 import type { ActivityFields } from './activity-log'
+import {
+  BACKFILL_CALL_TIMEOUT_MS,
+  BACKFILL_CONCURRENCY,
+  BACKFILL_MAX_TOKENS,
+  BACKFILL_MODEL,
+  GET_BATCH,
+  judge,
+  parseProposals,
+  parseRows,
+  parseTags,
+  pool,
+  PROPOSALS_FILE,
+  SYSTEM_PROMPT,
+  tagPrompt,
+} from './backfill'
+import type { Proposal, Row } from './backfill'
 import { buildRequests, engineEnv, parseReplies } from './engine'
 import type { EngineRequest } from './engine'
 import { ENGINE_BUILD, SETUP_TIMEOUT_MS } from './engine-build'
@@ -42,6 +58,7 @@ const RULES_SECTION = {
   text: `# Long-term memory (Mnemosyne)
 mcp__mnemosyne__memory_remember / _recall / _update / _forget keep facts across sessions and repos.
 - Remember: lasting preferences, conventions, decisions, runbooks the user states. One self-contained fact per call.
+- With each fact, pass tags: 2 to 5 short lowercase topic words (for example ["git", "ci"]).
 - Never remember secrets, credentials, or one-off task details.
 - Recall before answering about past decisions or preferences ("what did we…", "how do I usually…").
 - To change or tag a fact, update it by id and owner with memory_update. Use memory_forget only to delete. Never save a duplicate.`,
@@ -62,6 +79,11 @@ const TOOLS = [
         global: {
           type: 'boolean',
           description: 'Per-project mode only: true shares the fact with every project.',
+        },
+        tags: {
+          type: 'array',
+          items: { type: 'string' },
+          description: '2 to 5 short lowercase topic tags for the fact, e.g. ["git", "ci"].',
         },
       },
       required: ['content'],
@@ -310,9 +332,10 @@ async function runAll(
   options: PluginOptions,
   requests: readonly EngineRequest[],
   as?: string,
+  timeoutMs = 20_000,
 ) {
   const [id, { cli, store }] = await Promise.all([as ?? owner($, options), paths($, options)])
-  const ran = await $.process.run(['bun', cli, 'mcp'], { stdin: buildRequests(requests), env: engineEnv(store, id), timeoutMs: 20_000 })
+  const ran = await $.process.run(['bun', cli, 'mcp'], { stdin: buildRequests(requests), env: engineEnv(store, id), timeoutMs })
   return parseReplies(requests.length, ran.stdout, ran.exitCode, ran.stderr)
 }
 
@@ -416,6 +439,182 @@ async function record($: EngineInterface, options: PluginOptions, entries: reado
   }
 }
 
+// ---- /mnemosyne-tags: the one-time tag backfill (hooks/backfill.ts, bin/memories.ts) ----
+
+const TAGS_USAGE = 'Usage: /mnemosyne-tags (a dry run: Haiku proposes tags, nothing is written) or /mnemosyne-tags apply (writes the saved proposals).'
+// apply's one engine process per owner may carry every proposal of that owner.
+const APPLY_TIMEOUT_MS = 120_000
+const MEMORIES_TIMEOUT_MS = 60_000
+
+// bin/memories.ts: lists and reads rows from a read-only handle, and saves the proposals file.
+async function memoriesCli($: EngineInterface, options: PluginOptions, args: readonly string[], stdin?: string) {
+  const { store } = await paths($, options)
+  // --store goes first, before the command: the script refuses a second one, so no id can redirect the read.
+  const ran = await $.process.run(['bun', `${slashes($.plugin.root)}/bin/memories.ts`, ...(args[0] === 'save' ? [] : ['--store', store]), ...args], {
+    ...(stdin === undefined ? {} : { stdin }),
+    timeoutMs: MEMORIES_TIMEOUT_MS,
+  })
+  if (ran.exitCode !== 0) throw new Error(`bin/memories.ts ${args[0]} failed: ${`${ran.stderr}\n${ran.stdout}`.trim().slice(-300)}`)
+  // The host keeps 4 MiB of stdout; a cut listing would be broken JSON and a misleading error.
+  if (ran.isStdoutTruncated) throw new Error(`the output of bin/memories.ts ${args[0]} was cut at 4 MiB: too many memories for one run`)
+  return ran.stdout
+}
+
+// A progress line under the prompt; a UI failure must not stop the run.
+function progress($: EngineInterface, text: string) {
+  try {
+    $.ui.status(`Mnemosyne · ${text}`)
+  } catch {
+    // no status line
+  }
+}
+
+const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`
+
+// The dry run: one Haiku call per untagged memory, saved as proposals; no memory changes.
+export async function tagsDryRun($: EngineInterface, options: PluginOptions, signal: AbortSignal) {
+  const { root } = await paths($, options)
+  const listed = parseRows(await memoriesCli($, options, ['list', '--untagged']))
+  // A row whose metadata is not a JSON object cannot take a metadata merge: no model call for it, and it is named below.
+  const rows = listed.filter(row => row.taggable)
+  const blocked = listed.filter(row => !row.taggable)
+  const blockedNote = blocked.length === 0 ? '' : `${plural(blocked.length, 'memory', 'memories')} cannot be tagged (their metadata is not a JSON object): ${blocked.slice(0, 10).map(row => row.id).join(', ')}${blocked.length > 10 ? ', …' : ''}.`
+  if (rows.length === 0) return [blocked.length === 0 ? 'Every memory already has tags; nothing to propose.' : 'No memory can be tagged; nothing to propose.', blockedNote].filter(Boolean).join('\n')
+  const proposed: (Proposal | undefined)[] = rows.map(() => undefined)
+  const skipped = { failed: 0, empty: 0, aborted: 0 }
+  let firstError = ''
+  let done = 0
+  progress($, `tagging 0/${rows.length}`)
+  await pool(rows, BACKFILL_CONCURRENCY, signal, async (row, i) => {
+    try {
+      // The memory's text goes in the prompt as a quoted string, to a model that is told it is data.
+      const reply = await $.model.complete(
+        { model: BACKFILL_MODEL, system: SYSTEM_PROMPT, prompt: tagPrompt(row.content), maxTokens: BACKFILL_MAX_TOKENS, timeoutMs: BACKFILL_CALL_TIMEOUT_MS },
+        { signal },
+      )
+      if (!reply.isAnswered) {
+        if (reply.reason === 'aborted') skipped.aborted++
+        else {
+          skipped.failed++
+          firstError ||= reply.reason === 'api-error' ? `api-error ${reply.status ?? 'no response'} ${reply.error}` : reply.reason
+        }
+      } else {
+        const tags = parseTags(reply.text)
+        if (tags.length === 0) skipped.empty++
+        else proposed[i] = { id: row.id, owner: row.owner, tags, sha256: row.sha256 }
+      }
+    } catch (err) {
+      skipped.failed++
+      firstError ||= (err as Error).message
+    }
+    progress($, `tagging ${++done}/${rows.length}`)
+  })
+  if (signal.aborted) {
+    progress($, 'tagging stopped')
+    return `Stopped after ${done} of ${rows.length} memories. Nothing was saved and no memory was changed; run /mnemosyne-tags again.`
+  }
+  const proposals = proposed.filter((p): p is Proposal => p !== undefined)
+  const byId = new Map(rows.map(row => [row.id, row]))
+  const lines = proposals.map(p => `${p.id}  ${p.owner}  [${p.tags.join(', ')}]  ${Array.from(byId.get(p.id)?.content ?? '').slice(0, 60).join('').replace(/\s+/g, ' ')}`)
+  const notes = [
+    skipped.empty > 0 ? `${plural(skipped.empty, 'memory', 'memories')} got no usable tags` : '',
+    skipped.failed > 0 ? `${plural(skipped.failed, 'call')} failed (${firstError})` : '',
+    skipped.aborted > 0 ? `${plural(skipped.aborted, 'call')} ${skipped.aborted === 1 ? 'was' : 'were'} cut short` : '',
+  ].filter(Boolean)
+  if (proposals.length === 0) {
+    progress($, 'tagging found nothing')
+    return `No tags were proposed for ${plural(rows.length, 'memory', 'memories')}${notes.length > 0 ? `: ${notes.join('; ')}` : ''}. Nothing was saved.${blockedNote ? `\n${blockedNote}` : ''}`
+  }
+  await memoriesCli($, options, ['save', `${root}/${PROPOSALS_FILE}`], JSON.stringify({ proposals }))
+  progress($, `${proposals.length} tag proposals saved`)
+  return [
+    `Proposed tags for ${proposals.length} of ${plural(rows.length, 'untagged memory', 'untagged memories')}; no memory was changed.`,
+    ...lines,
+    ...(notes.length > 0 ? [`Skipped: ${notes.join('; ')}.`] : []),
+    ...(blockedNote ? [blockedNote] : []),
+    `Saved to ${root}/${PROPOSALS_FILE} (ids, owners, tags and a hash of each text; never the text). Run /mnemosyne-tags apply to write them.`,
+  ].join('\n')
+}
+
+// apply: re-reads each owner's proposed rows just before writing that owner's tags and writes only where
+// nothing changed since the dry run. No model call.
+// The remaining window: a row can still gain tags between its re-read and the engine's update (a few
+// hundred milliseconds, within one owner). The update replaces metadata.tags, so a tag Claude added in that
+// window would be overwritten. The window is not closed, only kept small.
+export async function tagsApply($: EngineInterface, options: PluginOptions, signal: AbortSignal) {
+  const { root } = await paths($, options)
+  const file = `${root}/${PROPOSALS_FILE}`
+  if (!(await $.fs.stat(file).then(() => true, () => false))) return 'No saved proposals: run /mnemosyne-tags (the dry run) first.'
+  let proposals: Proposal[]
+  try {
+    proposals = parseProposals(await $.fs.read(file))
+  } catch (err) {
+    return `The saved proposals cannot be used (${(err as Error).message}): run /mnemosyne-tags again.`
+  }
+  if (proposals.length === 0) return 'The saved proposals list is empty: run /mnemosyne-tags again.'
+  const byOwner = new Map<string, Proposal[]>()
+  for (const proposal of proposals) byOwner.set(proposal.owner, [...(byOwner.get(proposal.owner) ?? []), proposal])
+  const counts = { gone: 0, tagged: 0, untaggable: 0, changed: 0 }
+  let written = 0
+  let failed = 0
+  let notReached = 0
+  let checked = 0
+  let firstError = ''
+  for (const [id, proposed] of byOwner) {
+    if (signal.aborted) {
+      notReached += proposed.length
+      continue
+    }
+    progress($, `writing tags ${checked}/${proposals.length}`)
+    // Re-read this owner's rows now, not before the earlier owners' writes: Claude may have tagged one meanwhile.
+    const current = new Map<string, Row>()
+    for (let at = 0; at < proposed.length; at += GET_BATCH) {
+      const ids = proposed.slice(at, at + GET_BATCH).map(p => p.id)
+      for (const row of parseRows(await memoriesCli($, options, ['get', ...ids]))) current.set(row.id, row)
+    }
+    const list: Proposal[] = []
+    for (const proposal of proposed) {
+      const verdict = judge(proposal, current.get(proposal.id))
+      if (verdict === 'write') list.push(proposal)
+      else counts[verdict]++
+    }
+    checked += proposed.length
+    if (list.length === 0) continue
+    let ownerError = ''
+    const requests: EngineRequest[] = list.map(p => ['mnemopi_update', { memory_id: p.id, metadata: { tags: p.tags } }])
+    const answers = await runAll($, options, requests, id, APPLY_TIMEOUT_MS).catch(err => requests.map(() => err as Error))
+    const done = list.filter((_, i) => {
+      const answer = answers[i]
+      if (typeof answer === 'string' && callOutcome('update', {}, answer).ok) return true
+      ownerError ||= answer instanceof Error ? answer.message : (callOutcome('update', {}, answer ?? '').error ?? 'the engine gave no reply')
+      return false
+    })
+    written += done.length
+    failed += list.length - done.length
+    firstError ||= ownerError
+    // One error per owner: another owner's failure does not show up on this owner's line.
+    await record($, options, [
+      {
+        action: 'update',
+        origin: 'backfill',
+        owner: id,
+        text: `tag backfill: ${plural(list.length, 'memory', 'memories')}`,
+        ids: done.map(p => p.id),
+        count: done.length,
+        ok: done.length === list.length,
+        error: ownerError,
+      },
+    ])
+  }
+  progress($, `${plural(written, 'memory', 'memories')} tagged`)
+  return [
+    `Tagged ${plural(written, 'memory', 'memories')} of ${proposals.length} proposed.`,
+    `Skipped: ${counts.gone} gone, ${counts.tagged} already tagged, ${counts.untaggable} cannot be tagged (metadata is not a JSON object), ${counts.changed} changed since the dry run.`,
+    ...(failed > 0 ? [`${plural(failed, 'update')} failed (${firstError}).`] : []),
+    ...(notReached > 0 ? [`Stopped early: ${plural(notReached, 'memory', 'memories')} not reached; run /mnemosyne-tags apply again to finish.`] : []),
+  ].join('\n')
+}
+
 export const register: Register = (on, options) => {
   const isPerProject = options.scope === 'per-project'
 
@@ -423,6 +622,8 @@ export const register: Register = (on, options) => {
     switch (tool) {
       case 'memory_remember': {
         const isGlobal = !isPerProject || input.global === true
+        // Tags are cleaned as the engine stores them (hooks/tags.ts); none left, no metadata.
+        const tags = Array.isArray(input.tags) ? cleanTags(input.tags) : []
         return [
           'mnemopi_remember',
           {
@@ -432,6 +633,7 @@ export const register: Register = (on, options) => {
             // as STATED working memory, which the engine deletes after 24 hours.
             source: 'imported',
             scope: isGlobal ? 'global' : 'channel',
+            ...(tags.length > 0 ? { metadata: { tags } } : {}),
           },
         ] as const
       }
@@ -454,6 +656,10 @@ export const register: Register = (on, options) => {
     await $.command.register({
       name: 'mnemosyne-setup',
       description: `Install the Mnemosyne Memory engine (${ENGINE_PACKAGE} ${ENGINE_BUILD}, the plugin's own copy) into ~/.claude/mnemosyne`,
+    })
+    await $.command.register({
+      name: 'mnemosyne-tags',
+      description: 'Tag the existing memories once: a dry run lets Haiku propose topic tags; "apply" writes them (no new model calls)',
     })
     await $.command.register({
       name: 'mnemosyne-ui',
@@ -514,6 +720,21 @@ export const register: Register = (on, options) => {
       return await openDashboard($, { plugin: slashes($.plugin.root), root, store, cli, activity: activityLog }, session)
     } catch (err) {
       return { text: `Mnemosyne dashboard failed: ${(err as Error).message}` }
+    }
+  })
+
+  // The tag backfill: no argument is a dry run (the only mode that calls a model); apply writes the saved proposals.
+  on('command.run', { command: 'mnemosyne-tags' }, async ($, e, next) => {
+    const mode = e.args.trim().toLowerCase()
+    if (mode !== '' && mode !== 'apply') return { text: TAGS_USAGE }
+    const bun = await $.process.run(['bun', '--version']).catch(() => null)
+    if (bun?.exitCode !== 0) return { text: 'The tag backfill needs Bun on PATH: https://bun.sh' }
+    try {
+      if (!(await isInstalled($, options))) return { text: 'The tag backfill needs the engine: run /mnemosyne-setup first.' }
+      if (!(await isCurrent($, options))) return { text: 'The Mnemosyne engine is out of date (the backfill needs memory_update): run /mnemosyne-setup, then try again.' }
+      return { text: mode === 'apply' ? await tagsApply($, options, next.signal) : await tagsDryRun($, options, next.signal) }
+    } catch (err) {
+      return { text: `Mnemosyne tag backfill failed: ${(err as Error).message}` }
     }
   })
 

@@ -46,6 +46,8 @@ export type Memory = {
   scope: string | null
   source?: string | null
   metadata: Record<string, unknown> | null
+  // The server sends the cleaned tags beside metadata; older replies have only metadata.
+  tags?: string[]
 }
 
 export type Hit = Memory & { content: string; score: number }
@@ -194,14 +196,35 @@ function project(owner: string | undefined, className = 'project', label?: strin
   return span
 }
 
-function chips(tags: readonly string[]) {
+/** A memory's tags: the server's list, else the ones in its metadata. */
+export function tagsOfMemory(memory: Pick<Memory, 'metadata' | 'tags'>): string[] {
+  return Array.isArray(memory.tags) ? memory.tags.filter((tag): tag is string => typeof tag === 'string' && tag !== '') : tagsOf(memory.metadata)
+}
+
+/** Tag chips, text only. With `pick` each chip is a button that filters the table to its tag (and does not open the row it sits in). */
+function chips(tags: readonly string[], pick?: (tag: string) => void) {
   const span = el('span', undefined, 'tag-list')
-  for (const tag of tags) span.append(el('span', tag, 'tag'))
+  for (const tag of tags) {
+    if (pick === undefined) {
+      span.append(el('span', tag, 'tag'))
+      continue
+    }
+    const chip = el('button', tag, 'tag tag-btn')
+    chip.type = 'button'
+    chip.title = `Show only memories tagged ${tag}`
+    chip.addEventListener('click', event => {
+      event.stopPropagation()
+      pick(tag)
+    })
+    // Enter and Space on a chip must not also open the row.
+    chip.addEventListener('keydown', event => event.stopPropagation())
+    span.append(chip)
+  }
   return span
 }
 
 /** One row of the Memories table. */
-export function memoryRow(memory: Memory, open: (id: string) => void) {
+export function memoryRow(memory: Memory, open: (id: string) => void, pickTag?: (tag: string) => void) {
   const row = el('tr', undefined, 'row')
   row.tabIndex = 0
   row.dataset.id = memory.id
@@ -212,7 +235,7 @@ export function memoryRow(memory: Memory, open: (id: string) => void) {
   const owner = el('td', undefined, 'nowrap')
   owner.append(project(memory.owner))
   const tags = el('td')
-  tags.append(chips(tagsOf(memory.metadata)))
+  tags.append(chips(tagsOfMemory(memory), pickTag))
   row.append(text, owner, tags, el('td', day(memory.timestamp), 'muted nowrap'), el('td', String(memory.recall_count ?? 0), 'num mono'))
   row.addEventListener('click', () => open(memory.id))
   row.addEventListener('keydown', event => {
@@ -225,7 +248,7 @@ export function memoryRow(memory: Memory, open: (id: string) => void) {
 }
 
 /** The detail panel's content for one memory; `forget` runs after the confirm. */
-export function memoryDetail(memory: Memory, forget: (memory: Memory, done: (error?: string) => void) => void) {
+export function memoryDetail(memory: Memory, forget: (memory: Memory, done: (error?: string) => void) => void, pickTag?: (tag: string) => void) {
   const panel = el('div', undefined, 'detail-body')
   const head = el('div', undefined, 'detail-head')
   head.append(project(memory.owner, 'project muted'), el('span', memory.id, 'mono muted push-right'))
@@ -243,8 +266,8 @@ export function memoryDetail(memory: Memory, forget: (memory: Memory, done: (err
   fact('Importance', memory.importance === null || memory.importance === undefined ? 'unknown' : memory.importance.toFixed(2))
   fact('Scope', memory.scope ?? 'unknown')
   const tagBox = el('div', undefined, 'detail-tags')
-  const tags = tagsOf(memory.metadata)
-  tagBox.append(el('span', 'Tags', 'muted small'), tags.length > 0 ? chips(tags) : el('span', 'No tags yet.', 'muted small'))
+  const tags = tagsOfMemory(memory)
+  tagBox.append(el('span', 'Tags', 'muted small'), tags.length > 0 ? chips(tags, pickTag) : el('span', 'No tags yet.', 'muted small'))
 
   // Forget: a first button, then a confirm that names the memory's first line and id.
   const danger = el('div', undefined, 'danger-zone')
@@ -327,7 +350,7 @@ export function searchHit(hit: Hit, rank: number, query: string, open: (id: stri
   const openButton = el('button', 'Open', 'link push-right')
   openButton.type = 'button'
   openButton.addEventListener('click', () => open(hit.id))
-  foot.append(chips(tagsOf(hit.metadata)), el('span', `${hit.recall_count} recalls`, 'muted small'), openButton)
+  foot.append(chips(tagsOfMemory(hit)), el('span', `${hit.recall_count} recalls`, 'muted small'), openButton)
   item.append(head, text, foot)
   return item
 }
@@ -471,7 +494,18 @@ async function loadHealth() {
 
 // ---- Memories ----
 
-const memories = { selected: '' as string, rows: [] as Memory[], timer: 0 as ReturnType<typeof setTimeout> | 0 }
+const memories = { selected: '' as string, rows: [] as Memory[], timer: 0 as ReturnType<typeof setTimeout> | 0, tag: '' }
+
+/** Filters the table to one tag ('' clears it), and shows which. */
+function setTagFilter(tag: string) {
+  memories.tag = tag
+  const button = byId('mem-tag')
+  button.hidden = tag === ''
+  button.textContent = tag === '' ? '' : `Tag: ${tag} ×`
+  button.title = tag === '' ? '' : `Showing only memories tagged ${tag}. Press to show all.`
+  button.setAttribute('aria-label', tag === '' ? 'Clear tag filter' : `Clear tag filter: ${tag}`)
+  void loadMemories()
+}
 
 async function loadMemories() {
   const params = new URLSearchParams()
@@ -481,6 +515,7 @@ async function loadMemories() {
   if (owner) params.set('owner', owner)
   params.set('sort', sort)
   if (q) params.set('q', q)
+  if (memories.tag) params.set('tag', memories.tag)
   try {
     const response = await api(`/api/memories?${params}`)
     const body = await readJson<{ total?: number; count?: number; memories?: Memory[]; error?: string }>(response)
@@ -496,7 +531,7 @@ async function loadMemories() {
 
 function drawRows() {
   const body = byId('mem-rows')
-  body.replaceChildren(...memories.rows.map(memory => memoryRow(memory, id => void openMemory(id))))
+  body.replaceChildren(...memories.rows.map(memory => memoryRow(memory, id => void openMemory(id), setTagFilter)))
   markSelected()
 }
 
@@ -522,7 +557,7 @@ async function openMemory(id: string) {
     }
     const memory = await readJson<Memory & { error?: string }>(response)
     if (!response.ok) throw new Error(memory.error ?? `the server answered ${response.status}`)
-    byId('detail').replaceChildren(memoryDetail(memory, forgetMemory))
+    byId('detail').replaceChildren(memoryDetail(memory, forgetMemory, setTagFilter))
   } catch (err) {
     if (!(err instanceof Expired)) setStatus(`Could not open the memory: ${failure(err)}`, 'error')
   }
@@ -559,6 +594,7 @@ function forgetMemory(memory: Memory, done: (error?: string) => void) {
 function wireMemories() {
   byId('mem-owner').addEventListener('change', () => void loadMemories())
   byId('mem-sort').addEventListener('change', () => void loadMemories())
+  byId('mem-tag').addEventListener('click', () => setTagFilter(''))
   byId('mem-filter').addEventListener('input', () => {
     if (memories.timer) clearTimeout(memories.timer)
     memories.timer = setTimeout(() => void loadMemories(), 250)
