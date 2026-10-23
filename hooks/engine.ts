@@ -7,17 +7,37 @@
 
 export type EngineRequest = readonly [name: string, args: Record<string, unknown>]
 
+// Where the local model lives, relative to $HOME: the plugin pins PI_CONFIG_DIR
+// so pi-utils resolves the fastembed cache under the plugin's root instead of
+// the shared ~/.omp one (EMB.1: the variable is PI_CONFIG_DIR, and the engine's
+// getFastembedCacheDir() is <PI_CONFIG_DIR>/cache/fastembed).
+export const EMBEDDINGS_MODEL = 'BAAI/bge-small-en-v1.5'
+export const EMBEDDINGS_CACHE_DIR = '.claude/mnemosyne/model-cache'
+
+export type EngineEnvOptions = {
+  // True only when the option is on AND the model is downloaded: setup wrote its
+  // marker and the model files are there. Otherwise the engine keeps embeddings
+  // off so it never downloads the model behind the user's back (EMB.2.a4).
+  embeddings?: boolean
+}
+
 // The variables every engine process gets, laid over the caller's own
 // environment. The owner id rides on MNEMOPI_SESSION_ID: recall reads that
 // owner's rows plus every `scope: 'global'` row, and forget deletes only the
-// owner's. MNEMOPI_NO_EMBEDDINGS=1 because a spawned bun panics on fastembed
-// (DESIGN §2.5), so recall is full-text only.
-export function engineEnv(store: string, owner: string): Record<string, string> {
+// owner's.
+//
+// Embeddings are off unless `options.embeddings` is true. When off,
+// MNEMOPI_NO_EMBEDDINGS=1 keeps recall full-text only. When on, the embedding
+// settings are pinned to local-only, fixed values: an inherited shell variable
+// can neither send memory text to an API nor change the model (which would wipe
+// the vectors). The engine treats an empty value as unset, so an empty string
+// clears an inherited one (EMB.3.a1).
+export function engineEnv(store: string, owner: string, options: EngineEnvOptions = {}): Record<string, string> {
+  const embeddings = options.embeddings === true
   return {
     MNEMOPI_DATA_DIR: store,
     MNEMOPI_SESSION_ID: owner,
     MNEMOPI_CHANNEL_ID: owner,
-    MNEMOPI_NO_EMBEDDINGS: '1',
     // Inherited from the shell this would move writes to <store>/banks/<x>; empty falls back to `default`.
     MNEMOPI_MCP_BANK: '',
     // The env is layered over the caller's: an exported LLM URL would let the engine call out.
@@ -28,6 +48,17 @@ export function engineEnv(store: string, owner: string): Record<string, string> 
     MNEMOPI_AUTHOR_TYPE: '',
     // Polyphonic recall writes consolidated_facts, which a forget does not purge.
     MNEMOPI_POLYPHONIC_RECALL: '0',
+    // Local only, always: no text to an API, no inherited key, one fixed model.
+    MNEMOPI_EMBEDDING_API_URL: '',
+    MNEMOPI_EMBEDDINGS_VIA_API: '',
+    MNEMOPI_EMBEDDING_API_KEY: '',
+    MNEMOPI_EMBEDDING_MODEL: EMBEDDINGS_MODEL,
+    // The model cache under the plugin's root, never the shared ~/.omp one.
+    PI_CONFIG_DIR: EMBEDDINGS_CACHE_DIR,
+    // On only when the caller proved the model is downloaded. Off blocks the
+    // engine's lazy model download outside /mnemosyne-setup; on clears an
+    // inherited MNEMOPI_NO_EMBEDDINGS (empty counts as unset in the engine).
+    MNEMOPI_NO_EMBEDDINGS: embeddings ? '' : '1',
   }
 }
 

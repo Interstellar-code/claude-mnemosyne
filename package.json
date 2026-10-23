@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "typecheck": "tsc -p . && tsc -p tsconfig.bun.json && tsc -p ui/tsconfig.json",
-    "test:bun": "bun install --frozen-lockfile && bun install --cwd engine --frozen-lockfile --production --omit=peer && bun test ./tests/bun ./engine/test && bun scripts/vendor-map.ts --check"
+    "test:bun": "bun install --frozen-lockfile && bun install --cwd engine --frozen-lockfile --production --omit=peer && bun test ./tests/bun ./engine/test && bun scripts/vendor-map.ts --check",
+    "test:embed": "bun install --cwd engine --frozen-lockfile --production --omit=peer && bun test ./tests/embed"
   },
   "devDependencies": {
     "3d-force-graph": "1.80.1",

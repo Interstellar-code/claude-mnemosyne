@@ -27,8 +27,9 @@ Ours, not upstream's (engine-diff ignores them): `UPSTREAM.md`, `bun.lock` (our 
 | 18.12.3-mnemosyne.2 | b6e40fdcd82f7bb7a96ff5be1609944d684337a1b25351736a24419efbef91b6 |
 | 18.12.3-mnemosyne.3 | 68cb174dee8ac991c6594c9f9079ca3830e6371b850ebe75edc84fc1832027ef |
 | 18.12.3-mnemosyne.4 | 445e8260986ffeb14737f38ce74a7e48a5cb32b367e484c2ace5e369e74a4803 |
+| 18.12.3-mnemosyne.5 | e67c4972b298ce2692bad37b377a423881b53d1141390474782f0ce44f8a9b2f |
 
-The `18.12.3` row is the untouched upstream source, for reference. `.1` had changes 1 to 3; `.2` makes the change 1 merge keep a `__proto__` key as plain data (it was dropped); `.3` adds the two knowledge tools (change 4) and keeps the first author on dedupe with empty author env unset (change 5); `.4` is the review fix round: the knowledge reply is normalised by `parseExtractedFactCategories` (change 4), and the author pair merges as one unit (change 5).
+The `18.12.3` row is the untouched upstream source, for reference. `.1` had changes 1 to 3; `.2` makes the change 1 merge keep a `__proto__` key as plain data (it was dropped); `.3` adds the two knowledge tools (change 4) and keeps the first author on dedupe with empty author env unset (change 5); `.4` is the review fix round: the knowledge reply is normalised by `parseExtractedFactCategories` (change 4), and the author pair merges as one unit (change 5); `.5` turns embeddings on: fastembed is a real dependency with an onnxruntime override (change 6), the CLI exits naturally on success (change 7), the on-demand runtime install is gone (change 8), and a `reembed` command backfills vectors (change 9).
 
 ## Changes
 
@@ -54,7 +55,7 @@ Status is `open` (ours only) or `merged-upstream` (drop it at the next rebase).
 
 ### 3. Packaging: our build number
 
-- What: `package.json` `version` is `18.12.3-mnemosyne.4` (our build number) instead of `18.12.3`, so the plugin can tell its own build from the npm one (`ENGINE_BUILD` in `hooks/engine-build.ts`, the `isCurrent` check in `hooks/register.ts`, the proxy's check in `bin/mcp-proxy.ts`). Nothing else in `package.json` changes: the dependencies stay pinned at `18.12.3`.
+- What: `package.json` `version` is `18.12.3-mnemosyne.5` (our build number) instead of `18.12.3`, so the plugin can tell its own build from the npm one (`ENGINE_BUILD` in `hooks/engine-build.ts`, the `isCurrent` check in `hooks/register.ts`, the proxy's check in `bin/mcp-proxy.ts`). Nothing else in `package.json` changes here: the dependencies stay pinned at `18.12.3` (the fastembed dependency and the onnxruntime override are change 6).
 - Why: a stale engine (the npm one, or an older build of ours) must be spotted and refused for features that need changes 1 and 2.
 - Files: `package.json`
 - Upstream issue: none (ours only)
@@ -74,6 +75,39 @@ Status is `open` (ours only) or `merged-upstream` (drop it at the next rebase).
 - Why: a Claude re-save of a user memory must keep the human author and stated veracity; plugin pins author env to empty string.
 - Files: `src/core/beam/store.ts` `src/mcp-tools.ts`
 - Tests: `test/dedupe-author.spec.ts` `test/knowledge-r2.spec.ts`
+- Status: open
+
+### 6. Packaging: fastembed as a dependency, onnxruntime-node overridden to 1.26.0
+
+- What: `fastembed` 3.0.0 moves from an optional peer/dev dependency to a regular `dependencies` entry, so `bun install --production` of the engine installs it. `overrides` pin `onnxruntime-node` to `1.26.0` (fastembed 3.0.0 itself pins 1.21.0, whose `process.exit()` abort after an ONNX session is ORT #24579, fixed from 1.24) and `@anush008/tokenizers` to `0.6.0` (fastembed's `^0.0.0` resolves to a build without the linux-arm64 bindings). `trustedDependencies` lists `onnxruntime-node` so its native postinstall runs. The peer `onnxruntime-node` pin moves to 1.26.0 to match; the dev dependency on it is dropped (the runtime dependency at the override version is the one used). `bin/install-engine.ts` restates the same `overrides` and `trustedDependencies` on the `.next/package.json` it writes, because Bun applies `overrides` only from the install root, and the production install treats the engine as a `file:` dependency.
+- Why: the plugin turns local embeddings on; the engine must install an ORT whose exit crash is fixed, so a spawned `bun cli.ts mcp` that embedded does not abort when it exits.
+- Files: `package.json`
+- Tests: `../../tests/bun/embeddings.spec.ts` (the plugin's spec spawns the installed engine)
+- Upstream issue: none (packaging only)
+- Status: open
+
+### 7. The CLI exits naturally on success
+
+- What: `src/cli.ts` no longer calls `process.exit(code)` when a command succeeds. A clean run sets `process.exitCode = 0` and lets the event loop drain, so onnxruntime-node's teardown (ORT #24579) does not abort in `process.exit()`. A failing command still calls `process.exit(code)` and exits non-zero.
+- Why: a spawned engine that embedded must be able to exit 0; the ORT override alone is not enough on the fastembed path — an explicit `process.exit(0)` after a model session still aborts.
+- Files: `src/cli.ts`
+- Tests: `test/cli-exit.spec.ts`
+- Status: open
+
+### 8. No on-demand fastembed install; a failed import means embeddings off
+
+- What: `src/core/fastembed-runtime.ts` no longer `bun install`s fastembed into a runtime cache when the direct import cannot resolve or its native loader fails. `loadFastembedOnce` throws the resolution error instead; `embeddings.ts` catches it in `getLocalModel`, logs the reason and returns null, so recall is full-text only. The runtime-install plan, `loadFromRuntimeInstall` and the recoverable-error classifier are removed.
+- Why: the plugin never installs packages or downloads a model behind the user's back. The old fallback installed fastembed with ORT 1.21.0 (no override), reintroducing the exit crash, over the network, at an arbitrary time.
+- Files: `src/core/fastembed-runtime.ts`
+- Tests: `test/fastembed-runtime.spec.ts`
+- Status: open
+
+### 9. `mnemopi reembed` backfills embeddings
+
+- What: `src/cli.ts` gains a `reembed` command. No argument is a dry run: it counts the live memories with no vector for the active model and writes nothing. `apply` runs the engine's own backfill, `reconcileEmbeddingModel` (`src/core/beam/store.ts`), and drains its background work, so the memories saved before embeddings were on get vectors. `rebuild` is required when the store holds vectors from another model: `reconcileEmbeddingModel` wipes every vector on a model mismatch, which `reembed` refuses without `rebuild`. It never edits or deletes a `working_memory` row; it only writes `memory_embeddings`.
+- Why: the MCP and CLI paths never called the backfill; only the `Mnemopi` library class did. `/mnemosyne-embed` drives this command to fill the older memories' vectors.
+- Files: `src/cli.ts` `src/core/beam/store.ts`
+- Tests: `test/reembed.spec.ts`
 - Status: open
 
 Not changed: `dist/types/*.d.ts` still describe upstream 18.12.3 (no `metadata` on `updateWorking`). Nothing in the plugin reads them; regenerating them needs upstream's monorepo build.

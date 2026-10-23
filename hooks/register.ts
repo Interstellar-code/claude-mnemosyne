@@ -36,7 +36,7 @@ import {
 import type { Proposal, Row } from './backfill'
 import { extractMany, extractOne, reasonLine, storedCount } from './knowledge'
 import type { ExtractOutcome, KnowledgeEngine } from './knowledge'
-import { buildRequests, engineEnv, parseReplies } from './engine'
+import { buildRequests, EMBEDDINGS_CACHE_DIR, EMBEDDINGS_MODEL, engineEnv, parseReplies } from './engine'
 import type { EngineRequest } from './engine'
 import { ENGINE_BUILD, SETUP_TIMEOUT_MS } from './engine-build'
 import { mnemosyneStats } from './surface'
@@ -216,6 +216,90 @@ async function paths($: EngineInterface, options: PluginOptions) {
   }
 }
 
+// ---- Embeddings (EMB): local only, downloaded once by /mnemosyne-setup ----------
+
+// The setup marker /mnemosyne-setup writes after downloading the model; its
+// presence plus the model files is what lets an engine run turn embeddings on.
+export const EMBEDDINGS_MARKER = 'embeddings.json'
+// The 5 files fastembed writes under <cache>/<repo with / -> _>/ for bge-small.
+export const EMBEDDINGS_MODEL_DIR = 'Qdrant_bge-small-en-v1.5-onnx-Q'
+export const EMBEDDINGS_MODEL_FILES = [
+  'model_optimized.onnx',
+  'tokenizer.json',
+  'tokenizer_config.json',
+  'config.json',
+  'special_tokens_map.json',
+] as const
+
+/** The model cache folder under <root>: matches engineEnv's PI_CONFIG_DIR + /cache/fastembed. */
+export const embeddingsCacheDir = (root: string) => `${root}/model-cache/cache/fastembed`
+
+// The embeddings option, resolved: 'on' only when set to on, or 'auto' (the
+// default) on macOS arm64 — the one platform the fix is tested on. Elsewhere it
+// is off unless the user turns it on. EMB.3.a3.
+export function embeddingsSetting(options: { embeddings?: unknown }): 'on' | 'off' | 'auto' {
+  const value = typeof options.embeddings === 'string' ? options.embeddings.trim().toLowerCase() : ''
+  if (value === 'on') return 'on'
+  if (value === 'off') return 'off'
+  return 'auto'
+}
+
+// Whether the host is macOS on Apple Silicon (a hook cannot read process.arch, so it asks uname).
+const isMacArm64 = async ($: EngineInterface) => {
+  try {
+    const [system, machine] = await Promise.all([
+      $.process.run(['uname', '-s'], { timeoutMs: 2_000 }),
+      $.process.run(['uname', '-m'], { timeoutMs: 2_000 }),
+    ])
+    return system.exitCode === 0 && system.stdout.trim() === 'Darwin' && machine.exitCode === 0 && machine.stdout.trim() === 'arm64'
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Whether the model is downloaded: /mnemosyne-setup wrote its marker AND every
+ * model file is present. /mnemosyne-setup only downloads when the option is on
+ * (by 'on', or 'auto' on macOS arm64), so the marker's presence already encodes
+ * that decision — including the platform one. No platform probe runs here, so
+ * this stays a cheap check on every engine call.
+ */
+async function embeddingsReady($: EngineInterface, root: string): Promise<boolean> {
+  if (!(await fileExists($, `${root}/${EMBEDDINGS_MARKER}`))) return false
+  const dir = `${embeddingsCacheDir(root)}/${EMBEDDINGS_MODEL_DIR}`
+  return (await Promise.all(EMBEDDINGS_MODEL_FILES.map(file => fileExists($, `${dir}/${file}`)))).every(Boolean)
+}
+
+/**
+ * Whether an engine run may turn embeddings on: the option is not off AND the
+ * model is downloaded. An option turned off after setup keeps them off even with
+ * the marker in place. Without both the engine keeps MNEMOPI_NO_EMBEDDINGS=1, so
+ * it never downloads the model mid-call (EMB.2.a4).
+ */
+async function embeddingsOn($: EngineInterface, options: PluginOptions, root?: string): Promise<boolean> {
+  if (embeddingsSetting(options) === 'off') return false
+  const base = root ?? (await paths($, options)).root
+  return embeddingsReady($, base)
+}
+
+async function fileExists($: EngineInterface, path: string): Promise<boolean> {
+  return $.fs.stat(path).then((stat: { kind: string }) => stat.kind === 'file', () => false)
+}
+
+/**
+ * Writes <root>/embeddings.json (0600), the setup marker: it names the model
+ * /mnemosyne-setup downloaded, and engineEnv checks it plus the model files
+ * before turning embeddings on. A new file renamed over the old one, so a
+ * half-written marker never counts.
+ */
+async function writeEmbeddingsMarker($: EngineInterface, root: string) {
+  const text = `${JSON.stringify({ model: EMBEDDINGS_MODEL, cache: EMBEDDINGS_CACHE_DIR })}\n`
+  const code =
+    'const fs = require("fs"); const a = process.argv.slice(1); const t = a[0] + ".tmp"; fs.rmSync(t, { force: true }); fs.writeFileSync(t, a[1], { mode: 0o600, flag: "wx" }); fs.chmodSync(t, 0o600); fs.renameSync(t, a[0]);'
+  const ran = await $.process.run(['bun', '-e', code, `${root}/${EMBEDDINGS_MARKER}`, text], { timeoutMs: 5_000 })
+  if (ran.exitCode !== 0) throw new Error(`could not write ${EMBEDDINGS_MARKER}: ${ran.stderr.trim().slice(0, 300)}`)
+}
+
 async function owner($: EngineInterface, options: PluginOptions) {
   if (options.scope !== 'per-project') return GLOBAL_OWNER
   const root = slashes((await $.session.repo())?.root ?? (await $.session.cwd()))
@@ -260,7 +344,12 @@ async function syncWrapper($: EngineInterface, options: PluginOptions) {
   await bunFs($, `fs.mkdirSync(a[0], { recursive: true }); ${windows ? '' : 'fs.chmodSync(a[0], 0o700);'}`, `${root}/bin`)
   // The proxy logs to activity.jsonl unless activityLog is off; it reads this at its next start.
   const activity = options.activityLog === 'off' ? '' : log
-  const text = windows ? cmdWrapper(store, cli, proxy, activity) : shWrapper(store, cli, proxy, activity)
+  // The same env the hooks send: local-only embedding pins, embeddings on only
+  // when the model is downloaded (EMB.3.a2).
+  const embeddings = await embeddingsOn($, options)
+  const text = windows
+    ? cmdWrapper(store, cli, proxy, activity, embeddings)
+    : shWrapper(store, cli, proxy, activity, embeddings)
   await bunFs($, `fs.writeFileSync(a[0], a[1]); ${windows ? '' : 'fs.chmodSync(a[0], 0o700);'}`, wrapper, text)
 }
 
@@ -269,37 +358,47 @@ serving only remember / recall / update / forget / stats.
 MNEMOSYNE_OWNER picks the owner: global (default) or a project-... id.
 MNEMOSYNE_ACTIVITY_LOG is the activity log each call is recorded in; empty when activityLog is off.`
 
-const shWrapper = (store: string, cli: string, proxy: string, activity: string) => `#!/bin/sh
+const shWrapper = (store: string, cli: string, proxy: string, activity: string, embeddings: boolean) => `#!/bin/sh
 ${WRAPPER_NOTE.replace(/^/gm, '# ')}
 export MNEMOPI_DATA_DIR=${shellQuote(store)}
 export MNEMOPI_SESSION_ID="\${MNEMOSYNE_OWNER:-global}"
 export MNEMOPI_CHANNEL_ID="$MNEMOPI_SESSION_ID"
-export MNEMOPI_NO_EMBEDDINGS=1
+${embeddings ? 'unset MNEMOPI_NO_EMBEDDINGS' : 'export MNEMOPI_NO_EMBEDDINGS=1'}
 export MNEMOPI_MCP_BANK=
 export MNEMOPI_LLM_BASE_URL=
 export MNEMOPI_HOST_LLM_ENABLED=
 export MNEMOPI_AUTHOR_ID=
 export MNEMOPI_AUTHOR_TYPE=
 export MNEMOPI_POLYPHONIC_RECALL=0
+export MNEMOPI_EMBEDDING_API_URL=
+export MNEMOPI_EMBEDDINGS_VIA_API=
+export MNEMOPI_EMBEDDING_API_KEY=
+export MNEMOPI_EMBEDDING_MODEL=${EMBEDDINGS_MODEL}
+export PI_CONFIG_DIR=${EMBEDDINGS_CACHE_DIR}
 export MNEMOSYNE_CLI=${shellQuote(cli)}
 export MNEMOSYNE_ACTIVITY_LOG=${activity ? shellQuote(activity) : ''}
 exec bun ${shellQuote(proxy)}
 `
 
 // cmd has no safe quoting for " or %; paths() refuses a store holding either.
-const cmdWrapper = (store: string, cli: string, proxy: string, activity: string) => `@echo off\r
+const cmdWrapper = (store: string, cli: string, proxy: string, activity: string, embeddings: boolean) => `@echo off\r
 ${WRAPPER_NOTE.replace(/^/gm, 'rem ').replace(/\n/g, '\r\n')}\r
 set "MNEMOPI_DATA_DIR=${store}"\r
 if not defined MNEMOSYNE_OWNER set "MNEMOSYNE_OWNER=global"\r
 set "MNEMOPI_SESSION_ID=%MNEMOSYNE_OWNER%"\r
 set "MNEMOPI_CHANNEL_ID=%MNEMOSYNE_OWNER%"\r
-set "MNEMOPI_NO_EMBEDDINGS=1"\r
+${embeddings ? 'set "MNEMOPI_NO_EMBEDDINGS="' : 'set "MNEMOPI_NO_EMBEDDINGS=1"'}\r
 set "MNEMOPI_MCP_BANK="\r
 set "MNEMOPI_LLM_BASE_URL="\r
 set "MNEMOPI_HOST_LLM_ENABLED="\r
 set "MNEMOPI_AUTHOR_ID="\r
 set "MNEMOPI_AUTHOR_TYPE="\r
 set "MNEMOPI_POLYPHONIC_RECALL=0"\r
+set "MNEMOPI_EMBEDDING_API_URL="\r
+set "MNEMOPI_EMBEDDINGS_VIA_API="\r
+set "MNEMOPI_EMBEDDING_API_KEY="\r
+set "MNEMOPI_EMBEDDING_MODEL=${EMBEDDINGS_MODEL}"\r
+set "PI_CONFIG_DIR=${EMBEDDINGS_CACHE_DIR}"\r
 set "MNEMOSYNE_CLI=${cli}"\r
 set "MNEMOSYNE_ACTIVITY_LOG=${activity}"\r
 bun "${proxy}"\r
@@ -351,7 +450,12 @@ async function runAll(
   timeoutMs = 20_000,
 ) {
   const [id, { cli, store }] = await Promise.all([as ?? owner($, options), paths($, options)])
-  const ran = await $.process.run(['bun', cli, 'mcp'], { stdin: buildRequests(requests), env: engineEnv(store, id), timeoutMs })
+  const embeddings = await embeddingsOn($, options)
+  const ran = await $.process.run(['bun', cli, 'mcp'], {
+    stdin: buildRequests(requests),
+    env: engineEnv(store, id, { embeddings }),
+    timeoutMs,
+  })
   return parseReplies(requests.length, ran.stdout, ran.exitCode, ran.stderr)
 }
 
@@ -639,6 +743,12 @@ export async function extraction($: EngineInterface, options: PluginOptions, id:
 
 export const KNOWLEDGE_USAGE =
   'Usage: /mnemosyne-knowledge (a dry run: counts pending entries and memories with no knowledge; nothing is written) or /mnemosyne-knowledge apply (extracts for them).'
+
+// /mnemosyne-embed: fills vectors for memories saved before embeddings were on.
+export const EMBED_USAGE =
+  'Usage: /mnemosyne-embed (a dry run: how many memories have no vector), /mnemosyne-embed apply (fills the missing vectors) or /mnemosyne-embed rebuild (also allows a model change, which wipes and rebuilds every vector).'
+// One engine process embeds every missing memory; the model is loaded once.
+export const REEMBED_TIMEOUT_MS = 600_000
 
 // The empty records file: a memory whose extraction yielded nothing, so apply skips it.
 const EMPTY_NAME = 'knowledge-empty.json'
@@ -961,6 +1071,10 @@ export const register: Register = (on, options) => {
       name: 'mnemosyne-knowledge',
       description: 'Extract knowledge from older memories and finish pending ones: a dry run counts them; "apply" extracts',
     })
+    await $.command.register({
+      name: 'mnemosyne-embed',
+      description: 'Fill embeddings for memories saved before embeddings were on: a dry run counts them; "apply" fills them; "rebuild" also allows a model change',
+    })
     for (const tool of TOOLS) await $.tool.register({ ...tool, isDeferred: false })
     if (!(await isInstalled($, options))) $.ui.toast('Mnemosyne Memory engine not installed. Run /mnemosyne-setup.')
     else {
@@ -978,17 +1092,32 @@ export const register: Register = (on, options) => {
     if (bun?.exitCode !== 0) return { text: 'Mnemosyne needs Bun on PATH: https://bun.sh' }
 
     try {
-      const { engine, store } = await paths($, options)
+      const { engine, store, root: pluginRoot } = await paths($, options)
       // Creates <root> and the store first: the installer writes only <engine>, <engine>.next and <engine>.old.
       await secure($, options)
       const root = slashes($.plugin.root)
+      // Embeddings: decide from the option (on / off / auto on macOS arm64). When
+      // on, the install check downloads the model once; tell the person where it
+      // comes from and how big it is before that download starts (EMB.3.a4).
+      const setting = embeddingsSetting(options)
+      const embeddings = setting === 'on' || (setting === 'auto' && (await isMacArm64($)))
+      if (embeddings) {
+        progress($, 'downloading the embedding model from huggingface.co (about 63 MB)')
+        $.ui.log('Mnemosyne: /mnemosyne-setup downloads the embedding model BAAI/bge-small-en-v1.5 from huggingface.co (Qdrant/bge-small-en-v1.5-onnx-Q, about 63 MB), once.')
+      }
       // Builds <engine>.next from the plugin's engine/ and swaps it in only once it answers (bin/install-engine.ts).
-      const installed = await $.process.run(['bun', `${root}/bin/install-engine.ts`, root, engine, store], {
-        timeoutMs: SETUP_TIMEOUT_MS,
-      })
+      const installed = await $.process.run(
+        ['bun', `${root}/bin/install-engine.ts`, root, engine, store, ...(embeddings ? ['embeddings'] : [])],
+        { timeoutMs: SETUP_TIMEOUT_MS },
+      )
       if (installed.exitCode !== 0) {
         return { text: `Engine install failed; the engine already installed (if any) is unchanged:\n${`${installed.stderr}\n${installed.stdout}`.trim().slice(-800)}` }
       }
+      // The model is on disk now (or embeddings are off): record which model, so
+      // engine runs turn embeddings on only once setup has downloaded it. An off
+      // setup removes a stale marker so an old download never re-enables them.
+      if (embeddings) await writeEmbeddingsMarker($, pluginRoot)
+      else await bunFs($, 'fs.rmSync(a[0], { force: true })', `${pluginRoot}/${EMBEDDINGS_MARKER}`)
 
       await syncWrapper($, options)
       const filled = await fillDefaults($).catch(() => [])
@@ -1014,7 +1143,10 @@ export const register: Register = (on, options) => {
       const activityLog = options.activityLog === 'off' ? '' : log
       const session = await $.session.id()
       const extraction = extractionModelOf(options)
-      return await openDashboard($, { plugin: slashes($.plugin.root), root, store, cli, activity: activityLog, extraction }, session)
+      // C11: the server keeps the embeddings setting it starts with; 'on' only when
+      // the model is downloaded, matching what engineEnv sends (EMB.3.a2).
+      const embeddings = (await embeddingsOn($, options)) ? 'on' : 'off'
+      return await openDashboard($, { plugin: slashes($.plugin.root), root, store, cli, activity: activityLog, extraction, embeddings }, session)
     } catch (err) {
       return { text: `Mnemosyne dashboard failed: ${(err as Error).message}` }
     }
@@ -1048,6 +1180,33 @@ export const register: Register = (on, options) => {
       return { text: `Mnemosyne knowledge backfill failed: ${(err as Error).message}` }
     }
   }).catch(() => ({ text: 'Mnemosyne: the knowledge backfill failed.' }))
+
+  // The embeddings backfill: no argument is a dry run, "apply" fills the vectors,
+  // "rebuild" also allows a model change (which wipes and rebuilds every vector).
+  on('command.run', { command: 'mnemosyne-embed' }, async ($, e) => {
+    const mode = e.args.trim().toLowerCase()
+    if (mode !== '' && mode !== 'apply' && mode !== 'rebuild') return { text: EMBED_USAGE }
+    const bun = await $.process.run(['bun', '--version']).catch(() => null)
+    if (bun?.exitCode !== 0) return { text: 'The embeddings backfill needs Bun on PATH: https://bun.sh' }
+    try {
+      if (!(await isInstalled($, options))) return { text: 'The embeddings backfill needs the engine: run /mnemosyne-setup first.' }
+      if (!(await isCurrent($, options))) return { text: 'The Mnemosyne engine is out of date (the backfill needs the reembed command): run /mnemosyne-setup, then try again.' }
+      const { cli, store } = await paths($, options)
+      if (!(await embeddingsOn($, options))) {
+        return { text: 'Embeddings are off: set the embeddings option to on (or run /mnemosyne-setup on macOS arm64 to download the model), then try again.' }
+      }
+      // Run the engine's own reembed command with the same local-only pins the hooks send.
+      const ran = await $.process.run(['bun', cli, 'reembed', ...(mode === '' ? [] : [mode])], {
+        env: engineEnv(store, GLOBAL_OWNER, { embeddings: true }),
+        timeoutMs: REEMBED_TIMEOUT_MS,
+      })
+      const output = `${ran.stdout}${ran.stderr}`.trim()
+      if (ran.exitCode !== 0 && output === '') return { text: `Mnemosyne embeddings backfill failed (exit ${ran.exitCode}).` }
+      return { text: output.split('\n').slice(-6).join('\n') }
+    } catch (err) {
+      return { text: `Mnemosyne embeddings backfill failed: ${(err as Error).message}` }
+    }
+  }).catch(() => ({ text: 'Mnemosyne: the embeddings backfill failed.' }))
 
   // The session that started the dashboard ends (exit, /clear, resume...): its server stops.
   on('session.end', async ($, e, next) => {
