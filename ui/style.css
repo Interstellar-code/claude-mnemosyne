@@ -109,7 +109,7 @@ a:hover { color: var(--accent-dark); }
 /* Views. */
 .view h1 { margin: 0; font-size: 20px; font-weight: 600; letter-spacing: -0.01em; }
 .column { flex-direction: column; flex-wrap: nowrap; gap: 20px; }
-.wide { max-width: 1200px; width: 100%; }
+.wide { max-width: 1280px; width: 100%; margin-left: auto; margin-right: auto; }
 .narrow { max-width: 960px; width: 100%; margin: 0 auto; padding: 32px; }
 
 /* Form controls. */
@@ -479,6 +479,7 @@ button.toggle-name:focus-visible { outline: 2px solid var(--accent); outline-off
   pointer-events: none;
   overflow-wrap: anywhere;
 }
+.back-to-map { display: none; }
 .path { position: absolute; top: 14px; left: 14px; z-index: 200; max-width: 55%; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
 .path:empty { display: none; }
 .crumb { display: inline-flex; align-items: center; gap: 4px; }
@@ -634,9 +635,12 @@ button.toggle-name:focus-visible { outline: 2px solid var(--accent); outline-off
   #map-legend { order: 4; flex: none; }
   .map-rail { order: 5; align-self: stretch; }
   .path { max-width: calc(100% - 28px); }
-  .stage-find { top: 58px; left: 14px; right: 14px; max-width: none; }
+  /* The Find box sits in a strip above the canvas (not over the stars): the stage's own margin holds it. */
+  .stage { margin-top: 46px; overflow: visible; scroll-margin-top: 62px; }
+  .stage-canvas { border-radius: 14px; overflow: hidden; }
+  .stage-find { top: -46px; left: 0; right: 0; max-width: none; }
   .find-input { width: 100%; flex: 1; }
-  .path:empty + .stage-find { top: 14px; }
+  .back-to-map { display: inline-flex; order: 2; align-self: flex-start; }
   .stage-controls { max-width: calc(100% - 28px); }
   .stage-hint { display: none; }
 }
@@ -689,7 +693,9 @@ button.toggle-name:focus-visible { outline: 2px solid var(--accent); outline-off
 .table.compact { min-width: 0; table-layout: auto; }
 .table.compact th, .table.compact td { padding: 10px 12px; }
 .table.compact .know-text { min-width: 0; }
-.table.compact .project { white-space: normal; overflow-wrap: anywhere; }
+.table.compact td.col-project { min-width: 120px; }
+.table.compact .project { max-width: 200px; white-space: nowrap; }
+.table.compact .project > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .table.compact td:last-child, .table.compact th:last-child { width: 1%; }
 .table.compact .confirm-inline { display: flex; flex-direction: column; align-items: flex-start; white-space: normal; }
 @media (max-width: 760px) {
@@ -702,7 +708,8 @@ button.toggle-name:focus-visible { outline: 2px solid var(--accent); outline-off
   .know-table td { display: block; min-width: 0; padding: 0; border: 0; overflow-wrap: anywhere; }
   .know-table td[data-label]::before { content: attr(data-label); display: block; color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; }
   .know-table td.k-text { grid-column: 1 / -1; min-width: 0; }
-  .know-table td.k-topic, .know-table td.k-project { grid-column: span 2; }
+  .know-table td.k-topic, .know-table td.k-project { grid-column: span 2; display: flex; align-items: center; min-height: 20px; line-height: 20px; }
+  .know-table td.k-project .project { line-height: 20px; }
   .know-table td.k-status { grid-column: span 1; }
   .know-table td.k-used { grid-column: span 2; }
   .know-table td.k-last { grid-column: span 1; }

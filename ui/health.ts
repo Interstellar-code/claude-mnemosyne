@@ -16,6 +16,7 @@ export type HealthData = {
   neverList: MemoryRow[]
   mostRecalled: MemoryRow[]
   recallsPerDay: { date: string; count: number }[]
+  otherRecallsPerDay: { date: string; count: number }[]
   daysCovered: number
   storeSize: number
   logSize: number
@@ -41,6 +42,11 @@ function memoryRows(value: unknown): MemoryRow[] {
     }))
 }
 
+const perDay = (value: unknown) =>
+  objects(value)
+    .filter(row => typeof row.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(row.date))
+    .map(row => ({ date: text(row.date), count: whole(row.count) }))
+
 /** A /api/health-report reply made safe to use; null when it is no object. */
 export function parseHealth(body: unknown): HealthData | null {
   if (body === null || typeof body !== 'object' || Array.isArray(body)) return null
@@ -59,9 +65,8 @@ export function parseHealth(body: unknown): HealthData | null {
     neverCount: whole(raw.neverRecalledCount ?? never.count),
     neverList,
     mostRecalled: memoryRows(raw.mostRecalled),
-    recallsPerDay: objects(raw.recallsPerDay)
-      .filter(row => typeof row.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(row.date))
-      .map(row => ({ date: text(row.date), count: whole(row.count) })),
+    recallsPerDay: perDay(raw.recallsPerDay),
+    otherRecallsPerDay: perDay(raw.otherRecallsPerDay),
     daysCovered: whole(raw.daysCovered),
     storeSize: whole(raw.storeSize ?? sizes.store),
     logSize: whole(raw.logSize ?? sizes.log),
@@ -84,14 +89,16 @@ const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one :
 
 export type Kpi = { label: string; value: string; note: string }
 
-/** Memories, never recalled, recalls in the log, store size. */
+/** Memories, never recalled, Claude's recalls in the log, other apps' recalls, store size. */
 export function kpis(data: HealthData): Kpi[] {
   const recalls = data.recallsPerDay.reduce((sum, day) => sum + day.count, 0)
+  const others = data.otherRecallsPerDay.reduce((sum, day) => sum + day.count, 0)
   const projects = data.owners.filter(owner => owner.owner !== 'global').length
   return [
     { label: 'Memories', value: String(data.total), note: `${plural(projects, 'project', 'projects')}, ${data.global} global` },
     { label: 'Never recalled', value: String(data.neverCount), note: `${percent(data.neverCount, data.total)}% of all memories` },
     { label: 'Claude recalls in the log', value: String(recalls), note: data.daysCovered > 0 ? `over ${plural(data.daysCovered, 'day', 'days')} of activity log, without dashboard searches` : 'the activity log has no days yet' },
+    { label: "Other apps' recalls", value: String(others), note: 'from other MCP clients, not counted as Claude recalls' },
     { label: 'Store size', value: bytes(data.storeSize + data.logSize), note: `database ${bytes(data.storeSize)}, log ${bytes(data.logSize)}` },
   ]
 }
@@ -256,7 +263,7 @@ export function projectRows(data: HealthData, host: HealthHost): HTMLElement[] {
 /** One never-recalled row: the memory, its project, when it was saved, Review and a two-step Forget. */
 export function neverRow(memory: MemoryRow, host: HealthHost, removed: () => void): HTMLElement {
   const tr = el('tr')
-  const project = el('td')
+  const project = el('td', undefined, 'col-project')
   project.append(host.project(memory.owner))
   const actions = el('td', undefined, 'row-actions')
   const review = el('button', 'Review', 'link')

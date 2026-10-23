@@ -17,6 +17,7 @@
 import { createMap, type MapView } from './map'
 import { extractionState, itemHead, kindTabs, kpiTiles as knowledgeKpiTiles, notice as knowledgeNotice, dotClass, ownerColour, ownerColours, parseKnowledge, tableRows, type KnowledgeData, type KnowledgeHost, type KnowledgeKind } from './knowledge'
 import { chartBars, chartText, coverageRows, dayBars, hotRows, kpiTiles as healthKpiTiles, neverRow, neverText, parseHealth, projectRows as healthProjectRows, storageList, type HealthData, type HealthHost } from './health'
+import { isClaudeRecall } from './recalls'
 import { createStream, type StreamApi, type StreamHandle, type StreamListener, type StreamStatus } from './stream'
 
 const TOKEN_KEY = 'mnemosyne.token'
@@ -553,8 +554,12 @@ export const revealNeeded = (shown: string, next: string, narrow: boolean) => na
 function wireInspectorReveal() {
   if (typeof MutationObserver === 'undefined' || typeof matchMedia !== 'function') return
   const inspector = byId('map-inspector')
+  const back = byId('map-back')
+  // The link to the canvas shows only with something in the inspector (the CSS shows it on narrow screens alone).
+  back.addEventListener('click', () => byId('map-stage').scrollIntoView({ block: 'start', behavior: 'smooth' }))
   let shown = ''
   new MutationObserver(() => {
+    back.hidden = inspector.childElementCount === 0
     const next = inspector.querySelector('.insp-title')?.textContent ?? ''
     if (revealNeeded(shown, next, matchMedia(NARROW).matches)) inspector.scrollIntoView({ block: 'start', behavior: 'smooth' })
     shown = next
@@ -978,8 +983,8 @@ function drawApps() {
 export function drawFeed() {
   const today = feed.lines.filter(line => isToday(line.t))
   const count = (test: (line: ActivityLine) => boolean) => String(today.filter(test).length)
-  // A dashboard search is logged as a recall (origin ui, the audit trail) but is not Claude recalling: it is not counted.
-  byId('tile-recall').textContent = count(line => line.action === 'recall' && line.origin !== 'ui' && line.ok !== false)
+  // Claude's recalls only (ui/recalls.ts, the same rule as the Health tab): a dashboard search or another app's recall is not one.
+  byId('tile-recall').textContent = count(isClaudeRecall)
   byId('tile-remember').textContent = count(line => line.action === 'remember' && line.ok !== false)
   byId('tile-update').textContent = count(line => line.action === 'update' && line.ok !== false)
   byId('tile-failed').textContent = count(line => line.ok === false)

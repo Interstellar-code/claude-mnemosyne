@@ -989,9 +989,26 @@ describe('VIEWS R2: the Knowledge and Health glue in app.ts', () => {
     const recall = (origin: string, extra: Record<string, unknown> = {}) => ({ t, action: 'recall', origin, owner: 'global', text: 'q', ok: true, ...extra })
     app.feed.lines = [recall('hook'), recall('tool'), recall('external', { client: 'codex-mcp' }), recall('ui'), recall('ui'), recall('ui'), recall('ui'), recall('hook', { ok: false })]
     app.drawFeed()
-    expect(byId('tile-recall').textContent).toBe('3')
+    expect(byId('tile-recall').textContent).toBe('2')
     // The log lines themselves stay in the feed: the audit trail.
     expect((byId('act-list').children as AppNode[]).length).toBe(8)
+    app.feed.lines = []
+  })
+
+  test('QAPAGE R2 item 1: the Activity tile counts the QA mix as 9 Claude recalls (the same lines tests/bun/health-report-api.spec.ts gives the server)', () => {
+    const t = new Date().toISOString()
+    const recall = (origin: string, extra: Record<string, unknown> = {}) => ({ t, action: 'recall', origin, owner: 'global', text: 'q', ids: [], count: 0, ok: true, ...extra })
+    app.feed.lines = [
+      ...[1, 2, 3, 4].map(() => recall('hook', { client: 'claude-code' })),
+      ...[1, 2, 3].map(() => recall('tool', { client: 'claude-code' })),
+      ...[1, 2].map(() => recall('trigger', { client: 'claude-code' })),
+      recall('external', { client: 'codex-mcp-client' }),
+      recall('external', { client: 'codex-mcp-client' }),
+      ...[1, 2, 3, 4].map(() => recall('ui', { client: 'dashboard' })),
+      recall('hook', { client: 'claude-code', ok: false }),
+    ]
+    app.drawFeed()
+    expect(byId('tile-recall').textContent).toBe('9')
     app.feed.lines = []
   })
 
@@ -1145,7 +1162,7 @@ function flowOf(container: PageNode, rules: Rule[], active: string[]): string[] 
   const take = (node: PageNode) => {
     for (const child of node.children) {
       if (styleOf(child, rules, 'display', active) === 'contents') take(child)
-      else if (styleOf(child, rules, 'position', active) !== 'absolute') items.push(child)
+      else if (styleOf(child, rules, 'display', active) !== 'none' && styleOf(child, rules, 'position', active) !== 'absolute') items.push(child)
     }
   }
   take(container)
@@ -1169,12 +1186,12 @@ describe('QAPAGE R1: the page, read as a tree and a stylesheet', () => {
   test('item 1: on a phone the canvas is first, 60vh tall, with the inspector right under it; wide screens keep the three columns', () => {
     const view = byIdIn(tree, 'view-map')
     // The markup the order rules rely on: the stage lives in .map-centre, the inspector is a child of the view.
-    expect(view.children.map(node => node.id || node.classes[0] || node.tag)).toEqual(['sr-only', 'map-rail', 'map-centre', 'map-inspector'])
+    expect(view.children.map(node => node.id || node.classes[0] || node.tag)).toEqual(['sr-only', 'map-rail', 'map-centre', 'map-back', 'map-inspector'])
     expect(byIdIn(tree, 'map-stage').parent!.classes).toContain('map-centre')
     expect(byIdIn(tree, 'map-live-strip').parent!.classes).toContain('map-centre')
     expect(byIdIn(tree, 'map-legend').parent!.classes).toContain('map-centre')
     // 900px and narrower: one column, the canvas first, then the inspector, the live strip, the legend, the rail's controls.
-    expect(flowOf(view, rules, [PHONE])).toEqual(['map-stage', 'map-inspector', 'map-live-strip', 'map-legend', 'map-rail'])
+    expect(flowOf(view, rules, [PHONE])).toEqual(['map-stage', 'map-back', 'map-inspector', 'map-live-strip', 'map-legend', 'map-rail'])
     expect(styleOf(view, rules, 'flex-direction', [PHONE])).toBe('column')
     expect(styleOf(view, rules, 'flex-wrap', [PHONE])).toBe('nowrap')
     const stage = byIdIn(tree, 'map-stage')
@@ -1184,6 +1201,8 @@ describe('QAPAGE R1: the page, read as a tree and a stylesheet', () => {
     expect(Math.round(0.6 * 844)).toBe(506)
     // Wide screens: the old arrangement, untouched: rail, centre, inspector in a row; the stage 620px.
     expect(flowOf(view, rules, [])).toEqual(['map-rail', 'map-centre', 'map-inspector'])
+    // The Back link is hidden outside the phone query, and starts hidden in the markup.
+    expect(styleOf(byIdIn(tree, 'map-back'), rules, 'display', [])).toBe('none')
     expect(styleOf(view, rules, 'flex-direction', [])).toBeUndefined()
     expect(styleOf(stage, rules, 'height', [])).toBe('620px')
     expect(styleOf(byIdIn(tree, 'map-inspector'), rules, 'order', [])).toBeUndefined()
@@ -1246,6 +1265,53 @@ describe('QAPAGE R1: the page, read as a tree and a stylesheet', () => {
     // The real numbers: a 252px-wide inspector body holds two 120px fields and a 12px gap (120 + 12 + 120 = 252); a narrower one stacks them.
     const fields = (width: number) => Math.max(1, Math.floor((width + 12) / (120 + 12)))
     expect([fields(264), fields(252), fields(204)]).toEqual([2, 2, 1])
+  })
+
+  test('QAPAGE R2 item 2: the content is centred up to 1280px, and the Health project cell keeps its name whole (no wrap, ellipsis when long)', () => {
+    const wide = rules.find(rule => rule.selector === '.wide')!.decls
+    expect(wide['max-width']).toBe('1280px')
+    expect(wide['margin-left']).toBe('auto')
+    expect(wide['margin-right']).toBe('auto')
+    // Real numbers: at 1440px the 1280px column leaves 80px each side instead of ~240px on the right.
+    expect((1440 - 1280) / 2).toBe(80)
+    const never = allNodes(tree).find(node => node.tag === 'table' && node.classes.includes('compact'))!
+    expect(hasAncestor(never, node => node.classes.includes('wide'))).toBe(true)
+    expect(rules.find(rule => rule.selector === '.table.compact .project')?.decls['white-space']).toBe('nowrap')
+    expect(rules.find(rule => rule.selector === '.table.compact td.col-project')?.decls['min-width']).toBe('120px')
+    expect(rules.find(rule => rule.selector === '.table.compact .project > span:last-child')?.decls['text-overflow']).toBe('ellipsis')
+    // No rule lets the project name break inside a word.
+    expect(rules.filter(rule => rule.selector.includes('.project') && rule.decls['overflow-wrap'] === 'anywhere')).toEqual([])
+  })
+
+  test('QAPAGE R2 item 3: on a phone the Find box sits above the canvas, and the inspector has a Back to the map button', () => {
+    // All the phone rules of one selector, merged in order.
+    const of = (selector: string) => Object.assign({}, ...rules.filter(rule => rule.media === PHONE && rule.selector === selector).map(rule => rule.decls)) as Record<string, string>
+    // The strip is the stage's own margin: the Find box (36px high) is placed 46px above the stage box, so it never covers a star.
+    expect(of('.stage')?.['margin-top']).toBe('46px')
+    expect(of('.stage')?.overflow).toBe('visible')
+    expect(of('.stage-find')?.top).toBe('-46px')
+    expect(of('.stage-canvas')?.overflow).toBe('hidden')
+    expect(36 + 10).toBe(46)
+    // Wide screens keep the Find box over the canvas, top right.
+    expect(rules.find(rule => rule.selector === '.stage-find' && rule.media === null)?.decls.top).toBe('14px')
+    // The button: in the markup right before the inspector, hidden until it has content (app.ts), shown on a phone only.
+    const back = byIdIn(tree, 'map-back')
+    expect(back.tag).toBe('button')
+    expect(back.parent!.id).toBe('view-map')
+    expect(of('.back-to-map')?.display).toBe('inline-flex')
+    expect(styleOf(back, rules, 'display', [])).toBe('none')
+    expect(styleOf(back, rules, 'display', [PHONE])).toBe('inline-flex')
+  })
+
+  test('QAPAGE R2 item 4: on a phone the Knowledge topic and project cells share one centred 20px line', () => {
+    const of = (selector: string) => Object.assign({}, ...rules.filter(rule => rule.media === SMALL && rule.selector === selector).map(rule => rule.decls)) as Record<string, string>
+    for (const cell of ['.know-table td.k-topic', '.know-table td.k-project']) {
+      expect(of(cell).display).toBe('flex')
+      expect(of(cell)['align-items']).toBe('center')
+      expect(of(cell)['line-height']).toBe('20px')
+      expect(of(cell)['min-height']).toBe('20px')
+    }
+    expect(of('.know-table td.k-project .project')?.['line-height']).toBe('20px')
   })
 
   test('items 5 and 7a: the Activity tile reads "Claude recalls today" and Health says "Claude recalls"', () => {

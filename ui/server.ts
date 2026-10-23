@@ -60,6 +60,7 @@ import { activityEntry, preview } from '../hooks/activity-log'
 import type { ActivityFields } from '../hooks/activity-log'
 import { buildRequests, engineEnv, parseReplies } from '../hooks/engine'
 import type { EngineRequest } from '../hooks/engine'
+import { countByDay, isClaudeRecall, isOtherAppsRecall } from './recalls'
 
 const UI_DIR = import.meta.dir
 const VENDOR_DIR = join(UI_DIR, 'vendor')
@@ -299,7 +300,6 @@ export function healthReport(config: Config, store: Store, _engine: string | und
       ]
     : []
 
-  const recallsByDay: Record<string, number> = {}
   let minDay: string | null = null
   let maxDay: string | null = null
   for (const line of logLines) {
@@ -308,10 +308,6 @@ export function healthReport(config: Config, store: Store, _engine: string | und
       if (/^\d{4}-\d{2}-\d{2}$/.test(day)) {
         if (minDay === null || day < minDay) minDay = day
         if (maxDay === null || day > maxDay) maxDay = day
-        // A dashboard search is logged as a recall line (origin ui, the audit trail) but is not Claude recalling.
-        if (line.action === 'recall' && line.origin !== 'ui') {
-          recallsByDay[day] = (recallsByDay[day] ?? 0) + 1
-        }
       }
     }
   }
@@ -322,9 +318,15 @@ export function healthReport(config: Config, store: Store, _engine: string | und
     const tMax = new Date(`${maxDay}T00:00:00.000Z`).getTime()
     daysCovered = Math.max(1, Math.round((tMax - tMin) / (24 * 60 * 60 * 1000)) + 1)
   }
-  const recallsPerDay = Object.keys(recallsByDay)
-    .sort()
-    .map(date => ({ date, count: recallsByDay[date] }))
+  // Claude's own recalls and other apps' recalls, counted apart by ui/recalls.ts (the same functions the Activity tile uses).
+  const recallsByDay = countByDay(logLines, isClaudeRecall)
+  const otherRecallsByDay = countByDay(logLines, isOtherAppsRecall)
+  const perDay = (days: Record<string, number>) =>
+    Object.keys(days)
+      .sort()
+      .map(date => ({ date, count: days[date] }))
+  const recallsPerDay = perDay(recallsByDay)
+  const otherRecallsPerDay = perDay(otherRecallsByDay)
 
   if (db === null) {
     return {
@@ -341,6 +343,7 @@ export function healthReport(config: Config, store: Store, _engine: string | und
         mostRecalled: [],
         recallsPerDay,
         recallsByDay,
+        otherRecallsPerDay,
         daysCovered,
         sizes: { store: storeSize, log: logSize },
         tables: {},
@@ -508,6 +511,7 @@ export function healthReport(config: Config, store: Store, _engine: string | und
       mostRecalled,
       recallsPerDay,
       recallsByDay,
+      otherRecallsPerDay,
       daysCovered,
       sizes: { store: storeSize, log: logSize },
       tables,
