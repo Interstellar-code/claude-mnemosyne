@@ -259,7 +259,7 @@ a:hover { color: var(--accent-dark); }
   .feed-head, .event { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .what { white-space: normal; overflow-wrap: anywhere; }
 }
-.feed-head { padding-top: 10px; padding-bottom: 10px; border-bottom: 1px solid var(--line); background: #F7F8F6; color: var(--muted); font-size: 12px; font-weight: 600; }
+.feed-head { padding-top: 10px; padding-bottom: 10px; border-bottom: 1px solid var(--line); background: #F7F8F6; color: var(--muted); font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; }
 .event { border-bottom: 1px solid #EEEFEC; }
 .event:last-child { border-bottom: 0; }
 .event.empty { display: block; }

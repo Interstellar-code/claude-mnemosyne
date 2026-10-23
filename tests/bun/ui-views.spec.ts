@@ -351,13 +351,28 @@ describe('the dashboard views on a real store', () => {
     expect(view.indexOf('class="feed-head"')).toBeLessThan(view.indexOf('id="act-list"'))
     expect(view.indexOf('id="act-list"')).toBeLessThan(view.indexOf('id="act-key"'))
     const key = view.slice(view.indexOf('id="act-key"'))
-    expect([...key.matchAll(/<dt class="mono">([^<]*)<\/dt>/g)].map(m => m[1])).toEqual(['hook', 'tool', 'trigger', 'external', 'ui', 'backfill'])
+    // The mockup's words (design/Activity.dc.html), term by term.
+    expect([...key.matchAll(/<dt class="mono">([^<]*)<\/dt><dd>([^<]*)<\/dd>/g)].map(m => [m[1], m[2]])).toEqual([
+      ['hook', 'automatic recall on a first prompt or after a compaction'],
+      ['tool', 'Claude called a memory tool in Claude Code'],
+      ['trigger', 'you typed a trigger phrase, such as \u201cremember that\u201d'],
+      ['external', 'another MCP client, through mnemosyne-mcp'],
+      ['ui', 'this dashboard (search or forget)'],
+      ['backfill', 'the one-time tagging run, /mnemosyne-tags'],
+    ])
     expect([...view.matchAll(/<option value="([^"]*)"/g)].map(m => m[1])).toEqual(['all', 'Claude Code', 'Codex', 'Cursor', 'Dashboard'])
+    expect(/<option value="all">All<\/option>/.test(view)).toBe(true)
     expect(view).toContain('id="act-session"')
     // One rule gives the header and the rows the same columns, and one rule inside one media query changes both.
     const columns = [...css.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}]*)\{[^{}]*grid-template-columns[^{}]*\}/g)].map(m => m[1]!.replace(/@media[^{]*\{/, '').trim())
     expect(columns.filter(selector => /\.(feed-head|event)\b/.test(selector))).toEqual(['.feed-head, .event', '.feed-head, .event'])
-    expect(css.match(/@media \(max-width: 760px\)/g)?.length).toBe(1)
+    // The header and the rows change together: both rules sit inside one media query, and the stylesheet may hold more.
+    expect(css.match(/@media \([^)]*\)/g)?.length).toBeGreaterThan(0)
+    const phone = /@media[^{]*\{((?:[^{}]*\{[^{}]*\})*)\s*\}/g
+    const together = [...css.matchAll(phone)].filter(m => /\.feed-head, \.event\s*\{[^}]*grid-template-columns/.test(m[1]!))
+    expect(together.length).toBe(1)
+    // The header is uppercase with spaced letters, like the mockup.
+    expect(/\.feed-head \{[^}]*text-transform: uppercase;[^}]*letter-spacing: 0\.06em/.test(css)).toBe(true)
   })
 
   test('VIEW.2.a1: GET /api/activity returns the last N lines, newest first', async () => {

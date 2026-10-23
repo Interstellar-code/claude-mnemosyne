@@ -132,6 +132,8 @@ export function clock(value: string | undefined): string {
 
 const textOf = (value: unknown) => (typeof value === 'string' ? value.trim() : '')
 
+const EXTERNAL_KNOWN = ['Codex', 'Cursor', 'Claude Code']
+
 /** The app a clientInfo name belongs to when it is a known one, else undefined. */
 function knownApp(client: string): string | undefined {
   if (/codex/i.test(client)) return 'Codex'
@@ -142,10 +144,19 @@ function knownApp(client: string): string | undefined {
 
 /** The app an activity line came from: 'Claude Code', 'Codex', 'Cursor', 'Dashboard', another client's own name, or '' when unknown. */
 export function appOf(line: ActivityLine): string {
-  if (line.origin === 'ui') return 'Dashboard'
   const client = textOf(line.client)
+  // An outside client names itself, so its name may not pass for the dashboard or a fixed group of the filter (see appKey).
+  if (line.origin === 'external') return client ? (knownApp(client) ?? firstLine(client, 40)) : ''
+  if (line.origin === 'ui') return 'Dashboard'
   if (client) return knownApp(client) ?? firstLine(client, 40)
-  return line.origin && line.origin !== 'external' ? 'Claude Code' : ''
+  // Hook, tool and trigger lines are Claude Code's; a backfill line names its own client or none.
+  return line.origin === 'hook' || line.origin === 'tool' || line.origin === 'trigger' ? 'Claude Code' : ''
+}
+
+/** What the App filter compares: an outside client's raw name is namespaced, so "Dashboard" from an MCP client is never the dashboard. */
+export function appKey(line: ActivityLine): string {
+  const app = appOf(line)
+  return line.origin === 'external' && app !== '' && !EXTERNAL_KNOWN.includes(app) ? `ext:${app}` : app
 }
 
 /** A session id cut to its first 8 characters. */
@@ -349,8 +360,8 @@ export function memoryDetail(memory: Memory, forget: (memory: Memory, done: (err
   return panel
 }
 
-/** One line of the Activity feed; `pickSession`, when given, makes the session a button. */
-export function activityItem(line: ActivityLine, pickSession?: (session: string) => void) {
+/** One line of the Activity feed; `pickSession` is called with the full session id when its button is pressed. */
+export function activityItem(line: ActivityLine, pickSession: (session: string) => void) {
   const item = el('li', undefined, 'event')
   const action = line.action ?? ''
   const what = line.text || (action === 'forget' ? (line.ids ?? []).join(', ') : action === 'rearm' ? 'will recall on next prompt' : '')
@@ -361,15 +372,12 @@ export function activityItem(line: ActivityLine, pickSession?: (session: string)
   if (line.origin) raw.append(el('span', String(line.origin)))
   const session = textOf(line.session)
   if (session) {
-    if (pickSession) {
-      const button = el('button', shortSession(session), 'link mono session')
-      button.type = 'button'
-      button.title = 'Show only this session'
-      button.addEventListener('click', () => pickSession(session))
-      raw.append(button)
-    } else {
-      raw.append(el('span', shortSession(session), 'session'))
-    }
+    const button = el('button', shortSession(session), 'link mono session')
+    button.type = 'button'
+    button.title = 'Show only this session'
+    button.setAttribute('aria-label', `Show only session ${shortSession(session)}`)
+    button.addEventListener('click', () => pickSession(session))
+    raw.append(button)
   }
   source.append(el('span', originLabel(line), 'muted origin'), raw)
   item.append(
@@ -740,18 +748,22 @@ export const newFilter = (): FeedFilter => ({ action: 'all', app: 'all', session
 /** Whether a line passes the action chip ('all', 'external' or an action), the App drop-down ('all' or an app) and the clicked session ('' for any). */
 export function showLine(line: ActivityLine, filter: FeedFilter): boolean {
   if (filter.action === 'external' ? line.origin !== 'external' : filter.action !== 'all' && line.action !== filter.action) return false
-  if (filter.app !== 'all' && appOf(line) !== filter.app) return false
+  if (filter.app !== 'all' && appKey(line) !== filter.app) return false
   return filter.session === '' || textOf(line.session) === filter.session
 }
 
 const FIXED_APPS = ['Claude Code', 'Codex', 'Cursor', 'Dashboard']
 
-/** The App drop-down's entries: the four fixed apps, then any other client seen (and the one picked), by name. */
+/** The App drop-down's values (appKey): the four fixed apps, then any other client seen (and the one picked), by name. */
 export function appOptions(lines: readonly ActivityLine[], picked = 'all'): string[] {
   const others = new Set<string>()
-  for (const name of [...lines.map(appOf), picked]) if (name !== '' && name !== 'all' && !FIXED_APPS.includes(name)) others.add(name)
-  return [...FIXED_APPS, ...[...others].sort((a, b) => a.localeCompare(b))]
+  for (const key of [...lines.map(appKey), picked]) if (key !== '' && key !== 'all' && !FIXED_APPS.includes(key)) others.add(key)
+  const name = (key: string) => key.replace(/^ext:/, '')
+  return [...FIXED_APPS, ...[...others].sort((a, b) => name(a).localeCompare(name(b)))]
 }
+
+/** The words an App drop-down value shows. */
+export const appName = (key: string) => key.replace(/^ext:/, '')
 
 export const feed = newFeed()
 export const feedView = { filter: newFilter(), started: false, live: 'Connecting', apps: '' }
@@ -776,12 +788,12 @@ function drawApps() {
   if (key === feedView.apps) return
   feedView.apps = key
   const select = byId<HTMLSelectElement>('act-app')
-  const all = el('option', 'All apps')
+  const all = el('option', 'All')
   all.value = 'all'
   select.replaceChildren(
     all,
     ...names.map(name => {
-      const option = el('option', name)
+      const option = el('option', appName(name))
       option.value = name
       return option
     }),

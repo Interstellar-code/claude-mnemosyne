@@ -120,7 +120,7 @@
       </div>
       <label class="field">App
         <select id="act-app" class="input">
-          <option value="all">All apps</option>
+          <option value="all">All</option>
           <option value="Claude Code">Claude Code</option>
           <option value="Codex">Codex</option>
           <option value="Cursor">Cursor</option>
@@ -136,12 +136,12 @@
       <ol id="act-list" class="feed"></ol>
     </div>
     <dl id="act-key" class="key" aria-label="Where a line comes from">
-      <dt class="mono">hook</dt><dd>Claude Code ran it on its own: the recall on your first prompt, and the re-arm after a compaction.</dd>
-      <dt class="mono">tool</dt><dd>Claude called a Mnemosyne tool itself: remember, recall, update, forget or stats.</dd>
-      <dt class="mono">trigger</dt><dd>You wrote a trigger phrase such as “remember this”, and the plugin saved it.</dd>
-      <dt class="mono">external</dt><dd>Another app's agent, such as Codex or Cursor, used the same memory through the outside MCP server.</dd>
-      <dt class="mono">ui</dt><dd>You did it in this dashboard: a search or a forget.</dd>
-      <dt class="mono">backfill</dt><dd>A background job that added topic tags to older memories.</dd>
+      <dt class="mono">hook</dt><dd>automatic recall on a first prompt or after a compaction</dd>
+      <dt class="mono">tool</dt><dd>Claude called a memory tool in Claude Code</dd>
+      <dt class="mono">trigger</dt><dd>you typed a trigger phrase, such as “remember that”</dd>
+      <dt class="mono">external</dt><dd>another MCP client, through mnemosyne-mcp</dd>
+      <dt class="mono">ui</dt><dd>this dashboard (search or forget)</dd>
+      <dt class="mono">backfill</dt><dd>the one-time tagging run, /mnemosyne-tags</dd>
     </dl>
     <p class="muted small">From the activity log on this machine. Text previews are cut short and secrets are masked.</p>
   </main>

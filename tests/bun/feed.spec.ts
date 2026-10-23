@@ -211,6 +211,9 @@ describe('ACT: the Activity list on real-shaped lines', () => {
     expect(pairs({ ...LINES.zedRecall, client: undefined })).toEqual(['outside agent', 'external'])
     expect(pairs({ ...LINES.zedRecall, client: '  ' })).toEqual(['outside agent', 'external'])
     expect(pairs({ ...LINES.zedRecall, client: 42 })).toEqual(['outside agent', 'external'])
+    // The raw origin line is mono.
+    const rawLine = ((app.activityItem(LINES.hookRecall) as Fake).children[2] as Fake).children[1] as Fake
+    expect(rawLine.className.split(' ')).toContain('mono')
     // The row keeps its six cells, in the header's order.
     expect((app.activityItem(LINES.codexRecall) as Fake).children.length).toBe(6)
   })
@@ -220,7 +223,12 @@ describe('ACT: the Activity list on real-shaped lines', () => {
     const texts = item.texts()
     expect(texts).toContain('a1b2c3d4')
     expect(texts.some(text => text.includes('a1b2c3d4-'))).toBe(false)
-    expect(item.all().some(e => e.tagName === 'button')).toBe(true)
+    const button = item.all().find(e => e.tagName === 'button')!
+    expect(button.attributes.get('aria-label')).toBe('Show only session a1b2c3d4')
+    let picked = ''
+    const pickable = app.activityItem(LINES.hookRecall, (id: string) => (picked = id)) as Fake
+    pickable.all().find(e => e.tagName === 'button')!.fire('click')
+    expect(picked).toBe(SESSION_A)
     expect(app.shortSession('abc')).toBe('abc')
     expect(app.shortSession('0123456789')).toBe('01234567')
     const legacy = app.activityItem(LINES.legacy, () => {}) as Fake
@@ -249,19 +257,58 @@ describe('ACT: the Activity list on real-shaped lines', () => {
     expect(ALL.map(line => app.appOf(line))).toEqual(['Claude Code', 'Claude Code', 'Claude Code', 'Codex', 'Cursor', 'zed', 'Dashboard', 'Claude Code'])
     expect(app.appOf({ origin: 'external' })).toBe('')
     expect(app.appOptions([])).toEqual(['Claude Code', 'Codex', 'Cursor', 'Dashboard'])
-    expect(app.appOptions(ALL)).toEqual(['Claude Code', 'Codex', 'Cursor', 'Dashboard', 'zed'])
+    // An outside client's own name is namespaced (ext:), so it can never equal a fixed app.
+    expect(app.appOptions(ALL)).toEqual(['Claude Code', 'Codex', 'Cursor', 'Dashboard', 'ext:zed'])
+    expect(app.appName('ext:zed')).toBe('zed')
     // The picked app stays listed even when no line shows it any more.
-    expect(app.appOptions([], 'Windsurf')).toEqual(['Claude Code', 'Codex', 'Cursor', 'Dashboard', 'Windsurf'])
+    expect(app.appOptions([], 'ext:Windsurf')).toEqual(['Claude Code', 'Codex', 'Cursor', 'Dashboard', 'ext:Windsurf'])
+  })
+
+  test('review 2 / 2: an outside client that names itself "Dashboard" is not the dashboard, in the filter or the options', () => {
+    const fake = { ...base, t: iso(9), action: 'recall', origin: 'external', client: 'Dashboard' }
+    expect(app.appKey(fake)).toBe('ext:Dashboard')
+    expect(app.showLine(fake, { action: 'all', app: 'Dashboard', session: '' })).toBe(false)
+    expect(app.showLine(fake, { action: 'all', app: 'ext:Dashboard', session: '' })).toBe(true)
+    expect(app.showLine(LINES.uiRecall, { action: 'all', app: 'Dashboard', session: '' })).toBe(true)
+    expect(app.appOptions([fake])).toEqual(['Claude Code', 'Codex', 'Cursor', 'Dashboard', 'ext:Dashboard'])
+    // Through the drop-down: the real dashboard line and the fake one fall in different entries.
+    app.feed.lines = [fake, LINES.uiRecall]
+    app.drawFeed()
+    expect((els.get('act-app')!.children as Fake[]).map(o => [o.value, o.textContent])).toEqual([
+      ['all', 'All'], ['Claude Code', 'Claude Code'], ['Codex', 'Codex'], ['Cursor', 'Cursor'], ['Dashboard', 'Dashboard'], ['ext:Dashboard', 'Dashboard'],
+    ])
+    pickApp('Dashboard')
+    expect(shownTimes()).toEqual([app.clock(LINES.uiRecall.t)])
+    // A client that names itself Claude Code is Claude Code (a known app), not a raw name.
+    expect(app.appKey({ origin: 'external', client: 'claude-code' })).toBe('Claude Code')
+  })
+
+  test('review 2 / 3: hook, tool and trigger lines are Claude Code; a backfill line takes its client, else no app', () => {
+    for (const origin of ['hook', 'tool', 'trigger']) expect(app.appOf({ ...base, origin })).toBe('Claude Code')
+    expect(app.appOf({ ...base, origin: 'backfill', client: 'mnemosyne-tags' })).toBe('mnemosyne-tags')
+    expect(app.appOf({ ...base, origin: 'backfill' })).toBe('')
+    expect(app.appKey({ ...base, origin: 'backfill' })).toBe('')
+    expect(app.showLine({ ...base, origin: 'backfill' }, { action: 'all', app: 'Claude Code', session: '' })).toBe(false)
+    expect(app.showLine({ ...base, origin: 'backfill' }, { action: 'all', app: 'all', session: '' })).toBe(true)
+    expect(app.appOptions([{ ...base, origin: 'backfill' }])).toEqual(['Claude Code', 'Codex', 'Cursor', 'Dashboard'])
+    // Without an origin or a client, no app either.
+    expect(app.appOf({ owner: 'global' })).toBe('')
+  })
+
+  test('review 2 / 5: the App drop-down\'s first entry reads All', () => {
+    app.drawFeed()
+    expect((els.get('act-app')!.children as Fake[])[0]!.textContent).toBe('All')
   })
 
   test('ACT.2.a1: the App drop-down narrows the list, and its entries come from the lines seen', () => {
     app.drawFeed()
     expect(rows().length).toBe(ALL.length)
     const options = els.get('act-app')!.children as Fake[]
-    expect(options.map(o => o.value)).toEqual(['all', 'Claude Code', 'Codex', 'Cursor', 'Dashboard', 'zed'])
+    expect(options.map(o => o.value)).toEqual(['all', 'Claude Code', 'Codex', 'Cursor', 'Dashboard', 'ext:zed'])
+    expect(options.map(o => o.textContent)).toEqual(['All', 'Claude Code', 'Codex', 'Cursor', 'Dashboard', 'zed'])
     pickApp('Codex')
     expect(shownTimes()).toEqual(timesOf('codexRecall'))
-    pickApp('zed')
+    pickApp('ext:zed')
     expect(shownTimes()).toEqual(timesOf('zedRecall'))
     pickApp('Dashboard')
     expect(shownTimes()).toEqual(timesOf('uiRecall'))
