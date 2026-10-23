@@ -7,6 +7,7 @@
 // textContent only: no HTML is ever parsed from data (tests/bun/inert.spec.ts scans
 // this file). ui/app.ts fetches the reply and calls them.
 import { plainLabel } from './escape'
+import { buildGalaxy, GLOBAL_COLOUR, projectColour } from './map-state'
 
 export type KnowledgeKind = 'fact' | 'preference' | 'instruction' | 'timeline' | 'relation'
 
@@ -77,6 +78,28 @@ export function parseKnowledge(body: unknown): KnowledgeData | null {
   return { extraction: text(raw.extraction) || 'unknown', items, totals }
 }
 
+/**
+ * The Map's project colours, for every tab: the colour buildGalaxy (ui/map-state.ts) gives each owner of a store
+ * that holds these owners (it sorts them by name and takes the palette in turn; global is grey). The Map's own
+ * function, so a project has one colour everywhere.
+ */
+export function ownerColours(owners: readonly string[]): Map<string, string> {
+  const galaxy = buildGalaxy({ projects: [...new Set(owners)].map(owner => ({ owner, label: owner, count: 0, recalls: 0 })), memories: [], knowledge: [], meaning: false, total: 0, shown: 0 })
+  return new Map([...new Set(owners)].map(owner => [owner, projectColour(galaxy, owner)]))
+}
+
+/** One owner's colour: its Map colour, grey for global, 'all' or an owner the store does not list. */
+export const ownerColour = (colours: ReadonlyMap<string, string>, owner: string | undefined): string => (owner === undefined || owner === 'all' ? GLOBAL_COLOUR : (colours.get(owner) ?? GLOBAL_COLOUR))
+
+/** The Map's palette in the order it hands colours out, read off a store of many owners. */
+const SLOTS = [...new Set(ownerColours(Array.from({ length: 64 }, (_, i) => `probe-${String(i).padStart(2, '0')}`)).values())]
+
+/** The CSS class that paints a project dot in `colour` (ui/style.css: .c0, .c1 … are the Map's palette in that order, .c-global its grey). The CSP refuses inline styles, so a colour is a class. */
+export const dotClass = (colour: string): string => {
+  const slot = SLOTS.indexOf(colour)
+  return slot < 0 ? 'c-global' : `c${slot}`
+}
+
 export const total = (data: KnowledgeData) => KINDS.reduce((sum, { kind }) => sum + data.items[kind].length, 0)
 /** Every item the store holds, shown or not. */
 export const storeTotal = (data: KnowledgeData) => KINDS.reduce((sum, { kind }) => sum + data.totals[kind], 0)
@@ -104,7 +127,7 @@ export const STALE_DAYS = 30
 
 export type Kpi = { label: string; value: string }
 
-/** Items, items whose memory was recalled in the last 7 days, items whose memory was never recalled. */
+/** Items, items whose memory was recalled in the last 7 days, items whose memory was never recalled (items, not memories: one memory can hold several). */
 export function kpis(data: KnowledgeData, now: number): Kpi[] {
   const all = KINDS.flatMap(({ kind }) => data.items[kind])
   const recent = all.filter(item => {
@@ -114,7 +137,7 @@ export function kpis(data: KnowledgeData, now: number): Kpi[] {
   return [
     { label: 'Items', value: countText(all.length, storeTotal(data)) },
     { label: 'Memory recalled in the last 7 days', value: String(recent) },
-    { label: 'Memory never recalled', value: String(all.filter(item => item.recalls === 0).length) },
+    { label: 'Items whose memory was never recalled', value: String(all.filter(item => item.recalls === 0).length) },
   ]
 }
 
@@ -232,19 +255,36 @@ export function tableRows(data: KnowledgeData, kind: KnowledgeKind, host: Knowle
     tr.append(td)
     return [tr]
   }
+  const head = itemHead(kind)
   return rows.map(row => {
     const tr = el('tr')
     const open = el('button', 'Show on map', 'link')
     open.type = 'button'
     open.disabled = row.memory === ''
     open.addEventListener('click', () => host.showOnMap(row.memory))
-    const project = el('td')
+    const project = cell('td', undefined, 'k-project')
     project.append(host.project(row.owner))
-    const fromMemory = el('td')
+    const fromMemory = cell('td', undefined, 'k-from')
     fromMemory.append(open)
-    tr.append(el('td', row.text, 'know-text'), el('td', row.topic, 'muted'), project, fromMemory, el('td', row.status, 'muted'), el('td', row.used, 'small'), el('td', row.last, row.stale ? 'small is-stale' : 'small'))
+    // On a phone each row is a card (ui/style.css): data-label names a cell there, the kind first, then the item.
+    tr.append(
+      cell('td', row.text, 'know-text k-text', head),
+      cell('td', row.topic, 'muted k-topic'),
+      project,
+      fromMemory,
+      cell('td', row.status, 'muted k-status', 'Status'),
+      cell('td', row.used, 'small k-used', 'Used'),
+      cell('td', row.last, row.stale ? 'small is-stale k-last' : 'small k-last', 'Last used'),
+    )
     return tr
   })
+}
+
+/** A table cell with its class names and, for the phone card, the label shown before its text. */
+function cell(tag: 'td', content: string | undefined, className: string, label?: string) {
+  const td = el(tag, content, className)
+  if (label !== undefined) td.dataset.label = label
+  return td
 }
 
 /** The column heading of the first and the status column for a kind. */

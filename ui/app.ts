@@ -15,7 +15,7 @@
 // Styles live in style.css: the CSP refuses inline ones.
 
 import { createMap, type MapView } from './map'
-import { extractionState, itemHead, kindTabs, kpiTiles as knowledgeKpiTiles, notice as knowledgeNotice, parseKnowledge, tableRows, type KnowledgeData, type KnowledgeHost, type KnowledgeKind } from './knowledge'
+import { extractionState, itemHead, kindTabs, kpiTiles as knowledgeKpiTiles, notice as knowledgeNotice, dotClass, ownerColour, ownerColours, parseKnowledge, tableRows, type KnowledgeData, type KnowledgeHost, type KnowledgeKind } from './knowledge'
 import { chartBars, chartText, coverageRows, dayBars, hotRows, kpiTiles as healthKpiTiles, neverRow, neverText, parseHealth, projectRows as healthProjectRows, storageList, type HealthData, type HealthHost } from './health'
 import { createStream, type StreamApi, type StreamHandle, type StreamListener, type StreamStatus } from './stream'
 
@@ -25,7 +25,7 @@ type View = (typeof VIEWS)[number]
 const VIEW_NAMES: Record<View, string> = { map: 'Map', memories: 'Memories', activity: 'Activity', search: 'Search', knowledge: 'Knowledge', health: 'Health' }
 const FEED_KEEP = 1000
 const FEED_SHOW = 300
-const OWNER_COLOURS = 8
+const CONNECTED = 'Connected to the local Mnemosyne server.'
 
 type Owner = { owner: string; count: number }
 
@@ -189,7 +189,7 @@ export function originLabel(line: ActivityLine): string {
     case 'tool':
       return 'Claude tool'
     case 'external':
-      return appOf(line) || 'outside agent'
+      return appName(appKey(line)) || 'outside agent'
     case 'ui':
       return 'dashboard'
     case 'backfill':
@@ -237,23 +237,20 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, text?: string, classN
   return element
 }
 
-const ownerColour = new Map<string, string>()
+// Every tab draws a project in its Map colour (ownerColours, ui/knowledge.ts): set when the page learns the owners.
+let colours = new Map<string, string>()
 
-/** A colour class per owner: global grey, the others in the order the server lists them. */
-function colourOf(owner: string | undefined) {
-  if (!owner || owner === 'global' || owner === 'all') return 'c-global'
-  let colour = ownerColour.get(owner)
-  if (colour === undefined) {
-    colour = `c${ownerColour.size % OWNER_COLOURS}`
-    ownerColour.set(owner, colour)
-  }
-  return colour
+/** Takes the store's owners: from now on every project dot has its Map colour. */
+export function useOwners(list: readonly string[]) {
+  colours = ownerColours(list)
 }
 
-function project(owner: string | undefined, className = 'project', label?: string) {
+/** A project's name with its colour dot; `label` stands for a group of projects (grey). */
+export function project(owner: string | undefined, className = 'project', label?: string) {
   const span = el('span', undefined, className)
   span.title = label ?? owner ?? ''
-  span.append(el('span', undefined, `dot ${label ? 'c-global' : colourOf(owner)}`), el('span', label ?? ownerName(owner)))
+  const dot = el('span', undefined, `dot ${dotClass(label ? ownerColour(colours, undefined) : ownerColour(colours, owner))}`)
+  span.append(dot, el('span', label ?? ownerName(owner)))
   return span
 }
 
@@ -517,7 +514,9 @@ function drawTabs() {
   }
 }
 
-function show(view: View) {
+export function show(view: View) {
+  // A message about the last tab (Forgot memory …) does not follow the page to another one.
+  if (view !== current && !expired) setStatus(CONNECTED, 'ok')
   current = view
   for (const name of VIEWS) byId(`view-${name}`).hidden = name !== view
   for (const tab of byId('tabs').querySelectorAll<HTMLButtonElement>('button.tab')) {
@@ -545,6 +544,22 @@ function show(view: View) {
 // ---- Map ----
 
 let map: MapView | null = null
+
+const NARROW = '(max-width: 900px)'
+
+/** On a phone the inspector sits under the canvas: a newly selected star (a new title in it) brings it into view; a refresh of the same star does not. */
+export const revealNeeded = (shown: string, next: string, narrow: boolean) => narrow && next !== '' && next !== shown
+
+function wireInspectorReveal() {
+  if (typeof MutationObserver === 'undefined' || typeof matchMedia !== 'function') return
+  const inspector = byId('map-inspector')
+  let shown = ''
+  new MutationObserver(() => {
+    const next = inspector.querySelector('.insp-title')?.textContent ?? ''
+    if (revealNeeded(shown, next, matchMedia(NARROW).matches)) inspector.scrollIntoView({ block: 'start', behavior: 'smooth' })
+    shown = next
+  }).observe(inspector, { childList: true, subtree: true })
+}
 
 /** The map inspector's Open in Memories: the Memories view, with that memory open. */
 function openInMemories(id: string) {
@@ -710,7 +725,7 @@ let owners: Owner[] = []
 async function loadHealth() {
   const health = await readJson<Health>(await api('/api/health'))
   owners = health.owners ?? []
-  for (const { owner } of owners) colourOf(owner)
+  useOwners(owners.map(row => row.owner))
   const projects = owners.length
   byId('summary').textContent = `${health.total} ${health.total === 1 ? 'memory' : 'memories'} · ${projects} ${projects === 1 ? 'project' : 'projects'}`
   byId('engine').textContent = health.engine ? `engine ${health.engine}` : ''
@@ -916,8 +931,13 @@ export function appOptions(lines: readonly ActivityLine[], picked = 'all'): stri
   return [...FIXED_APPS, ...[...others].sort((a, b) => name(a).localeCompare(name(b)))]
 }
 
+/** An outside client that calls itself like one of the fixed apps (a client named "Dashboard") is told apart by this suffix. */
+export function externalName(name: string): string {
+  return FIXED_APPS.some(fixed => fixed.toLowerCase() === name.toLowerCase()) ? `${name} (external)` : name
+}
+
 /** The words an App drop-down value shows. */
-export const appName = (key: string) => key.replace(/^ext:/, '')
+export const appName = (key: string) => (key.startsWith('ext:') ? externalName(key.slice(4)) : key)
 
 export const feed = newFeed()
 export const feedView = { filter: newFilter(), started: false, live: 'Connecting', apps: '' }
@@ -958,7 +978,8 @@ function drawApps() {
 export function drawFeed() {
   const today = feed.lines.filter(line => isToday(line.t))
   const count = (test: (line: ActivityLine) => boolean) => String(today.filter(test).length)
-  byId('tile-recall').textContent = count(line => line.action === 'recall' && line.ok !== false)
+  // A dashboard search is logged as a recall (origin ui, the audit trail) but is not Claude recalling: it is not counted.
+  byId('tile-recall').textContent = count(line => line.action === 'recall' && line.origin !== 'ui' && line.ok !== false)
   byId('tile-remember').textContent = count(line => line.action === 'remember' && line.ok !== false)
   byId('tile-update').textContent = count(line => line.action === 'update' && line.ok !== false)
   byId('tile-failed').textContent = count(line => line.ok === false)
@@ -1203,11 +1224,12 @@ async function main() {
     if (!(err instanceof Expired)) setStatus(`Could not reach the Mnemosyne server: ${failure(err)}. Run /mnemosyne-ui again.`, 'error')
     return
   }
-  setStatus('Connected to the local Mnemosyne server.', 'ok')
+  setStatus(CONNECTED, 'ok')
   wireMemories()
   wireActivity()
   wireSearch()
   wireKnowledgeHealth()
+  wireInspectorReveal()
   show(current)
 }
 

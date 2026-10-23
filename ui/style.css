@@ -150,17 +150,18 @@ a:hover { color: var(--accent-dark); }
 .link { padding: 0; border: 0; background: none; color: var(--accent); font: inherit; font-size: 13px; text-decoration: underline; cursor: pointer; }
 .link:hover { color: var(--accent-dark); }
 
-/* Owner dots: global grey, the others in turn. */
+/* Owner dots: the Map's project colours (PALETTE and GLOBAL_COLOUR in ui/map-state.ts, in the same order),
+   so a project has one colour on every tab; tests/bun/ui-views.spec.ts compares the two. */
 .dot { display: inline-block; flex: none; width: 8px; height: 8px; border-radius: 50%; }
-.c-global { background: #5C6166; }
-.c0 { background: #0B6665; }
-.c1 { background: #2B6CB0; }
-.c2 { background: #C2410C; }
-.c3 { background: #6B46C1; }
-.c4 { background: #B7791F; }
-.c5 { background: #2F855A; }
-.c6 { background: #B83280; }
-.c7 { background: #4A5568; }
+.c-global { background: #A9B4B2; }
+.c0 { background: #4C8DDB; }
+.c1 { background: #F0773A; }
+.c2 { background: #9B7BE3; }
+.c3 { background: #2FB3AE; }
+.c4 { background: #E3B341; }
+.c5 { background: #E05D8C; }
+.c6 { background: #7BC86C; }
+.c7 { background: #5FA8D3; }
 .project { display: inline-flex; align-items: center; gap: 8px; }
 
 .tag-list { display: inline-flex; flex-wrap: wrap; gap: 4px; }
@@ -608,22 +609,30 @@ button.toggle-name:focus-visible { outline: 2px solid var(--accent); outline-off
 .insp-kind { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
 .insp-title { margin: 0; font-size: 20px; font-weight: 600; line-height: 1.25; overflow-wrap: anywhere; }
 .insp-sub { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+/* The Overview has no second line: its colour dot alone under the count means nothing. */
+.insp-sub > .map-dot:only-child { display: none; }
 .insp-text { margin: 0; padding: 10px 12px; border-radius: 8px; background: #F3F4F1; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
 .insp-open { align-self: flex-start; border-color: var(--accent-line); color: var(--accent); font-weight: 500; }
-.insp-stats { margin: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; font-size: 13px; }
+/* A field never gets narrower than 120px (a date or a tag stays whole); a narrow inspector stacks them. */
+.insp-stats { margin: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 120px), 1fr)); gap: 12px; font-size: 13px; }
 .insp-stats dt { color: var(--muted); }
-.insp-stats dd { margin: 2px 0 0; font-size: 18px; font-weight: 600; overflow-wrap: anywhere; }
+.insp-stats dd { margin: 2px 0 0; font-size: 18px; font-weight: 600; overflow-wrap: break-word; }
 .insp-hint { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.5; }
 .insp-section { display: flex; flex-direction: column; gap: 8px; padding-top: 12px; border-top: 1px solid var(--line); }
 .insp-section-title { margin: 0; font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
 .insp-note { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
 
-/* Narrow screens: the rail, the stage and the inspector stack, with 16px gutters. */
+/* Narrow screens: one column, the canvas first (60vh), the inspector right under it, then the live strip,
+   the legend and the rail's controls. .map-centre dissolves so its children take their place in the order. */
 @media (max-width: 900px) {
-  .map-view { padding: 16px; gap: 16px; }
-  .map-rail, .inspector { flex: 1 1 100%; max-width: none; }
-  .map-centre { flex: 1 1 100%; }
-  .stage { height: 560px; }
+  .map-view { flex-direction: column; flex-wrap: nowrap; padding: 16px; gap: 16px; }
+  .map-rail, .inspector { flex: none; max-width: none; }
+  .map-centre { display: contents; }
+  .stage { order: 1; flex: none; height: 60vh; min-height: 360px; max-height: none; }
+  .inspector { order: 2; align-self: stretch; }
+  .live-strip { order: 3; flex: none; }
+  #map-legend { order: 4; flex: none; }
+  .map-rail { order: 5; align-self: stretch; }
   .path { max-width: calc(100% - 28px); }
   .stage-find { top: 58px; left: 14px; right: 14px; max-width: none; }
   .find-input { width: 100%; flex: 1; }
@@ -674,8 +683,31 @@ button.toggle-name:focus-visible { outline: 2px solid var(--accent); outline-off
 .prov { display: inline-block; margin-right: 8px; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; vertical-align: baseline; }
 .prov-human { background: #E6F2F1; color: #0B6665; }
 .prov-agent { background: #EAF1FA; color: #1F5592; }
+/* A card's lists size to their rows (the shared .list rule above gives the Memories list a 640px basis). */
+.card .list { flex: none; }
+/* The Health never-recalled table: it fits its card, the memory wraps, Review and Forget stay in view. */
+.table.compact { min-width: 0; table-layout: auto; }
+.table.compact th, .table.compact td { padding: 10px 12px; }
+.table.compact .know-text { min-width: 0; }
+.table.compact .project { white-space: normal; overflow-wrap: anywhere; }
+.table.compact td:last-child, .table.compact th:last-child { width: 1%; }
+.table.compact .confirm-inline { display: flex; flex-direction: column; align-items: flex-start; white-space: normal; }
 @media (max-width: 760px) {
   .health-grid { grid-template-columns: minmax(0, 1fr); }
+  /* Knowledge: each row is a card: the kind and the item, topic and project, then Status, Used and Last used on one line. */
+  .know-table { min-width: 0; }
+  .know-table thead { display: none; }
+  .know-table, .know-table tbody { display: block; }
+  .know-table tr { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px 12px; padding: 12px 14px; border-bottom: 1px solid #EEEFEC; }
+  .know-table td { display: block; min-width: 0; padding: 0; border: 0; overflow-wrap: anywhere; }
+  .know-table td[data-label]::before { content: attr(data-label); display: block; color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; }
+  .know-table td.k-text { grid-column: 1 / -1; min-width: 0; }
+  .know-table td.k-topic, .know-table td.k-project { grid-column: span 2; }
+  .know-table td.k-status { grid-column: span 1; }
+  .know-table td.k-used { grid-column: span 2; }
+  .know-table td.k-last { grid-column: span 1; }
+  .know-table td.k-status:empty::after { content: '\2013'; }
+  .know-table td.k-from { grid-column: 1 / -1; order: 9; }
 }
 
 /* From ui/vendor/map-lib.js: the CSS its bundled helpers used to inject as a

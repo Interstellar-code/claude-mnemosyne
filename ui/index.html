@@ -181,7 +181,7 @@
       <button id="pause" type="button" class="btn push-right">Pause</button>
     </div>
     <div class="tiles">
-      <div class="tile"><div class="tile-label">Recalls today</div><div id="tile-recall" class="tile-value">0</div></div>
+      <div class="tile"><div class="tile-label">Claude recalls today</div><div id="tile-recall" class="tile-value">0</div></div>
       <div class="tile"><div class="tile-label">Saved today</div><div id="tile-remember" class="tile-value">0</div></div>
       <div class="tile"><div class="tile-label">Updated today</div><div id="tile-update" class="tile-value">0</div></div>
       <div class="tile"><div class="tile-label">Failed calls</div><div id="tile-failed" class="tile-value">0</div></div>
@@ -261,7 +261,7 @@
       <div id="know-tabs" class="chips" role="group" aria-label="Knowledge kind"></div>
       <div id="know-kpis" class="tiles"></div>
       <div class="table-wrap">
-        <table class="table">
+        <table class="table know-table">
           <thead>
             <tr><th id="know-item-head">Fact</th><th>Topic</th><th>Project</th><th>From memory</th><th>Status</th><th>Used</th><th>Last used</th></tr>
           </thead>
@@ -289,7 +289,7 @@
           <div id="health-coverage" class="cov"></div>
         </section>
         <section class="card" aria-labelledby="health-days-title">
-          <h2 id="health-days-title" class="card-title">Recalls per day, last 14 days</h2>
+          <h2 id="health-days-title" class="card-title">Claude recalls per day, last 14 days</h2>
           <div id="health-chart" class="days" role="img" aria-label="Bar chart of recalls per day"></div>
           <p id="health-chart-text" class="muted small"></p>
           <h2 class="card-title">Projects</h2>
@@ -301,7 +301,7 @@
           <h2 id="health-never-title" class="card-title">Never recalled</h2>
           <p id="health-never-text" class="muted small"></p>
           <div class="table-wrap">
-            <table class="table">
+            <table class="table compact">
               <thead><tr><th>Memory</th><th>Project</th><th>Saved</th><th>Actions</th></tr></thead>
               <tbody id="health-never"></tbody>
             </table>

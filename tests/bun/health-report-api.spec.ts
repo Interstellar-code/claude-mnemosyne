@@ -233,15 +233,15 @@ describe('KAPI.2: GET /api/health and /api/health-report', () => {
     // 5. Recalls per day & days covered
     // 2026-10-21: 2 recalls
     // 2026-10-22: 1 recall
-    // 2026-10-23: 1 recall
+    // 2026-10-23: 1 line, origin ui (a dashboard search): in the log, but not Claude recalling, so not counted
     // Total span: 3 days
     expect(report.daysCovered).toBe(3)
     const day21 = report.recallsPerDay.find(d => d.date === '2026-10-21')
     expect(day21?.count).toBe(2)
     const day22 = report.recallsPerDay.find(d => d.date === '2026-10-22')
     expect(day22?.count).toBe(1)
-    const day23 = report.recallsPerDay.find(d => d.date === '2026-10-23')
-    expect(day23?.count).toBe(1)
+    expect(report.recallsPerDay.find(d => d.date === '2026-10-23')).toBeUndefined()
+    expect(report.recallsPerDay.reduce((sum, day) => sum + day.count, 0)).toBe(3)
 
     // 6. Sizes in bytes
     expect(report.sizes.store).toBeGreaterThan(0)
