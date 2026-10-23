@@ -73,7 +73,7 @@ describe('EVT.1.a2: toMapEvent', () => {
 
 describe('EVT.2: the demo source', () => {
   test('EVT.2.a1: recall picks a project by weight, a topic, and up to 3 of its memories', () => {
-    // random() = 0 lands on the first weighted project and the first memory.
+    // seeded(1)'s first draw lands on the heavier project, project-alpha (4 of 6 memories).
     const event = simulate('recall', GALAXY, seeded(1))!
     expect(event.kind).toBe('recall')
     expect(event.demo).toBe(true)
@@ -83,6 +83,34 @@ describe('EVT.2: the demo source', () => {
     expect(event.owner).toBe('project-alpha-1a2b')
     expect(typeof event.topic).toBe('string')
     for (const id of event.ids) expect(GALAXY.memories!.some(memory => memory.id === id)).toBe(true)
+  })
+
+  test('EVT.2.a1: every memory a demo recall picks carries the topic the event names', () => {
+    for (let i = 0; i < 300; i++) {
+      const event = simulate('recall', GALAXY, seeded(i + 1))!
+      const picked = event.ids.map(id => GALAXY.memories!.find(memory => memory.id === id)!)
+      for (const memory of picked) {
+        expect(memory.owner).toBe(event.owner!)
+        expect(topicOf(memory)).toBe(event.topic!)
+      }
+    }
+  })
+
+  test('EVT.2.a3: a project with no memories in the list is never drawn, so no other owner gets its label', () => {
+    const galaxy: GalaxyLike = {
+      projects: [
+        { owner: 'project-unlisted-9f9f', count: 50 },
+        { owner: 'global', count: 1 },
+      ],
+      memories: [{ id: 'g1', owner: 'global', tags: ['fruit'] }],
+    }
+    for (let i = 0; i < 50; i++) {
+      for (const kind of ['recall', 'write'] as const) {
+        const event = simulate(kind, galaxy, seeded(i + 1))!
+        expect(event.owner).toBe('global')
+      }
+    }
+    expect(simulate('recall', { projects: [{ owner: 'project-unlisted-9f9f', count: 5 }], memories: [{ id: 'g1', owner: 'global' }] })).toBeUndefined()
   })
 
   test('EVT.2.a1: the write mix is save 50%, update 32%, forget 18%, and save uses a fresh client id', () => {
