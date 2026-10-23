@@ -15,6 +15,7 @@
 // Styles live in style.css: the CSP refuses inline ones.
 
 import { createMap, type MapView } from './map'
+import { createStream, type StreamApi, type StreamHandle, type StreamListener, type StreamStatus } from './stream'
 
 const TOKEN_KEY = 'mnemosyne.token'
 const VIEWS = ['map', 'memories', 'activity', 'search'] as const
@@ -68,6 +69,9 @@ export type ActivityLine = {
   error?: string
   // A dashboard search across owners: how many it searched.
   owners?: number
+  // The calling app's clientInfo name, and the Claude Code session (written from v0.6; older lines have neither).
+  client?: string
+  session?: string
 }
 
 // ---- Pure helpers (exported for tests/bun/inert.spec.ts) ----
@@ -127,6 +131,38 @@ export function clock(value: string | undefined): string {
   return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
 }
 
+const textOf = (value: unknown) => (typeof value === 'string' ? value.trim() : '')
+
+const EXTERNAL_KNOWN = ['Codex', 'Cursor', 'Claude Code']
+
+/** The app a clientInfo name belongs to when it is a known one, else undefined. */
+function knownApp(client: string): string | undefined {
+  if (/codex/i.test(client)) return 'Codex'
+  if (/cursor/i.test(client)) return 'Cursor'
+  if (/^claude[-_ ]?code/i.test(client)) return 'Claude Code'
+  return undefined
+}
+
+/** The app an activity line came from: 'Claude Code', 'Codex', 'Cursor', 'Dashboard', another client's own name, or '' when unknown. */
+export function appOf(line: ActivityLine): string {
+  const client = textOf(line.client)
+  // An outside client names itself, so its name may not pass for the dashboard or a fixed group of the filter (see appKey).
+  if (line.origin === 'external') return client ? (knownApp(client) ?? firstLine(client, 40)) : ''
+  if (line.origin === 'ui') return 'Dashboard'
+  if (client) return knownApp(client) ?? firstLine(client, 40)
+  // Hook, tool and trigger lines are Claude Code's; a backfill line names its own client or none.
+  return line.origin === 'hook' || line.origin === 'tool' || line.origin === 'trigger' ? 'Claude Code' : ''
+}
+
+/** What the App filter compares: an outside client's raw name is namespaced, so "Dashboard" from an MCP client is never the dashboard. */
+export function appKey(line: ActivityLine): string {
+  const app = appOf(line)
+  return line.origin === 'external' && app !== '' && !EXTERNAL_KNOWN.includes(app) ? `ext:${app}` : app
+}
+
+/** A session id cut to its first 8 characters. */
+export const shortSession = (session: string) => Array.from(session).slice(0, 8).join('')
+
 /** Where an activity line came from, in words. */
 export function originLabel(line: ActivityLine): string {
   switch (line.origin) {
@@ -137,7 +173,7 @@ export function originLabel(line: ActivityLine): string {
     case 'tool':
       return 'Claude tool'
     case 'external':
-      return 'outside agent'
+      return appOf(line) || 'outside agent'
     case 'ui':
       return 'dashboard'
     case 'backfill':
@@ -149,6 +185,10 @@ export function originLabel(line: ActivityLine): string {
 
 /** What an activity line's call came to, in words. */
 export function resultLabel(line: ActivityLine): string {
+  if (line.action === 'extract') {
+    if (line.ok === false) return textOf(line.error) ? `failed: ${firstLine(textOf(line.error), 60)}` : 'failed'
+    return `${line.count ?? 0} ${line.count === 1 ? 'item' : 'items'}`
+  }
   if (line.ok === false) return 'failed'
   switch (line.action) {
     case 'recall':
@@ -166,7 +206,8 @@ export function resultLabel(line: ActivityLine): string {
   }
 }
 
-const actionLabel = (action: string | undefined) => (action === 'rearm' ? 're-arm' : (action ?? ''))
+/** An action in words: 'rearm' shows as 're-arm', 'extract' (knowledge learned from a save) as 'learn'. */
+export const actionLabel = (action: string | undefined) => (action === 'rearm' ? 're-arm' : action === 'extract' ? 'learn' : (action ?? ''))
 
 // The bar's width, in twentieths (style.css has .w0 … .w20).
 const barClass = (score: number) => `w${Math.round(Math.min(1, Math.max(0, score)) * 20)}`
@@ -320,17 +361,30 @@ export function memoryDetail(memory: Memory, forget: (memory: Memory, done: (err
   return panel
 }
 
-/** One line of the Activity feed. */
-export function activityItem(line: ActivityLine) {
+/** One line of the Activity feed; `pickSession` is called with the full session id when its button is pressed. */
+export function activityItem(line: ActivityLine, pickSession: (session: string) => void) {
   const item = el('li', undefined, 'event')
   const action = line.action ?? ''
   const what = line.text || (action === 'forget' ? (line.ids ?? []).join(', ') : action === 'rearm' ? 'will recall on next prompt' : '')
   const result = el('span', resultLabel(line), line.ok === false ? 'result is-failed' : 'result')
   if (line.ok === false && line.error) result.title = line.error
+  const source = el('span', undefined, 'source')
+  const raw = el('span', undefined, 'origin-raw mono muted')
+  if (line.origin) raw.append(el('span', String(line.origin)))
+  const session = textOf(line.session)
+  if (session) {
+    const button = el('button', shortSession(session), 'link mono session')
+    button.type = 'button'
+    button.title = 'Show only this session'
+    button.setAttribute('aria-label', `Show only session ${shortSession(session)}`)
+    button.addEventListener('click', () => pickSession(session))
+    raw.append(button)
+  }
+  source.append(el('span', originLabel(line), 'muted origin'), raw)
   item.append(
     el('span', clock(line.t), 'mono muted time'),
     el('span', actionLabel(action), `badge a-${/^[a-z]+$/.test(action) ? action : 'other'}`),
-    el('span', originLabel(line), 'muted origin'),
+    source,
     project(line.owner, 'project owner-col', typeof line.owners === 'number' && line.owners > 1 ? `all projects (${line.owners})` : undefined),
     el('span', what, 'what'),
     result,
@@ -453,10 +507,14 @@ function show(view: View) {
   if (!opened.has(view)) {
     opened.add(view)
     if (view === 'memories') void loadMemories()
-    if (view === 'activity') void startActivity()
+    if (view === 'activity') startActivity()
     if (view === 'search') byId<HTMLInputElement>('search-query').focus()
     // The map (and its library, under /vendor/) loads only when the Map tab first opens.
-    if (view === 'map') map = createMap({ api: path => api(path), openMemory: openInMemories, status: setStatus })
+    if (view === 'map') map = createMap({ api: path => api(path), openMemory: openInMemories, status: setStatus, events: listener => useEvents().subscribe(listener) })
+  }
+  if (view === 'activity' && feedDirty) {
+    feedDirty = false
+    drawFeed()
   }
   map?.visible(view === 'map')
 }
@@ -687,26 +745,78 @@ export function receiveChunk(feed: Feed, buffer: string, draw: () => void): stri
   return rest
 }
 
-const feed = newFeed()
-const feedView = { filter: 'all', started: false, live: 'Connecting' }
+/** The Activity filters; they combine: a line must pass all three. */
+export type FeedFilter = { action: string; app: string; session: string }
+
+export const newFilter = (): FeedFilter => ({ action: 'all', app: 'all', session: '' })
+
+/** Whether a line passes the action chip ('all', 'external' or an action), the App drop-down ('all' or an app) and the clicked session ('' for any). */
+export function showLine(line: ActivityLine, filter: FeedFilter): boolean {
+  if (filter.action === 'external' ? line.origin !== 'external' : filter.action !== 'all' && line.action !== filter.action) return false
+  if (filter.app !== 'all' && appKey(line) !== filter.app) return false
+  return filter.session === '' || textOf(line.session) === filter.session
+}
+
+const FIXED_APPS = ['Claude Code', 'Codex', 'Cursor', 'Dashboard']
+
+/** The App drop-down's values (appKey): the four fixed apps, then any other client seen (and the one picked), by name. */
+export function appOptions(lines: readonly ActivityLine[], picked = 'all'): string[] {
+  const others = new Set<string>()
+  for (const key of [...lines.map(appKey), picked]) if (key !== '' && key !== 'all' && !FIXED_APPS.includes(key)) others.add(key)
+  const name = (key: string) => key.replace(/^ext:/, '')
+  return [...FIXED_APPS, ...[...others].sort((a, b) => name(a).localeCompare(name(b)))]
+}
+
+/** The words an App drop-down value shows. */
+export const appName = (key: string) => key.replace(/^ext:/, '')
+
+export const feed = newFeed()
+export const feedView = { filter: newFilter(), started: false, live: 'Connecting', apps: '' }
 
 const isToday = (t: string | undefined) => day(t) === day(new Date().toISOString())
 
-function shown(line: ActivityLine) {
-  if (feedView.filter === 'all') return true
-  if (feedView.filter === 'external') return line.origin === 'external'
-  return line.action === feedView.filter
+/** Picks one session ('' clears it): the chip shows it and the list narrows to it. */
+function setSessionFilter(session: string) {
+  feedView.filter.session = session
+  const chip = byId('act-session')
+  chip.hidden = session === ''
+  chip.textContent = session === '' ? '' : `Session: ${shortSession(session)} ×`
+  chip.title = session === '' ? '' : 'Showing only this session. Press to show all.'
+  chip.setAttribute('aria-label', session === '' ? 'Clear session filter' : `Clear session filter: ${shortSession(session)}`)
+  drawFeed()
 }
 
-function drawFeed() {
+/** Keeps the App drop-down's entries current without resetting it while the stream adds lines. */
+function drawApps() {
+  const names = appOptions(feed.lines, feedView.filter.app)
+  const key = names.join('\n')
+  if (key === feedView.apps) return
+  feedView.apps = key
+  const select = byId<HTMLSelectElement>('act-app')
+  const all = el('option', 'All')
+  all.value = 'all'
+  select.replaceChildren(
+    all,
+    ...names.map(name => {
+      const option = el('option', appName(name))
+      option.value = name
+      return option
+    }),
+  )
+  select.value = feedView.filter.app
+}
+
+export function drawFeed() {
   const today = feed.lines.filter(line => isToday(line.t))
   const count = (test: (line: ActivityLine) => boolean) => String(today.filter(test).length)
   byId('tile-recall').textContent = count(line => line.action === 'recall' && line.ok !== false)
   byId('tile-remember').textContent = count(line => line.action === 'remember' && line.ok !== false)
   byId('tile-update').textContent = count(line => line.action === 'update' && line.ok !== false)
   byId('tile-failed').textContent = count(line => line.ok === false)
-  const list = feed.lines.filter(shown).slice(0, FEED_SHOW)
-  byId('act-list').replaceChildren(...(list.length > 0 ? list.map(activityItem) : [el('li', 'No activity yet.', 'event muted')]))
+  drawApps()
+  const list = feed.lines.filter(line => showLine(line, feedView.filter)).slice(0, FEED_SHOW)
+  const none = feed.lines.length > 0 ? 'No activity matches these filters.' : 'No activity yet.'
+  byId('act-list').replaceChildren(...(list.length > 0 ? list.map(line => activityItem(line, setSessionFilter)) : [el('li', none, 'event empty muted')]))
 }
 
 function setLive(text: string) {
@@ -723,61 +833,137 @@ async function loadActivity() {
   return body.off === true
 }
 
-const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+// ---- The one activity stream, shared by the Activity tab and the Map tab ----
 
-async function follow() {
-  let attempt = 0
-  for (;;) {
-    try {
-      const from = feed.cursor ? `?cursor=${encodeURIComponent(feed.cursor)}` : ''
-      const response = await api(`/api/activity/stream${from}`)
-      if (response.status === 404) {
-        setLive('Log off')
-        return
+/** How many delivered lines a reader remembers to recognise a replay. */
+const REPLAY_KEEP = 20_000
+
+/**
+ * Drops the lines a reconnect sends again. The shared reader restarts from the cursor it
+ * began at, so after a drop it first repeats what this page already took in: `reconnecting()`
+ * starts the comparison and `accept()` skips each repeated line, then lets the first new one through.
+ */
+export function replayFilter() {
+  const seen: string[] = []
+  let at = -1
+  return {
+    reconnecting() {
+      at = 0
+    },
+    accept(line: Record<string, unknown>): boolean {
+      const key = JSON.stringify(line)
+      if (at >= 0) {
+        if (at < seen.length && seen[at] === key) {
+          at++
+          return false
+        }
+        at = -1
       }
-      if (!response.ok || response.body === null) throw new Error(`the server answered ${response.status}`)
-      setLive('Live')
-      attempt = 0
-      const reader = response.body.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ''
-      for (;;) {
-        const { value, done } = await reader.read()
-        if (done) break
-        buffer = receiveChunk(feed, buffer + decoder.decode(value, { stream: true }), drawFeed)
-      }
-    } catch (err) {
-      if (err instanceof Expired) return
-    }
-    // The stream ended (the server's time cap, a restart, the network): catch up, then follow again from the new cursor.
-    setLive('Reconnecting')
-    await sleep(Math.min(30_000, 1_000 * 2 ** attempt++))
-    if (expired) return
-    try {
-      await loadActivity()
-    } catch (err) {
-      if (err instanceof Expired) return
-    }
+      if (seen.length < REPLAY_KEEP) seen.push(key)
+      return true
+    },
   }
 }
 
-async function startActivity() {
+/**
+ * The page's one stream: `prepare` runs once, when the first tab needs lines, and answers the cursor to follow
+ * from (the Activity tab reads its history there); then ONE createStream reader serves every subscriber.
+ */
+export function shareStream(api: StreamApi, prepare: () => Promise<string>) {
+  const listeners = new Set<StreamListener>()
+  const watchers = new Set<(status: StreamStatus) => void>()
+  let handle: StreamHandle | null = null
+  let starting: Promise<StreamHandle> | null = null
+  const ensure = () =>
+    (starting ??= prepare()
+      .catch(() => '')
+      .then(cursor => {
+        const reader = createStream({ api, cursor })
+        const filter = replayFilter()
+        reader.onStatus(status => {
+          if (status === 'reconnecting') filter.reconnecting()
+          for (const watcher of watchers) watcher(status)
+        })
+        reader.subscribe(line => {
+          if (!filter.accept(line)) return
+          for (const listener of listeners) listener(line)
+        })
+        handle = reader
+        return reader
+      }))
+  return {
+    /** Every new line goes to the listener; returns the way to stop. */
+    subscribe(listener: StreamListener) {
+      listeners.add(listener)
+      void ensure()
+      return () => void listeners.delete(listener)
+    },
+    onStatus(watcher: (status: StreamStatus) => void) {
+      watchers.add(watcher)
+      if (handle !== null) watcher(handle.status())
+      return () => void watchers.delete(watcher)
+    },
+    /** The reader once it exists (a spec counts its polls). */
+    reader: () => handle,
+  }
+}
+
+const LIVE_WORDS: Record<StreamStatus, string> = { idle: 'Connecting', connecting: 'Connecting', live: 'Live', off: 'Log off', reconnecting: 'Reconnecting', expired: 'Connecting' }
+
+// The reader calls api() for the token; a link that stopped working ends it quietly (api() has already said so).
+const streamApi: StreamApi = async (path, init) => {
+  if (expired) return new Response(null, { status: 401 })
+  try {
+    return await api(path, init)
+  } catch (err) {
+    if (err instanceof Expired) return new Response(null, { status: 401 })
+    throw err
+  }
+}
+
+const events = shareStream(streamApi, async () => {
+  try {
+    await loadActivity()
+  } catch (err) {
+    if (!(err instanceof Expired)) setStatus(`Could not load the activity log: ${failure(err)}`, 'error')
+  }
+  return feed.cursor
+})
+
+let eventsWired = false
+let feedDirty = false
+let drawQueued = false
+
+// Lines of one chunk are drawn once, after the whole chunk is in; a hidden tab draws when it is shown.
+function scheduleDraw() {
+  if (drawQueued) return
+  drawQueued = true
+  queueMicrotask(() => {
+    drawQueued = false
+    if (current === 'activity') drawFeed()
+    else feedDirty = true
+  })
+}
+
+/** Starts the shared stream for the first tab that needs it, with the Activity feed listening from the first line. */
+function useEvents() {
+  if (!eventsWired) {
+    eventsWired = true
+    events.onStatus(status => setLive(LIVE_WORDS[status]))
+    events.subscribe(line => {
+      if (feedAdd(feed, [line as ActivityLine])) scheduleDraw()
+    })
+  }
+  return events
+}
+
+function startActivity() {
   if (feedView.started) return
   feedView.started = true
-  try {
-    const off = await loadActivity()
-    if (off) {
-      setLive('Log off')
-      return
-    }
-  } catch (err) {
-    if (err instanceof Expired) return
-    setStatus(`Could not load the activity log: ${failure(err)}`, 'error')
-  }
-  void follow()
+  useEvents()
 }
 
-function wireActivity() {
+export function wireActivity() {
   const pause = byId<HTMLButtonElement>('pause')
   pause.addEventListener('click', () => {
     const redraw = feedPause(feed, !feed.paused)
@@ -788,11 +974,16 @@ function wireActivity() {
   const filters = byId('act-filters')
   for (const button of filters.querySelectorAll<HTMLButtonElement>('button[data-filter]')) {
     button.addEventListener('click', () => {
-      feedView.filter = button.dataset.filter ?? 'all'
+      feedView.filter.action = button.dataset.filter ?? 'all'
       for (const other of filters.querySelectorAll<HTMLButtonElement>('button[data-filter]')) other.setAttribute('aria-pressed', String(other === button))
       drawFeed()
     })
   }
+  byId<HTMLSelectElement>('act-app').addEventListener('change', event => {
+    feedView.filter.app = (event.target as HTMLSelectElement).value || 'all'
+    drawFeed()
+  })
+  byId('act-session').addEventListener('click', () => setSessionFilter(''))
 }
 
 // ---- Search: one at a time ----
