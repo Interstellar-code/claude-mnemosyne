@@ -790,11 +790,20 @@ section records the code.
   failed, stale, gone) is one `extract` line. `hooks/knowledge.ts` takes the
   engine, memory-file and model calls as parameters and imports nothing;
   `register.ts` imports it, never the reverse. A call lost to Esc, a session end
-  or a failure leaves its pending file, `<root>/knowledge-pending/<memory
+  or a failure usually leaves its pending file, `<root>/knowledge-pending/<memory
   id>.json` (`{ id, owner, sha256 }`, mode 0600 in a 0700 folder, the memory id
   being 1 to 64 hex characters), written, listed and removed by `bin/memories.ts
   pending write|remove|remove-many|list`, and a removal that names a hash leaves
-  a newer update's entry alone. `/mnemosyne-knowledge` lists them; `apply`
+  a newer update's entry alone. The file exists only after two background
+  process spawns (the engine's `knowledge_prompt`, then `memories.ts pending
+  write`) have finished, which happens after the tool reply, so a save made
+  right before exit may leave no pending file and no `extract` line. Nothing is
+  lost for good: `/mnemosyne-knowledge` works from `list --no-knowledge` (the
+  store state), not only from pending files, and its dry run is the check.
+  Making the reply wait for the model would be a one-line change, but the 60 s
+  model timeout (`hooks/knowledge.ts`) and the 120 s engine timeout
+  (`hooks/register.ts`) would then hold the tool reply, so a timeout change goes
+  with it. `/mnemosyne-knowledge` lists the pending files; `apply`
   finishes the pending entries from the memory's current text and hash first,
   then extracts memories with no knowledge, 40 memories to a batch per owner
   and 4 model calls at a time, and notes a memory whose extraction found nothing

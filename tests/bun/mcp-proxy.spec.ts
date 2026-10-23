@@ -402,4 +402,31 @@ for await (const chunk of Bun.stdin.stream()) {
     const anonymous = await rawProxy(`${initialize()}\n${remember()}\n`, join(temp.dir, 'logs-a8-unknown', 'activity.jsonl'))
     expect(forwardedCall(anonymous.forwarded, 2)).toMatchObject({ author_type: 'agent', author_id: 'unknown' })
   })
+
+  // FINAL R1: the self-declared name is stamped into author_id on every save, so it is bounded to 60
+  // code points with control characters removed, as the activity line bounds it.
+  test('FINAL.2: a 1 MB or control-character client name arrives bounded and clean in author_id', async () => {
+    const huge = await rawProxy(
+      `${initialize({ name: 'x'.repeat(1_000_000), version: '1' })}\n${remember()}\n`,
+      join(temp.dir, 'logs-final-huge', 'activity.jsonl'),
+    )
+    const hugeAuthor = forwardedCall(huge.forwarded, 2).author_id as string
+    expect(hugeAuthor).toBe('x'.repeat(60))
+    expect(huge.log[0]).toMatchObject({ action: 'remember', origin: 'external', client: 'x'.repeat(60) })
+
+    const dirty = await rawProxy(
+      `${initialize({ name: '\u202ecodex\u0000\n\u200b-client\u007f', version: '1' })}\n${remember()}\n`,
+      join(temp.dir, 'logs-final-control', 'activity.jsonl'),
+    )
+    expect(forwardedCall(dirty.forwarded, 2).author_id).toBe('codex-client')
+    expect(dirty.log[0]).toMatchObject({ client: 'codex-client' })
+
+    // 100 emoji (one code point each, two UTF-16 units) are cut on a code point, never mid-pair.
+    const wide = await rawProxy(`${initialize({ name: '😀'.repeat(100) })}\n${remember()}\n`, join(temp.dir, 'logs-final-wide', 'activity.jsonl'))
+    expect(forwardedCall(wide.forwarded, 2).author_id).toBe('😀'.repeat(60))
+
+    // A name of only control characters names nothing: the client stays unknown.
+    const empty = await rawProxy(`${initialize({ name: '\u0000\u202e ' })}\n${remember()}\n`, join(temp.dir, 'logs-final-empty', 'activity.jsonl'))
+    expect(forwardedCall(empty.forwarded, 2).author_id).toBe('unknown')
+  })
 })

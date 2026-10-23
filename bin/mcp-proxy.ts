@@ -38,6 +38,13 @@ const activityLog = process.env.MNEMOSYNE_ACTIVITY_LOG ?? ''
 // The client's self-declared name, from its initialize request (CTX.2); unknown until it says.
 let client = 'unknown'
 
+// The name is stamped into author_id on every save, so it is bounded here as the activity line bounds
+// it (60 code points, hooks/activity-log.ts CLIENT_LIMIT): control characters, bidirectional marks and
+// zero-width characters removed (the set activity-log.ts removes), the ends trimmed, the rest cut.
+const CLIENT_LIMIT = 60
+const CLIENT_CONTROL = /[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g
+const cleanClient = (name: string) => Array.from(name.replace(CLIENT_CONTROL, '').trim()).slice(0, CLIENT_LIMIT).join('').trim()
+
 // The installed engine's build, from <engine>/node_modules/@oh-my-pi/pi-mnemopi/package.json.
 function installedBuild(cliPath: string) {
   try {
@@ -108,7 +115,7 @@ void (async () => {
       // version is never used as a label (review 2 LOW 3).
       const info = message?.params?.clientInfo
       if (info !== null && typeof info === 'object' && !Array.isArray(info)) {
-        const name = typeof info.name === 'string' ? info.name.trim() : ''
+        const name = typeof info.name === 'string' ? cleanClient(info.name) : ''
         if (name !== '') client = name
       }
       // Forward the initialize request unchanged, byte for byte (CTX.2.a1).

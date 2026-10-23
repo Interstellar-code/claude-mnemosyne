@@ -54,7 +54,7 @@ Status is `open` (ours only) or `merged-upstream` (drop it at the next rebase).
 
 ### 3. Packaging: our build number
 
-- What: `package.json` `version` is `18.12.3-mnemosyne.3` (our build number) instead of `18.12.3`, so the plugin can tell its own build from the npm one (`ENGINE_BUILD` in `hooks/engine-build.ts`, the `isCurrent` check in `hooks/register.ts`, the proxy's check in `bin/mcp-proxy.ts`). Nothing else in `package.json` changes: the dependencies stay pinned at `18.12.3`.
+- What: `package.json` `version` is `18.12.3-mnemosyne.4` (our build number) instead of `18.12.3`, so the plugin can tell its own build from the npm one (`ENGINE_BUILD` in `hooks/engine-build.ts`, the `isCurrent` check in `hooks/register.ts`, the proxy's check in `bin/mcp-proxy.ts`). Nothing else in `package.json` changes: the dependencies stay pinned at `18.12.3`.
 - Why: a stale engine (the npm one, or an older build of ours) must be spotted and refused for features that need changes 1 and 2.
 - Files: `package.json`
 - Upstream issue: none (ours only)
