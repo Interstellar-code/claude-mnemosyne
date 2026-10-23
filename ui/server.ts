@@ -6,6 +6,13 @@
 // <token>`. Every reply carries a strict CSP and no CORS allow header. SQLite
 // is opened read-only; every change goes through the engine (hooks/engine.ts).
 //
+// The views' routes (plan phase VIEW): GET /api/memories (owner, sort, q),
+// GET /api/memories/<id>, GET /api/activity, GET /api/activity/stream (NDJSON),
+// POST /api/search (the engine's recall with update_recall_counts false, once
+// per owner, merged by id) and POST /api/forget (the engine's forget, as the
+// owner the database names). Both POSTs want the page's own Origin and a JSON
+// body, and each one that reaches the engine leaves an activity line, origin ui.
+//
 // Two modes:
 //   bun ui/server.ts --hold   what /mnemosyne-ui starts. The host's spawn closes
 //                             a child's stdin from the start, so this holder
@@ -27,8 +34,26 @@
 // 100 ms - 10 s) sets how often the parent is checked.
 import { Database } from 'bun:sqlite'
 import { randomBytes, timingSafeEqual } from 'node:crypto'
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
-import { join, sep } from 'node:path'
+import {
+  chmodSync,
+  closeSync,
+  existsSync,
+  fstatSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
+import { dirname, join, sep } from 'node:path'
+import { appendActivity } from '../bin/activity'
+import { activityEntry, preview } from '../hooks/activity-log'
+import type { ActivityFields } from '../hooks/activity-log'
 import { buildRequests, engineEnv, parseReplies } from '../hooks/engine'
 import type { EngineRequest } from '../hooks/engine'
 
@@ -61,6 +86,30 @@ export const PING_FETCH_TIMEOUT_MS = 2_500
 // A proxy would see the token: the ping never uses one, whatever the environment says.
 export const PROXY_VARIABLES = ['HTTP_PROXY', 'http_proxy', 'HTTPS_PROXY', 'https_proxy', 'ALL_PROXY', 'all_proxy'] as const
 export const ENGINE_TIMEOUT_MS = 20_000
+
+// The views (plan phase VIEW).
+// GET /api/memories: at most this many rows, each with this much of its text.
+export const LIST_LIMIT = 1000
+export const PREVIEW_CHARS = 240
+// POST /api/search: the engine's top hits, as the first-prompt recall takes them;
+// across owners, at most this many owners (the largest), once each.
+export const SEARCH_LIMIT = 5
+export const SEARCH_OWNERS = 10
+export const MAX_QUERY_CHARS = 500
+// A POST body past this is refused unread.
+export const MAX_BODY_BYTES = 4096
+// GET /api/activity: the last lines, newest first.
+export const ACTIVITY_DEFAULT = 200
+export const ACTIVITY_MAX = 1000
+// GET /api/activity/stream: polled, a blank keep-alive line when quiet, closed
+// after a while (the page reconnects), and only so many at once.
+export const STREAM_POLL_MS = 500
+export const STREAM_HEARTBEAT_MS = 5_000
+export const STREAM_MAX_MS = 10 * 60_000
+export const MAX_STREAMS = 8
+// Engine processes alive at once, across every route; the rest wait their turn.
+// One search runs at a time: an overlapping one gets 429.
+export const MAX_ENGINES = 4
 
 export type Config = {
   root: string
@@ -124,6 +173,7 @@ export async function runEngine(
   requests: readonly EngineRequest[],
   owner: string,
   baseEnv: Record<string, string | undefined> = process.env,
+  timeoutMs = ENGINE_TIMEOUT_MS,
 ): Promise<(string | Error)[]> {
   const child = Bun.spawn([process.execPath, config.cli, 'mcp'], {
     env: { ...baseEnv, ...engineEnv(config.store, owner) },
@@ -131,7 +181,7 @@ export async function runEngine(
     stdout: 'pipe',
     stderr: 'pipe',
   })
-  const timer = setTimeout(() => child.kill(), ENGINE_TIMEOUT_MS)
+  const timer = setTimeout(() => child.kill(), timeoutMs)
   try {
     child.stdin.write(buildRequests(requests))
     await child.stdin.end()
@@ -175,9 +225,19 @@ function hasToken(request: Request, token: string) {
 
 type Store = { db: Database | null }
 
-function health(config: Config, store: Store) {
+// The installed engine's version, from the package.json beside its src/cli.ts.
+export function engineVersion(cli: string): string | undefined {
+  try {
+    const version = JSON.parse(readFileSync(join(dirname(cli), '..', 'package.json'), 'utf8'))?.version
+    return typeof version === 'string' ? version : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function health(config: Config, store: Store, engine: string | undefined) {
   store.db ??= openStore(config.store)
-  const base = { ok: true, pid: process.pid, store: config.store }
+  const base = { ok: true, pid: process.pid, store: config.store, engine: engine ?? null, activity: config.activityLog !== '' }
   if (store.db === null) return { ...base, total: 0, owners: [], note: 'The store has no database yet.' }
   try {
     const owners = store.db
@@ -189,17 +249,583 @@ function health(config: Config, store: Store) {
   }
 }
 
+// ---- Memories (VIEW.1): read-only queries through the read-only handle ----
+
+type Answer = { status: number; body: unknown }
+
+const SORTS: Readonly<Record<string, { where?: string; order: string }>> = {
+  newest: { order: 'timestamp DESC, id' },
+  recalled: { order: 'COALESCE(recall_count, 0) DESC, last_recalled DESC, timestamp DESC, id' },
+  never: { where: 'COALESCE(recall_count, 0) = 0', order: 'timestamp DESC, id' },
+}
+
+/** A memory id as the API takes it: a non-empty string of at most 64 characters, no control characters. */
+export function isMemoryId(value: unknown): value is string {
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: control characters are what it refuses
+  return typeof value === 'string' && /^[^\u0000-\u001f\u007f]{1,64}$/.test(value)
+}
+
+/** A row's metadata_json as a plain object; null when empty, broken or not an object. */
+export function parseMetadata(text: unknown): Record<string, unknown> | null {
+  if (typeof text !== 'string' || text === '') return null
+  try {
+    const value = JSON.parse(text)
+    return value !== null && typeof value === 'object' && !Array.isArray(value) ? value : null
+  } catch {
+    return null
+  }
+}
+
+type ListRow = {
+  id: string
+  preview: string
+  length: number
+  owner: string
+  importance: number | null
+  recall_count: number | null
+  last_recalled: string | null
+  timestamp: string | null
+  scope: string | null
+  metadata_json: string | null
+}
+
+/** GET /api/memories?owner=&sort=newest|recalled|never&q=&limit= */
+export function listMemories(db: Database | null, params: URLSearchParams): Answer {
+  const owner = params.get('owner') ?? ''
+  const sortName = params.get('sort') || 'newest'
+  const q = params.get('q') ?? ''
+  const limitText = params.get('limit')
+  const limit = limitText === null ? LIST_LIMIT : Number(limitText)
+  const sort = SORTS[sortName]
+  if (sort === undefined || !Object.hasOwn(SORTS, sortName)) return { status: 400, body: { error: 'sort must be newest, recalled or never' } }
+  if (!Number.isInteger(limit) || limit < 1 || limit > LIST_LIMIT) return { status: 400, body: { error: `limit must be 1 to ${LIST_LIMIT}` } }
+  if (owner.length > 200 || q.length > 200) return { status: 400, body: { error: 'owner and q are at most 200 characters' } }
+  if (db === null) return { status: 200, body: { total: 0, count: 0, memories: [] } }
+  const where: string[] = []
+  const args: (string | number)[] = []
+  if (owner) {
+    where.push('session_id = ?')
+    args.push(owner)
+  }
+  if (q) {
+    where.push("(instr(lower(content), lower(?)) > 0 OR instr(lower(COALESCE(metadata_json, '')), lower(?)) > 0)")
+    args.push(q, q)
+  }
+  if (sort.where) where.push(sort.where)
+  const clause = where.length > 0 ? `WHERE ${where.join(' AND ')}` : ''
+  const total = (db.query(`SELECT COUNT(*) AS n FROM working_memory ${clause}`).get(...args) as { n: number }).n
+  const rows = db
+    .query(
+      `SELECT id, substr(content, 1, ?) AS preview, length(content) AS length, session_id AS owner, importance,
+        recall_count, last_recalled, timestamp, scope, metadata_json
+       FROM working_memory ${clause} ORDER BY ${sort.order} LIMIT ?`,
+    )
+    .all(PREVIEW_CHARS, ...args, limit) as ListRow[]
+  const memories = rows.map(({ metadata_json, length, ...row }) => ({
+    ...row,
+    recall_count: row.recall_count ?? 0,
+    truncated: length > PREVIEW_CHARS,
+    metadata: parseMetadata(metadata_json),
+  }))
+  return { status: 200, body: { total, count: memories.length, memories } }
+}
+
+/** GET /api/memories/<id>: one row in full, or 404. */
+export function getMemory(db: Database | null, id: string): Answer {
+  if (db === null || !isMemoryId(id)) return { status: 404, body: { error: 'not found' } }
+  const row = db
+    .query(
+      `SELECT id, content, session_id AS owner, importance, recall_count, last_recalled, timestamp, scope,
+        metadata_json, source, memory_type, veracity, created_at
+       FROM working_memory WHERE id = ?`,
+    )
+    .get(id) as (Omit<ListRow, 'preview' | 'length'> & { content: string; source: string | null; memory_type: string | null; veracity: string | null; created_at: string | null }) | null
+  if (row === null) return { status: 404, body: { error: 'not found' } }
+  const { metadata_json, ...rest } = row
+  return { status: 200, body: { ...rest, recall_count: rest.recall_count ?? 0, metadata: parseMetadata(metadata_json) } }
+}
+
+/** The store's owners, the largest first. */
+function storeOwners(db: Database | null): string[] {
+  if (db === null) return []
+  const rows = db.query('SELECT session_id AS owner, COUNT(*) AS n FROM working_memory GROUP BY session_id ORDER BY n DESC, owner').all() as { owner: string | null }[]
+  return rows.map(row => row.owner).filter((owner): owner is string => typeof owner === 'string' && owner !== '')
+}
+
+// ---- Activity (VIEW.2): the log, read; and its tail, streamed ----
+
+// The JSON object lines of a log file's text; anything else is skipped.
+function objectLines(text: string): Record<string, unknown>[] {
+  const out: Record<string, unknown>[] = []
+  for (const line of text.split('\n')) {
+    if (line.trim() === '') continue
+    const value = parseMetadata(line)
+    if (value !== null) out.push(value)
+  }
+  return out
+}
+
+const readText = (path: string) => {
+  try {
+    return readFileSync(path, 'utf8')
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * Where a read of the log stopped: `<inode>:<byte offset>` of the current file,
+ * just past its last whole line. The stream started from it sends every line
+ * after it, so nothing falls between a catch-up read and the live tail.
+ * Empty when the file does not exist yet (the stream then reads it from its start).
+ */
+export type ActivityRead = { lines: Record<string, unknown>[]; cursor: string }
+
+// The current file's whole lines and the cursor past them, from one open file.
+function readCurrent(path: string): { text: string; cursor: string } {
+  let fd: number
+  try {
+    fd = openSync(path, 'r')
+  } catch {
+    return { text: '', cursor: '' }
+  }
+  try {
+    const { ino, size } = fstatSync(fd)
+    const buffer = Buffer.alloc(size)
+    let read = 0
+    while (read < size) {
+      const n = readSync(fd, buffer, read, size - read, read)
+      if (n <= 0) break
+      read += n
+    }
+    const end = buffer.subarray(0, read).lastIndexOf(0x0a) + 1
+    return { text: buffer.subarray(0, end).toString('utf8'), cursor: `${ino}:${end}` }
+  } finally {
+    closeSync(fd)
+  }
+}
+
+/** The last `limit` lines of the log (the backup first when the log holds fewer), newest first, and the cursor. A missing file is no lines. */
+export function readActivity(path: string, limit = ACTIVITY_DEFAULT): ActivityRead {
+  if (!path) return { lines: [], cursor: '' }
+  const current = readCurrent(path)
+  let lines = objectLines(current.text)
+  if (lines.length < limit) lines = [...objectLines(readText(`${path}.1`)), ...lines]
+  return { lines: lines.slice(-limit).reverse(), cursor: current.cursor }
+}
+
+/** A cursor from readActivity, or undefined when it is not one. */
+export function parseCursor(text: string | null): { ino: number; offset: number } | undefined {
+  const match = /^(\d{1,20}):(\d{1,15})$/.exec(text ?? '')
+  if (!match) return undefined
+  const ino = Number(match[1])
+  const offset = Number(match[2])
+  return Number.isSafeInteger(offset) && Number.isFinite(ino) ? { ino, offset } : undefined
+}
+
+/**
+ * Follows the log, from `from` (a cursor) or else from its current end.
+ * poll() gives the whole lines added since the last poll. A rotation (the
+ * file now has another inode) first finishes the old file, now <path>.1, then
+ * reads the new one from its start; a missing file is waited for; a file that
+ * shrank is read again from 0.
+ */
+export function tailActivity(path: string, from?: { ino: number; offset: number }) {
+  let ino: number | undefined
+  let offset = 0
+  let pending = Buffer.alloc(0)
+  if (from !== undefined) {
+    ino = from.ino
+    offset = from.offset
+  } else {
+    try {
+      const stat = statSync(path)
+      ino = stat.ino
+      offset = stat.size
+    } catch {
+      // not there yet: read it from its start once it is
+    }
+  }
+  const take = (file: string, out: string[]) => {
+    let fd: number
+    try {
+      fd = openSync(file, 'r')
+    } catch {
+      return
+    }
+    try {
+      const size = fstatSync(fd).size
+      while (offset < size) {
+        const chunk = Buffer.alloc(Math.min(size - offset, 1024 * 1024))
+        const read = readSync(fd, chunk, 0, chunk.length, offset)
+        if (read <= 0) break
+        offset += read
+        pending = Buffer.concat([pending, chunk.subarray(0, read)])
+      }
+    } finally {
+      closeSync(fd)
+    }
+    // Whole lines only; a line still being written waits for its newline.
+    let at = pending.indexOf(0x0a)
+    while (at !== -1) {
+      const value = parseMetadata(pending.subarray(0, at).toString('utf8'))
+      if (value !== null) out.push(JSON.stringify(value))
+      pending = pending.subarray(at + 1)
+      at = pending.indexOf(0x0a)
+    }
+  }
+  return {
+    poll(): string[] {
+      const out: string[] = []
+      let stat: ReturnType<typeof statSync>
+      try {
+        stat = statSync(path)
+      } catch {
+        return out
+      }
+      if (ino === undefined) {
+        ino = stat.ino
+        offset = 0
+      } else if (stat.ino !== ino) {
+        try {
+          if (statSync(`${path}.1`).ino === ino) take(`${path}.1`, out)
+        } catch {
+          // no backup: the old file's tail is gone
+        }
+        ino = stat.ino
+        offset = 0
+        pending = Buffer.alloc(0)
+      } else if (stat.size < offset) {
+        offset = 0
+        pending = Buffer.alloc(0)
+      }
+      take(path, out)
+      return out
+    },
+  }
+}
+
+// ---- Search and forget (VIEW.3): through the engine, as the row's owner ----
+
+type Hit = {
+  id: string
+  owner: string
+  content: string
+  truncated: boolean
+  scope: string | null
+  score: number
+  recall_count: number
+  last_recalled: string | null
+  timestamp: string | null
+  importance: number | null
+  metadata: Record<string, unknown> | null
+}
+
+// A JSON body that is one plain object holding only `allowed` keys; else the reason.
+function plainBody(text: string, allowed: readonly string[]): Record<string, unknown> | string {
+  let value: unknown
+  try {
+    value = JSON.parse(text)
+  } catch {
+    return 'the body is not JSON'
+  }
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return 'the body must be a JSON object'
+  const extra = Object.keys(value).filter(key => !allowed.includes(key))
+  if (extra.length > 0) return `unexpected field: ${extra[0]}`
+  return value as Record<string, unknown>
+}
+
+/** Recall hits merged by id, each kept once with its best score, best first. */
+export function mergeHits(runs: readonly (readonly Record<string, unknown>[])[], limit = SEARCH_LIMIT): Hit[] {
+  const best = new Map<string, Hit>()
+  for (const results of runs) {
+    for (const row of results) {
+      if (typeof row?.id !== 'string') continue
+      const score = typeof row.score === 'number' && Number.isFinite(row.score) ? row.score : 0
+      const seen = best.get(row.id)
+      if (seen !== undefined && seen.score >= score) continue
+      best.set(row.id, {
+        id: row.id,
+        owner: String(row.session_id ?? ''),
+        content: String(row.content ?? ''),
+        truncated: row.truncated === true,
+        scope: typeof row.scope === 'string' ? row.scope : null,
+        score,
+        recall_count: typeof row.recall_count === 'number' ? row.recall_count : 0,
+        last_recalled: typeof row.last_recalled === 'string' ? row.last_recalled : null,
+        timestamp: typeof row.timestamp === 'string' ? row.timestamp : null,
+        importance: typeof row.importance === 'number' ? row.importance : null,
+        metadata: parseMetadata(row.metadata_json),
+      })
+    }
+  }
+  return [...best.values()].sort((a, b) => b.score - a.score || a.id.localeCompare(b.id)).slice(0, limit)
+}
+
+// The engine reply's results, or the reason it failed.
+function recallResults(answer: string | Error | undefined): Record<string, unknown>[] | Error {
+  if (answer === undefined) return new Error('the engine gave no reply')
+  if (answer instanceof Error) return answer
+  const body = parseMetadata(answer)
+  if (body === null) return new Error('the engine reply is not JSON')
+  if (typeof body.error === 'string') return new Error(body.error)
+  if (body.status !== 'ok' || !Array.isArray(body.results)) return new Error(`the engine answered ${String(body.status)}`)
+  return body.results as Record<string, unknown>[]
+}
+
+type Views = {
+  config: Config
+  store: Store
+  // An activity line, origin ui; `extra` adds keys after the C3 ones.
+  log: (fields: ActivityFields, extra?: Record<string, unknown>) => void
+  // One engine process, within the server's cap on live engine processes.
+  run: (config: Pick<Config, 'cli' | 'store'>, requests: readonly EngineRequest[], owner: string) => Promise<(string | Error)[]>
+  // True while a search runs: one at a time.
+  searching: boolean
+}
+
+// What the page gets when the engine fails: the detail goes to the activity log only.
+const ENGINE_FAILED = 'The engine failed; the activity log has the detail.'
+
+/**
+ * At most `max` jobs at once; the rest wait in order. `live()` is how many run.
+ */
+export function limiter(max: number) {
+  let live = 0
+  const waiting: (() => void)[] = []
+  return {
+    live: () => live,
+    async run<T>(job: () => Promise<T>): Promise<T> {
+      while (live >= max) await new Promise<void>(resolve => waiting.push(resolve))
+      live++
+      try {
+        return await job()
+      } finally {
+        live--
+        waiting.shift()?.()
+      }
+    },
+  }
+}
+
+/** POST /api/search {query, owner?}: the engine's recall with recall counts left alone. */
+async function search(views: Views, text: string): Promise<Answer> {
+  const body = plainBody(text, ['query', 'owner'])
+  if (typeof body === 'string') return { status: 400, body: { error: body } }
+  const { query, owner } = body
+  if (typeof query !== 'string' || query.trim() === '' || query.length > MAX_QUERY_CHARS) {
+    return { status: 400, body: { error: `query must be a non-empty string of at most ${MAX_QUERY_CHARS} characters` } }
+  }
+  if (owner !== undefined && (typeof owner !== 'string' || owner === '')) return { status: 400, body: { error: 'owner must be a non-empty string' } }
+  views.store.db ??= openStore(views.config.store)
+  const all = storeOwners(views.store.db)
+  if (owner !== undefined && !all.includes(owner)) return { status: 400, body: { error: 'no such owner in the store' } }
+  const owners = owner !== undefined ? [owner] : all.slice(0, SEARCH_OWNERS)
+  // An empty store: nothing to search, no engine run, no activity line.
+  if (owners.length === 0) return { status: 200, body: { query, owners, skipped: 0, count: 0, results: [] } }
+  if (views.searching) return { status: 429, body: { error: 'A search is already running; try again when it ends.' } }
+  views.searching = true
+  try {
+    const request: EngineRequest = ['mnemopi_recall', { query, limit: SEARCH_LIMIT, update_recall_counts: false }]
+    const runs = await Promise.all(owners.map(async as => recallResults((await views.run(views.config, [request], as))[0])))
+    const failed = runs.find((run): run is Error => run instanceof Error)
+    // One owner: that owner. Across owners: the C3 default owner, and `owners` says how many were searched.
+    const logged = { action: 'recall', origin: 'ui', owner: (owners.length === 1 ? owners[0] : undefined) ?? 'global', text: query } as const
+    const extra = { owners: owners.length }
+    if (failed !== undefined) {
+      views.log({ ...logged, ok: false, error: failed.message }, extra)
+      return { status: 502, body: { error: ENGINE_FAILED } }
+    }
+    const hits = mergeHits(runs as Record<string, unknown>[][])
+    views.log({ ...logged, ok: true, ids: hits.map(hit => hit.id), count: hits.length }, extra)
+    return { status: 200, body: { query, owners, skipped: owner !== undefined ? 0 : all.length - owners.length, count: hits.length, results: hits } }
+  } finally {
+    views.searching = false
+  }
+}
+
+/** POST /api/forget {memory_id}: the engine's forget, as the owner the database names. */
+async function forget(views: Views, text: string): Promise<Answer> {
+  const body = plainBody(text, ['memory_id'])
+  if (typeof body === 'string') return { status: 400, body: { error: body } }
+  const id = body.memory_id
+  if (!isMemoryId(id)) return { status: 400, body: { error: 'memory_id must be a non-empty string of at most 64 characters' } }
+  views.store.db ??= openStore(views.config.store)
+  const ownerOf = () => views.store.db?.query('SELECT session_id AS owner FROM working_memory WHERE id = ?').get(id) as { owner: string | null } | null | undefined
+  const row = ownerOf()
+  const gone = { status: 404, body: { status: 'not_found', memory_id: id, error: 'That memory is already gone; nothing was deleted.' } }
+  if (row === null || row === undefined) return gone
+  const owner = row.owner
+  if (typeof owner !== 'string' || owner === '') return { status: 409, body: { error: 'this memory has no owner to forget it as' } }
+  const [answer] = await views.run(views.config, [['mnemopi_forget', { memory_id: id }]], owner)
+  const logged = { action: 'forget', origin: 'ui', owner, ids: [id] } as const
+  const reply = typeof answer === 'string' ? parseMetadata(answer) : null
+  if (reply?.status === 'deleted') {
+    views.log({ ...logged, count: 1, ok: true })
+    return { status: 200, body: { status: 'deleted', memory_id: id, owner } }
+  }
+  if (reply?.status === 'not_found') {
+    views.log({ ...logged, count: 0, ok: false, error: 'not_found' })
+    return gone
+  }
+  const message =
+    answer === undefined
+      ? 'the engine gave no reply'
+      : answer instanceof Error
+        ? answer.message
+        : typeof reply?.error === 'string'
+          ? reply.error
+          : `the engine answered ${String(reply?.status ?? answer.slice(0, 100))}`
+  // The engine failed or timed out, maybe after its delete committed: the row says what happened.
+  if (ownerOf() == null) {
+    views.log({ ...logged, count: 1, ok: true }, { note: preview(`engine reply lost: ${message}`) })
+    return { status: 200, body: { status: 'deleted', memory_id: id, owner, note: 'The engine reply was lost, but the memory is gone.' } }
+  }
+  views.log({ ...logged, count: 0, ok: false, error: message })
+  return { status: 502, body: { error: `${ENGINE_FAILED} Nothing was deleted.` } }
+}
+
 export type Started = { port: number; token: string; stop: () => void }
 
 // Starts the HTTP server; the caller writes ui.json and the ready line.
-export async function startServer(config: Config, options: { vendorDir?: string } = {}): Promise<Started> {
+// Limits a test can lower; the defaults are the exported constants.
+export type ServerOptions = {
+  vendorDir?: string
+  maxEngines?: number
+  maxStreams?: number
+  streamMaxMs?: number
+  engineTimeoutMs?: number
+}
+
+export async function startServer(config: Config, options: ServerOptions = {}): Promise<Started> {
   const vendorDir = options.vendorDir ?? VENDOR_DIR
+  const maxStreams = options.maxStreams ?? MAX_STREAMS
+  const streamMaxMs = options.streamMaxMs ?? STREAM_MAX_MS
+  const engines = limiter(options.maxEngines ?? MAX_ENGINES)
+  const engineTimeoutMs = options.engineTimeoutMs ?? ENGINE_TIMEOUT_MS
   const token = randomBytes(32).toString('base64url')
   const page = readFileSync(join(UI_DIR, 'index.html'))
   const style = readFileSync(join(UI_DIR, 'style.css'))
   const app = await buildApp()
   const store: Store = { db: null }
+  const engine = engineVersion(config.cli)
   let host = ''
+  // Every search and forget that reaches the engine leaves one line, origin ui (C3).
+  const log = (fields: ActivityFields, extra: Record<string, unknown> = {}) => {
+    if (config.activityLog) appendActivity(config.activityLog, [{ ...activityEntry(fields), ...extra }])
+  }
+  const views: Views = {
+    config,
+    store,
+    log,
+    run: (cfg, requests, owner) => engines.run(() => runEngine(cfg, requests, owner, process.env, engineTimeoutMs)),
+    searching: false,
+  }
+  const streams = new Set<() => void>()
+
+  // The two POST routes: the page's own origin, JSON, a small body; then the handler.
+  async function post(request: Request, handle: (views: Views, text: string) => Promise<Answer>) {
+    if (request.method !== 'POST') return notAllowed('POST')
+    if (request.headers.get('origin') !== `http://${host}`) return json({ error: 'forbidden origin' }, 403)
+    const type = (request.headers.get('content-type') ?? '').split(';')[0]?.trim().toLowerCase()
+    if (type !== 'application/json') return json({ error: 'the body must be application/json' }, 415)
+    if (Number(request.headers.get('content-length') ?? 0) > MAX_BODY_BYTES) return json({ error: 'the body is too large' }, 413)
+    const text = await request.text()
+    if (Buffer.byteLength(text) > MAX_BODY_BYTES) return json({ error: 'the body is too large' }, 413)
+    const answer = await handle(views, text)
+    return json(answer.body, answer.status)
+  }
+
+  // NDJSON: one log line per line, a blank line to keep a quiet stream open.
+  function stream(cursor: string | null) {
+    if (!config.activityLog) return json({ error: 'the activity log is off' }, 404)
+    const from = parseCursor(cursor)
+    if (cursor !== null && cursor !== '' && from === undefined) return json({ error: 'cursor must be <inode>:<offset> from /api/activity' }, 400)
+    if (streams.size >= maxStreams) return json({ error: 'too many activity streams' }, 429)
+    const tail = tailActivity(config.activityLog, from)
+    const encoder = new TextEncoder()
+    let finish = () => {}
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const opened = Date.now()
+        let sent = opened
+        const timer = setInterval(() => {
+          try {
+            const lines = tail.poll()
+            const now = Date.now()
+            if (lines.length > 0) {
+              controller.enqueue(encoder.encode(lines.map(line => `${line}\n`).join('')))
+              sent = now
+            } else if (now - sent >= STREAM_HEARTBEAT_MS) {
+              controller.enqueue(encoder.encode('\n'))
+              sent = now
+            }
+            if (now - opened >= streamMaxMs) finish()
+          } catch {
+            finish()
+          }
+        }, STREAM_POLL_MS)
+        finish = () => {
+          clearInterval(timer)
+          streams.delete(finish)
+          try {
+            controller.close()
+          } catch {
+            // already closed or cancelled
+          }
+        }
+        streams.add(finish)
+        // A first blank line, so the reply's headers go out at once.
+        controller.enqueue(encoder.encode('\n'))
+      },
+      cancel() {
+        finish()
+      },
+    })
+    return reply(body, 200, { 'Content-Type': 'application/x-ndjson; charset=utf-8' })
+  }
+
+  function api(request: Request, url: URL, server: { timeout(request: Request, seconds: number): void }): Response | Promise<Response> {
+    const path = url.pathname
+    const get = (answer: () => Answer | Response) => {
+      if (request.method !== 'GET') return notAllowed()
+      const out = answer()
+      return out instanceof Response ? out : json(out.body, out.status)
+    }
+    if (path === '/api/health') return get(() => ({ status: 200, body: health(config, store, engine) }))
+    if (path === '/api/memories') {
+      return get(() => listMemories((store.db ??= openStore(config.store)), url.searchParams))
+    }
+    if (path.startsWith('/api/memories/')) {
+      return get(() => {
+        let id: string
+        try {
+          id = decodeURIComponent(path.slice('/api/memories/'.length))
+        } catch {
+          return { status: 404, body: { error: 'not found' } }
+        }
+        return getMemory((store.db ??= openStore(config.store)), id)
+      })
+    }
+    if (path === '/api/activity') {
+      return get(() => {
+        const asked = url.searchParams.get('limit')
+        const limit = asked === null ? ACTIVITY_DEFAULT : Number(asked)
+        if (!Number.isInteger(limit) || limit < 1 || limit > ACTIVITY_MAX) return { status: 400, body: { error: `limit must be 1 to ${ACTIVITY_MAX}` } }
+        return { status: 200, body: { off: !config.activityLog, ...readActivity(config.activityLog, limit) } }
+      })
+    }
+    if (path === '/api/activity/stream') {
+      return get(() => {
+        // Bun's idle timeout would cut a quiet stream; the keep-alive line covers it too.
+        server.timeout(request, 0)
+        return stream(url.searchParams.get('cursor'))
+      })
+    }
+    if (path === '/api/search') return post(request, search)
+    if (path === '/api/forget') return post(request, forget)
+    return notFound()
+  }
 
   const statics: Record<string, () => Response> = {
     '/': () => reply(page, 200, { 'Content-Type': 'text/html; charset=utf-8' }),
@@ -213,16 +839,17 @@ export async function startServer(config: Config, options: { vendorDir?: string 
   const server = Bun.serve({
     hostname: '127.0.0.1',
     port: 0,
-    fetch(request) {
+    maxRequestBodySize: 64 * 1024,
+    fetch(request, server) {
       // DNS rebinding: a page on another name that resolves here is refused.
       if (request.headers.get('host') !== host) return json({ error: 'forbidden' }, 403)
       if (request.method === 'OPTIONS') return notAllowed()
-      const path = new URL(request.url).pathname
+      const url = new URL(request.url)
+      const path = url.pathname
       if (path === '/api' || path.startsWith('/api/')) {
         // The token only ever counts in the header: never in the query string.
         if (!hasToken(request, token)) return json({ error: 'unauthorized' }, 401)
-        if (path === '/api/health') return request.method === 'GET' ? json(health(config, store)) : notAllowed()
-        return notFound()
+        return api(request, url, server)
       }
       if (request.method !== 'GET') return notAllowed()
       const fixed = statics[path]
@@ -241,6 +868,7 @@ export async function startServer(config: Config, options: { vendorDir?: string 
     port,
     token,
     stop() {
+      for (const finish of [...streams]) finish()
       void server.stop(true)
       store.db?.close()
     },

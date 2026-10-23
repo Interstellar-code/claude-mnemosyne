@@ -394,6 +394,50 @@ Manual check (plan SRV.4), in a real terminal session and in the desktop app:
    `/mnemosyne-ui` in B (same address). Close B: the port still listens. Close
    A: the port is gone and `ui.json` is gone.
 
+Manual check of the four views (plan VIEW.5), in a browser, by the user or a
+browser agent. The mockups to compare with are `Memories.dc.html`,
+`Activity.dc.html` and `Search.dc.html` in the plan's design folder
+(`~/.matrixkoder/projects/claude-mnemosyne/plans/mnemosyne-ui/assets/design/`).
+Keep the browser console open throughout: no error and no CSP violation.
+
+1. Run `/mnemosyne-ui` and open the copied link. The page opens on Memories:
+   a table (Memory, Project, Tags, Saved, Recalls), "Showing N of M", and a
+   detail panel saying "Pick a memory to see it in full." Compare layout,
+   copy and colours with `Memories.dc.html` (the mockup's "Save tags" editor
+   is not built: tags are shown read-only, editing is not in VIEW).
+2. Choose a project in Project: only its rows stay and the count drops. Choose
+   Sort "Most recalled": the row with the most recalls is first. Type a word in
+   Filter: only rows holding it stay. Click a row (or Tab to it and press
+   Enter): the panel shows the full text, Saved, Recalls, Last recalled,
+   Source, Importance, Scope and Tags.
+3. Activity tab: the Live badge shows "Live", the tiles count today's recalls,
+   saves, updates and failures, and the list shows recent lines newest first.
+   In Claude Code type a recall term (for example `recall: dashboard`): within
+   about a second a new `recall` line with origin `trigger` appears at the top
+   without a reload. Press Pause, make another call: nothing new shows; press
+   Resume: it appears. Try each filter chip. Compare with `Activity.dc.html`.
+4. Search tab: note one memory's Recalls in Memories first. Search a word from
+   it with All projects: each hit appears once, with `#rank`, its project, a
+   score bar and number, the matched words marked, tags and Open. Search again
+   with one project chosen. Back in Memories (or press Open on the hit), the
+   row's Recalls is unchanged. Activity shows one `recall` line with origin
+   `dashboard` per search (an all-projects search shows "all projects (N)").
+   While a search runs the Search button is disabled, and pressing Enter again
+   starts nothing. Compare with `Search.dc.html`.
+5. Markup stays text: in Claude Code ask it to remember the throwaway fact
+   `<img src=x onerror=alert(1)> dashboard test` (owner global). Reload
+   Memories: the row shows the characters `<img src=x onerror=alert(1)>` as
+   plain text, no image box, no alert. Open it: the same in the panel.
+6. Forget with confirm: in that row's panel press "Forget…". The confirm says
+   "Forget this memory for good? This cannot be undone." and names the
+   memory's first line in quotes and its id. Press "Keep it": the confirm
+   closes and the row is still in the table (reload to be sure). Press
+   "Forget…" then "Forget": the status line says "Forgot memory <id>.", the row
+   is gone from the table and the header count drops by one, and Activity
+   shows a `forget` line with origin `dashboard`.
+7. Open the bare address `http://127.0.0.1:<port>/` in a private window: it
+   says to open the link from /mnemosyne-ui and shows no data.
+
 ## 4. Why a plugin, and why mod tools rather than an MCP server
 
 A skill cannot do this. A skill loads when invoked or when the model decides it

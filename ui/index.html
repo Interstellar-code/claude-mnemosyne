@@ -18,16 +18,97 @@
     <nav class="tabs" aria-label="Dashboard" id="tabs"></nav>
     <div class="meta">
       <span id="summary"></span>
+      <span id="engine" class="mono"></span>
       <span class="local">local only</span>
     </div>
   </header>
-  <main class="main" id="main">
-    <section class="panel" aria-labelledby="status-title">
-      <h1 id="status-title">Dashboard</h1>
-      <p id="status" class="status" role="status">Loading…</p>
-      <dl id="facts" class="facts" hidden></dl>
+
+  <p id="status" class="status" role="status">Loading…</p>
+
+  <main id="view-map" class="main view" hidden>
+    <section class="panel">
+      <h1>Map</h1>
+      <p class="muted">The map of how memories group arrives in a later build.</p>
     </section>
   </main>
+
+  <main id="view-memories" class="main view" hidden>
+    <section class="list" aria-label="All memories">
+      <div class="toolbar">
+        <h1 class="title-left">Memories</h1>
+        <label class="field">Project
+          <select id="mem-owner" class="input"><option value="">All projects</option></select>
+        </label>
+        <label class="field">Sort
+          <select id="mem-sort" class="input">
+            <option value="newest">Newest first</option>
+            <option value="recalled">Most recalled</option>
+            <option value="never">Never recalled</option>
+          </select>
+        </label>
+        <label class="field">Filter
+          <input id="mem-filter" class="input filter" type="search" placeholder="Text or tag" maxlength="200">
+        </label>
+      </div>
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr><th>Memory</th><th>Project</th><th>Tags</th><th>Saved</th><th class="num">Recalls</th></tr>
+          </thead>
+          <tbody id="mem-rows"></tbody>
+        </table>
+      </div>
+      <span id="mem-count" class="muted small"></span>
+    </section>
+    <aside id="detail" class="detail" aria-label="Memory detail" aria-live="polite"></aside>
+  </main>
+
+  <main id="view-activity" class="main view column wide" hidden>
+    <div class="titlebar">
+      <h1>Activity</h1>
+      <span id="live" class="live"><span class="live-dot"></span><span id="live-text">Connecting</span></span>
+      <button id="pause" type="button" class="btn push-right">Pause</button>
+    </div>
+    <div class="tiles">
+      <div class="tile"><div class="tile-label">Recalls today</div><div id="tile-recall" class="tile-value">0</div></div>
+      <div class="tile"><div class="tile-label">Saved today</div><div id="tile-remember" class="tile-value">0</div></div>
+      <div class="tile"><div class="tile-label">Updated today</div><div id="tile-update" class="tile-value">0</div></div>
+      <div class="tile"><div class="tile-label">Failed calls</div><div id="tile-failed" class="tile-value">0</div></div>
+    </div>
+    <div role="group" aria-label="Show" class="chips" id="act-filters">
+      <button type="button" class="chip-btn" data-filter="all" aria-pressed="true">All</button>
+      <button type="button" class="chip-btn" data-filter="recall" aria-pressed="false">Recall</button>
+      <button type="button" class="chip-btn" data-filter="remember" aria-pressed="false">Remember</button>
+      <button type="button" class="chip-btn" data-filter="update" aria-pressed="false">Update</button>
+      <button type="button" class="chip-btn" data-filter="forget" aria-pressed="false">Forget</button>
+      <button type="button" class="chip-btn" data-filter="external" aria-pressed="false">Outside agents</button>
+    </div>
+    <ol id="act-list" class="feed"></ol>
+    <p class="muted small">From the activity log on this machine. Text previews are cut short and secrets are masked.</p>
+  </main>
+
+  <main id="view-search" class="main view column narrow" hidden>
+    <h1>Ask memory what Claude would see</h1>
+    <form id="search-form" class="search-form">
+      <label class="field grow">Query
+        <input id="search-query" class="input big query" type="search" maxlength="500" required>
+      </label>
+      <label class="field">Project
+        <select id="search-owner" class="input big"><option value="">All projects</option></select>
+      </label>
+      <button type="submit" class="btn primary big">Search</button>
+    </form>
+    <p class="notes">
+      <span>Same engine recall Claude uses, top 5.</span>
+      <span>Searching here does not count as a recall.</span>
+    </p>
+    <p id="search-note" class="muted small" hidden></p>
+    <ol id="search-results" class="hits"></ol>
+  </main>
+
+  <footer id="foot" class="foot" hidden>
+    <dl id="facts" class="facts"></dl>
+  </footer>
 </div>
 </body>
 </html>
