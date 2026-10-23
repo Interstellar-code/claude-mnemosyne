@@ -47,6 +47,11 @@ import {
   pushRow,
   recallMemory,
   simulationInput,
+  FIND_FLY_DELAY_MS,
+  isPrimary,
+  liveLabel,
+  shouldFlyToFound,
+  slotOf,
   SPARK_COLOURS,
   sparkAlpha,
   sparkAt,
@@ -128,6 +133,8 @@ export type MapHost = {
   status: (text: string, kind?: 'ok' | 'error' | 'plain') => void
   /** The page's one activity stream: calls the listener with every new line; returns the way to stop. */
   events?: (listener: (line: Record<string, unknown>) => void) => () => void
+  /** Tells whether that stream is connected ('live'), so the Live pill only says On when lines can arrive. */
+  streamStatus?: (watcher: (status: string) => void) => () => void
 }
 
 export type MapView = { visible: (shown: boolean) => void; show: (memoryId: string) => void }
@@ -265,7 +272,7 @@ export function createMap(host: MapHost): MapView {
       return undefined
     }
   })()
-  let state: MapState = initialState({ reducedMotion, layout: initialLayout(readLayout(storage), false) })
+  let state: MapState = initialState({ reducedMotion, layout: initialLayout(readLayout(storage), true) })
   let galaxy: Galaxy | null = null
   let found: Found | null = null
   let graph: ForceGraph3DInstance | null = null
@@ -299,6 +306,10 @@ export function createMap(host: MapHost): MapView {
   let stopEvents: (() => void) | null = null
   let chain: Promise<void> = Promise.resolve()
   const fetching = new Set<string>()
+  // Find: the camera flies once the query settles, and only to a centre it has not flown to.
+  let findTimer: ReturnType<typeof setTimeout> | 0 = 0
+  let lastFound: Vec3 | null = null
+  let connected = false
 
   const canvasBox = byId('map-canvas')
   const stage = byId('map-stage')
@@ -370,13 +381,28 @@ export function createMap(host: MapHost): MapView {
   function reset() {
     if (galaxy === null) return
     find$.value = ''
+    if (findTimer) clearTimeout(findTimer)
+    findTimer = 0
+    lastFound = null
     dispatch(resetView(state))
     fly(flightTo(galaxy, 'reset'))
   }
   function search(value: string) {
     if (galaxy === null) return
     dispatch(setQuery(state, value))
-    if (found !== null && found.centre !== null && value.trim() !== '') fly({ target: found.centre, distance: found.distance })
+    if (findTimer) clearTimeout(findTimer)
+    findTimer = 0
+    if (value.trim() === '') {
+      lastFound = null
+      return
+    }
+    // Not on every keystroke: the camera flies once the typing stops, and not again to the same centre.
+    findTimer = setTimeout(() => {
+      findTimer = 0
+      if (found === null || found.centre === null || !shouldFlyToFound(found, lastFound)) return
+      lastFound = found.centre
+      fly({ target: found.centre, distance: found.distance })
+    }, FIND_FLY_DELAY_MS)
   }
 
   // ---- Drawing the page ----
@@ -430,6 +456,7 @@ export function createMap(host: MapHost): MapView {
   function renderRail(g: Galaxy) {
     const focused = document.activeElement instanceof HTMLElement ? document.activeElement : null
     const focusedProject = focused?.dataset.project
+    const focusedTag = focused?.tagName.toLowerCase() === 'button' ? 'button' : 'input'
     const focusedTopic = focused?.dataset.topic
     const toggles = byId('map-toggles')
     const rows = projectRows(g, state)
@@ -446,7 +473,7 @@ export function createMap(host: MapHost): MapView {
             box.addEventListener('change', () => dispatch(toggleProject(state, row.owner)))
             const name = el('button', row.label, row.focused ? 'toggle-name is-selected' : 'toggle-name')
             name.type = 'button'
-            name.dataset.fly = row.owner
+            name.dataset.project = row.owner
             name.title = `Fly to ${row.label}`
             name.addEventListener('click', event => {
               event.preventDefault()
@@ -477,7 +504,7 @@ export function createMap(host: MapHost): MapView {
       )
     }
     // A redraw replaces the rail's controls: the one that had focus keeps it.
-    if (focusedProject !== undefined) toggles.querySelector<HTMLElement>(`input[data-project="${CSS.escape(focusedProject)}"]`)?.focus()
+    if (focusedProject !== undefined) toggles.querySelector<HTMLElement>(`${focusedTag}[data-project="${CSS.escape(focusedProject)}"]`)?.focus()
     if (focusedTopic !== undefined) byId('map-topics').querySelector<HTMLElement>(`button[data-topic="${CSS.escape(focusedTopic)}"]`)?.focus()
   }
 
@@ -536,8 +563,9 @@ export function createMap(host: MapHost): MapView {
     byId<HTMLInputElement>('map-layer-write').checked = state.layerWrite
     rotate.setAttribute('aria-pressed', String(state.rotating))
     byId('map-found').textContent = found === null ? '' : foundText(state.query, found)
-    byId('map-live-state').textContent = state.live ? 'On' : 'Paused'
-    byId('map-live-state').parentElement?.classList.toggle('is-on', state.live)
+    const pillText = liveLabel(state, connected)
+    byId('map-live-state').textContent = pillText
+    byId('map-live-state').parentElement?.classList.toggle('is-on', pillText === 'On')
     byId('map-live-state').parentElement?.setAttribute('aria-pressed', String(state.live))
     renderStrip()
     syncDemoTimer()
@@ -594,9 +622,25 @@ export function createMap(host: MapHost): MapView {
     graphLinks.push({ source: `h:${star.topic}`, target: `s:${star.id}`, kind: 'spoke', owner: star.owner, star: star.id })
   }
 
+  /** Lets go of the sprites' materials and the labels' canvas textures before a redraw makes new ones. */
+  function disposeVisuals() {
+    for (const v of visuals) {
+      if (v.sprite) {
+        v.sprite.parent?.remove(v.sprite)
+        v.sprite.material?.dispose?.()
+      }
+      if (v.label) {
+        v.label.parent?.remove(v.label)
+        v.label.material?.map?.dispose?.()
+        v.label.material?.dispose?.()
+      }
+    }
+  }
+
   /** The graph data and a visual per node for a galaxy; threads and bridges are the library's links. */
   function drawGalaxy(g: Galaxy) {
     if (graph === null || lib === null || three === null) return
+    disposeVisuals()
     visuals = []
     graphNodes = []
     graphLinks = []
@@ -654,7 +698,7 @@ export function createMap(host: MapHost): MapView {
   function setLinkStyle() {
     if (graph === null) return
     const g = galaxy
-    const hidden = (owner: string) => state.hidden[owner] === true
+    const hidden = (owner: string) => state.hidden.has(owner)
     const ends = (link: Any) => {
       const source = typeof link.source === 'object' ? (link.source as GraphNode) : null
       const target = typeof link.target === 'object' ? (link.target as GraphNode) : null
@@ -792,7 +836,8 @@ export function createMap(host: MapHost): MapView {
   // ---- Per frame ----
 
   function frame(now: number) {
-    raf = requestAnimationFrame(frame)
+    // A hidden map asks for no more frames; visible(true) starts the loop again.
+    raf = shown ? requestAnimationFrame(frame) : 0
     const dt = Math.min(0.05, (now - lastFrame) / 1000)
     lastFrame = now
     clock += dt
@@ -866,7 +911,7 @@ export function createMap(host: MapHost): MapView {
     if (v) v.pulse = Math.max(v.pulse, PULSE[spark.kind])
     if (spark.demo || spark.toKind !== 'star') return
     const id = spark.to
-    const star = g.layout.stars[g.layout.starById[id] ?? -1]
+    const star = g.layout.stars[slotOf(g.layout.starById, id)]
     if (star === undefined) return
     if (spark.kind === 'recall') {
       const was = star.recalls
@@ -899,7 +944,7 @@ export function createMap(host: MapHost): MapView {
   async function addSaved(g: Galaxy, event: MapEvent) {
     await Promise.all(
       event.ids
-        .filter(id => g.layout.starById[id] === undefined && !fetching.has(id))
+        .filter(id => slotOf(g.layout.starById, id) < 0 && !fetching.has(id))
         .map(async id => {
           fetching.add(id)
           try {
@@ -928,7 +973,7 @@ export function createMap(host: MapHost): MapView {
     if (event.demo && event.kind === 'save') {
       // A demo save has no memory: its spark lands on the topic's hub.
       const key = `${event.owner ?? ''}/${event.topic ?? 'Untagged'}`
-      targets = g.layout.hubByKey[key] === undefined ? [] : [{ to: key, toKind: 'hub' }]
+      targets = slotOf(g.layout.hubByKey, key) < 0 ? [] : [{ to: key, toKind: 'hub' }]
     } else {
       targets = eventStars(g, event).map(id => ({ to: id, toKind: 'star' as const }))
     }
@@ -1113,6 +1158,8 @@ export function createMap(host: MapHost): MapView {
   }
   find$.addEventListener('input', () => search(find$.value))
   canvasBox.addEventListener('pointerdown', event => {
+    // A right or middle press is not a click on a star.
+    if (!isPrimary(event)) return
     down = { x: event.clientX, y: event.clientY }
     flight = null
   })
@@ -1129,7 +1176,7 @@ export function createMap(host: MapHost): MapView {
   canvasBox.addEventListener('pointerup', event => {
     const start = down
     down = null
-    if (start === null || !isClick(start, { x: event.clientX, y: event.clientY })) return
+    if (!isPrimary(event) || start === null || !isClick(start, { x: event.clientX, y: event.clientY })) return
     const box = canvasBox.getBoundingClientRect()
     pointer = { x: event.clientX - box.left, y: event.clientY - box.top, moved: false }
     click()
@@ -1210,16 +1257,18 @@ export function createMap(host: MapHost): MapView {
     controls.minDistance = 40
     controls.maxDistance = 1800
     // Bloom on the library's own composer: its render pass, then bloom, then the output pass.
+    let bloom: Any = null
     try {
       const composer = l.postProcessingComposer?.() as Any
-      const bloom = new lib.UnrealBloomPass({ x: 512, y: 512 }, BLOOM.strength, BLOOM.radius, BLOOM.threshold) as Any
+      if (!composer) throw new Error('the library has no post-processing composer')
+      bloom = new lib.UnrealBloomPass({ x: 512, y: 512 }, BLOOM.strength, BLOOM.radius, BLOOM.threshold)
       composer.addPass(bloom)
       composer.addPass(new lib.OutputPass())
-      const basic = bloom.basic
-      if (basic && typeof basic.constructor === 'function') bloomPassBasic = basic.constructor
-    } catch {
-      // without bloom the stars are plainer but the map works
+    } catch (err) {
+      bloom = null
+      host.status(`The glow effect could not start (${err instanceof Error ? err.message : String(err)}); the map is drawn without it.`, 'error')
     }
+    if (bloom?.basic && typeof bloom.basic.constructor === 'function') bloomPassBasic = bloom.basic.constructor
     graph.cameraPosition({ x: HOME[0], y: HOME[1], z: HOME[2] }, { x: 0, y: 0, z: 0 }, 0)
     const fit = () => {
       if (graph === null) return
@@ -1231,19 +1280,31 @@ export function createMap(host: MapHost): MapView {
     controls.autoRotate = state.rotating && shown
     if (!shown) graph.pauseAnimation()
     lastFrame = performance.now()
-    raf = requestAnimationFrame(frame)
+    if (shown) raf = requestAnimationFrame(frame)
     if (galaxy !== null) {
       drawGalaxy(galaxy)
       render()
     }
   }
 
+  host.streamStatus?.(status => {
+    connected = status === 'live'
+    if (galaxy !== null) renderControls(galaxy)
+  })
   void loadGalaxy()
   void start()
 
   return {
     visible(next: boolean) {
       shown = next
+      if (!next && raf !== 0) {
+        cancelAnimationFrame(raf)
+        raf = 0
+      }
+      if (next && raf === 0 && graph !== null) {
+        lastFrame = performance.now()
+        raf = requestAnimationFrame(frame)
+      }
       if (graph !== null) {
         if (next) graph.resumeAnimation()
         else graph.pauseAnimation()

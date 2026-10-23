@@ -350,7 +350,7 @@ describe('the dashboard views on a real store', () => {
     // The header sits above the rows inside one box, and the key under it.
     expect(view.indexOf('class="feed-head"')).toBeLessThan(view.indexOf('id="act-list"'))
     expect(view.indexOf('id="act-list"')).toBeLessThan(view.indexOf('id="act-key"'))
-    const key = view.slice(view.indexOf('id="act-key"'))
+    const key = view.slice(view.indexOf('id="act-key"'), view.indexOf('</dl>', view.indexOf('id="act-key"')))
     // The mockup's words (design/Activity.dc.html), term by term.
     expect([...key.matchAll(/<dt class="mono">([^<]*)<\/dt><dd>([^<]*)<\/dd>/g)].map(m => [m[1], m[2]])).toEqual([
       ['hook', 'automatic recall on a first prompt or after a compaction'],
@@ -562,3 +562,109 @@ function readLines(response: Response) {
     },
   }
 }
+
+// ---- VIEWS.3: the Activity tab shows who wrote each memory ----
+
+describe('VIEWS.3: provenance badges on saved memories in the Activity tab', () => {
+  let app: Record<string, any>
+  let saved: unknown
+
+  class Node {
+    children: (Node | { data: string; textContent: string })[] = []
+    attributes = new Map<string, string>()
+    className = ''
+    hidden = false
+    title = ''
+    type = ''
+    constructor(public tagName: string) {}
+    get textContent(): string {
+      return this.children.map(child => child.textContent).join('')
+    }
+    set textContent(value: string) {
+      this.children = value === '' ? [] : [{ data: String(value), textContent: String(value) }]
+    }
+    append(...nodes: (Node | string)[]) {
+      for (const node of nodes) this.children.push(typeof node === 'string' ? { data: node, textContent: node } : node)
+    }
+    setAttribute(name: string, value: string) {
+      this.attributes.set(name, value)
+    }
+    addEventListener() {}
+    all(): Node[] {
+      return [this, ...this.children.flatMap(child => (child instanceof Node ? child.all() : []))]
+    }
+    style = {}
+  }
+
+  beforeAll(async () => {
+    // A path tsc does not follow: ui/app.ts is DOM code, checked by ui/tsconfig.json.
+    app = await import(join(ROOT, 'ui', 'app.ts'))
+    saved = (globalThis as Record<string, unknown>).document
+    ;(globalThis as Record<string, unknown>).document = { createElement: (tag: string) => new Node(tag), createTextNode: (data: string) => ({ data, textContent: data }) }
+  })
+  afterAll(() => {
+    ;(globalThis as Record<string, unknown>).document = saved
+  })
+
+  // Real-shaped save lines of the CTX format with the KNOWX.1 fields.
+  const save = { t: '2026-10-23T10:00:00.000Z', action: 'remember', origin: 'trigger', owner: 'project-x-1a2b', text: 'always use bun', ids: ['m1'], count: 1, ok: true, client: 'claude-code', session: 'a1b2c3d4-0000-4000-8000-aaaaaaaaaaaa', veracity: 'stated' }
+
+  test('VIEWS.3.a1: you said (human), Claude (agent in Claude Code), Codex or the outside app\'s name (agent), nothing without author_type', () => {
+    expect(app.provenanceBadge({ ...save, author_type: 'human' })).toBe('you said')
+    expect(app.provenanceBadge({ ...save, origin: 'tool', author_type: 'agent' })).toBe('Claude')
+    expect(app.provenanceBadge({ ...save, origin: 'external', client: 'codex-mcp-client', author_type: 'agent' })).toBe('Codex')
+    expect(app.provenanceBadge({ ...save, origin: 'external', client: 'cursor-vscode', author_type: 'agent' })).toBe('Cursor')
+    expect(app.provenanceBadge({ ...save, origin: 'external', client: 'zed', author_type: 'agent' })).toBe('zed')
+    expect(app.provenanceBadge({ ...save, origin: 'external', client: undefined, author_type: 'agent' })).toBe('agent')
+    expect(app.provenanceBadge({ ...save, author_type: 'system' })).toBe('system')
+    // No author_type, or a value the engine does not use: no badge.
+    expect(app.provenanceBadge(save)).toBe('')
+    expect(app.provenanceBadge({ ...save, author_type: 'robot' })).toBe('')
+    // Only a save has an author.
+    expect(app.provenanceBadge({ ...save, action: 'recall', author_type: 'human' })).toBe('')
+    expect(app.provenanceBadge({ ...save, action: 'update', author_type: 'agent' })).toBe('')
+  })
+
+  test('VIEWS.3.a1: a save row shows the badge before its text, the other rows show none, and the row keeps its six cells', () => {
+    const row = (line: unknown) => app.activityItem(line, () => {}) as Node
+    const human = row({ ...save, author_type: 'human' })
+    expect(human.children).toHaveLength(6)
+    const what = human.children[4] as Node
+    expect(what.className).toBe('what')
+    expect((what.children[0] as Node).textContent).toBe('you said')
+    expect((what.children[0] as Node).className).toContain('prov-human')
+    expect(what.textContent).toBe('you saidalways use bun')
+    const agent = row({ ...save, origin: 'tool', author_type: 'agent' })
+    expect(((agent.children[4] as Node).children[0] as Node).className).toContain('prov-agent')
+    // An old save and a recall have no badge, and the text is alone in the cell.
+    for (const line of [save, { ...save, action: 'recall', author_type: 'human' }]) {
+      const plain = row(line)
+      expect(plain.children).toHaveLength(6)
+      expect((plain.children[4] as Node).textContent).toBe('always use bun')
+      expect((plain.children[4] as Node).all().filter(n => n.className.includes('prov'))).toEqual([])
+    }
+  })
+
+  test('VIEWS.3.a1: an outside app\'s name in the badge is text, never markup', () => {
+    const MARKUP = '<img src=x onerror=alert(1)>'
+    const line = { ...save, origin: 'external', client: MARKUP, author_type: 'agent' }
+    expect(app.provenanceBadge(line)).toBe(MARKUP)
+    const what = (app.activityItem(line, () => {}) as Node).children[4] as Node
+    expect(what.all().map(n => n.tagName).filter(tag => tag !== 'span')).toEqual([])
+    expect((what.children[0] as Node).textContent).toBe(MARKUP)
+    expect(what.all().some(n => [...n.attributes.keys()].some(name => /^on/i.test(name)))).toBe(false)
+  })
+
+  test('VIEWS.3.a2: the key under the list explains the badges, and the original key is still there', () => {
+    const html = readFileSync(join(ROOT, 'ui', 'index.html'), 'utf8')
+    const view = html.slice(html.indexOf('id="view-activity"'), html.indexOf('id="view-search"'))
+    const prov = view.slice(view.indexOf('id="act-prov-key"'), view.indexOf('</dl>', view.indexOf('id="act-prov-key"')))
+    expect(prov).toContain('you said')
+    expect(prov).toContain('Claude')
+    expect(prov).toContain('Codex')
+    expect(prov).toContain('no badge')
+    expect(view.indexOf('id="act-key"')).toBeLessThan(view.indexOf('id="act-prov-key"'))
+    expect(view.indexOf('id="act-list"')).toBeLessThan(view.indexOf('id="act-prov-key"'))
+    expect(readFileSync(join(ROOT, 'ui', 'style.css'), 'utf8')).toMatch(/\.prov-human \{/)
+  })
+})

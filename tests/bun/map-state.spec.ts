@@ -13,6 +13,11 @@ import { plainLabel } from '../../ui/escape'
 import { galaxyLayout } from '../../ui/map-layout'
 import { simulate, toMapEvent, type MapEvent } from '../../ui/map-live'
 import {
+  FIND_FLY_DELAY_MS,
+  isPrimary,
+  liveLabel,
+  shouldFlyToFound,
+  slotOf,
   addMemory,
   ageColour,
   announcement,
@@ -126,7 +131,11 @@ class FakeText {
   }
 }
 
-class FakeNode {
+// The page asks `activeElement instanceof HTMLElement`: the stand-in's nodes share this base, which a spec installs as HTMLElement.
+class FakeBase {}
+
+class FakeNode extends FakeBase {
+  static focused: FakeNode | null = null
   children: (FakeNode | FakeText)[] = []
   attributes = new Map<string, string>()
   dataset: Record<string, string> = {}
@@ -142,7 +151,9 @@ class FakeNode {
   groups: FakeNode[] = []
   parentElement: FakeNode | null = null
   classList = { toggle: () => {}, add: () => {}, contains: () => false }
-  constructor(public tagName: string) {}
+  constructor(public tagName: string) {
+    super()
+  }
   get textContent(): string {
     return this.children.map(child => child.textContent).join('')
   }
@@ -165,7 +176,9 @@ class FakeNode {
   fire(type: string, event: unknown = {}) {
     for (const listener of this.listeners.get(type) ?? []) listener(event)
   }
-  focus() {}
+  focus() {
+    FakeNode.focused = this
+  }
   getBoundingClientRect() {
     return { left: 0, top: 0, width: 800, height: 600 }
   }
@@ -176,11 +189,17 @@ class FakeNode {
     return this.children.flatMap(child => (child instanceof FakeNode ? child.texts() : [child.data]))
   }
   // Static buttons of a group (data-layout, data-range, data-colour) are made from the markup; the rest is searched in the children.
+  // Selectors: `tag[data-key]`, `tag[data-key="value"]` or `[data-key]`.
   querySelectorAll(selector: string): FakeNode[] {
-    const attr = /\[(data-[a-z]+)\]/.exec(selector)?.[1]
-    const key = attr?.replace('data-', '')
+    const match = /^(\w+)?\[data-([\w-]+)(?:="([^"]*)")?\]/.exec(selector)
+    const tag = match?.[1]
+    const key = match?.[2]?.replace(/-(\w)/g, (_, c: string) => c.toUpperCase())
+    const value = match?.[3]
     const from = this.groups.length > 0 ? this.groups : this.all().filter(n => n.tagName === 'button' || n.tagName === 'input')
-    return from.filter(n => key === undefined || n.dataset[key] !== undefined)
+    return from.filter(n => (tag === undefined || n.tagName === tag) && (key === undefined || (n.dataset[key] !== undefined && (value === undefined || n.dataset[key] === value))))
+  }
+  contains(node: unknown): boolean {
+    return this.all().includes(node as FakeNode)
   }
   querySelector(selector: string): FakeNode | null {
     return this.querySelectorAll(selector)[0] ?? null
@@ -211,7 +230,7 @@ function fakeDom(html: string) {
     createElement: (tag: string) => new FakeNode(tag.toLowerCase()),
     createTextNode: (data: string) => new FakeText(data),
     getElementById: (id: string) => nodes.get(id) ?? null,
-    activeElement: null,
+    activeElement: null as FakeNode | null,
   }
   return { document, nodes }
 }
@@ -515,7 +534,7 @@ describe('the galaxy on a real /api/galaxy reply', () => {
     expect(projectRows(galaxy, hidden).find(r => r.owner === alpha)).toMatchObject({ shown: false, focused: false })
     // Hiding the focused project clears the focus; showing it again keeps none.
     expect(hidden).toMatchObject({ project: null, topic: null, selected: null })
-    expect(toggleProject(hidden, alpha).hidden).toEqual({})
+    expect(toggleProject(hidden, alpha).hidden).toEqual(new Set())
     expect(starTarget(galaxy, index('a1'), hidden, null)).toBe(0)
     expect(coreTarget(hidden, alpha)).toBe(0)
     expect(hubTarget(hidden, alpha, `${alpha}/fruit`)).toBe(0)
@@ -537,7 +556,7 @@ describe('the galaxy on a real /api/galaxy reply', () => {
     const g = globalThis as Record<string, unknown>
     const saved = { document: g.document, CSS: g.CSS, HTMLElement: g.HTMLElement }
     g.document = fake.document
-    g.HTMLElement = class {}
+    g.HTMLElement = FakeBase
     ;(globalThis as Record<string, unknown>).CSS = { escape: (v: string) => v }
     try {
       // A path tsc does not follow: ui/map.ts is DOM code, checked by ui/tsconfig.json.
@@ -605,6 +624,73 @@ describe('the galaxy on a real /api/galaxy reply', () => {
     }
   })
 
+  test('GAL R2 / 1 (GAL.3.a5): activating a project name with the keyboard keeps focus on the re-rendered name button', async () => {
+    const html = readFileSync(join(ROOT, 'ui', 'index.html'), 'utf8')
+    const fake = fakeDom(html)
+    const g = globalThis as Record<string, unknown>
+    const saved = { document: g.document, CSS: g.CSS, HTMLElement: g.HTMLElement }
+    g.document = fake.document
+    g.CSS = { escape: (v: string) => v }
+    g.HTMLElement = FakeBase
+    try {
+      const { createMap } = (await import(join(ROOT, 'ui', 'map.ts'))) as { createMap: (host: unknown) => unknown }
+      createMap({ api: async () => new Response(JSON.stringify(rawBody), { status: 200 }), openMemory: () => {}, status: () => {} })
+      await Bun.sleep(30)
+      const rows = () => fake.nodes.get('map-toggles')!.children as FakeNode[]
+      const nameOf = (owner: string) => rows().flatMap(row => row.all()).find(n => n.tagName === 'button' && n.dataset.project === owner)!
+      const boxOf = (owner: string) => rows().flatMap(row => row.all()).find(n => n.tagName === 'input' && n.dataset.project === owner)!
+      // The name button carries the project, as the checkbox does, so a redraw can find it again.
+      const before = nameOf(alpha)
+      expect(before.dataset.fly).toBeUndefined()
+      fake.document.activeElement = before
+      before.fire('click', { preventDefault() {} })
+      const after = nameOf(alpha)
+      expect(after).not.toBe(before)
+      expect(FakeNode.focused).toBe(after)
+      expect(after.tagName).toBe('button')
+      // Enter again, and the checkbox keeps its own focus on a redraw.
+      fake.document.activeElement = after
+      after.fire('click', { preventDefault() {} })
+      expect(FakeNode.focused).toBe(nameOf(alpha))
+      const box = boxOf(beta)
+      fake.document.activeElement = box
+      box.fire('change')
+      expect(FakeNode.focused?.tagName).toBe('input')
+      expect(FakeNode.focused?.dataset.project).toBe(beta)
+    } finally {
+      g.document = saved.document
+      g.CSS = saved.CSS
+      g.HTMLElement = saved.HTMLElement
+    }
+  })
+
+  test('GAL R2 / 6: a stored Meaning layout is kept when the reply says meaning, and falls back to Galaxy when it does not', async () => {
+    const html = readFileSync(join(ROOT, 'ui', 'index.html'), 'utf8')
+    const g = globalThis as Record<string, unknown>
+    const saved = { document: g.document, CSS: g.CSS, HTMLElement: g.HTMLElement, localStorage: g.localStorage }
+    const run = async (meaning: boolean) => {
+      const fake = fakeDom(html)
+      g.document = fake.document
+      g.CSS = { escape: (v: string) => v }
+      g.HTMLElement = FakeBase
+      g.localStorage = { getItem: () => 'meaning', setItem: () => {} }
+      const { createMap } = (await import(join(ROOT, 'ui', 'map.ts'))) as { createMap: (host: unknown) => unknown }
+      createMap({ api: async () => new Response(JSON.stringify({ ...(rawBody as object), meaning }), { status: 200 }), openMemory: () => {}, status: () => {} })
+      await Bun.sleep(30)
+      const pressed = (name: string) => fake.nodes.get('map-layout')!.querySelectorAll('button[data-layout]').find(b => b.dataset.layout === name)!.attributes.get('aria-pressed')
+      return { meaning: pressed('meaning'), galaxy: pressed('galaxy') }
+    }
+    try {
+      expect(await run(true)).toEqual({ meaning: 'true', galaxy: 'false' })
+      expect(await run(false)).toEqual({ meaning: 'false', galaxy: 'true' })
+    } finally {
+      g.document = saved.document
+      g.CSS = saved.CSS
+      g.HTMLElement = saved.HTMLElement
+      g.localStorage = saved.localStorage
+    }
+  })
+
   test('LIVE: real activity lines play on the map: a save adds a star, a recall and an update count, a forget removes one; failed, extract and unknown lines draw nothing; demo events change nothing and ask nothing', async () => {
     const html = readFileSync(join(ROOT, 'ui', 'index.html'), 'utf8')
     const fake = fakeDom(html)
@@ -612,12 +698,13 @@ describe('the galaxy on a real /api/galaxy reply', () => {
     const saved = { document: g.document, CSS: g.CSS, HTMLElement: g.HTMLElement }
     g.document = fake.document
     g.CSS = { escape: (v: string) => v }
-    g.HTMLElement = class {}
+    g.HTMLElement = FakeBase
     try {
       const { createMap } = (await import(join(ROOT, 'ui', 'map.ts'))) as { createMap: (host: unknown) => { visible: (shown: boolean) => void; show: (id: string) => void } }
       const asked: string[] = []
       let push: (line: Record<string, unknown>) => void = () => {}
       let stopped = 0
+      let setStream: (status: string) => void = () => {}
       const newId = 'a'.repeat(32)
       createMap({
         api: async (path: string) => {
@@ -633,6 +720,10 @@ describe('the galaxy on a real /api/galaxy reply', () => {
         events: (listener: (line: Record<string, unknown>) => void) => {
           push = listener
           return () => stopped++
+        },
+        streamStatus: (watcher: (status: string) => void) => {
+          setStream = watcher
+          return () => {}
         },
       })
       await Bun.sleep(40)
@@ -724,9 +815,17 @@ describe('the galaxy on a real /api/galaxy reply', () => {
       expect(asked.length).toBe(asking)
       expect(stat('Memories')).toBe(total)
       expect(stat('Recalls, all time')).toBe(recallsAll)
-      // Live On is the pill's text; pressing the pill pauses it.
+      // The Live pill says On only while the stream is connected and Live is on.
+      expect(node('map-live-state').textContent).toBe('Paused')
+      setStream('live')
       expect(node('map-live-state').textContent).toBe('On')
       node('map-live-state').parentElement!.fire('click')
+      expect(node('map-live-state').textContent).toBe('Paused')
+      node('map-live-state').parentElement!.fire('click')
+      expect(node('map-live-state').textContent).toBe('On')
+      setStream('reconnecting')
+      expect(node('map-live-state').textContent).toBe('Paused')
+      setStream('off')
       expect(node('map-live-state').textContent).toBe('Paused')
     } finally {
       g.document = saved.document
@@ -1056,7 +1155,7 @@ describe('LIVE.1: what an event does to the galaxy', () => {
     expect(odd).toBeGreaterThan(0)
     expect(g.layout.coreByOwner['project-z-9']).toBeDefined()
     expect(g.layout.hubByKey['project-z-9/brand-new']).toBeDefined()
-    expect(g.colours['project-z-9']).toBeDefined()
+    expect(g.colours.has('project-z-9')).toBe(true)
   })
 
   test('LIVE.1.a3: a recall raises the star\'s count and size (and the most recalled); an update makes it new again', () => {
@@ -1255,5 +1354,115 @@ describe('LIVE.3: the live strip, the layers and the demo timer', () => {
     // The events a real line makes are not demos.
     expect(toMapEvent({ action: 'recall', ids: ['m1'], ok: true, client: 'cursor-vscode' })).toMatchObject({ kind: 'recall', client: 'cursor-vscode' })
     expect(toMapEvent({ action: 'recall', ids: ['m1'], ok: true })?.demo).toBeUndefined()
+  })
+})
+
+// ---- GAL R2: review fixes ----
+
+describe('GAL R2: review fixes', () => {
+  test('2: only the main button picks or flies, in both pointer handlers', () => {
+    expect(isPrimary({ button: 0 })).toBe(true)
+    expect(isPrimary({ button: 1 })).toBe(false)
+    expect(isPrimary({ button: 2 })).toBe(false)
+    const map = readFileSync(join(ROOT, 'ui', 'map.ts'), 'utf8')
+    const handler = (name: string) => map.slice(map.indexOf(`canvasBox.addEventListener('${name}'`), map.indexOf('})', map.indexOf(`canvasBox.addEventListener('${name}'`)))
+    expect(handler('pointerdown')).toContain('isPrimary(event)')
+    expect(handler('pointerup')).toContain('isPrimary(event)')
+  })
+
+  test('3: a project named like an Object member hides, colours and indexes like any other', () => {
+    const owners = ['constructor', 'toString', 'hasOwnProperty', '__proto__']
+    const g = buildGalaxy(reply(owners.map((owner, i) => memory(`id${i}`, owner, { tags: ['t'], recalls: i })), { projects: owners.map(owner => ({ owner, label: owner, count: 1, recalls: 0 })) }), LIVE_NOW)
+    const start = initialState({ reducedMotion: false })
+    for (const owner of owners) {
+      expect(start.hidden.has(owner)).toBe(false)
+      const hidden = toggleProject(start, owner)
+      expect(hidden.hidden.has(owner)).toBe(true)
+      expect([...hidden.hidden]).toEqual([owner])
+      // Only that owner's stars are hidden.
+      for (const [i, other] of owners.entries()) {
+        const index = g.layout.starById[`id${i}`]!
+        expect(starTarget(g, index, hidden, null) === 0).toBe(other === owner)
+      }
+      expect(toggleProject(hidden, owner).hidden.size).toBe(0)
+    }
+    // A colour for an owner the galaxy does not hold is the grey one, never a member of Object.
+    expect(projectColour(g, 'valueOf')).toBe(GLOBAL_COLOUR)
+    expect(projectColour(g, 'toString')).toMatch(/^#[0-9A-F]{6}$/)
+    // The layout's index maps: a key it never stored has no slot, even if Object has a member of that name.
+    for (const absent of ['valueOf', 'isPrototypeOf', 'nope']) expect(slotOf(g.layout.coreByOwner, absent)).toBe(-1)
+    expect(slotOf(g.layout.coreByOwner, 'constructor')).toBeGreaterThanOrEqual(0)
+    expect(slotOf(g.layout.coreByOwner, 'toString')).toBeGreaterThanOrEqual(0)
+    expect(projectRows(g, start).map(row => row.owner)).toEqual(expect.arrayContaining(['constructor', 'toString', 'hasOwnProperty']))
+    // A memory of an owner named like a member finds its core, and a missing one finds none.
+    expect(tooltip(g, { kind: 'core', id: 'constructor', sx: 0, sy: 0 })!.title).toBe('constructor')
+    expect(tooltip(g, { kind: 'core', id: 'valueOf', sx: 0, sy: 0 })).toBeNull()
+    expect(flightTo(g, 'core', 'valueOf')).toBeNull()
+    expect(focusProject(start, 'toString').project).toBe('toString')
+    expect(inspector(g, focusProject(start, 'valueOf')).kind).toBe('Overview')
+  })
+
+  test('4: the stage hint says "click to fly in"', () => {
+    const html = readFileSync(join(ROOT, 'ui', 'index.html'), 'utf8')
+    expect(html).toContain('click to fly in')
+    expect(html).not.toContain('drill in')
+  })
+
+  test('5: the Live pill says On only while the stream is connected and Live is on', () => {
+    const on = initialState({ reducedMotion: false })
+    expect(liveLabel(on, true)).toBe('On')
+    expect(liveLabel(on, false)).toBe('Paused')
+    expect(liveLabel(toggleLive(on), true)).toBe('Paused')
+    expect(liveLabel(initialState({ reducedMotion: true }), true)).toBe('Paused')
+  })
+
+  test('7: a bloom that fails is reported in plain words, and the catch names the error', () => {
+    const map = readFileSync(join(ROOT, 'ui', 'map.ts'), 'utf8')
+    const block = map.slice(map.indexOf('postProcessingComposer?.()') - 120, map.indexOf("host.status(`The glow effect") + 160)
+    expect(block).toContain('catch (err)')
+    expect(block).toContain('The glow effect could not start')
+    expect(block).not.toMatch(/catch\s*\{/)
+  })
+
+  test('8: a redraw lets go of the old sprites and label textures, and a hidden map asks for no frames', () => {
+    const map = readFileSync(join(ROOT, 'ui', 'map.ts'), 'utf8')
+    const draw = map.slice(map.indexOf('function drawGalaxy('), map.indexOf('function growGalaxy('))
+    expect(draw.indexOf('disposeVisuals()')).toBeGreaterThan(0)
+    expect(draw.indexOf('disposeVisuals()')).toBeLessThan(draw.indexOf('visuals = []'))
+    const dispose = map.slice(map.indexOf('function disposeVisuals()'), map.indexOf('function drawGalaxy('))
+    expect(dispose).toContain('material?.dispose')
+    expect(dispose).toContain('material?.map?.dispose')
+    const visible = map.slice(map.indexOf('visible(next: boolean)'), map.indexOf('show(memoryId'))
+    expect(visible).toContain('cancelAnimationFrame(raf)')
+    expect(visible).toContain('requestAnimationFrame(frame)')
+    expect(map).toMatch(/raf = shown \? requestAnimationFrame\(frame\) : 0/)
+  })
+
+  test('9: the v1-era CSS nobody uses is gone; the vendored library CSS and what the page uses stay', () => {
+    const css = readFileSync(join(ROOT, 'ui', 'style.css'), 'utf8')
+    for (const gone of ['.rail-items', '.insp-items', '.insp-item ', '.insp-item-kind', '.insp-item-text']) expect(css).not.toContain(gone)
+    // The page uses .mini-badge (the live strip), and the package CSS the CSP made us carry is in the file.
+    expect(readFileSync(join(ROOT, 'ui', 'map.ts'), 'utf8')).toContain('mini-badge')
+    expect(css).toContain('.mini-badge')
+    for (const kept of ['.graph-info-msg', '.scene-container .clickable', '.scene-container .grabbable', '.scene-nav-info', '.float-tooltip-kap']) expect(css).toContain(kept)
+    // Activity's rules are untouched.
+    for (const rule of ['.feed-head', '.event', '.key', '.act-bar']) expect(css).toContain(rule)
+  })
+
+  test('10: Find flies once typing settles, and only to a centre it has not flown to', () => {
+    expect(FIND_FLY_DELAY_MS).toBe(250)
+    const found = { ids: new Set(['a']), count: 1, centre: [10, 20, 30] as [number, number, number], distance: 260 }
+    expect(shouldFlyToFound(found, null)).toBe(true)
+    expect(shouldFlyToFound(found, [10, 20, 30])).toBe(false)
+    expect(shouldFlyToFound(found, [10.3, 20, 30])).toBe(false)
+    expect(shouldFlyToFound(found, [40, 20, 30])).toBe(true)
+    expect(shouldFlyToFound({ ...found, centre: null, count: 0 }, null)).toBe(false)
+    const map = readFileSync(join(ROOT, 'ui', 'map.ts'), 'utf8')
+    const search = map.slice(map.indexOf('function search('), map.indexOf('// ---- Drawing the page ----'))
+    expect(search).toContain('setTimeout')
+    expect(search).toContain('FIND_FLY_DELAY_MS')
+    expect(search).toContain('shouldFlyToFound(found, lastFound)')
+    // The count and the dimming are not delayed: the query is dispatched at once.
+    expect(search.indexOf('dispatch(setQuery')).toBeLessThan(search.indexOf('setTimeout'))
   })
 })
