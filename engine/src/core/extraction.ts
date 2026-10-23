@@ -74,7 +74,7 @@ export function buildExtractionPrompt(text: string, detectedLang = "en"): string
 	const template = getMnemopiRuntimeOptions()?.llm?.extractionPrompt ?? EXTRACTION_PROMPT_TEMPLATE;
 	return template.split("{text}").join(text).split("{lang}").join(detectedLang);
 }
-function stripFence(raw: string): string {
+export function stripFence(raw: string): string {
 	let s = raw.trim();
 	if (!s.startsWith("```")) {
 		return s;
@@ -121,6 +121,7 @@ function normalizeFact(fact: string): string {
 interface FactArrayOptions {
 	fields: readonly string[];
 	joinFields?: boolean;
+	limit?: number;
 }
 
 function normalizeFactArray(items: unknown, options: FactArrayOptions): string[] {
@@ -150,7 +151,7 @@ function normalizeFactArray(items: unknown, options: FactArrayOptions): string[]
 			const normalized = normalizeFact(text);
 			if (normalized !== "") {
 				out.push(normalized);
-				if (out.length >= STRUCTURED_CATEGORY_LIMIT) break;
+				if (out.length >= (options.limit ?? STRUCTURED_CATEGORY_LIMIT)) break;
 			}
 		}
 	}
@@ -181,7 +182,7 @@ function normalizeKgTriple(item: unknown): ExtractedKgTriple | null {
 	return subject !== "" && predicate !== "" && object !== "" ? { subject, predicate, object } : null;
 }
 
-function normalizeKgArray(items: unknown): ExtractedKgTriple[] {
+function normalizeKgArray(items: unknown, limit = STRUCTURED_CATEGORY_LIMIT): ExtractedKgTriple[] {
 	if (!Array.isArray(items)) {
 		return [];
 	}
@@ -190,7 +191,7 @@ function normalizeKgArray(items: unknown): ExtractedKgTriple[] {
 		const triple = normalizeKgTriple(item);
 		if (triple !== null) {
 			out.push(triple);
-			if (out.length >= STRUCTURED_CATEGORY_LIMIT) break;
+			if (out.length >= limit) break;
 		}
 	}
 	return out;
@@ -218,8 +219,18 @@ export function countExtractedFactCategories(extracted: ExtractedFactCategories)
 	);
 }
 
+/** Options for {@link parseExtractedFactCategories}. */
+export interface ParseFactCategoriesOptions {
+	/** Items kept per category from a JSON reply; default 5 (mnemosyne change 4). */
+	categoryLimit?: number;
+}
+
 /** Parse extractor output without discarding MEMORIA categories or KG triples. */
-export function parseExtractedFactCategories(rawOutput: string | null | undefined): ExtractedFactCategories {
+export function parseExtractedFactCategories(
+	rawOutput: string | null | undefined,
+	options: ParseFactCategoriesOptions = {},
+): ExtractedFactCategories {
+	const limit = options.categoryLimit ?? STRUCTURED_CATEGORY_LIMIT;
 	return withLoopPhase("mnemopi.extract", () => {
 		if (rawOutput === null || rawOutput === undefined) {
 			return emptyFactCategories();
@@ -234,14 +245,15 @@ export function parseExtractedFactCategories(rawOutput: string | null | undefine
 				const parsed: unknown = JSON.parse(rawClean);
 				if (isRecord(parsed)) {
 					return {
-						facts: normalizeFactArray(parsed.facts, { fields: FACT_TEXT_FIELD_KEYS }),
-						instructions: normalizeFactArray(parsed.instructions, { fields: INSTRUCTION_TEXT_FIELD_KEYS }),
-						preferences: normalizeFactArray(parsed.preferences, { fields: PREFERENCE_TEXT_FIELD_KEYS }),
+						facts: normalizeFactArray(parsed.facts, { fields: FACT_TEXT_FIELD_KEYS, limit }),
+						instructions: normalizeFactArray(parsed.instructions, { fields: INSTRUCTION_TEXT_FIELD_KEYS, limit }),
+						preferences: normalizeFactArray(parsed.preferences, { fields: PREFERENCE_TEXT_FIELD_KEYS, limit }),
 						timelines: normalizeFactArray(parsed.timelines, {
 							fields: TIMELINE_TEXT_FIELD_KEYS,
 							joinFields: true,
+							limit,
 						}),
-						kg: normalizeKgArray(parsed.kg),
+						kg: normalizeKgArray(parsed.kg, limit),
 					};
 				}
 			} catch {
