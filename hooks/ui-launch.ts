@@ -1,6 +1,6 @@
 // /mnemosyne-ui: start the dashboard server (ui/server.ts), or reuse the one
-// running, and hand its link over without writing the token into the
-// transcript (DESIGN.md §3.3, "The dashboard server").
+// running, open its link in the default browser and show it in the reply
+// (DESIGN.md §3.3, "The dashboard server").
 //
 // One server is shared: any session's later call pings the server ui.json
 // names and reuses it while it answers. The server stops when the session that
@@ -18,6 +18,7 @@ export const READY_TIMEOUT_MS = 20_000
 export const STOP_WAIT_MS = 600
 export const KILL_TIMEOUT_MS = 500
 export const ALIVE_TIMEOUT_MS = 1_000
+export const OPEN_TIMEOUT_MS = 5_000
 
 // The ping must never go through a proxy: the proxy would see the token.
 export const PING_ENV: Readonly<Record<string, string>> = {
@@ -99,18 +100,32 @@ async function isAlive($: EngineInterface, pid: number) {
   }
 }
 
-// The link goes to the clipboard; the transcript gets the bare address only.
-async function handOver($: EngineInterface, state: State, verb: 'started' | 'running', note = '') {
-  const address = `http://127.0.0.1:${state.port}/`
-  const link = `${address}#token=${state.token}`
-  const copied = await $.ui.copy({ text: link }).catch(() => ({ isCopied: false as const }))
-  if (copied.isCopied) {
-    $.ui.toast(`Mnemosyne dashboard link copied: ${address}`)
-    return { text: `Mnemosyne dashboard ${verb} at ${address}${note}. Its link, with the key, is on the clipboard: paste it into a browser.` }
+// The default browser's opener on macOS, Linux and Windows; the first that
+// exits 0 wins. A hook cannot read the platform, so each is tried in turn.
+const OPENERS = [['open'], ['xdg-open'], ['cmd', '/c', 'start', '']]
+
+async function openBrowser($: EngineInterface, link: string) {
+  for (const opener of OPENERS) {
+    try {
+      if ((await $.process.run([...opener, link], { timeoutMs: OPEN_TIMEOUT_MS })).exitCode === 0) return true
+    } catch {
+      // Not on this platform: try the next one.
+    }
   }
-  // A toast never reaches the transcript or the model.
-  $.ui.toast(`Open this Mnemosyne dashboard link in a browser: ${link}`, { timeoutMs: 60_000 })
-  return { text: `Mnemosyne dashboard ${verb} at ${address}${note}. The clipboard did not take its link, so a toast shows it: copy it from there.` }
+  return false
+}
+
+// The default browser opens the link, the clipboard gets it, and the reply
+// shows it in full (the key is good only on 127.0.0.1, until the server stops).
+async function handOver($: EngineInterface, state: State, verb: 'started' | 'running', note = '') {
+  const link = `http://127.0.0.1:${state.port}/#token=${state.token}`
+  const [opened, copied] = await Promise.all([
+    openBrowser($, link),
+    $.ui.copy({ text: link }).catch(() => ({ isCopied: false as const })),
+  ])
+  $.ui.toast(opened ? 'Mnemosyne dashboard opened in your browser.' : 'Mnemosyne dashboard: open its link from the reply.')
+  const how = [opened ? 'Opened in your default browser' : 'Could not open a browser: open the link yourself', copied.isCopied ? 'the link is also on the clipboard' : '']
+  return { text: `Mnemosyne dashboard ${verb}${note}.\n${how.filter(Boolean).join('; ')}.\nLink: ${link}` }
 }
 
 // Starts the holder (ui/server.ts --hold) in a spawn loop that keeps running

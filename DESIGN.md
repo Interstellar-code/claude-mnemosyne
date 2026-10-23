@@ -324,10 +324,13 @@ and a temporary WAL store made by the real engine.
   pid only. The hook reads the token from `ui.json` with `$.fs.read`, so the
   token never passes through spawn output. The link is
   `http://127.0.0.1:<port>/#token=<token>`: the fragment is never sent in a
-  request. It goes to the clipboard with `$.ui.copy`; the toast says it was
-  copied and shows the bare address; only when the clipboard did not take it
-  does a toast (60 s) show the full link. The reply text and `$.ui.log` never
-  hold the token. The page takes the token from the fragment, removes it from
+  request. The hook opens it in the default browser (`open`, then
+  `xdg-open`, then `cmd /c start`, the first that exits 0), copies it with
+  `$.ui.copy`, and shows it in full in the reply, so the token is in the
+  transcript (decision 2026-10-23: the user wants the link in the console;
+  the key works only on 127.0.0.1 and only until the server stops). The
+  opener gets the link as an argument, so it is in a process list for that
+  moment. `$.ui.log` never holds the token. The page takes the token from the fragment, removes it from
   the address bar with `history.replaceState`, keeps it in the tab's
   `sessionStorage` for reloads, and sends it only as the Authorization header.
   What other code of the same user can see, within the same-user boundary:
@@ -373,8 +376,8 @@ and a temporary WAL store made by the real engine.
 
 Manual check (plan SRV.4), in a real terminal session and in the desktop app:
 
-1. Run `/mnemosyne-ui`. The reply and the toast show only
-   `http://127.0.0.1:<port>/`. Paste the clipboard into a browser: the page
+1. Run `/mnemosyne-ui`. The default browser opens the page, and the reply
+   shows `Link: http://127.0.0.1:<port>/#token=<token>`. The page
    shows the header, the owners with counts, the store path and "Connected to
    the local Mnemosyne server." Open the browser console: no error and no CSP
    violation.
@@ -382,9 +385,7 @@ Manual check (plan SRV.4), in a real terminal session and in the desktop app:
    still works (the tab's sessionStorage). Open `http://127.0.0.1:<port>/`
    (no fragment) in a new tab: it says to open the link from /mnemosyne-ui and
    shows no data.
-3. Search the transcript for the token (it is in `~/.claude/mnemosyne/ui.json`):
-   `grep -c "$(bun -e "console.log(require(process.env.HOME + '/.claude/mnemosyne/ui.json').token)")" <transcript .jsonl>`
-   finds 0.
+3. Paste the reply's link into a second browser: the page loads there too.
 4. Run `/mnemosyne-ui` again: the same address, nothing new starts
    (`lsof -nP -iTCP:<port> -sTCP:LISTEN` shows one `bun`).
 5. `/clear` in the starting session: `lsof -nP -iTCP:<port> -sTCP:LISTEN`

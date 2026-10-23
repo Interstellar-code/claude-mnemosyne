@@ -663,7 +663,7 @@ export const register: Register = (on, options) => {
     })
     await $.command.register({
       name: 'mnemosyne-ui',
-      description: 'Open the Mnemosyne dashboard: a local page on 127.0.0.1; its link goes to the clipboard',
+      description: 'Open the Mnemosyne dashboard: a local page on 127.0.0.1, opened in your default browser',
     })
     for (const tool of TOOLS) await $.tool.register({ ...tool, isDeferred: false })
     if (!(await isInstalled($, options))) $.ui.toast('Mnemosyne Memory engine not installed. Run /mnemosyne-setup.')

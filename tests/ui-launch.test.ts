@@ -1,5 +1,5 @@
-// SRV.3: /mnemosyne-ui starts one shared dashboard server, hands the link over
-// without the token in the transcript, reuses a live server, replaces a stale
+// SRV.3: /mnemosyne-ui starts one shared dashboard server, opens its link in
+// the default browser and shows it in the reply, reuses a live server, replaces a stale
 // one, and its starting session's session.end ends the spawn loop and kills
 // the server. Review r1 findings 1, 2, 3 and 8 have their tests here.
 import { expect, mock, test } from 'claude-code/testing'
@@ -19,6 +19,8 @@ type Options = {
   installed?: boolean
   build?: string
   copies?: boolean
+  // The browser openers found on this machine (default: macOS `open`).
+  openers?: string[]
   // What ui.json holds before any server of the test starts.
   state?: { port: number; token: string; pid: number }
   // Exit code of the health ping.
@@ -31,6 +33,7 @@ type Options = {
 
 const isPing = (argv: readonly string[]) => argv[2] === '--ping'
 const isKill = (argv: readonly string[]) => argv[0] === 'kill' && argv[1] !== '-0'
+const OPENERS = ['open', 'xdg-open', 'cmd']
 
 // The world beneath the plugin: Bun, an engine, ui.json in a variable, a
 // clipboard, and a spawned server that writes ui.json then prints its ready
@@ -66,6 +69,10 @@ function world(on: On, o: Options = {}) {
     }
     if (isPing(e.argv)) return { value: { exitCode: seen.ping, stdout: '', stderr: '' } } as never
     if (e.argv[0] === 'kill' && e.argv[1] === '-0') return { value: { exitCode: seen.alive ? 0 : 1, stdout: '', stderr: '' } } as never
+    if (OPENERS.includes(e.argv[0]!)) {
+      if (!(o.openers ?? ['open']).includes(e.argv[0]!)) throw new Error(`spawn ${e.argv[0]} ENOENT`)
+      return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
+    }
     return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
   })
   on('process.spawn', async function* (_$: unknown, e: { argv: readonly string[]; env?: Record<string, string>; input?: string }, next: { signal?: AbortSignal }) {
@@ -166,13 +173,11 @@ test('the first call starts one server, reads the ready line in pieces and the t
   expect(pings(seen).length).toBe(0)
 
   expect(seen.copied).toEqual([`http://127.0.0.1:4321/#token=${TOKEN_B}`])
-  expect(seen.toasts.length).toBe(1)
-  expect(seen.toasts[0]).toContain('copied')
-  expect(seen.toasts[0]).toContain('http://127.0.0.1:4321/')
-  expect(seen.toasts[0]).not.toContain(TOKEN_B)
-  expect(text).toContain('http://127.0.0.1:4321/')
-  expect(text).not.toContain(TOKEN_B)
-  expect(text).not.toContain('#token')
+  // The default browser opens the full link, and the reply shows it.
+  expect(seen.runs.filter(r => OPENERS.includes(r.argv[0]!)).map(r => r.argv)).toEqual([['open', `http://127.0.0.1:4321/#token=${TOKEN_B}`]])
+  expect(seen.toasts).toEqual(['Mnemosyne dashboard opened in your browser.'])
+  expect(text).toContain('Opened in your default browser')
+  expect(text).toContain(`Link: http://127.0.0.1:4321/#token=${TOKEN_B}`)
   expect(seen.logs.some(line => line.includes(TOKEN_B))).toBe(false)
   // The loop runs on after the command returned.
   expect(child.ended).toBe(false)
@@ -186,12 +191,24 @@ test('with activityLog off the server gets an empty MNEMOSYNE_ACTIVITY_LOG', { o
   await $.session.end(end('s1', 'other'))
 })
 
-test('when the clipboard does not take the link, only the toast shows it in full', async ($, on) => {
-  const seen = world(on, { copies: false })
+test('on Linux the second opener opens the link, and a failed copy still leaves it in the reply', async ($, on) => {
+  const seen = world(on, { copies: false, openers: ['xdg-open'] })
   const text = textOf(await openUi($))
-  expect(seen.toasts.some(t => t.includes(`http://127.0.0.1:4321/#token=${TOKEN_B}`))).toBe(true)
-  expect(text).toContain('http://127.0.0.1:4321/')
-  expect(text).not.toContain(TOKEN_B)
+  expect(seen.runs.filter(r => OPENERS.includes(r.argv[0]!)).map(r => r.argv[0])).toEqual(['open', 'xdg-open'])
+  expect(text).toContain('Opened in your default browser')
+  expect(text).not.toContain('clipboard')
+  expect(text).toContain(`Link: http://127.0.0.1:4321/#token=${TOKEN_B}`)
+  await $.session.end(end('s1', 'other'))
+})
+
+test('when no opener works the reply says so and still shows the link', async ($, on) => {
+  const seen = world(on, { openers: [] })
+  const text = textOf(await openUi($))
+  expect(seen.runs.filter(r => OPENERS.includes(r.argv[0]!)).map(r => r.argv[0])).toEqual(OPENERS)
+  expect(seen.toasts).toEqual(['Mnemosyne dashboard: open its link from the reply.'])
+  expect(text).toContain('Could not open a browser')
+  expect(text).toContain('the link is also on the clipboard')
+  expect(text).toContain(`Link: http://127.0.0.1:4321/#token=${TOKEN_B}`)
   expect(seen.logs.some(line => line.includes(TOKEN_B))).toBe(false)
   await $.session.end(end('s1', 'other'))
 })
@@ -225,8 +242,7 @@ test('a later call, from another session, pings the running server with the toke
   expect(pings(seen).length).toBe(1)
   expect(seen.spawned.length).toBe(0)
   expect(seen.copied).toEqual([`http://127.0.0.1:5555/#token=${TOKEN_A}`])
-  expect(text).toContain('http://127.0.0.1:5555/')
-  expect(text).not.toContain(TOKEN_A)
+  expect(text).toContain(`Link: http://127.0.0.1:5555/#token=${TOKEN_A}`)
 })
 
 test('a ui.json whose server does not answer (asked twice) is replaced by a new server', async ($, on) => {
@@ -290,10 +306,9 @@ test('a missed ping does not kill this session\'s own server while its process i
   expect(child.ended).toBe(false)
   expect(kills(seen)).toEqual([])
   expect(seen.spawned.length).toBe(1)
-  // The same link again; the reply says the check was missed, without the token.
+  // The same link again; the reply says the check was missed.
   expect(seen.copied).toEqual([`http://127.0.0.1:4321/#token=${TOKEN_B}`, `http://127.0.0.1:4321/#token=${TOKEN_B}`])
   expect(text).toContain('did not answer')
-  expect(text).not.toContain(TOKEN_B)
   await $.session.end(end('s1', 'other'))
 })
 

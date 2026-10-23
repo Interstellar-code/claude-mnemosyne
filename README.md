@@ -76,7 +76,7 @@ Recall matches words, not meaning: "deploy Fridays" finds the fact above, "relea
 /mnemosyne-ui
 ```
 
-Starts a small local web page for your memories and copies its link to the clipboard (the reply shows only the bare address). Paste the link into a browser. The page has four tabs:
+Starts a small local web page for your memories and opens it in your default browser. The reply shows the full link, with its key after `#`, and the link is on the clipboard too, so you can open it in another browser. The page has four tabs:
 
 - **Map:** a 3D map of your memories (see below).
 - **Memories:** every memory, with a project filter, sorting (newest, most recalled, never recalled), a text and tag filter, and a detail panel with a Forget button that asks before it deletes.
