@@ -115,6 +115,37 @@ import {
   tooltip,
   topicRows,
   type GalaxyReply,
+  DIM_NO_KNOWLEDGE,
+  hasKnowledge,
+  KIND_LABELS,
+  CHIP_LABELS,
+  KNOWLEDGE_KINDS,
+  knowledgeCounts,
+  knowledgeNote,
+  knowledgeOf,
+  type KnowledgeKind,
+  MOON_COLOURS,
+  MOON_LIMIT,
+  MOON_LINE_COLOUR,
+  MOON_LINE_OPACITY,
+  MOON_PICK_RADIUS,
+  MOON_RADIUS,
+  MOON_SIZE,
+  MOON_SIZE_SELECTED,
+  MOON_SPEED,
+  moonColour,
+  moonPosition,
+  moonPulse,
+  moonRows,
+  moonSize,
+  moonTooltip,
+  NO_KNOWLEDGE_NOTE,
+  passesKnowledgeFilter,
+  selectedMoon,
+  selectMoon,
+  toggleKind,
+  toggleMoons,
+  usageText,
 } from '../../ui/map-state'
 import { startServer } from '../../ui/server'
 import type { Started } from '../../ui/server'
@@ -170,6 +201,9 @@ class FakeNode extends FakeBase {
   setAttribute(name: string, value: string) {
     this.attributes.set(name, String(value))
   }
+  removeAttribute(name: string) {
+    this.attributes.delete(name)
+  }
   addEventListener(type: string, listener: (event: unknown) => void) {
     this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener])
   }
@@ -214,7 +248,7 @@ function fakeDom(html: string) {
     node.hidden = /\bhidden\b/.test(match[0].replace(/id="[^"]*"/, ''))
     nodes.set(match[2]!, node)
   }
-  for (const group of ['map-layout', 'map-range', 'map-colour']) {
+  for (const group of ['map-layout', 'map-range', 'map-colour', 'map-know']) {
     const start = html.indexOf(`id="${group}"`)
     const block = html.slice(start, html.indexOf('</div>', start))
     for (const button of block.matchAll(/<button\b[^>]*data-(\w+)="([^"]+)"[^>]*>/g)) {
@@ -484,7 +518,7 @@ describe('the galaxy on a real /api/galaxy reply', () => {
 
   test('GAL.2.a6: every setting the scene reacts to is plain data in the state, changed by pure functions', () => {
     const s = base()
-    expect(Object.keys(s).sort()).toEqual(['bridges', 'colourBy', 'hidden', 'layerRecall', 'layerWrite', 'layout', 'live', 'project', 'query', 'range', 'reducedMotion', 'rotating', 'selected', 'spokes', 'topic'].sort())
+    expect(Object.keys(s).sort()).toEqual(['bridges', 'colourBy', 'hidden', 'kinds', 'layerRecall', 'layerWrite', 'layout', 'live', 'moon', 'moons', 'project', 'query', 'range', 'reducedMotion', 'rotating', 'selected', 'spokes', 'topic'].sort())
     expect(setColourBy(s, 'age').colourBy).toBe('age')
     expect(setColourBy(s, 'nope' as never)).toBe(s)
     expect(setRange(s, 7).range).toBe(7)
@@ -520,7 +554,7 @@ describe('the galaxy on a real /api/galaxy reply', () => {
     expect(memory.memory).toEqual({ text: plainLabel(star('b1').label, 80), tags: ['Fruit'], id: ids.b1! })
     expect(memory.stats.map(s => s.label)).toEqual(['Project', 'Recalls', 'Saved', 'Tags'])
     // The Knowledge and Similar sections are there and empty until MOON and SEM.
-    expect(memory.knowledge?.note).toBe('Nothing extracted from this memory yet.')
+    expect(memory.knowledge?.note).toBe(NO_KNOWLEDGE_NOTE)
     expect(memory.similar?.note).toBe('Similar memories need embeddings.')
     expect(inspector(galaxy, selectStar(base(), galaxy, ids.a2!)).hint).toBe('Never recalled: a candidate to review or forget.')
     expect(announcement(galaxy, base())).toBe('All memories: 7 memories')
@@ -840,6 +874,7 @@ describe('the galaxy on a real /api/galaxy reply', () => {
 const reply = (memories: GalaxyReply['memories'], extra: Partial<GalaxyReply> = {}): GalaxyReply => ({
   projects: [],
   memories,
+  knowledge: [],
   meaning: false,
   total: memories.length,
   shown: memories.length,
@@ -1464,5 +1499,341 @@ describe('GAL R2: review fixes', () => {
     expect(search).toContain('shouldFlyToFound(found, lastFound)')
     // The count and the dimming are not delayed: the query is dispatched at once.
     expect(search.indexOf('dispatch(setQuery')).toBeLessThan(search.indexOf('setTimeout'))
+  })
+})
+
+// ---- MOON: knowledge moons and the knowledge filter, on a real /api/galaxy reply ----
+//
+// The rows are written by the real engine tool mnemopi_knowledge_store (as in
+// tests/bun/knowledge-api.spec.ts) into a real temporary store, and read back by the
+// real server's /api/galaxy; only the page's network edge is a stand-in.
+
+describe('MOON: moons on a clicked star and the knowledge filter', () => {
+  const temp = tempDir('map-moon')
+  const store = join(temp.dir, 'store')
+  let started: Started
+  let galaxy: Galaxy
+  let rawBody: { knowledge: { id: string; kind: KnowledgeKind; text: string; memory: string }[] } & Record<string, unknown>
+  const ids: Record<string, string> = {}
+  const alpha = 'project-alpha-1a2b'
+  const beta = 'project-beta-9z8y'
+  const now = Date.parse('2026-10-23T12:00:00Z')
+  const LONG = `${'long fact '.repeat(49)}end`
+  const MARKUP_FACT = '<img src=x onerror=alert(1)> fact'
+
+  async function remember(owner: string, key: string, content: string, tags: string[]) {
+    const answer = body((await engineCall(CLI, store, owner, [toolCall(1, 'mnemopi_remember', { content, metadata: { tags } })])).get(1))
+    if (typeof answer?.memory_id !== 'string') throw new Error(`remember failed: ${JSON.stringify(answer)}`)
+    ids[key] = answer.memory_id as string
+  }
+  async function mine(owner: string, key: string, reply: Record<string, unknown>) {
+    const prompt = body((await engineCall(CLI, store, owner, [toolCall(10, 'mnemopi_knowledge_prompt', { memory_id: ids[key] })])).get(10)) as { sha256: string }
+    const stored = body((await engineCall(CLI, store, owner, [toolCall(11, 'mnemopi_knowledge_store', { memory_id: ids[key], reply: JSON.stringify(reply), sha256: prompt.sha256 })])).get(11))
+    if (stored?.error || stored?.ok === false || stored?.stored === 0) throw new Error(`knowledge_store failed: ${JSON.stringify(stored)}`)
+  }
+
+  beforeAll(async () => {
+    mkdirSync(store, { recursive: true })
+    await remember(alpha, 'few', 'Alpha standards note', ['standards'])
+    await remember(alpha, 'many', 'Alpha long list of facts', ['standards'])
+    await remember(beta, 'mixed', 'Beta release note', ['release'])
+    await remember(beta, 'bare', 'Beta note nothing was mined from', ['release'])
+    await remember('global', 'markup', 'Global note with markup knowledge', ['misc'])
+    await mine(alpha, 'few', { facts: ['Mnemosyne needs Bun', 'Standards apply to all lanes'], preferences: ['Prefers tabs'], instructions: [], timelines: ['Release on 2026-11-01'], kg: [] })
+    await mine(alpha, 'many', {
+      facts: Array.from({ length: 10 }, (_, i) => `Fact number ${i + 1}`),
+      preferences: [],
+      instructions: [],
+      timelines: [],
+      kg: [{ subject: 'Alpha', predicate: 'lists', object: 'facts' }],
+    })
+    await mine(beta, 'mixed', { facts: [LONG], preferences: [], instructions: ['Always run typecheck'], timelines: [], kg: [{ subject: 'Beta', predicate: 'ships', object: 'Mnemosyne' }] })
+    await mine('global', 'markup', { facts: [MARKUP_FACT], preferences: [], instructions: [], timelines: [], kg: [] })
+    const db = new Database(join(store, 'mnemopi.db'))
+    try {
+      db.run("UPDATE working_memory SET recall_count = 7, last_recalled = '2026-10-21T09:00:00.000Z' WHERE id = ?", [ids.few!])
+      db.run("UPDATE working_memory SET recall_count = 1, last_recalled = '2026-10-23T08:00:00.000Z' WHERE id = ?", [ids.many!])
+      db.run('UPDATE working_memory SET recall_count = 0, last_recalled = NULL WHERE id = ?', [ids.bare!])
+    } finally {
+      db.close()
+    }
+    started = await startServer({ root: join(temp.dir, 'root'), store, cli: CLI, activityLog: join(temp.dir, 'activity.jsonl'), pluginRoot: ROOT })
+    const response = await fetch(`http://127.0.0.1:${started.port}/api/galaxy`, { headers: { Authorization: `Bearer ${started.token}` } })
+    expect(response.status).toBe(200)
+    rawBody = (await response.json()) as typeof rawBody
+    const reply = parseGalaxy(rawBody)
+    if (reply === null) throw new Error('not a galaxy')
+    galaxy = buildGalaxy(reply, now)
+  }, 180_000)
+
+  afterAll(() => {
+    started?.stop()
+    temp.dispose()
+  })
+
+  const base = (): MapState => initialState({ reducedMotion: false })
+  const select = (key: string, state = base()) => selectStar(state, galaxy, ids[key]!)
+  const indexOfStar = (key: string) => galaxy.layout.starById[ids[key]!]!
+
+  test('the real reply carries the knowledge, and the page keeps it as the API gave it', () => {
+    expect(rawBody.knowledge.length).toBe(2 + 1 + 1 + 10 + 1 + 1 + 1 + 1 + 1)
+    expect(hasKnowledge(galaxy)).toBe(true)
+    expect(knowledgeOf(galaxy, ids.few!).map(row => row.kind)).toEqual(['fact', 'fact', 'preference', 'timeline'])
+    // Item text can be 500 characters in the store; the route cuts it to 80 and the page shows exactly that (no extra fetch).
+    const long = knowledgeOf(galaxy, ids.mixed!).find(row => row.kind === 'fact')!
+    expect(Array.from(long.text).length).toBeLessThanOrEqual(80)
+    expect(long.text).toBe(rawBody.knowledge.find(row => row.id === long.id)!.text)
+    expect(knowledgeOf(galaxy, ids.bare!)).toEqual([])
+  })
+
+  test('parseGalaxy keeps only well-formed knowledge rows, and an id named like an Object member is safe', () => {
+    const good = { id: 'fact:1', kind: 'fact' as const, text: 'a fact', memory: 'constructor' }
+    const parsed = parseGalaxy({
+      memories: [{ id: 'constructor', owner: 'global' }],
+      knowledge: [good, good, { ...good, id: 'x:2', kind: 'mood' }, { ...good, id: 'fact:3', memory: '' }, { ...good, id: 'fact:4', memory: 7 }, { kind: 'fact', text: 'no id', memory: 'constructor' }, 'junk', null],
+    })!
+    expect(parsed.knowledge).toEqual([good])
+    const built = buildGalaxy(parsed, now)
+    expect(knowledgeOf(built, 'constructor')).toEqual([good])
+    expect(knowledgeOf(built, 'toString')).toEqual([])
+    // Knowledge of a memory the reply does not hold (cut by the 2000 limit) is dropped.
+    const cut = buildGalaxy(parseGalaxy({ memories: [{ id: 'm1', owner: 'global' }], knowledge: [{ ...good, memory: 'gone-from-reply' }] })!, now)
+    expect(hasKnowledge(cut)).toBe(false)
+    // An old reply with no knowledge at all still parses.
+    expect(parseGalaxy({ memories: [{ id: 'm1', owner: 'global' }] })!.knowledge).toEqual([])
+  })
+
+  test('MOON.1.a1: a selected star with Knowledge moons on shows its rows, at most 8, none otherwise', () => {
+    expect(base().moons).toBe(true)
+    expect(moonRows(galaxy, base())).toEqual([])
+    const few = moonRows(galaxy, select('few'))
+    expect(few.map(row => row.text)).toEqual(['Mnemosyne needs Bun', 'Standards apply to all lanes', 'Prefers tabs', 'Release on 2026-11-01'])
+    // More than 8 rows: only 8 moons; the inspector still lists all 11.
+    const many = select('many')
+    expect(knowledgeOf(galaxy, ids.many!).length).toBe(11)
+    expect(MOON_LIMIT).toBe(8)
+    expect(moonRows(galaxy, many).length).toBe(8)
+    expect(moonRows(galaxy, many).map(row => row.id)).toEqual(knowledgeOf(galaxy, ids.many!).slice(0, 8).map(row => row.id))
+    expect(inspector(galaxy, many, now).knowledge!.items.length).toBe(11)
+    expect(inspector(galaxy, many, now).knowledge!.note).toContain('Only the first 8 orbit the star')
+    // Moons off, or the memory forgotten: none.
+    expect(moonRows(galaxy, toggleMoons(select('few')))).toEqual([])
+    expect(toggleMoons(toggleMoons(select('few'))).moons).toBe(true)
+    // 0 knowledge rows: none.
+    expect(moonRows(galaxy, select('bare'))).toEqual([])
+  })
+
+  test('MOON.1.a1: orbit radius 18, 0.45 rad/s, still under reduced motion; MOON.1.a2: colours, sizes and pulse are constants', () => {
+    expect([MOON_RADIUS, MOON_SPEED]).toEqual([18, 0.45])
+    const centre: [number, number, number] = [100, 50, -20]
+    const flat = (at: number[]) => Math.hypot(at[0]! - centre[0], at[2]! - centre[2])
+    for (const t of [0, 1.3, 7]) for (let i = 0; i < 5; i++) expect(flat(moonPosition(centre, i, 5, t, false))).toBeCloseTo(18, 9)
+    // Evenly spread: 8 moons are 45 degrees apart.
+    const angle = (at: number[]) => Math.atan2(at[2]! - centre[2], at[0]! - centre[0])
+    expect(angle(moonPosition(centre, 1, 8, 0, false)) - angle(moonPosition(centre, 0, 8, 0, false))).toBeCloseTo(Math.PI / 4, 9)
+    // 0.45 rad/s: after 2 s the first moon has turned 0.9 rad.
+    expect(angle(moonPosition(centre, 0, 8, 2, false)) - angle(moonPosition(centre, 0, 8, 0, false))).toBeCloseTo(0.9, 9)
+    // Reduced motion: the same place at any time.
+    for (const t of [0.5, 3, 100]) expect(moonPosition(centre, 2, 5, t, true)).toEqual(moonPosition(centre, 2, 5, 0, true))
+    // The mockup's flattening: height swing is 0.45 of the radius.
+    expect(Math.max(...[0, 1, 2, 3, 4, 5, 6, 7].map(i => moonPosition(centre, i, 8, 0.2, false)[1] - centre[1]))).toBeLessThanOrEqual(18 * 0.45 + 1e-9)
+    expect(MOON_COLOURS).toEqual({ fact: '#9ED1FF', preference: '#FF9EC7', instruction: '#9EF0A8', timeline: '#FFD17A', relation: '#C7A6FF' })
+    for (const kind of KNOWLEDGE_KINDS) expect(moonColour(kind)).toBe(MOON_COLOURS[kind])
+    expect([MOON_SIZE, MOON_SIZE_SELECTED]).toEqual([6.5, 9])
+    expect(moonSize(true)).toBeGreaterThan(moonSize(false))
+    expect(moonPulse(false, 1.7)).toBe(0)
+    const pulses = [0, 0.1, 0.2, 0.3, 0.4, 0.5].map(t => moonPulse(true, t))
+    expect(new Set(pulses).size).toBeGreaterThan(3)
+    expect(Math.min(...pulses)).toBeGreaterThanOrEqual(0.1 - 1e-9)
+    expect(Math.max(...pulses)).toBeLessThanOrEqual(0.7 + 1e-9)
+    expect([MOON_LINE_COLOUR, MOON_LINE_OPACITY, MOON_PICK_RADIUS]).toEqual(['#CFE3FF', 0.35, 12])
+  })
+
+  test('MOON.1.a3: the inspector lists the same items as the moons, with the memory usage; a list item and a moon select each other', () => {
+    const state = select('few')
+    const view = inspector(galaxy, state, now)
+    expect(view.knowledge!.items.map(item => item.id)).toEqual(moonRows(galaxy, state).map(row => row.id))
+    expect(view.knowledge!.items.map(item => [item.label, item.text])).toEqual([
+      ['Fact', 'Mnemosyne needs Bun'],
+      ['Fact', 'Standards apply to all lanes'],
+      ['Preference', 'Prefers tabs'],
+      ['Timeline event', 'Release on 2026-11-01'],
+    ])
+    expect(view.knowledge!.items.every(item => item.usage === 'its memory recalled 7 times, last 2 days ago')).toBe(true)
+    expect(view.knowledge!.items.map(item => item.colour)).toEqual([MOON_COLOURS.fact, MOON_COLOURS.fact, MOON_COLOURS.preference, MOON_COLOURS.timeline])
+    expect(view.knowledge!.note).toContain('moons')
+    // Nothing picked yet.
+    expect(selectedMoon(galaxy, state)).toBeNull()
+    expect(view.knowledge!.items.some(item => item.selected)).toBe(false)
+    // Clicking a list item (or a moon: the same call with the moon's row id) picks it; both sides show it.
+    const rows = moonRows(galaxy, state)
+    const picked = selectMoon(state, galaxy, rows[2]!.id)
+    expect(selectedMoon(galaxy, picked)).toBe(rows[2]!.id)
+    expect(inspector(galaxy, picked, now).knowledge!.items.map(item => item.selected)).toEqual([false, false, true, false])
+    expect(selectMoon(picked, galaxy, rows[0]!.id).moon).toBe(rows[0]!.id)
+    // A row of another memory is ignored; a pick never survives a change of star or a reset.
+    expect(selectMoon(state, galaxy, knowledgeOf(galaxy, ids.many!)[0]!.id)).toBe(state)
+    expect(selectStar(picked, galaxy, ids.many!).moon).toBeNull()
+    expect(resetView(picked).moon).toBeNull()
+    expect(focusProject(picked, alpha).moon).toBeNull()
+    expect(selectStar(picked, galaxy, ids.few!).moon).toBe(rows[2]!.id)
+    // The usage wording.
+    expect(usageText(0, null, now)).toBe('its memory was never recalled')
+    expect(usageText(1, '2026-10-23T08:00:00.000Z', now)).toBe('its memory recalled 1 time, last today')
+    expect(usageText(3, '2026-10-22T08:00:00.000Z', now)).toBe('its memory recalled 3 times, last yesterday')
+    expect(usageText(2, null, now)).toBe('its memory recalled 2 times')
+    // Hovering a moon shows its kind and its text.
+    const hit = { kind: 'moon' as const, id: rows[2]!.id, sx: 0, sy: 0 }
+    expect(tooltip(galaxy, hit)).toEqual({ title: 'Preference', sub: 'Prefers tabs' })
+    expect(moonTooltip(galaxy, 'fact:99999')).toBeNull()
+    expect(tooltip(galaxy, { ...hit, id: 'nope' })).toBeNull()
+    // A moon is picked like a star: nearest inside its radius.
+    expect(pickNearest([{ ...hit, sx: 100, sy: 100, radius: MOON_PICK_RADIUS, alpha: 0.9 }], 105, 103)?.kind).toBe('moon')
+  })
+
+  test('MOON.1.a4: a star with no knowledge says so, tells to reload, and has no moons', () => {
+    const state = select('bare')
+    const view = inspector(galaxy, state, now)
+    expect(view.knowledge!.items).toEqual([])
+    expect(view.knowledge!.note).toBe(NO_KNOWLEDGE_NOTE)
+    expect(NO_KNOWLEDGE_NOTE).toContain('Nothing extracted from this memory yet.')
+    expect(NO_KNOWLEDGE_NOTE.toLowerCase()).toContain('reload to see new knowledge')
+    expect(moonRows(galaxy, state)).toEqual([])
+    // Without any knowledge in the page the controls stay disabled.
+    const empty = buildGalaxy(parseGalaxy({ memories: [{ id: 'm1', owner: 'global' }] })!, now)
+    expect(hasKnowledge(empty)).toBe(false)
+  })
+
+  test('MOON.1.a5: an extract activity line changes nothing on the map (knowledge extracted after the page loaded shows after a reload)', () => {
+    const line = { t: '2026-10-23T12:00:00.000Z', action: 'extract', origin: 'hook', owner: alpha, ids: [ids.bare!], count: 3, ok: true, client: 'claude-code' }
+    const before = JSON.stringify([knowledgeCounts(galaxy), moonRows(galaxy, select('bare')), inspector(galaxy, select('bare'), now), [...galaxy.knowledge.keys()]])
+    expect(toMapEvent(line)).toBeNull()
+    // The page enqueues an event only when toMapEvent gives one; so the galaxy it holds is the same afterwards.
+    const after = JSON.stringify([knowledgeCounts(galaxy), moonRows(galaxy, select('bare')), inspector(galaxy, select('bare'), now), [...galaxy.knowledge.keys()]])
+    expect(after).toBe(before)
+    expect(knowledgeOf(galaxy, ids.bare!)).toEqual([])
+    // A save, by contrast, is an event; its new memory has no knowledge until a reload either.
+    expect(toMapEvent({ ...line, action: 'remember' })).not.toBeNull()
+  })
+
+  test('MOON.2.a1: the chips count the memories that have each kind', () => {
+    // few: fact, preference, timeline. many: fact, relation. mixed: fact, instruction, relation. markup: fact. bare: none.
+    expect(knowledgeCounts(galaxy)).toEqual({ fact: 4, preference: 1, instruction: 1, timeline: 1, relation: 2 })
+    expect(CHIP_LABELS).toEqual({ fact: 'Facts', preference: 'Preferences', instruction: 'Instructions', timeline: 'Timeline', relation: 'Relations' })
+    expect(KIND_LABELS.timeline).toBe('Timeline event')
+    // A memory forgotten while the page is open leaves the counts.
+    const copy = buildGalaxy(parseGalaxy(rawBody)!, now)
+    expect(forgetMemory(copy, ids.many!)).toBe(true)
+    expect(knowledgeCounts(copy)).toEqual({ fact: 3, preference: 1, instruction: 1, timeline: 1, relation: 1 })
+    expect(knowledgeOf(copy, ids.many!)).toEqual([])
+  })
+
+  test('MOON.2.a1/a2: picking kinds dims every memory without one of them to a tenth; the note changes', () => {
+    expect(DIM_NO_KNOWLEDGE).toBe(0.1)
+    const target = (state: MapState, key: string) => starTarget(galaxy, indexOfStar(key), state, null)
+    const none = base()
+    const keys = ['few', 'many', 'mixed', 'bare', 'markup']
+    // No kind picked: nothing dims, so every star keeps its plain brightness.
+    const plain = Object.fromEntries(keys.map(key => [key, target(none, key)]))
+    expect(knowledgeNote(none)).toBe('Pick a kind to light up only the memories it was mined from.')
+    // One kind: preference. Only 'few' has it.
+    const pref = toggleKind(none, 'preference')
+    expect([...pref.kinds]).toEqual(['preference'])
+    expect(knowledgeNote(pref)).toBe('Showing only memories with the chosen knowledge; the rest are dimmed.')
+    expect(target(pref, 'few')).toBe(plain.few!)
+    for (const key of ['many', 'mixed', 'bare', 'markup']) expect(target(pref, key)).toBeCloseTo(plain[key]! * 0.1, 12)
+    // Two kinds: preference or instruction. few and mixed stay lit.
+    const two = toggleKind(pref, 'instruction')
+    expect(target(two, 'few')).toBe(plain.few!)
+    expect(target(two, 'mixed')).toBe(plain.mixed!)
+    for (const key of ['many', 'bare', 'markup']) expect(target(two, key)).toBeCloseTo(plain[key]! * 0.1, 12)
+    expect(passesKnowledgeFilter(galaxy, ids.mixed!, two)).toBe(true)
+    expect(passesKnowledgeFilter(galaxy, ids.bare!, two)).toBe(false)
+    expect(passesKnowledgeFilter(galaxy, ids.bare!, none)).toBe(true)
+    // Dropping a chip, an unknown kind, and a selected star (always fully lit).
+    expect([...toggleKind(two, 'preference').kinds]).toEqual(['instruction'])
+    expect(toggleKind(none, 'mood' as KnowledgeKind)).toBe(none)
+    expect(target(select('bare', pref), 'bare')).toBe(1)
+    // Dimming composes with the other rules (a focused project) instead of replacing them.
+    const focused = focusProject(pref, beta)
+    expect(target(focused, 'mixed')).toBeCloseTo(starTarget(galaxy, indexOfStar('mixed'), focusProject(none, beta), null) * 0.1, 12)
+  })
+
+  test('knowledge text is untrusted: the markup stays plain text in the state and is only ever set with textContent', () => {
+    const row = knowledgeOf(galaxy, ids.markup!)[0]!
+    expect(row.text).toBe(rawBody.knowledge.find(r => r.id === row.id)!.text)
+    expect(row.text).toContain('<img src=x onerror=alert(1)>')
+    const view = inspector(galaxy, select('markup'), now)
+    expect(view.knowledge!.items[0]!.text).toBe(row.text)
+    const map = readFileSync(join(ROOT, 'ui', 'map.ts'), 'utf8')
+    expect(map).not.toMatch(/\binnerHTML\b|insertAdjacentHTML|outerHTML/)
+  })
+
+  test('the page: a star selected on the real reply lists its knowledge, a list item picks, the chips count and dim, moons toggle', async () => {
+    const html = readFileSync(join(ROOT, 'ui', 'index.html'), 'utf8')
+    const fake = fakeDom(html)
+    const g = globalThis as Record<string, unknown>
+    const saved = { document: g.document, CSS: g.CSS, HTMLElement: g.HTMLElement }
+    g.document = fake.document
+    g.CSS = { escape: (v: string) => v }
+    g.HTMLElement = FakeBase
+    try {
+      const { createMap } = (await import(join(ROOT, 'ui', 'map.ts'))) as { createMap: (host: unknown) => { show: (id: string) => void } }
+      const view = createMap({ api: async () => new Response(JSON.stringify(rawBody), { status: 200 }), openMemory: () => {}, status: () => {} })
+      await Bun.sleep(40)
+      const node = (id: string) => fake.nodes.get(id)!
+      const items = () => node('map-inspector').all().filter(n => n.dataset.knowledge !== undefined)
+      // The chips: enabled by the knowledge, with the counts.
+      const chips = node('map-know').groups
+      expect(chips.map(chip => chip.attributes.get('aria-disabled'))).toEqual([undefined, undefined, undefined, undefined, undefined])
+      expect(chips.map(chip => chip.textContent)).toEqual(['4', '1', '1', '1', '2'])
+      expect(node('map-moons').disabled).toBe(false)
+      expect(node('map-know-note').textContent).toBe('Pick a kind to light up only the memories it was mined from.')
+      node('map-know').groups[1]!.fire('click')
+      expect(chips.map(chip => chip.attributes.get('aria-pressed'))).toEqual(['false', 'true', 'false', 'false', 'false'])
+      expect(node('map-know-note').textContent).toBe('Showing only memories with the chosen knowledge; the rest are dimmed.')
+      node('map-know').groups[1]!.fire('click')
+      expect(chips.map(chip => chip.attributes.get('aria-pressed'))).toEqual(['false', 'false', 'false', 'false', 'false'])
+      // A star with knowledge: the list has one button per row, text as plain text.
+      view.show(ids.markup!)
+      expect(items().length).toBe(1)
+      expect(items()[0]!.texts()).toContain(MARKUP_FACT)
+      expect(items()[0]!.children.every(child => !(child instanceof FakeNode) || child.tagName !== 'img')).toBe(true)
+      view.show(ids.many!)
+      expect(items().length).toBe(11)
+      expect(items().every(item => item.attributes.get('aria-pressed') === 'false')).toBe(true)
+      items()[4]!.fire('click')
+      expect(items().map(item => item.attributes.get('aria-pressed'))).toEqual(items().map((_, i) => String(i === 4)))
+      expect(items()[4]!.className).toContain('is-selected')
+      // Moons off: the list stays, the note says how to bring the moons back.
+      node('map-moons').checked = false
+      node('map-moons').fire('change')
+      expect(items().length).toBe(11)
+      expect(node('map-inspector').texts().join(' ')).toContain('Turn on Knowledge moons')
+      // A star with none: the empty text.
+      view.show(ids.bare!)
+      expect(items().length).toBe(0)
+      expect(node('map-inspector').texts().join(' ')).toContain(NO_KNOWLEDGE_NOTE)
+    } finally {
+      g.document = saved.document
+      g.CSS = saved.CSS
+      g.HTMLElement = saved.HTMLElement
+    }
+  })
+
+  test('the scene file draws what the state says: eight sprites, a line and a kind label per moon, the state functions for place, size and pulse', () => {
+    const map = readFileSync(join(ROOT, 'ui', 'map.ts'), 'utf8')
+    const moons = map.slice(map.indexOf('// ---- Knowledge moons'), map.indexOf('/** A spark lands'))
+    expect(moons).toContain('MOON_LIMIT')
+    expect(moons).toContain('moonRows(g, state)')
+    expect(moons).toContain('moonPosition(star.position, i, rows.length, clock, state.reducedMotion)')
+    expect(moons).toContain('moonSize(chosen)')
+    expect(moons).toContain('moonPulse(chosen, clock)')
+    expect(moons).toContain('makeLabel(row.kind')
+    expect(moons).toContain('array.set(star.position, 0)')
+    // Picking and clicking go through the state: a moon click selects its row, never flies.
+    expect(map).toContain("kind: 'moon'")
+    expect(map).toContain('selectMoon(state, galaxy, hit.id)')
+    expect(map).toContain('toggleKind(state')
   })
 })

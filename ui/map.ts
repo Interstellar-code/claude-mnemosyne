@@ -85,10 +85,23 @@ import {
   initialState,
   inspector,
   isClick,
+  hasKnowledge,
   isHollow,
+  KNOWLEDGE_KINDS,
+  knowledgeCounts,
+  knowledgeNote,
+  type KnowledgeKind,
   labelScale,
   type LayoutName,
   lerp3,
+  MOON_LIMIT,
+  MOON_LINE_COLOUR,
+  MOON_LINE_OPACITY,
+  moonColour,
+  moonPosition,
+  moonPulse,
+  moonRows,
+  moonSize,
   type MapState,
   NO_TOOLTIP,
   parseGalaxy,
@@ -103,6 +116,8 @@ import {
   rgba,
   saveLayout,
   selectedPulse,
+  selectedMoon,
+  selectMoon,
   selectStar,
   setColourBy,
   setLayout,
@@ -115,7 +130,9 @@ import {
   STARFIELD_COUNT,
   threadOpacity,
   toggleBridges,
+  toggleKind,
   toggleLayer,
+  toggleMoons,
   toggleProject,
   toggleRotation,
   toggleSpokes,
@@ -310,6 +327,13 @@ export function createMap(host: MapHost): MapView {
   let findTimer: ReturnType<typeof setTimeout> | 0 = 0
   let lastFound: Vec3 | null = null
   let connected = false
+  // Knowledge moons: eight glow sprites, eight lines and their kind labels, kept in the scene and shown for the selected star.
+  let moonSprites: Any[] = []
+  let moonLines: Any[] = []
+  let moonLabels: Any[] = []
+  let moonKey = ''
+  let moonSpots: { id: string; position: Vec3; sprite: Any }[] = []
+  let lineClasses: { Line: new (geometry: Any, material: Any) => Any; Material: new (params: Record<string, unknown>) => Any } | null = null
 
   const canvasBox = byId('map-canvas')
   const stage = byId('map-stage')
@@ -536,6 +560,21 @@ export function createMap(host: MapHost): MapView {
       if (!section) continue
       const block = el('section', undefined, 'insp-section')
       block.append(el('h3', title, 'insp-section-title'), el('p', section.note, 'insp-note'))
+      // Knowledge text comes from the store: textContent only (el), never markup.
+      if ('items' in section && section.items.length > 0) {
+        const list = el('div', undefined, 'rail-list')
+        for (const item of section.items) {
+          const button = el('button', undefined, item.selected ? 'rail-item is-selected' : 'rail-item')
+          button.type = 'button'
+          button.dataset.knowledge = item.id
+          button.setAttribute('aria-pressed', String(item.selected))
+          button.title = `${item.label}: ${item.text}`
+          button.append(dot(item.colour), el('span', item.text, 'rail-name'), el('span', item.label, 'rail-mark'))
+          button.addEventListener('click', () => dispatch(selectMoon(state, g, item.id)))
+          list.append(button, el('p', `${item.label}, ${item.usage}`, 'insp-note'))
+        }
+        block.append(list)
+      }
       parts.push(block)
     }
     if (view.memory) {
@@ -561,6 +600,7 @@ export function createMap(host: MapHost): MapView {
     byId<HTMLInputElement>('map-bridges').checked = state.bridges
     byId<HTMLInputElement>('map-layer-recall').checked = state.layerRecall
     byId<HTMLInputElement>('map-layer-write').checked = state.layerWrite
+    renderKnowledgeControls(g)
     rotate.setAttribute('aria-pressed', String(state.rotating))
     byId('map-found').textContent = found === null ? '' : foundText(state.query, found)
     const pillText = liveLabel(state, connected)
@@ -569,6 +609,25 @@ export function createMap(host: MapHost): MapView {
     byId('map-live-state').parentElement?.setAttribute('aria-pressed', String(state.live))
     renderStrip()
     syncDemoTimer()
+  }
+
+  /** Knowledge moons and the five chips: disabled until the page holds some knowledge, then live. */
+  function renderKnowledgeControls(g: Galaxy) {
+    const any = hasKnowledge(g)
+    const moons = byId<HTMLInputElement>('map-moons')
+    moons.disabled = !any
+    moons.checked = state.moons
+    const counts = knowledgeCounts(g)
+    for (const chip of byId('map-know').querySelectorAll<HTMLButtonElement>('button[data-kind]')) {
+      const kind = chip.dataset.kind as KnowledgeKind
+      if (!KNOWLEDGE_KINDS.includes(kind)) continue
+      chip.setAttribute('aria-pressed', String(state.kinds.has(kind)))
+      if (any) chip.removeAttribute('aria-disabled')
+      else chip.setAttribute('aria-disabled', 'true')
+      const number = chip.querySelector('span.mono')
+      if (number) number.textContent = String(counts[kind])
+    }
+    byId('map-know-note').textContent = any ? knowledgeNote(state) : 'No knowledge extracted yet. Run /mnemosyne-knowledge, then reload.'
   }
 
   // ---- The scene ----
@@ -738,6 +797,8 @@ export function createMap(host: MapHost): MapView {
       if (object.isLine && object.material) {
         object.material.blending = ADDITIVE
         object.material.depthWrite = false
+        // The library's own Line and its material class make the moons' lines too (the bundle exports neither).
+        if (lineClasses === null && typeof object.constructor === 'function' && typeof object.material.constructor === 'function') lineClasses = { Line: object.constructor, Material: object.material.constructor }
       }
       if (mesh === null && object.isMesh && object.geometry && object.material) mesh = object
     })
@@ -849,6 +910,7 @@ export function createMap(host: MapHost): MapView {
     const follow = Math.min(1, dt * 5)
     const selectedKey = state.selected
     for (const spark of stepSparks(sparkPool, dt)) arrive(spark)
+    updateMoons(follow)
     for (const v of visuals) {
       v.alpha += (v.target - v.alpha) * follow
       v.labelAlpha += (v.labelTarget - v.labelAlpha) * follow
@@ -900,6 +962,102 @@ export function createMap(host: MapHost): MapView {
       sprite.scale.set(9, 9, 1)
       scene.add(sprite)
       return sprite
+    })
+  }
+
+  // ---- Knowledge moons: the selected star's knowledge rows, orbiting it ----
+
+  /** Eight glow sprites in the library's scene, one per possible moon; each frame shows as many as the selected star has. */
+  function makeMoonSprites() {
+    const scene = (graph as unknown as Loose | null)?.scene?.() as Any
+    if (!scene || three === null) return
+    moonSprites = Array.from({ length: MOON_LIMIT }, () => {
+      const sprite = makeSprite('glow', '#FFFFFF')
+      if (sprite === null) return null
+      sprite.scale.set(moonSize(false), moonSize(false), 1)
+      scene.add(sprite)
+      return sprite
+    })
+  }
+
+  /** The thin lines, once the library has drawn its own (their classes are where ours come from). */
+  function makeMoonLines() {
+    const scene = (graph as unknown as Loose | null)?.scene?.() as Any
+    const T = three
+    if (!scene || T === null || lineClasses === null || moonLines.length > 0) return
+    const { Line, Material } = lineClasses
+    moonLines = Array.from({ length: MOON_LIMIT }, () => {
+      const geometry = new T.BufferGeometry()
+      geometry.setAttribute('position', new T.BufferAttribute(new Float32Array(6), 3))
+      const line = new Line(geometry, new Material({ color: Number.parseInt(MOON_LINE_COLOUR.slice(1), 16), transparent: true, opacity: 0, depthWrite: false, blending: ADDITIVE }))
+      line.frustumCulled = false
+      line.visible = false
+      scene.add(line)
+      return line
+    })
+  }
+
+  /** New labels (the kind of each moon) when the selected star or its moons change; the old ones are let go. */
+  function setMoonLabels(rows: readonly { kind: KnowledgeKind }[], key: string) {
+    const scene = (graph as unknown as Loose | null)?.scene?.() as Any
+    for (const label of moonLabels) {
+      label.parent?.remove(label)
+      label.material?.map?.dispose?.()
+      label.material?.dispose?.()
+    }
+    moonLabels = []
+    moonKey = key
+    if (!scene) return
+    moonLabels = rows.flatMap(row => {
+      const label = makeLabel(row.kind, 4.4, moonColour(row.kind))
+      if (label === null) return []
+      scene.add(label)
+      return [label]
+    })
+  }
+
+  /** Per frame: the moons of the selected star at their orbit places, the lines to the star, the labels and the selected moon's pulse. */
+  function updateMoons(follow: number) {
+    const g = galaxy
+    const rows = g === null ? [] : moonRows(g, state)
+    const star = state.selected === null ? undefined : starVisual.get(state.selected)
+    const key = star === undefined ? '' : `${state.selected}|${rows.map(row => row.id).join(',')}`
+    if (key !== moonKey) setMoonLabels(star === undefined ? [] : rows, key)
+    if (moonLines.length === 0) makeMoonLines()
+    const picked = g === null ? null : selectedMoon(g, state)
+    moonSpots = []
+    moonSprites.forEach((sprite, i) => {
+      if (!sprite) return
+      const row = star === undefined ? undefined : rows[i]
+      const line = moonLines[i]
+      const label = moonLabels[i]
+      if (row === undefined || star === undefined) {
+        sprite.material.opacity += (0 - sprite.material.opacity) * follow
+        if (line) line.visible = false
+        if (label) label.material.opacity += (0 - label.material.opacity) * follow
+        return
+      }
+      const at = moonPosition(star.position, i, rows.length, clock, state.reducedMotion)
+      const chosen = row.id === picked
+      const [r, gr, b] = rgb01(moonColour(row.kind))
+      sprite.position.set(at[0], at[1], at[2])
+      sprite.material.color.setRGB(r, gr, b)
+      const size = moonSize(chosen) * (1 + moonPulse(chosen, clock) * 1.6)
+      sprite.scale.set(size, size, 1)
+      sprite.material.opacity += (0.95 - sprite.material.opacity) * follow
+      if (line) {
+        const array = line.geometry.attributes.position.array as Float32Array
+        array.set(star.position, 0)
+        array.set(at, 3)
+        line.geometry.attributes.position.needsUpdate = true
+        line.material.opacity = MOON_LINE_OPACITY
+        line.visible = true
+      }
+      if (label) {
+        label.position.set(at[0], at[1] + 5, at[2])
+        label.material.opacity += (0.9 - label.material.opacity) * follow
+      }
+      moonSpots.push({ id: row.id, position: at, sprite })
     })
   }
 
@@ -1066,6 +1224,12 @@ export function createMap(host: MapHost): MapView {
       const screen = l.graph2ScreenCoords(v.position[0], v.position[1], v.position[2]) as { x: number; y: number }
       out.push({ kind: v.kind, id: v.key, sx: screen.x, sy: screen.y, radius: PICK_RADIUS[v.kind], alpha: v.alpha })
     }
+    // The moons of the selected star are picked like stars, in screen space.
+    for (const spot of moonSpots) {
+      if (view[2]! * spot.position[0] + view[6]! * spot.position[1] + view[10]! * spot.position[2] + view[14]! >= 0) continue
+      const screen = l.graph2ScreenCoords(spot.position[0], spot.position[1], spot.position[2]) as { x: number; y: number }
+      out.push({ kind: 'moon', id: spot.id, sx: screen.x, sy: screen.y, radius: PICK_RADIUS.moon, alpha: spot.sprite.material.opacity })
+    }
     return out
   }
 
@@ -1103,6 +1267,9 @@ export function createMap(host: MapHost): MapView {
     const hit = pick()
     if (hit === null) return
     if (hit.kind === 'star') flyToStar(hit.id)
+    else if (hit.kind === 'moon') {
+      if (galaxy !== null) dispatch(selectMoon(state, galaxy, hit.id))
+    }
     else if (hit.kind === 'hub') flyToTopic(hit.id)
     else flyToProject(hit.id)
   }
@@ -1128,6 +1295,14 @@ export function createMap(host: MapHost): MapView {
   }
   byId('map-spokes').addEventListener('change', () => dispatch(toggleSpokes(state)))
   byId('map-bridges').addEventListener('change', () => dispatch(toggleBridges(state)))
+  byId('map-moons').addEventListener('change', () => dispatch(toggleMoons(state)))
+  for (const chip of byId('map-know').querySelectorAll<HTMLButtonElement>('button[data-kind]')) {
+    chip.addEventListener('click', () => {
+      // A chip is inert until the page holds some knowledge.
+      if (galaxy === null || !hasKnowledge(galaxy)) return
+      dispatch(toggleKind(state, chip.dataset.kind as KnowledgeKind))
+    })
+  }
   byId('map-layer-recall').addEventListener('change', () => {
     dispatch(toggleLayer(state, 'recall'))
     if (!state.layerRecall) dropLayer('recall')
@@ -1232,6 +1407,7 @@ export function createMap(host: MapHost): MapView {
       glowTexture.glow = textures.glow
       glowTexture.ring = textures.ring
       makeSparkSprites()
+      makeMoonSprites()
     } catch (err) {
       graph = null
       say(`The 3D map could not start (${err instanceof Error ? err.message : String(err)}).`)

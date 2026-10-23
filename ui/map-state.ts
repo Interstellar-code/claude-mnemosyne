@@ -17,9 +17,17 @@ import type { MapEvent, MapEventKind } from './map-live'
 
 type GalaxyProject = { owner: string; label: string; count: number; recalls: number }
 type GalaxyMemory = { id: string; owner: string; tags: string[]; recalls: number; lastRecalled: string | null; created: string | null; label: string }
-export type GalaxyReply = { projects: GalaxyProject[]; memories: GalaxyMemory[]; meaning: boolean; total: number; shown: number }
+/** The five kinds of knowledge a memory is mined into, in the order the chips show them. */
+export const KNOWLEDGE_KINDS = ['fact', 'preference', 'instruction', 'timeline', 'relation'] as const
+export type KnowledgeKind = (typeof KNOWLEDGE_KINDS)[number]
+/** One knowledge row of /api/galaxy: its id (`<kind>:<rowid>`), kind, text (the API cuts it to 80) and the memory it came from. */
+type KnowledgeRow = { id: string; kind: KnowledgeKind; text: string; memory: string }
+export type GalaxyReply = { projects: GalaxyProject[]; memories: GalaxyMemory[]; knowledge: KnowledgeRow[]; meaning: boolean; total: number; shown: number }
 
 const LABEL_CHARS = 80
+// Knowledge text is shown as the API gives it (a KSTORE item can be 500 characters, the route cuts it to 80); this only bounds a bad reply.
+const KNOWLEDGE_CHARS = 500
+const isKind = (value: unknown): value is KnowledgeKind => (KNOWLEDGE_KINDS as readonly unknown[]).includes(value)
 
 const text = (value: unknown, fallback = '') => (typeof value === 'string' ? value : fallback)
 const count = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0)
@@ -44,7 +52,12 @@ export function parseGalaxy(body: unknown): GalaxyReply | null {
   const projects = rows(raw.projects)
     .filter(row => typeof row.owner === 'string' && row.owner !== '')
     .map(row => ({ owner: text(row.owner), label: plainLabel(text(row.label, text(row.owner)), 60), count: count(row.count), recalls: count(row.recalls) }))
-  return { projects, memories, meaning: raw.meaning === true, total: Math.max(count(raw.total), memories.length), shown: memories.length }
+  const seenIds = new Set<string>()
+  const knowledge = rows(raw.knowledge)
+    .filter(row => typeof row.id === 'string' && row.id !== '' && isKind(row.kind) && typeof row.memory === 'string' && row.memory !== '')
+    .filter(row => !seenIds.has(row.id as string) && seenIds.add(row.id as string))
+    .map(row => ({ id: text(row.id), kind: row.kind as KnowledgeKind, text: plainLabel(text(row.text), KNOWLEDGE_CHARS), memory: text(row.memory) }))
+  return { projects, memories, knowledge, meaning: raw.meaning === true, total: Math.max(count(raw.total), memories.length), shown: memories.length }
 }
 
 // ---- WebGL, and the library's tooltip ----
@@ -185,6 +198,10 @@ export type Galaxy = {
   colours: Map<string, string>
   /** Memories forgotten while the page is open: their stars fade out and no count holds them. */
   gone: Set<string>
+  /** The knowledge rows of each memory (by memory id), in the order the server sent them; a Map so an id named like an Object member is safe. */
+  knowledge: Map<string, KnowledgeRow[]>
+  /** The same rows by their own id. */
+  knowledgeById: Map<string, KnowledgeRow>
 }
 
 const DAY_MS = 86_400_000
@@ -211,7 +228,23 @@ export function buildGalaxy(reply: GalaxyReply, now = Date.now()): Galaxy {
     maxRecalls: layout.stars.reduce((a, star) => Math.max(a, star.recalls), 0),
     colours,
     gone: new Set(),
+    ...knowledgeIndex(reply.knowledge, input),
   }
+}
+
+/** The knowledge rows grouped by their memory; a row whose memory is not in the reply (cut by the 2000 limit) is dropped. */
+function knowledgeIndex(rows: readonly KnowledgeRow[], memories: readonly { id: string }[]): Pick<Galaxy, 'knowledge' | 'knowledgeById'> {
+  const known = new Set(memories.map(memory => memory.id))
+  const knowledge = new Map<string, KnowledgeRow[]>()
+  const knowledgeById = new Map<string, KnowledgeRow>()
+  for (const row of rows) {
+    if (!known.has(row.memory)) continue
+    const list = knowledge.get(row.memory) ?? []
+    list.push(row)
+    knowledge.set(row.memory, list)
+    knowledgeById.set(row.id, row)
+  }
+  return { knowledge, knowledgeById }
 }
 
 /** The stars still in the galaxy: all but the memories forgotten while the page was open. */
@@ -274,6 +307,12 @@ export type MapState = {
   topic: string | null
   selected: string | null
   query: string
+  /** Knowledge moons on (MOON.1): the knowledge rows of the selected memory orbit its star. */
+  moons: boolean
+  /** The selected knowledge row (its id) of the selected memory, or null. */
+  moon: string | null
+  /** The Knowledge chips picked (MOON.2): only memories with one of these kinds stay lit. */
+  kinds: ReadonlySet<KnowledgeKind>
 }
 
 export function initialState(options: { reducedMotion: boolean; layout?: LayoutName }): MapState {
@@ -293,6 +332,9 @@ export function initialState(options: { reducedMotion: boolean; layout?: LayoutN
     topic: null,
     selected: null,
     query: '',
+    moons: true,
+    moon: null,
+    kinds: new Set<KnowledgeKind>(),
   }
 }
 
@@ -334,22 +376,22 @@ export const toggleLayer = (state: MapState, layer: 'recall' | 'write'): MapStat
 export const setQuery = (state: MapState, query: string): MapState => (query === state.query ? state : { ...state, query })
 
 /** Focus a project: its stars stay bright, the others dim; no topic or memory is picked. */
-export const focusProject = (state: MapState, owner: string): MapState => ({ ...state, project: owner, topic: null, selected: null })
+export const focusProject = (state: MapState, owner: string): MapState => ({ ...state, project: owner, topic: null, selected: null, moon: null })
 
 /** Focus a topic (a hub key `<owner>/<tag>`): its project comes into focus too. */
 export function focusTopic(state: MapState, galaxy: Galaxy, key: string): MapState {
   const hub = galaxy.layout.hubs[slotOf(galaxy.layout.hubByKey, key)]
-  return hub === undefined ? state : { ...state, project: hub.project, topic: key, selected: null }
+  return hub === undefined ? state : { ...state, project: hub.project, topic: key, selected: null, moon: null }
 }
 
 /** Select a memory: its project and topic come into focus. */
 export function selectStar(state: MapState, galaxy: Galaxy, id: string): MapState {
   const star = galaxy.layout.stars[slotOf(galaxy.layout.starById, id)]
-  return star === undefined || galaxy.gone.has(id) ? state : { ...state, project: star.owner, topic: star.topic, selected: id }
+  return star === undefined || galaxy.gone.has(id) ? state : { ...state, project: star.owner, topic: star.topic, selected: id, moon: state.selected === id ? state.moon : null }
 }
 
 /** Reset view: no focus, no memory, no Find. */
-export const resetView = (state: MapState): MapState => ({ ...state, project: null, topic: null, selected: null, query: '' })
+export const resetView = (state: MapState): MapState => ({ ...state, project: null, topic: null, selected: null, moon: null, query: '' })
 
 /** Hide or show a project's stars; hiding the focused project clears the focus. */
 export function toggleProject(state: MapState, owner: string): MapState {
@@ -357,7 +399,7 @@ export function toggleProject(state: MapState, owner: string): MapState {
   if (hidden.has(owner)) hidden.delete(owner)
   else hidden.add(owner)
   const hiding = hidden.has(owner)
-  return hiding && state.project === owner ? { ...state, hidden, project: null, topic: null, selected: null } : { ...state, hidden }
+  return hiding && state.project === owner ? { ...state, hidden, project: null, topic: null, selected: null, moon: null } : { ...state, hidden }
 }
 
 // ---- The path bar ----
@@ -380,7 +422,7 @@ export function pathBar(state: MapState, galaxy: Galaxy): Crumb[] {
 export function goTo(state: MapState, level: PathLevel): MapState {
   if (level === 'all') return resetView(state)
   if (level === 'project') return state.project === null ? state : focusProject(state, state.project)
-  return state.topic === null ? state : { ...state, selected: null }
+  return state.topic === null ? state : { ...state, selected: null, moon: null }
 }
 
 // ---- Find ----
@@ -424,14 +466,17 @@ export const foundText = (query: string, found: Found) => (query.trim() === '' ?
 const DIM_OTHER_PROJECT = 0.14
 const DIM_OTHER_TOPIC = 0.4
 const DIM_NO_MATCH = 0.08
+/** A memory without any of the picked kinds keeps a tenth of its brightness (MOON.2). */
+export const DIM_NO_KNOWLEDGE = 0.1
 
-/** The opacity a star settles at: brightness by age, 0 hidden, 0.14 outside the focused project, 0.4 in its other topics, 0.08 off a Find, 1 when selected. */
+/** The opacity a star settles at: brightness by age, 0 hidden, 0.14 outside the focused project, 0.4 in its other topics, 0.08 off a Find, a tenth without a picked kind of knowledge, 1 when selected. */
 export function starTarget(galaxy: Galaxy, index: number, state: MapState, found: Found | null): number {
   const star = galaxy.layout.stars[index]
   if (star === undefined) return 0
   if (state.hidden.has(star.owner) || galaxy.gone.has(star.id)) return 0
   if (state.selected === star.id) return 1
   let a = starBrightness(galaxy.ages[index] ?? 0, galaxy.oldestAge)
+  if (!passesKnowledgeFilter(galaxy, star.id, state)) a *= DIM_NO_KNOWLEDGE
   if (state.project !== null && star.owner !== state.project) a *= DIM_OTHER_PROJECT
   if (state.topic !== null && star.topic !== state.topic && star.owner === state.project) a *= DIM_OTHER_TOPIC
   if (found !== null && state.query.trim() !== '' && !found.ids.has(star.id)) a *= DIM_NO_MATCH
@@ -452,11 +497,122 @@ export function hubTarget(state: MapState, project: string, key: string): number
 /** Topic labels show only for the focused project. */
 export const hubLabelTarget = (state: MapState, project: string) => (state.project === project && !state.hidden.has(project) ? 0.95 : 0)
 
+// ---- Knowledge moons (MOON.1) and the knowledge filter (MOON.2) ----
+//
+// Every knowledge row names the memory it was mined from. The selected star shows
+// its rows (at most 8) as moons on a circle of radius 18; the Knowledge chips
+// count the memories that have each kind and, when picked, dim the others. The
+// numbers below are the mockup's (design/MapGalaxy.dc.html: moonHex, moonRgb,
+// frame's moons block, knowChips, knowFilter). The data is whatever /api/galaxy
+// held at page load: an `extract` activity line does not refetch it, so knowledge
+// mined later shows after a reload (stated limit).
+
+export const MOON_LIMIT = 8
+export const MOON_RADIUS = 18
+/** Orbit speed in radians per second; 0 under prefers-reduced-motion (the moons stand still). */
+export const MOON_SPEED = 0.45
+export const MOON_SIZE = 6.5
+export const MOON_SIZE_SELECTED = 9
+/** The thin line from the star to each moon. */
+export const MOON_LINE_OPACITY = 0.35
+export const MOON_LINE_COLOUR = '#CFE3FF'
+export const MOON_PICK_RADIUS = 12
+export const MOON_COLOURS: Readonly<Record<KnowledgeKind, string>> = { fact: '#9ED1FF', preference: '#FF9EC7', instruction: '#9EF0A8', timeline: '#FFD17A', relation: '#C7A6FF' }
+/** What the chips and the moon labels call a kind. */
+export const KIND_LABELS: Readonly<Record<KnowledgeKind, string>> = { fact: 'Fact', preference: 'Preference', instruction: 'Instruction', timeline: 'Timeline event', relation: 'Relation' }
+export const CHIP_LABELS: Readonly<Record<KnowledgeKind, string>> = { fact: 'Facts', preference: 'Preferences', instruction: 'Instructions', timeline: 'Timeline', relation: 'Relations' }
+export const moonColour = (kind: KnowledgeKind) => MOON_COLOURS[kind]
+
+/** The knowledge rows of a memory in the order sent (all of them; the inspector lists every row, the moons take the first 8); none for a forgotten memory. */
+export function knowledgeOf(galaxy: Galaxy, id: string): KnowledgeRow[] {
+  return galaxy.gone.has(id) ? [] : (galaxy.knowledge.get(id) ?? [])
+}
+
+/** Whether the page holds any knowledge at all: the controls stay disabled until it does. */
+export const hasKnowledge = (galaxy: Galaxy) => galaxy.knowledgeById.size > 0
+
+/** The rows that orbit the selected memory: at most 8, and none while Knowledge moons is off or nothing is selected. */
+export function moonRows(galaxy: Galaxy, state: MapState): KnowledgeRow[] {
+  if (!state.moons || state.selected === null) return []
+  return knowledgeOf(galaxy, state.selected).slice(0, MOON_LIMIT)
+}
+
+/** The selected knowledge row, only while it belongs to the selected memory and is one of the moons shown or listed. */
+export function selectedMoon(galaxy: Galaxy, state: MapState): string | null {
+  if (state.moon === null || state.selected === null) return null
+  return knowledgeOf(galaxy, state.selected).some(row => row.id === state.moon) ? state.moon : null
+}
+
+/** Picks a knowledge row (a moon or a list item): the other one follows. A row of another memory is ignored. */
+export function selectMoon(state: MapState, galaxy: Galaxy, id: string): MapState {
+  if (state.selected === null || state.moon === id) return state
+  return knowledgeOf(galaxy, state.selected).some(row => row.id === id) ? { ...state, moon: id } : state
+}
+
+export const toggleMoons = (state: MapState): MapState => ({ ...state, moons: !state.moons })
+
+/** Where moon i of n is: on a circle of radius 18 around the star, flattened to 0.45 in height, turning at 0.45 rad/s (still when reduced). */
+export function moonPosition(centre: Vec3, i: number, n: number, seconds: number, reducedMotion: boolean): Vec3 {
+  const angle = seconds * (reducedMotion ? 0 : MOON_SPEED) + (i * Math.PI * 2) / Math.max(1, n)
+  return [centre[0] + Math.cos(angle) * MOON_RADIUS, centre[1] + Math.sin(angle) * MOON_RADIUS * 0.45, centre[2] + Math.sin(angle) * MOON_RADIUS]
+}
+
+/** A moon's glow size: 6.5, and 9 for the selected one. */
+export const moonSize = (selected: boolean) => (selected ? MOON_SIZE_SELECTED : MOON_SIZE)
+/** The selected moon's pulse: 0.4 + 0.3 sin(5t); the others do not pulse. */
+export const moonPulse = (selected: boolean, seconds: number) => (selected ? 0.4 + 0.3 * Math.sin(seconds * 5) : 0)
+
+/** The kinds a memory has knowledge of. */
+function kindsOf(galaxy: Galaxy, id: string): Set<KnowledgeKind> {
+  return new Set(knowledgeOf(galaxy, id).map(row => row.kind))
+}
+
+/** How many live memories have each kind (the chips' numbers). */
+export function knowledgeCounts(galaxy: Galaxy): Record<KnowledgeKind, number> {
+  const counts: Record<KnowledgeKind, number> = { fact: 0, preference: 0, instruction: 0, timeline: 0, relation: 0 }
+  for (const star of liveStars(galaxy)) for (const kind of kindsOf(galaxy, star.id)) counts[kind]++
+  return counts
+}
+
+/** Picks or drops a chip. */
+export function toggleKind(state: MapState, kind: KnowledgeKind): MapState {
+  if (!KNOWLEDGE_KINDS.includes(kind)) return state
+  const kinds = new Set(state.kinds)
+  if (kinds.has(kind)) kinds.delete(kind)
+  else kinds.add(kind)
+  return { ...state, kinds }
+}
+
+/** The one-line note under the chips. */
+export const knowledgeNote = (state: MapState) =>
+  state.kinds.size > 0 ? 'Showing only memories with the chosen knowledge; the rest are dimmed.' : 'Pick a kind to light up only the memories it was mined from.'
+
+/** The filter's rule: with no kind picked every memory passes; with some, a memory passes when it has at least one of them. */
+export function passesKnowledgeFilter(galaxy: Galaxy, id: string, state: MapState): boolean {
+  if (state.kinds.size === 0) return true
+  return knowledgeOf(galaxy, id).some(row => state.kinds.has(row.kind))
+}
+
+/** The hover text of a moon: its kind and its text. */
+export function moonTooltip(galaxy: Galaxy, id: string): { title: string; sub: string } | null {
+  const row = galaxy.knowledgeById.get(id)
+  return row === undefined ? null : { title: KIND_LABELS[row.kind], sub: row.text }
+}
+
+/** "its memory recalled 3 times, last 2 days ago" (the KAPI usage of the memory a row came from). */
+export function usageText(recalls: number, lastRecalled: string | null, now = Date.now()): string {
+  if (recalls <= 0) return 'its memory was never recalled'
+  const last = lastRecalled === null ? Number.NaN : Date.parse(lastRecalled)
+  if (!Number.isFinite(last)) return `its memory recalled ${plural(recalls, 'time')}`
+  const days = Math.max(0, Math.floor((now - last) / DAY_MS))
+  return `its memory recalled ${plural(recalls, 'time')}, last ${days === 0 ? 'today' : days === 1 ? 'yesterday' : `${days} days ago`}`
+}
+
 // ---- Picking and the tooltip ----
 
-export type Hit = { kind: 'star' | 'hub' | 'core'; id: string; sx: number; sy: number }
+export type Hit = { kind: 'star' | 'hub' | 'core' | 'moon'; id: string; sx: number; sy: number }
 export type Candidate = Hit & { radius: number; alpha: number }
-export const PICK_RADIUS = { star: 10, hub: 12, core: 22 } as const
+export const PICK_RADIUS = { star: 10, hub: 12, core: 22, moon: MOON_PICK_RADIUS } as const
 const PICK_MIN_ALPHA = 0.2
 
 /** The nearest candidate whose screen distance is inside its radius; a faint one (opacity under 0.2) cannot be picked. */
@@ -494,6 +650,7 @@ const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
 /** The tooltip for a hit: a memory says topic · project, recalls, saved date and label; a hub or core says how many memories and 'Click to fly in'. */
 export function tooltip(galaxy: Galaxy, hit: Hit): { title: string; sub: string } | null {
   const layout = galaxy.layout
+  if (hit.kind === 'moon') return moonTooltip(galaxy, hit.id)
   if (hit.kind === 'star') {
     const star = layout.stars[slotOf(layout.starById, hit.id)]
     if (star === undefined || galaxy.gone.has(star.id)) return null
@@ -591,14 +748,32 @@ type Inspector = {
   memory?: { text: string; tags: string[]; id: string }
   stats: { label: string; value: string }[]
   hint: string
-  /** The two sections of a memory; empty (with their note) until knowledge and embeddings are built. */
-  knowledge?: { note: string }
+  /** The two sections of a memory: what was mined from it (MOON.1), and the similar memories (empty until embeddings are built). */
+  knowledge?: { note: string; items: KnowledgeItem[] }
   similar?: { note: string }
 }
 
+/** One line of the inspector's "Knowledge from this memory". */
+type KnowledgeItem = { id: string; kind: KnowledgeKind; label: string; colour: string; text: string; usage: string; selected: boolean }
+
+/** Shown when a memory has no knowledge rows; the second sentence is the stated limit (an `extract` line does not refetch the galaxy). */
+export const NO_KNOWLEDGE_NOTE = 'Nothing extracted from this memory yet. Reload to see new knowledge.'
+
 const sum = (values: readonly number[]) => values.reduce((a, b) => a + b, 0)
 
-export function inspector(galaxy: Galaxy, state: MapState): Inspector {
+function knowledgeSection(galaxy: Galaxy, state: MapState, star: GalaxyStar, now: number): { note: string; items: KnowledgeItem[] } {
+  const rows = knowledgeOf(galaxy, star.id)
+  if (rows.length === 0) return { note: NO_KNOWLEDGE_NOTE, items: [] }
+  const picked = selectedMoon(galaxy, state)
+  const usage = usageText(star.recalls, star.lastRecalled, now)
+  const more = rows.length > MOON_LIMIT ? ` Only the first ${MOON_LIMIT} orbit the star.` : ''
+  return {
+    note: `${state.moons ? 'Shown as moons around the star.' : 'Turn on Knowledge moons to see them around the star.'} Each item is also in the Knowledge tab.${more}`,
+    items: rows.map(row => ({ id: row.id, kind: row.kind, label: KIND_LABELS[row.kind], colour: MOON_COLOURS[row.kind], text: row.text, usage, selected: row.id === picked })),
+  }
+}
+
+export function inspector(galaxy: Galaxy, state: MapState, now = Date.now()): Inspector {
   const layout = galaxy.layout
   const star = state.selected === null || galaxy.gone.has(state.selected) ? undefined : layout.stars[slotOf(layout.starById, state.selected)]
   if (star !== undefined) {
@@ -616,7 +791,7 @@ export function inspector(galaxy: Galaxy, state: MapState): Inspector {
         { label: 'Tags', value: star.tags.length === 0 ? 'none' : star.tags.join(', ') },
       ],
       hint: star.recalls === 0 ? 'Never recalled: a candidate to review or forget.' : 'Its star grows each time Claude recalls it.',
-      knowledge: { note: 'Nothing extracted from this memory yet.' },
+      knowledge: knowledgeSection(galaxy, state, star, now),
       similar: { note: 'Similar memories need embeddings.' },
     }
   }
