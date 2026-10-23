@@ -83,6 +83,12 @@
       "type": "boolean",
       "default": false,
       "description": "Off by default. On: writes ~/.claude/mnemosyne/bin/mnemosyne-mcp (mnemosyne-mcp.cmd on Windows), a stdio MCP server other tools (Cursor, Codex, claude mcp add) can use with this memory. Off removes it."
+    },
+    "extractionModel": {
+      "title": "Knowledge extraction model",
+      "type": "string",
+      "default": "haiku",
+      "description": "The model that pulls facts, preferences, instructions, dated events and relations out of each saved memory in the background (an alias such as haiku, or a full model id). It also drives /mnemosyne-tags. off turns extraction off: no model call, and /mnemosyne-tags says so."
     }
   }
 }

@@ -14,14 +14,15 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, PluginOptions, Register } from 'claude-code'
 
-import type { Recalled } from '../types'
+import type { PendingTrigger, Recalled } from '../types'
 import { activityLine, callOutcome, callText, TOOL_ACTIONS } from './activity-log'
 import type { ActivityFields } from './activity-log'
 import {
   BACKFILL_CALL_TIMEOUT_MS,
   BACKFILL_CONCURRENCY,
   BACKFILL_MAX_TOKENS,
-  BACKFILL_MODEL,
+  extractionModelOf,
+  extractionOff,
   GET_BATCH,
   judge,
   parseProposals,
@@ -33,6 +34,8 @@ import {
   tagPrompt,
 } from './backfill'
 import type { Proposal, Row } from './backfill'
+import { extractOne, reasonLine, storedCount } from './knowledge'
+import type { ExtractOutcome } from './knowledge'
 import { buildRequests, engineEnv, parseReplies } from './engine'
 import type { EngineRequest } from './engine'
 import { ENGINE_BUILD, SETUP_TIMEOUT_MS } from './engine-build'
@@ -65,6 +68,9 @@ mcp__mnemosyne__memory_remember / _recall / _update / _forget keep facts across 
 } as const
 
 const recalled = atom({ plugin: 'mnemosyne', key: 'recalled' } as const, {} as Recalled)
+// A remember phrase matched this turn: the first MAIN-THREAD save of the turn is
+// the human's, and consumes it (KNOWX.1). A subagent's save never does.
+const pendingTrigger = atom({ plugin: 'mnemosyne', key: 'pendingTrigger' } as const, {} as PendingTrigger)
 
 const TOOLS = [
   {
@@ -268,6 +274,9 @@ export MNEMOPI_NO_EMBEDDINGS=1
 export MNEMOPI_MCP_BANK=
 export MNEMOPI_LLM_BASE_URL=
 export MNEMOPI_HOST_LLM_ENABLED=
+export MNEMOPI_AUTHOR_ID=
+export MNEMOPI_AUTHOR_TYPE=
+export MNEMOPI_POLYPHONIC_RECALL=0
 export MNEMOSYNE_CLI=${shellQuote(cli)}
 export MNEMOSYNE_ACTIVITY_LOG=${activity ? shellQuote(activity) : ''}
 exec bun ${shellQuote(proxy)}
@@ -284,6 +293,9 @@ set "MNEMOPI_NO_EMBEDDINGS=1"\r
 set "MNEMOPI_MCP_BANK="\r
 set "MNEMOPI_LLM_BASE_URL="\r
 set "MNEMOPI_HOST_LLM_ENABLED="\r
+set "MNEMOPI_AUTHOR_ID="\r
+set "MNEMOPI_AUTHOR_TYPE="\r
+set "MNEMOPI_POLYPHONIC_RECALL=0"\r
 set "MNEMOSYNE_CLI=${cli}"\r
 set "MNEMOSYNE_ACTIVITY_LOG=${activity}"\r
 bun "${proxy}"\r
@@ -420,9 +432,18 @@ async function record($: EngineInterface, options: PluginOptions, entries: reado
       $.env.get('MNEMOSYNE_ACTIVITY_APPEND').catch(() => undefined),
       entries.every(entry => entry.owner) ? undefined : owner($, options).catch(() => GLOBAL_OWNER),
     ])
+    // The session id is best-effort: a failure to read it must never drop the line (CTX.3.a3).
+    let session: string | undefined
+    try {
+      session = await $.session.id()
+    } catch {
+      session = undefined
+    }
     const mode = APPEND_MODES.find(m => m === asked) ?? DEFAULT_APPEND
     const argv = ['bun', `${slashes($.plugin.root)}/bin/activity.ts`, log]
-    const stdin = entries.map(entry => `${activityLine({ ...entry, owner: entry.owner ?? me ?? GLOBAL_OWNER })}\n`).join('')
+    const stdin = entries
+      .map(entry => `${activityLine({ ...entry, owner: entry.owner ?? me ?? GLOBAL_OWNER, client: entry.client ?? 'claude-code', session: entry.session ?? session })}\n`)
+      .join('')
     if (mode === 'spawn') {
       void (async () => {
         for await (const _piece of $.process.spawn({ argv, input: stdin })) {
@@ -484,12 +505,14 @@ export async function tagsDryRun($: EngineInterface, options: PluginOptions, sig
   const skipped = { failed: 0, empty: 0, aborted: 0 }
   let firstError = ''
   let done = 0
+  const model = extractionModelOf(options)
+  if (extractionOff(model)) return 'Knowledge extraction is off (extractionModel in the plugin settings is "off"): no tags proposed. Set extractionModel, then try again.'
   progress($, `tagging 0/${rows.length}`)
   await pool(rows, BACKFILL_CONCURRENCY, signal, async (row, i) => {
     try {
       // The memory's text goes in the prompt as a quoted string, to a model that is told it is data.
       const reply = await $.model.complete(
-        { model: BACKFILL_MODEL, system: SYSTEM_PROMPT, prompt: tagPrompt(row.content), maxTokens: BACKFILL_MAX_TOKENS, timeoutMs: BACKFILL_CALL_TIMEOUT_MS },
+        { model, system: SYSTEM_PROMPT, prompt: tagPrompt(row.content), maxTokens: BACKFILL_MAX_TOKENS, timeoutMs: BACKFILL_CALL_TIMEOUT_MS },
         { signal },
       )
       if (!reply.isAnswered) {
@@ -533,6 +556,240 @@ export async function tagsDryRun($: EngineInterface, options: PluginOptions, sig
     ...(notes.length > 0 ? [`Skipped: ${notes.join('; ')}.`] : []),
     ...(blockedNote ? [blockedNote] : []),
     `Saved to ${root}/${PROPOSALS_FILE} (ids, owners, tags and a hash of each text; never the text). Run /mnemosyne-tags apply to write them.`,
+  ].join('\n')
+}
+
+// ---- Knowledge extraction (KNOWX.2, hooks/knowledge.ts) ----
+
+// The memory id a remember/update reply names, or undefined when it names none.
+function savedId(reply: string): string | undefined {
+  try {
+    const value = JSON.parse(reply) as Record<string, unknown>
+    // remember answers memory_id; update echoes it when content or metadata changed.
+    const id = typeof value?.memory_id === 'string' ? value.memory_id : undefined
+    return id !== undefined && /^[0-9a-f]{1,64}$/.test(id) ? id : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** The engine call for knowledge: (name, args, owner) -> text, rejecting on an engine error. */
+function knowledgeEngine($: EngineInterface, options: PluginOptions) {
+  return async (name: string, args: Record<string, unknown>, owner: string) => {
+    const [answer] = await runAll($, options, [[name, args]], owner)
+    if (answer instanceof Error) throw answer
+    return answer ?? ''
+  }
+}
+
+/**
+ * One extraction for one memory, run after the tool reply (KNOWX.2). Never throws:
+ * every outcome - stored, empty, failed, stale, gone - is one 'extract' activity
+ * line, and nothing runs while the engine is stale or extraction is off.
+ */
+export async function extraction($: EngineInterface, options: PluginOptions, id: string, as: string) {
+  const model = extractionModelOf(options)
+  if (extractionOff(model)) return
+  if (!(await isCurrent($, options))) {
+    await record($, options, [{ action: 'extract', origin: 'tool', owner: as, ok: false, error: 'engine out of date', ids: [id], count: 0 }])
+    return
+  }
+  const { root } = await paths($, options)
+  let outcome: ExtractOutcome
+  try {
+    outcome = await extractOne({
+      id,
+      owner: as,
+      root,
+      model,
+      engine: knowledgeEngine($, options),
+      memories: (args, stdin) => memoriesCli($, options, args as string[], stdin),
+      modelCall: async request => {
+        try {
+          const reply = await $.model.complete(request, {})
+          return reply.isAnswered ? { text: reply.text } : { reason: reply.reason }
+        } catch (err) {
+          return { reason: (err as Error)?.message ?? 'rejected' }
+        }
+      },
+    })
+  } catch (err) {
+    outcome = { kind: 'failed', reason: (err as Error)?.message ?? 'failed' }
+  }
+  const failed = reasonLine(outcome)
+  await record($, options, [
+    {
+      action: 'extract',
+      origin: 'tool',
+      owner: as,
+      ids: [id],
+      count: storedCount(outcome),
+      ok: failed === undefined,
+      ...(failed === undefined ? {} : { error: failed }),
+    },
+  ])
+}
+
+// ---- /mnemosyne-knowledge: the backfill (KNOWX.3) ----
+
+export const KNOWLEDGE_USAGE =
+  'Usage: /mnemosyne-knowledge (a dry run: counts pending entries and memories with no knowledge; nothing is written) or /mnemosyne-knowledge apply (extracts for them).'
+
+// The empty records file: a memory whose extraction yielded nothing, so apply skips it.
+const EMPTY_NAME = 'knowledge-empty.json'
+
+/** The empty-record list, read from <root>/knowledge-empty.json; a missing or broken file is empty. */
+async function readEmptyFile($: EngineInterface, root: string): Promise<Record<string, string>> {
+  try {
+    const parsed = JSON.parse(await $.fs.read(`${root}/${EMPTY_NAME}`)) as { empty?: unknown }
+    const out: Record<string, string> = {}
+    if (Array.isArray(parsed?.empty)) {
+      for (const entry of parsed.empty as { id?: unknown; sha256?: unknown }[]) {
+        if (typeof entry?.id === 'string' && typeof entry.sha256 === 'string') out[entry.id] = entry.sha256
+      }
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
+
+async function writeEmptyFile($: EngineInterface, root: string, empty: Record<string, string>) {
+  const list = Object.entries(empty).map(([id, sha256]) => ({ id, sha256 }))
+  // The same atomic 0600 write bunFs gives the other plugin files; fs.chmod is a no-op on Windows.
+  await bunFs(
+    $,
+    'const fs = require("fs"); const t = a[0] + ".tmp"; fs.writeFileSync(t, a[1], { mode: 0o600 }); fs.renameSync(t, a[0]);',
+    `${root}/${EMPTY_NAME}`,
+    `${JSON.stringify({ empty: list }, null, 2)}\n`,
+  )
+}
+
+/** The pending entries and the memories with no knowledge, grouped by owner. */
+async function knowledgeSurvey($: EngineInterface, options: PluginOptions) {
+  const { root } = await paths($, options)
+  const pending = JSON.parse(await memoriesCli($, options, ['pending', 'list', root])) as { id: string; owner: string; sha256: string }[]
+  const rows = parseRows(await memoriesCli($, options, ['list', '--no-knowledge']))
+  return { root, pending, rows }
+}
+
+/**
+ * /mnemosyne-knowledge with no argument: per owner, how many memories have no
+ * knowledge and how many pending entries wait. No model call, no write.
+ */
+export async function knowledgeDryRun($: EngineInterface, options: PluginOptions) {
+  const model = extractionModelOf(options)
+  if (extractionOff(model)) return 'Knowledge extraction is off (extractionModel is "off"): set it, then try again.'
+  if (!(await isCurrent($, options))) return 'The Mnemosyne engine is out of date (the backfill needs the knowledge tools): run /mnemosyne-setup, then try again.'
+  const { root, pending, rows } = await knowledgeSurvey($, options)
+  const empty = await readEmptyFile($, root)
+  const perOwner = new Map<string, { missing: number; pending: number; empty: number }>()
+  const bump = (owner: string, field: 'missing' | 'pending' | 'empty') => {
+    const entry = perOwner.get(owner) ?? { missing: 0, pending: 0, empty: 0 }
+    entry[field]++
+    perOwner.set(owner, entry)
+  }
+  for (const row of rows) {
+    // A memory whose extraction yielded nothing is not "missing": it is done.
+    if (empty[row.id] === row.sha256) bump(row.owner, 'empty')
+    else bump(row.owner, 'missing')
+  }
+  for (const entry of pending) bump(entry.owner, 'pending')
+  if (perOwner.size === 0) return 'Every memory has knowledge, and no pending entry waits. Nothing to do.'
+  const lines = [...perOwner].map(([owner, counts]) => `- ${owner}: ${plural(counts.missing, 'memory', 'memories')} with no knowledge, ${plural(counts.pending, 'pending entry', 'pending entries')}, ${plural(counts.empty, 'memory', 'memories')} already tried (nothing found)`)
+  return [
+    'Knowledge extraction dry run: no model call, nothing written.',
+    ...lines,
+    'Run /mnemosyne-knowledge apply to extract. Try apply on a copy of the store first.',
+  ].join('\n')
+}
+
+/**
+ * /mnemosyne-knowledge apply: finishes the pending entries first (each from its
+ * current content and current sha256, so a changed memory is redone), then the
+ * older memories with no knowledge. Per owner: one engine process per prompt
+ * batch and one per store batch; the model calls run in a pool. Never edits or
+ * deletes a working_memory row.
+ */
+export async function knowledgeApply($: EngineInterface, options: PluginOptions, signal: AbortSignal) {
+  const model = extractionModelOf(options)
+  if (extractionOff(model)) return 'Knowledge extraction is off (extractionModel is "off"): set it, then try again.'
+  if (!(await isCurrent($, options))) return 'The Mnemosyne engine is out of date (the backfill needs the knowledge tools): run /mnemosyne-setup, then try again.'
+  const { root, pending, rows } = await knowledgeSurvey($, options)
+  const empty = await readEmptyFile($, root)
+  const counts = { stored: 0, empty: 0, failed: 0, stale: 0, gone: 0, notReached: 0 }
+  let items = 0
+
+  // Pending entries first; a gone memory drops its entry.
+  const seen = new Set<string>()
+  const targets: { id: string; owner: string }[] = []
+  for (const entry of pending) {
+    if (seen.has(entry.id)) continue
+    seen.add(entry.id)
+    targets.push({ id: entry.id, owner: entry.owner })
+  }
+  for (const row of rows) {
+    if (seen.has(row.id)) continue
+    if (empty[row.id] === row.sha256) continue
+    seen.add(row.id)
+    targets.push({ id: row.id, owner: row.owner })
+  }
+  if (targets.length === 0) return 'Nothing to extract: every memory has knowledge, and no pending entry waits.'
+
+  progress($, `extracting 0/${targets.length}`)
+  await pool(targets, BACKFILL_CONCURRENCY, signal, async target => {
+    if (signal.aborted) {
+      counts.notReached++
+      return
+    }
+    progress($, `extracting ${items}/${targets.length}`)
+    const outcome = await extractOne({
+      id: target.id,
+      owner: target.owner,
+      root,
+      model,
+      engine: knowledgeEngine($, options),
+      memories: (args, stdin) => memoriesCli($, options, args as string[], stdin),
+      modelCall: async request => {
+        try {
+          const reply = await $.model.complete(request, { signal })
+          return reply.isAnswered ? { text: reply.text } : { reason: reply.reason }
+        } catch (err) {
+          return { reason: (err as Error)?.message ?? 'rejected' }
+        }
+      },
+    })
+    items++
+    if (outcome.kind === 'empty') {
+      // A memory whose extraction yields nothing is recorded and skipped while its sha is unchanged.
+      const row = rows.find(candidate => candidate.id === target.id)
+      if (row !== undefined) empty[row.id] = row.sha256
+    }
+    if (outcome.kind === 'stored') counts.stored++
+    else if (outcome.kind === 'empty') counts.empty++
+    else if (outcome.kind === 'stale') counts.stale++
+    else if (outcome.kind === 'gone') counts.gone++
+    else counts.failed++
+    const failed = reasonLine(outcome)
+    await record($, options, [
+      {
+        action: 'extract',
+        origin: 'backfill',
+        owner: target.owner,
+        client: 'mnemosyne-knowledge',
+        ids: [target.id],
+        count: storedCount(outcome),
+        ok: failed === undefined,
+        ...(failed === undefined ? {} : { error: failed }),
+      },
+    ])
+  })
+  if (Object.keys(empty).length > 0) await writeEmptyFile($, root, empty).catch(() => undefined)
+  progress($, `${counts.stored} extracted`)
+  return [
+    `Extracted knowledge for ${counts.stored} of ${plural(targets.length, 'memory', 'memories')}.`,
+    `Outcomes: ${counts.empty} found nothing (noted, skipped while the text is unchanged), ${counts.stale} changed mid-run (run apply again), ${counts.gone} gone, ${counts.failed} failed.`,
+    ...(counts.notReached > 0 ? [`Stopped early: ${plural(counts.notReached, 'memory', 'memories')} not reached; run /mnemosyne-knowledge apply again to finish.`] : []),
   ].join('\n')
 }
 
@@ -598,6 +855,7 @@ export async function tagsApply($: EngineInterface, options: PluginOptions, sign
         action: 'update',
         origin: 'backfill',
         owner: id,
+        client: 'mnemosyne-tags',
         text: `tag backfill: ${plural(list.length, 'memory', 'memories')}`,
         ids: done.map(p => p.id),
         count: done.length,
@@ -633,6 +891,10 @@ export const register: Register = (on, options) => {
             // as STATED working memory, which the engine deletes after 24 hours.
             source: 'imported',
             scope: isGlobal ? 'global' : 'channel',
+            // Claude's own save: an agent wrote it (KNOWX.1.a3). A trigger save
+            // overrides this with human + 'stated' in tool.call.
+            author_id: 'claude-code',
+            author_type: 'agent',
             ...(tags.length > 0 ? { metadata: { tags } } : {}),
           },
         ] as const
@@ -664,6 +926,10 @@ export const register: Register = (on, options) => {
     await $.command.register({
       name: 'mnemosyne-ui',
       description: 'Open the Mnemosyne dashboard: a local page on 127.0.0.1, opened in your default browser',
+    })
+    await $.command.register({
+      name: 'mnemosyne-knowledge',
+      description: 'Extract knowledge from older memories and finish pending ones: a dry run counts them; "apply" extracts',
     })
     for (const tool of TOOLS) await $.tool.register({ ...tool, isDeferred: false })
     if (!(await isInstalled($, options))) $.ui.toast('Mnemosyne Memory engine not installed. Run /mnemosyne-setup.')
@@ -717,7 +983,8 @@ export const register: Register = (on, options) => {
       const { root, store, cli, activity: log } = await paths($, options)
       const activityLog = options.activityLog === 'off' ? '' : log
       const session = await $.session.id()
-      return await openDashboard($, { plugin: slashes($.plugin.root), root, store, cli, activity: activityLog }, session)
+      const extraction = extractionModelOf(options)
+      return await openDashboard($, { plugin: slashes($.plugin.root), root, store, cli, activity: activityLog, extraction }, session)
     } catch (err) {
       return { text: `Mnemosyne dashboard failed: ${(err as Error).message}` }
     }
@@ -738,6 +1005,20 @@ export const register: Register = (on, options) => {
     }
   }).catch(() => ({ text: 'Mnemosyne: the tag backfill failed.' }))
 
+  // The knowledge backfill: no argument is a dry run; apply extracts pending and older memories.
+  on('command.run', { command: 'mnemosyne-knowledge' }, async ($, e, next) => {
+    const mode = e.args.trim().toLowerCase()
+    if (mode !== '' && mode !== 'apply') return { text: KNOWLEDGE_USAGE }
+    const bun = await $.process.run(['bun', '--version']).catch(() => null)
+    if (bun?.exitCode !== 0) return { text: 'The knowledge backfill needs Bun on PATH: https://bun.sh' }
+    try {
+      if (!(await isInstalled($, options))) return { text: 'The knowledge backfill needs the engine: run /mnemosyne-setup first.' }
+      return { text: mode === 'apply' ? await knowledgeApply($, options, next.signal) : await knowledgeDryRun($, options) }
+    } catch (err) {
+      return { text: `Mnemosyne knowledge backfill failed: ${(err as Error).message}` }
+    }
+  }).catch(() => ({ text: 'Mnemosyne: the knowledge backfill failed.' }))
+
   // The session that started the dashboard ends (exit, /clear, resume...): its server stops.
   on('session.end', async ($, e, next) => {
     await stopDashboard($, e.sessionId).catch(() => undefined)
@@ -752,6 +1033,16 @@ export const register: Register = (on, options) => {
     const as = ownsRow && typeof input.owner === 'string' && input.owner ? input.owner : undefined
     // A memory_* name outside the five is not a memory call: not logged.
     const action = TOOL_ACTIONS[tool]
+    // KNOWX.1: only the main thread's first save after a remember phrase is the
+    // human's. A subagent's event carries an agentId and never consumes the trigger.
+    let provenance: { author_type: 'human'; veracity: 'stated' } | undefined
+    if (tool === 'memory_remember' && e.agentId === undefined) {
+      const session = await $.session.id().catch(() => undefined)
+      if (session !== undefined && (await read($, pendingTrigger))[session]) {
+        provenance = { author_type: 'human', veracity: 'stated' }
+        await update($, pendingTrigger, ({ [session]: _consumed, ...rest }) => rest)
+      }
+    }
     const answer = await (async (): Promise<{ result: string; reply: string } | { deny: string }> => {
       try {
         if (tool === 'memory_update') {
@@ -764,7 +1055,9 @@ export const register: Register = (on, options) => {
         }
         if (tool === 'memory_update' && !(await isCurrent($, options))) return { deny: NOT_CURRENT }
         const [name, args] = engineArgs(tool, input)
-        const text = await call($, options, name, args, as)
+        // The trigger save is the person's: human, with veracity 'stated'.
+        const withProvenance = provenance === undefined ? args : { ...args, ...provenance }
+        const text = await call($, options, name, withProvenance, as)
         return { reply: text, result: name === 'mnemopi_recall' ? JSON.stringify(compact(text)) : name === 'mnemopi_stats' ? mnemosyneStats(text) : text }
       } catch (err) {
         return { deny: `Mnemosyne: ${(err as Error).message}` }
@@ -774,7 +1067,16 @@ export const register: Register = (on, options) => {
       const outcome = 'deny' in answer ? { ok: false, error: answer.deny } : callOutcome(action, input, answer.reply)
       // Tags as the engine gets them, cleaned, as the proxy logs them.
       const shown = Array.isArray(input.tags) ? { ...input, tags: cleanTags(input.tags) } : input
-      await record($, options, [{ action, origin: 'tool', owner: as, text: callText(action, shown), ...outcome }])
+      await record($, options, [{ action, origin: 'tool', owner: as, text: callText(action, shown), ...outcome, ...(provenance ?? {}) }])
+    }
+    // A successful save (or a content update) starts extraction after the reply.
+    if (!('deny' in answer) && (tool === 'memory_remember' || tool === 'memory_update')) {
+      const id = savedId(answer.reply)
+      if (id !== undefined) {
+        const extract = extraction($, options, id, as ?? (await owner($, options).catch(() => GLOBAL_OWNER)))
+        // KNOWX.2: background by default. The await fallback (KNOWX.0) changes only this line.
+        void extract
+      }
     }
     return 'deny' in answer ? { deny: answer.deny } : { result: answer.result }
   }).catch(() => ({ deny: 'Mnemosyne: its tool failed.' }))
@@ -801,6 +1103,17 @@ export const register: Register = (on, options) => {
     return result
   }).catch((_$, e, next) => next(e))
 
+  // A main-conversation turn ends: its remember trigger is spent either way (KNOWX.1.a2).
+  on('turn.complete', async ($, e, next) => {
+    if (e.agentId === undefined) {
+      const session = await $.session.id().catch(() => undefined)
+      if (session !== undefined && (await read($, pendingTrigger))[session]) {
+        await update($, pendingTrigger, ({ [session]: _spent, ...rest }) => rest)
+      }
+    }
+    return next(e)
+  }).catch((_$, e, next) => next(e))
+
   // On the first prompt of a session, recall per sentence. On any prompt the
   // person typed that opens with a configured term: a remember term asks the
   // model to save once (so the never-secrets rule and its wording apply); a
@@ -819,6 +1132,9 @@ export const register: Register = (on, options) => {
     const context: string[] = []
     const logged: Activity[] = []
     if (remember) {
+      // KNOWX.1: the first main-thread save of this turn is the human's. Cleared
+      // at turn end, so a turn that saves nothing leaves the next turn an agent save.
+      await update($, pendingTrigger, seen => ({ ...seen, [session]: true as const }))
       activity($, options, 'remember term matched; asking Claude to save it')
       // The save itself is Claude's memory_remember call, logged with origin tool.
       logged.push({ action: 'remember', origin: 'trigger', text: remember, ok: true })

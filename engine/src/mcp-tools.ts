@@ -289,7 +289,37 @@ export const GRAPH_LINK_SCHEMA = {
 	required: ["source_id", "target_id", "relationship"],
 } as const;
 
+export const KNOWLEDGE_PROMPT_SCHEMA = {
+	type: "object",
+	properties: {
+		memory_id: { type: "string", description: "ID of the memory to build an extraction prompt for." },
+		bank: { type: "string", default: "default" },
+	},
+	required: ["memory_id"],
+} as const;
+
+export const KNOWLEDGE_STORE_SCHEMA = {
+	type: "object",
+	properties: {
+		memory_id: { type: "string", description: "ID of the memory to store extracted knowledge for." },
+		reply: { type: "string", description: "Extraction reply from the model." },
+		sha256: { type: "string", description: "SHA-256 hash of the content returned by mnemopi_knowledge_prompt." },
+		bank: { type: "string", default: "default" },
+	},
+	required: ["memory_id", "reply", "sha256"],
+} as const;
+
 export const TOOLS: readonly ToolDefinition[] = [
+	{
+		name: "mnemopi_knowledge_prompt",
+		description: "Build an extraction prompt and content sha256 for one owned memory.",
+		inputSchema: KNOWLEDGE_PROMPT_SCHEMA,
+	},
+	{
+		name: "mnemopi_knowledge_store",
+		description: "Store validated extracted knowledge for one owned memory.",
+		inputSchema: KNOWLEDGE_STORE_SCHEMA,
+	},
 	{
 		name: "mnemopi_remember",
 		description: "Store a durable memory in Mnemopi.",
@@ -444,8 +474,8 @@ function createBeam(args: ToolArguments, bank = resolveBank(args)): BeamMemory {
 	return new BeamMemory({
 		sessionId,
 		dbPath: bankDbPath(bank),
-		authorId: optionalStringArg(args, "author_id") ?? process.env.MNEMOPI_AUTHOR_ID ?? null,
-		authorType: optionalStringArg(args, "author_type") ?? process.env.MNEMOPI_AUTHOR_TYPE ?? null,
+		authorId: optionalStringArg(args, "author_id") ?? (process.env.MNEMOPI_AUTHOR_ID ? process.env.MNEMOPI_AUTHOR_ID : null),
+		authorType: optionalStringArg(args, "author_type") ?? (process.env.MNEMOPI_AUTHOR_TYPE ? process.env.MNEMOPI_AUTHOR_TYPE : null),
 		channelId: optionalStringArg(args, "channel_id") ?? process.env.MNEMOPI_CHANNEL_ID ?? sessionId,
 	});
 }
@@ -950,9 +980,26 @@ async function handleGraphLink(args: ToolArguments): Promise<ToolResult> {
 	});
 }
 
+async function handleKnowledgePrompt(args: ToolArguments): Promise<ToolResult> {
+	const memoryId = required(args, "memory_id");
+	if (typeof memoryId !== "string") return memoryId;
+	return withBeam(args, beam => beam.knowledgePrompt(memoryId));
+}
+
+async function handleKnowledgeStore(args: ToolArguments): Promise<ToolResult> {
+	const memoryId = required(args, "memory_id");
+	if (typeof memoryId !== "string") return memoryId;
+	const sha256 = required(args, "sha256");
+	if (typeof sha256 !== "string") return sha256;
+	const reply = stringArg(args, "reply");
+	return withBeam(args, beam => beam.storeKnowledge(memoryId, reply, sha256));
+}
+
 type Handler = (args: ToolArguments) => ToolResult | Promise<ToolResult>;
 
 const TOOL_HANDLERS: Record<string, Handler> = {
+	mnemopi_knowledge_prompt: handleKnowledgePrompt,
+	mnemopi_knowledge_store: handleKnowledgeStore,
 	mnemopi_remember: handleRemember,
 	mnemopi_recall: handleRecall,
 	mnemopi_shared_remember: handleSharedRemember,

@@ -167,6 +167,7 @@ test('the first call starts one server, reads the ready line in pieces and the t
     MNEMOSYNE_STORE: `${ROOT}/store`,
     MNEMOSYNE_CLI: `${ROOT}/engine/node_modules/@oh-my-pi/pi-mnemopi/src/cli.ts`,
     MNEMOSYNE_ACTIVITY_LOG: `${ROOT}/activity.jsonl`,
+    MNEMOSYNE_EXTRACTION: 'haiku',
   })
   expect(`${child.env?.MNEMOSYNE_PLUGIN_ROOT}/ui/server.ts`).toBe(child.argv[1]!)
   // No ui.json at first: nothing to ping.

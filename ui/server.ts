@@ -6,9 +6,8 @@
 // <token>`. Every reply carries a strict CSP and no CORS allow header. SQLite
 // is opened read-only; every change goes through the engine (hooks/engine.ts).
 //
-// The map's route (plan phase MAP): GET /api/map, one drill level per call
-// (projects; ?project= its topics; ?project=&tag= or &untagged=1 a topic's
-// memories; each with min_recalls). /vendor/ serves the map's library.
+// The map's route: GET /api/galaxy, every memory at once (the v1 drill-down
+// GET /api/map was removed in OLDMAP). /vendor/ serves the map's library.
 //
 // The views' routes (plan phase VIEW): GET /api/memories (owner, sort, q),
 // GET /api/memories/<id>, GET /api/activity, GET /api/activity/stream (NDJSON),
@@ -56,7 +55,7 @@ import {
 } from 'node:fs'
 import { dirname, join, sep } from 'node:path'
 import { appendActivity } from '../bin/activity'
-import { hasTagSql, tagsSql, untaggedSql } from '../bin/memories'
+import { hasTagSql, untaggedSql } from '../bin/memories'
 import { activityEntry, preview } from '../hooks/activity-log'
 import type { ActivityFields } from '../hooks/activity-log'
 import { buildRequests, engineEnv, parseReplies } from '../hooks/engine'
@@ -253,6 +252,272 @@ function health(config: Config, store: Store, engine: string | undefined) {
   }
 }
 
+/**
+ * GET /api/health-report: token-guarded and read-only.
+ * Returns memory counts, per-project split, global count, never-recalled (newest 50),
+ * most recalled (top 10), recalls per day with coverage days from activity log,
+ * file sizes, table row counts, and coverage numbers.
+ */
+export function healthReport(config: Config, store: Store, _engine: string | undefined): Answer {
+  store.db ??= openStore(config.store)
+  const db = store.db
+
+  // Sizes in bytes
+  let logSize = 0
+  if (config.activityLog && existsSync(config.activityLog)) {
+    try {
+      logSize = statSync(config.activityLog).size
+    } catch {
+      logSize = 0
+    }
+  }
+
+  let storeSize = 0
+  const dbFile = join(config.store, 'mnemopi.db')
+  if (existsSync(dbFile)) {
+    try {
+      storeSize = statSync(dbFile).size
+    } catch {
+      storeSize = 0
+    }
+  }
+
+  // Recalls per day & days covered from activity.jsonl
+  const logLines = config.activityLog
+    ? [
+        ...(existsSync(`${config.activityLog}.1`) ? objectLines(readText(`${config.activityLog}.1`)) : []),
+        ...(existsSync(config.activityLog) ? objectLines(readText(config.activityLog)) : []),
+      ]
+    : []
+
+  const recallsByDay: Record<string, number> = {}
+  let minDay: string | null = null
+  let maxDay: string | null = null
+  for (const line of logLines) {
+    if (typeof line.t === 'string') {
+      const day = line.t.slice(0, 10)
+      if (/^\d{4}-\d{2}-\d{2}$/.test(day)) {
+        if (minDay === null || day < minDay) minDay = day
+        if (maxDay === null || day > maxDay) maxDay = day
+        if (line.action === 'recall') {
+          recallsByDay[day] = (recallsByDay[day] ?? 0) + 1
+        }
+      }
+    }
+  }
+
+  let daysCovered = 0
+  if (minDay !== null && maxDay !== null) {
+    const tMin = new Date(`${minDay}T00:00:00.000Z`).getTime()
+    const tMax = new Date(`${maxDay}T00:00:00.000Z`).getTime()
+    daysCovered = Math.max(1, Math.round((tMax - tMin) / (24 * 60 * 60 * 1000)) + 1)
+  }
+  const recallsPerDay = Object.keys(recallsByDay)
+    .sort()
+    .map(date => ({ date, count: recallsByDay[date] }))
+
+  if (db === null) {
+    return {
+      status: 200,
+      body: {
+        ok: true,
+        total: 0,
+        global: 0,
+        projects: [],
+        owners: [],
+        neverRecalled: { count: 0, list: [] },
+        neverRecalledCount: 0,
+        neverRecalledList: [],
+        mostRecalled: [],
+        recallsPerDay,
+        recallsByDay,
+        daysCovered,
+        sizes: { store: storeSize, log: logSize },
+        storeSize,
+        logSize,
+        tables: {},
+        coverage: {
+          total: 0,
+          tagged: 0,
+          knowledge: 0,
+          embeddings: 0,
+          vectors: 0,
+          provenance: 0,
+          author_type: 0,
+        },
+      },
+    }
+  }
+
+  const present = new Set(
+    (db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").all() as { name: string }[]).map(row => row.name),
+  )
+
+  const tables: Record<string, number> = {}
+  for (const name of present) {
+    try {
+      tables[name] = (db.query(`SELECT COUNT(*) AS n FROM ${name}`).get() as { n: number })?.n ?? 0
+    } catch {
+      tables[name] = 0
+    }
+  }
+
+  let total = 0
+  let global = 0
+  let owners: { owner: string; label: string; count: number }[] = []
+  let projects: { owner: string; label: string; count: number }[] = []
+  let neverCount = 0
+  let neverList: { id: string; owner: string; created: string | null; lastRecalled: string | null; label: string; tags: string[]; recalls: number }[] = []
+  let mostRecalled: { id: string; owner: string; created: string | null; lastRecalled: string | null; label: string; tags: string[]; recalls: number }[] = []
+  let tagged = 0
+  let knowledge = 0
+  let embeddings = 0
+  let provenance = 0
+
+  if (present.has('working_memory')) {
+    const wmCols = tableColumns(db, 'working_memory')
+    total = tables.working_memory ?? 0
+
+    try {
+      global = (db.query("SELECT COUNT(*) AS n FROM working_memory WHERE session_id = 'global'").get() as { n: number })?.n ?? 0
+    } catch {
+      global = 0
+    }
+
+    try {
+      const rawOwners = db
+        .query('SELECT session_id AS owner, COUNT(*) AS count FROM working_memory GROUP BY session_id ORDER BY count DESC, owner')
+        .all() as { owner: string; count: number }[]
+      owners = rawOwners.map(r => ({ owner: r.owner, label: projectLabel(r.owner), count: r.count }))
+      projects = rawOwners
+        .filter(r => r.owner !== 'global' && r.owner !== '')
+        .map(r => ({ owner: r.owner, label: projectLabel(r.owner), count: r.count }))
+    } catch {
+      owners = []
+      projects = []
+    }
+
+    try {
+      neverCount = (db.query('SELECT COUNT(*) AS n FROM working_memory WHERE COALESCE(recall_count, 0) = 0').get() as { n: number })?.n ?? 0
+      const neverRows = db
+        .query(
+          `SELECT id, session_id AS owner, timestamp AS created, last_recalled AS lastRecalled,
+                  substr(content, 1, 4000) AS head, metadata_json, COALESCE(recall_count, 0) AS recalls
+           FROM working_memory WHERE COALESCE(recall_count, 0) = 0 ORDER BY timestamp DESC, id LIMIT 50`,
+        )
+        .all() as { id: string; owner: string; created: string | null; lastRecalled: string | null; head: string | null; metadata_json: string | null; recalls: number }[]
+      neverList = neverRows.map(r => ({
+        id: r.id,
+        owner: r.owner,
+        created: r.created,
+        lastRecalled: r.lastRecalled,
+        label: galaxyLabel(r.head),
+        tags: tagsOf(parseMetadata(r.metadata_json)),
+        recalls: r.recalls,
+      }))
+    } catch {
+      neverCount = 0
+      neverList = []
+    }
+
+    try {
+      const mostRows = db
+        .query(
+          `SELECT id, session_id AS owner, timestamp AS created, last_recalled AS lastRecalled,
+                  substr(content, 1, 4000) AS head, metadata_json, COALESCE(recall_count, 0) AS recalls
+           FROM working_memory WHERE COALESCE(recall_count, 0) > 0 ORDER BY COALESCE(recall_count, 0) DESC, last_recalled DESC, timestamp DESC, id LIMIT 10`,
+        )
+        .all() as { id: string; owner: string; created: string | null; lastRecalled: string | null; head: string | null; metadata_json: string | null; recalls: number }[]
+      mostRecalled = mostRows.map(r => ({
+        id: r.id,
+        owner: r.owner,
+        created: r.created,
+        lastRecalled: r.lastRecalled,
+        label: galaxyLabel(r.head),
+        tags: tagsOf(parseMetadata(r.metadata_json)),
+        recalls: r.recalls,
+      }))
+    } catch {
+      mostRecalled = []
+    }
+
+    if (wmCols.has('metadata_json')) {
+      try {
+        tagged = (db.query(`SELECT COUNT(*) AS n FROM working_memory WHERE NOT (${untaggedSql()})`).get() as { n: number })?.n ?? 0
+      } catch {
+        tagged = 0
+      }
+    }
+
+    const kSubqueries: string[] = []
+    for (const source of KNOWLEDGE_TABLES) {
+      if (present.has(source.table)) {
+        const cols = tableColumns(db, source.table)
+        if (cols.has('source_memory_id')) {
+          kSubqueries.push(`SELECT source_memory_id FROM ${source.table} WHERE source_memory_id IS NOT NULL AND source_memory_id <> ''`)
+        }
+      }
+    }
+    if (kSubqueries.length > 0) {
+      try {
+        knowledge = (db.query(`SELECT COUNT(*) AS n FROM working_memory WHERE id IN (${kSubqueries.join(' UNION ')})`).get() as { n: number })?.n ?? 0
+      } catch {
+        knowledge = 0
+      }
+    }
+
+    if (present.has('memory_embeddings')) {
+      const cols = tableColumns(db, 'memory_embeddings')
+      if (cols.has('memory_id')) {
+        try {
+          embeddings = (db.query('SELECT COUNT(*) AS n FROM working_memory WHERE id IN (SELECT memory_id FROM memory_embeddings)').get() as { n: number })?.n ?? 0
+        } catch {
+          embeddings = 0
+        }
+      }
+    }
+
+    if (wmCols.has('author_type')) {
+      try {
+        provenance = (db.query("SELECT COUNT(*) AS n FROM working_memory WHERE author_type IS NOT NULL AND author_type <> ''").get() as { n: number })?.n ?? 0
+      } catch {
+        provenance = 0
+      }
+    }
+  }
+
+  return {
+    status: 200,
+    body: {
+      ok: true,
+      total,
+      global,
+      projects,
+      owners,
+      neverRecalled: { count: neverCount, list: neverList },
+      neverRecalledCount: neverCount,
+      neverRecalledList: neverList,
+      mostRecalled,
+      recallsPerDay,
+      recallsByDay,
+      daysCovered,
+      sizes: { store: storeSize, log: logSize },
+      storeSize,
+      logSize,
+      tables,
+      coverage: {
+        total,
+        tagged,
+        knowledge,
+        embeddings,
+        vectors: embeddings,
+        provenance,
+        author_type: provenance,
+      },
+    },
+  }
+}
+
 // ---- Memories (VIEW.1): read-only queries through the read-only handle ----
 
 type Answer = { status: number; body: unknown }
@@ -366,13 +631,9 @@ export function getMemory(db: Database | null, id: string): Answer {
   return { status: 200, body: { ...rest, recall_count: rest.recall_count ?? 0, metadata, tags: tagsOf(metadata) } }
 }
 
-// ---- Map (MAP.1): one drill level per call, read-only, every value bound ----
+// ---- Labels shared by the galaxy and the stats ----
 
-// GET /api/map?project=&tag=: at most this many memory nodes in one topic.
-export const MAP_MEMORY_LIMIT = 500
 export const MAP_LABEL_CHARS = 80
-// min_recalls: digits only, at most this.
-const MAX_MIN_RECALLS = 1_000_000_000
 
 /** A project's label: Global for the global owner, `<name>` for `project-<name>-<hash>`, else the owner. */
 export function projectLabel(owner: string): string {
@@ -380,115 +641,275 @@ export function projectLabel(owner: string): string {
   return /^project-(.+)-[0-9a-z]+$/.exec(owner)?.[1] ?? owner
 }
 
-/** The first non-empty line of a text, at most `max` characters (the last an ellipsis when cut). */
-export function firstLineOf(text: string, max = MAP_LABEL_CHARS): string {
-  const line = text.split('\n').find(part => part.trim() !== '')?.trim() ?? ''
-  const chars = Array.from(line)
-  return chars.length > max ? `${chars.slice(0, max - 1).join('')}…` : line
-}
-
 const RECALLS = 'COALESCE(recall_count, 0)'
-
-/**
- * GET /api/map: the projects (owners) with their memory count, recall total and newest saved date.
- * ?project=<owner>: that project's topics (tags, lower-cased) and one Untagged node when any memory has no tag.
- * ?project=<owner>&tag=<t> or &untagged=1: that topic's memories.
- * Every level takes min_recalls (a non-negative integer): memories below it are left out,
- * counts follow, and a project or topic left with none is omitted.
- */
-export function mapLevel(db: Database | null, params: URLSearchParams, memoryLimit = MAP_MEMORY_LIMIT): Answer {
-  for (const key of params.keys()) {
-    if (!['project', 'tag', 'untagged', 'min_recalls'].includes(key)) return { status: 400, body: { error: `unknown parameter: ${key}` } }
-  }
-  for (const key of ['project', 'tag', 'untagged', 'min_recalls']) {
-    if (params.getAll(key).length > 1) return { status: 400, body: { error: `${key} is given more than once` } }
-  }
-  const minText = params.get('min_recalls')
-  if (minText !== null && (!/^\d{1,10}$/.test(minText) || Number(minText) > MAX_MIN_RECALLS)) {
-    return { status: 400, body: { error: 'min_recalls must be a non-negative integer' } }
-  }
-  const min = minText === null ? 0 : Number(minText)
-  const project = params.get('project')
-  const tagText = params.get('tag')
-  const untagged = params.get('untagged')
-  if (project !== null && (project === '' || project.length > 200)) return { status: 400, body: { error: 'project must be 1 to 200 characters' } }
-  const tag = tagText?.trim() ?? null
-  if (tag !== null && (tag === '' || tag.length > 200)) return { status: 400, body: { error: 'tag must be 1 to 200 characters' } }
-  if (untagged !== null && untagged !== '1') return { status: 400, body: { error: 'untagged must be 1' } }
-  if (tag !== null && untagged !== null) return { status: 400, body: { error: 'tag and untagged cannot be combined' } }
-  if (project === null && (tag !== null || untagged !== null)) return { status: 400, body: { error: 'tag and untagged need a project' } }
-
-  if (project === null) {
-    if (db === null) return { status: 200, body: { level: 'projects', min_recalls: min, nodes: [] } }
-    const rows = db
-      .query(
-        `SELECT session_id AS owner, COUNT(*) AS count, SUM(${RECALLS}) AS recalls, MAX(timestamp) AS newest
-         FROM working_memory WHERE session_id IS NOT NULL AND session_id <> '' AND ${RECALLS} >= ?
-         GROUP BY session_id ORDER BY count DESC, owner`,
-      )
-      .all(min) as { owner: string; count: number; recalls: number | null; newest: string | null }[]
-    const nodes = rows.map(row => ({ id: row.owner, label: projectLabel(row.owner), count: row.count, recalls: row.recalls ?? 0, newest: row.newest }))
-    return { status: 200, body: { level: 'projects', min_recalls: min, nodes } }
-  }
-
-  if (tag === null && untagged === null) {
-    if (db === null) return { status: 200, body: { level: 'topics', project, min_recalls: min, nodes: [] } }
-    // One row per memory and tag (a tag twice in one memory counts once), then grouped.
-    const rows = db
-      .query(
-        `SELECT tag, COUNT(*) AS count, SUM(recalls) AS recalls, MAX(timestamp) AS newest FROM (
-           SELECT DISTINCT w.id AS id, lower(j.value) AS tag, ${RECALLS} AS recalls, w.timestamp AS timestamp
-           FROM working_memory AS w, json_each(${tagsSql('w.metadata_json')}) AS j
-           WHERE w.session_id = ? AND ${RECALLS} >= ? AND j.type = 'text' AND j.value <> ''
-         ) GROUP BY tag ORDER BY count DESC, tag`,
-      )
-      .all(project, min) as { tag: string; count: number; recalls: number | null; newest: string | null }[]
-    const nodes: { id: string; label: string; count: number; recalls: number; newest: string | null; tag: string | null; untagged: boolean }[] = rows.map(row => ({
-      id: `tag:${row.tag}`,
-      label: row.tag,
-      count: row.count,
-      recalls: row.recalls ?? 0,
-      newest: row.newest,
-      tag: row.tag,
-      untagged: false,
-    }))
-    const none = db
-      .query(`SELECT COUNT(*) AS count, SUM(${RECALLS}) AS recalls, MAX(timestamp) AS newest FROM working_memory WHERE session_id = ? AND ${RECALLS} >= ? AND ${untaggedSql()}`)
-      .get(project, min) as { count: number; recalls: number | null; newest: string | null }
-    if (none.count > 0) nodes.push({ id: 'untagged', label: 'Untagged', count: none.count, recalls: none.recalls ?? 0, newest: none.newest, tag: null, untagged: true })
-    return { status: 200, body: { level: 'topics', project, min_recalls: min, nodes } }
-  }
-
-  // The tag is lower-cased by SQLite's lower() on both sides, as the topics
-  // level groups them, so a topic always finds its own memories (lower() folds
-  // ASCII only; JS toLowerCase would fold more and miss them).
-  const topic = tag !== null ? { tag, untagged: false } : { tag: null, untagged: true }
-  if (db === null) return { status: 200, body: { level: 'memories', project, ...topic, min_recalls: min, total: 0, limit: memoryLimit, nodes: [] } }
-  const hasTag = `EXISTS (SELECT 1 FROM json_each(${tagsSql()}) WHERE json_each.type = 'text' AND lower(json_each.value) = lower(?))`
-  const where = `session_id = ? AND ${RECALLS} >= ? AND ${topic.untagged ? untaggedSql() : hasTag}`
-  const args: (string | number)[] = topic.tag !== null ? [project, min, topic.tag] : [project, min]
-  const total = (db.query(`SELECT COUNT(*) AS n FROM working_memory WHERE ${where}`).get(...args) as { n: number }).n
-  const rows = db
-    .query(
-      `SELECT id, substr(content, 1, 2000) AS head, ${RECALLS} AS recall_count, timestamp, metadata_json
-       FROM working_memory WHERE ${where} ORDER BY timestamp DESC, id LIMIT ?`,
-    )
-    .all(...args, memoryLimit) as { id: string; head: string | null; recall_count: number; timestamp: string | null; metadata_json: string | null }[]
-  const nodes = rows.map(row => ({
-    id: row.id,
-    label: firstLineOf(row.head ?? ''),
-    tags: tagsOf(parseMetadata(row.metadata_json)),
-    recall_count: row.recall_count,
-    timestamp: row.timestamp,
-  }))
-  return { status: 200, body: { level: 'memories', project, ...topic, min_recalls: min, total, limit: memoryLimit, nodes } }
-}
 
 /** The store's owners, the largest first. */
 function storeOwners(db: Database | null): string[] {
   if (db === null) return []
   const rows = db.query('SELECT session_id AS owner, COUNT(*) AS n FROM working_memory GROUP BY session_id ORDER BY n DESC, owner').all() as { owner: string | null }[]
   return rows.map(row => row.owner).filter((owner): owner is string => typeof owner === 'string' && owner !== '')
+}
+
+// ---- Galaxy (GDATA.1): every memory at once, with the knowledge mined from each ----
+
+// At most this many memories in one galaxy reply; `total` and `shown` say how many were cut.
+export const GALAXY_LIMIT = 2000
+// C0 and C1 control characters and DEL, and the bidirectional marks: a label must not
+// reflow or read as something else (the same set ui/escape.ts removes).
+const GALAXY_CONTROL = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g
+
+/** A galaxy label: the first non-empty line, control characters removed, cut to MAP_LABEL_CHARS. */
+export function galaxyLabel(text: unknown): string {
+  const raw = typeof text === 'string' ? text : ''
+  const line = raw
+    .split('\n')
+    .map(part => part.replace(GALAXY_CONTROL, '').trim())
+    .find(part => part !== '') ?? ''
+  const chars = Array.from(line)
+  return chars.length > MAP_LABEL_CHARS ? `${chars.slice(0, MAP_LABEL_CHARS - 1).join('')}…` : line
+}
+
+// The five memoria tables (C6): the rowid column, the display text each row
+// carries, and the columns the query needs beyond `source_memory_id`.
+const KNOWLEDGE_TABLES = [
+  { table: 'memoria_facts', kind: 'fact', id: 'id', text: 'value', needs: ['value'] },
+  { table: 'memoria_preferences', kind: 'preference', id: 'id', text: 'preference', needs: ['preference'] },
+  { table: 'memoria_instructions', kind: 'instruction', id: 'id', text: 'instruction', needs: ['instruction'] },
+  { table: 'memoria_timelines', kind: 'timeline', id: 'event_id', text: 'description', needs: ['description'] },
+  { table: 'memoria_kg', kind: 'relation', id: 'id', text: "trim(coalesce(subject, '') || ' ' || coalesce(predicate, '') || ' ' || coalesce(object, ''))", needs: ['subject', 'predicate', 'object'] },
+] as const
+
+export type GalaxyKnowledge = { id: string; kind: string; text: string; memory: string }
+export type GalaxyMemory = { id: string; owner: string; tags: string[]; recalls: number; lastRecalled: string | null; created: string | null; label: string }
+export type GalaxyProject = { owner: string; label: string; count: number; recalls: number }
+
+/**
+ * The columns a table actually has: a legacy store may predate `source_memory_id`
+ * (and the other memoria columns) even though the table exists (review 2 LOW 1).
+ */
+function tableColumns(db: Database, table: string): Set<string> {
+  return new Set((db.query(`PRAGMA table_info(${table})`).all() as { name: string }[]).map(row => row.name))
+}
+
+/**
+ * GET /api/galaxy: every memory (newest first, at most `limit`), its project and the
+ * knowledge rows mined from it, read-only. A missing store or a missing memoria table
+ * gives empty lists; nothing here writes.
+ */
+export function galaxyLevel(db: Database | null, limit = GALAXY_LIMIT): Answer {
+  if (db === null) return { status: 200, body: { projects: [], memories: [], knowledge: [], meaning: false, total: 0, shown: 0 } }
+  const present = new Set(
+    (db.query("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map(row => row.name),
+  )
+  const where = "session_id IS NOT NULL AND session_id <> ''"
+  const total = (db.query(`SELECT COUNT(*) AS n FROM working_memory WHERE ${where}`).get() as { n: number }).n
+  const projects: GalaxyProject[] = (
+    db
+      .query(`SELECT session_id AS owner, COUNT(*) AS count, SUM(${RECALLS}) AS recalls FROM working_memory WHERE ${where} GROUP BY session_id ORDER BY count DESC, owner`)
+      .all() as { owner: string; count: number; recalls: number | null }[]
+  ).map(row => ({ owner: row.owner, label: projectLabel(row.owner), count: row.count, recalls: row.recalls ?? 0 }))
+
+  const rows = db
+    .query(
+      `SELECT id, session_id AS owner, ${RECALLS} AS recalls, last_recalled AS lastRecalled,
+              timestamp AS created, substr(content, 1, 4000) AS head, metadata_json
+       FROM working_memory WHERE ${where} ORDER BY timestamp DESC, id LIMIT ?`,
+    )
+    .all(limit) as { id: string; owner: string; recalls: number; lastRecalled: string | null; created: string | null; head: string | null; metadata_json: string | null }[]
+  const memories: GalaxyMemory[] = rows.map(row => ({
+    id: row.id,
+    owner: row.owner,
+    tags: tagsOf(parseMetadata(row.metadata_json)),
+    recalls: row.recalls,
+    lastRecalled: row.lastRecalled,
+    created: row.created,
+    label: galaxyLabel(row.head),
+  }))
+
+  const knowledge: GalaxyKnowledge[] = []
+  if (memories.length > 0) {
+    const ids = memories.map(memory => memory.id)
+    const marks = ids.map(() => '?').join(', ')
+    for (const source of KNOWLEDGE_TABLES) {
+      if (!present.has(source.table)) continue
+      // A legacy table can exist without the column the join needs: skip it, never throw.
+      const columns = tableColumns(db, source.table)
+      if (!columns.has(source.id) || !columns.has('source_memory_id') || !source.needs.every(column => columns.has(column))) continue
+      let found: { rowid: number; text: string | null; memory: string }[]
+      try {
+        found = db
+          .query(`SELECT ${source.id} AS rowid, ${source.text} AS text, source_memory_id AS memory FROM ${source.table} WHERE source_memory_id IN (${marks}) ORDER BY ${source.id}`)
+          .all(...ids) as { rowid: number; text: string | null; memory: string }[]
+      } catch {
+        continue
+      }
+      for (const row of found) {
+        knowledge.push({ id: `${source.kind}:${row.rowid}`, kind: source.kind, text: galaxyLabel(row.text), memory: row.memory })
+      }
+    }
+  }
+  return { status: 200, body: { projects, memories, knowledge, meaning: false, total, shown: memories.length } }
+}
+
+export type KnowledgeItem = {
+  id: string
+  kind: string
+  text: string
+  item: string
+  owner: string
+  source_memory_id: string
+  topic: string | null
+  recalls: number
+  lastRecalled: string | null
+  usage: {
+    recalls: number
+    lastRecalled: string | null
+  }
+}
+
+/**
+ * GET /api/knowledge: every mined item from the five memoria tables, token-guarded and read-only.
+ * Returns items mapped by kind with source memory topic and usage, plus extraction status.
+ */
+export function knowledgeList(db: Database | null): Answer {
+  const extraction = process.env.MNEMOSYNE_EXTRACTION || 'unknown'
+  if (db === null) {
+    return {
+      status: 200,
+      body: {
+        extraction,
+        facts: [],
+        preferences: [],
+        instructions: [],
+        timelines: [],
+        relations: [],
+        kg: [],
+        items: [],
+      },
+    }
+  }
+
+  const present = new Set(
+    (db.query("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map(row => row.name),
+  )
+  const wmPresent = present.has('working_memory')
+
+  const result: Record<'facts' | 'preferences' | 'instructions' | 'timelines' | 'relations', KnowledgeItem[]> = {
+    facts: [],
+    preferences: [],
+    instructions: [],
+    timelines: [],
+    relations: [],
+  }
+
+  for (const source of KNOWLEDGE_TABLES) {
+    if (!present.has(source.table)) continue
+    const columns = tableColumns(db, source.table)
+    if (!columns.has(source.id) || !columns.has('source_memory_id') || !source.needs.every(col => columns.has(col))) continue
+
+    const listKey =
+      source.table === 'memoria_facts'
+        ? 'facts'
+        : source.table === 'memoria_preferences'
+          ? 'preferences'
+          : source.table === 'memoria_instructions'
+            ? 'instructions'
+            : source.table === 'memoria_timelines'
+              ? 'timelines'
+              : 'relations'
+
+    let query: string
+    if (wmPresent) {
+      query = `SELECT t.${source.id} AS rowid,
+                      ${source.text} AS text,
+                      t.session_id AS owner,
+                      t.source_memory_id AS source_memory_id,
+                      wm.recall_count AS recalls,
+                      wm.last_recalled AS lastRecalled,
+                      wm.metadata_json AS metadata_json
+               FROM ${source.table} t
+               LEFT JOIN working_memory wm ON wm.id = t.source_memory_id
+               ORDER BY t.${source.id}`
+    } else {
+      query = `SELECT t.${source.id} AS rowid,
+                      ${source.text} AS text,
+                      t.session_id AS owner,
+                      t.source_memory_id AS source_memory_id,
+                      0 AS recalls,
+                      NULL AS lastRecalled,
+                      NULL AS metadata_json
+               FROM ${source.table} t
+               ORDER BY t.${source.id}`
+    }
+
+    let rows: {
+      rowid: number
+      text: string | null
+      owner: string | null
+      source_memory_id: string | null
+      recalls: number | null
+      lastRecalled: string | null
+      metadata_json: string | null
+    }[]
+    try {
+      rows = db.query(query).all() as {
+        rowid: number
+        text: string | null
+        owner: string | null
+        source_memory_id: string | null
+        recalls: number | null
+        lastRecalled: string | null
+        metadata_json: string | null
+      }[]
+    } catch {
+      continue
+    }
+
+    for (const r of rows) {
+      const cleaned = galaxyLabel(r.text)
+      const topic = tagsOf(parseMetadata(r.metadata_json))[0] ?? null
+      const recalls = r.recalls ?? 0
+      const lastRecalled = r.lastRecalled ?? null
+      const item: KnowledgeItem = {
+        id: `${source.kind}:${r.rowid}`,
+        kind: source.kind,
+        text: cleaned,
+        item: cleaned,
+        owner: r.owner ?? '',
+        source_memory_id: r.source_memory_id ?? '',
+        topic,
+        recalls,
+        lastRecalled,
+        usage: {
+          recalls,
+          lastRecalled,
+        },
+      }
+      result[listKey].push(item)
+    }
+  }
+
+  const allItems = [
+    ...result.facts,
+    ...result.preferences,
+    ...result.instructions,
+    ...result.timelines,
+    ...result.relations,
+  ]
+
+  return {
+    status: 200,
+    body: {
+      extraction,
+      facts: result.facts,
+      preferences: result.preferences,
+      instructions: result.instructions,
+      timelines: result.timelines,
+      relations: result.relations,
+      kg: result.relations,
+      items: allItems,
+    },
+  }
 }
 
 // ---- Activity (VIEW.2): the log, read; and its tail, streamed ----
@@ -504,7 +925,7 @@ function objectLines(text: string): Record<string, unknown>[] {
   return out
 }
 
-const readText = (path: string) => {
+function readText(path: string): string {
   try {
     return readFileSync(path, 'utf8')
   } catch {
@@ -775,7 +1196,7 @@ async function search(views: Views, text: string): Promise<Answer> {
     const failed = runs.find((run): run is Error => run instanceof Error)
     // One owner: that owner. Across owners: the C3 default owner, and `owners` says how many were searched.
     const logged = { action: 'recall', origin: 'ui', owner: (owners.length === 1 ? owners[0] : undefined) ?? 'global', text: query } as const
-    const extra = { owners: owners.length }
+    const extra = { owners: owners.length, client: 'dashboard' }
     if (failed !== undefined) {
       views.log({ ...logged, ok: false, error: failed.message }, extra)
       return { status: 502, body: { error: ENGINE_FAILED } }
@@ -813,13 +1234,14 @@ async function forget(views: Views, text: string): Promise<Answer> {
     answer = await forgetOnce()
   }
   const logged = { action: 'forget', origin: 'ui', owner, ids: [id] } as const
+  const extra = { client: 'dashboard' }
   const reply = typeof answer === 'string' ? parseMetadata(answer) : null
   if (reply?.status === 'deleted') {
-    views.log({ ...logged, count: 1, ok: true })
+    views.log({ ...logged, count: 1, ok: true }, extra)
     return { status: 200, body: { status: 'deleted', memory_id: id, owner } }
   }
   if (reply?.status === 'not_found') {
-    views.log({ ...logged, count: 0, ok: false, error: 'not_found' })
+    views.log({ ...logged, count: 0, ok: false, error: 'not_found' }, extra)
     return gone
   }
   const message =
@@ -832,10 +1254,10 @@ async function forget(views: Views, text: string): Promise<Answer> {
           : `the engine answered ${String(reply?.status ?? answer.slice(0, 100))}`
   // The engine failed or timed out, maybe after its delete committed: the row says what happened.
   if (ownerOf() == null) {
-    views.log({ ...logged, count: 1, ok: true }, { note: preview(`engine reply lost: ${message}`) })
+    views.log({ ...logged, count: 1, ok: true }, { ...extra, note: preview(`engine reply lost: ${message}`) })
     return { status: 200, body: { status: 'deleted', memory_id: id, owner, note: 'The engine reply was lost, but the memory is gone.' } }
   }
-  views.log({ ...logged, count: 0, ok: false, error: message })
+  views.log({ ...logged, count: 0, ok: false, error: message }, extra)
   return { status: 502, body: { error: `${ENGINE_FAILED} Nothing was deleted.` } }
 }
 
@@ -948,6 +1370,8 @@ export async function startServer(config: Config, options: ServerOptions = {}): 
       return out instanceof Response ? out : json(out.body, out.status)
     }
     if (path === '/api/health') return get(() => ({ status: 200, body: health(config, store, engine) }))
+    if (path === '/api/health-report') return get(() => healthReport(config, store, engine))
+    if (path === '/api/knowledge') return get(() => knowledgeList((store.db ??= openStore(config.store))))
     if (path === '/api/memories') {
       return get(() => listMemories((store.db ??= openStore(config.store)), url.searchParams))
     }
@@ -962,7 +1386,7 @@ export async function startServer(config: Config, options: ServerOptions = {}): 
         return getMemory((store.db ??= openStore(config.store)), id)
       })
     }
-    if (path === '/api/map') return get(() => mapLevel((store.db ??= openStore(config.store)), url.searchParams))
+    if (path === '/api/galaxy') return get(() => galaxyLevel((store.db ??= openStore(config.store))))
     if (path === '/api/activity') {
       return get(() => {
         const asked = url.searchParams.get('limit')
