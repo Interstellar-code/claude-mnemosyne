@@ -104,13 +104,12 @@ void (async () => {
       continue
     }
     if (message?.method === 'initialize') {
-      // The client's self-declared app name (CTX.2); its version is the fallback when no name is given.
+      // The client's self-declared app name (CTX.2). No name means unknown: the
+      // version is never used as a label (review 2 LOW 3).
       const info = message?.params?.clientInfo
       if (info !== null && typeof info === 'object' && !Array.isArray(info)) {
         const name = typeof info.name === 'string' ? info.name.trim() : ''
-        const version = typeof info.version === 'string' ? info.version.trim() : ''
         if (name !== '') client = name
-        else if (version !== '') client = version
       }
       // Forward the initialize request unchanged, byte for byte (CTX.2.a1).
       engine.stdin.write(`${line}\n`)

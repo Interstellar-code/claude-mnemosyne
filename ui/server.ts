@@ -510,18 +510,27 @@ export function galaxyLabel(text: unknown): string {
   return chars.length > MAP_LABEL_CHARS ? `${chars.slice(0, MAP_LABEL_CHARS - 1).join('')}…` : line
 }
 
-// The five memoria tables (C6): the rowid column and the display text each row carries.
+// The five memoria tables (C6): the rowid column, the display text each row
+// carries, and the columns the query needs beyond `source_memory_id`.
 const KNOWLEDGE_TABLES = [
-  { table: 'memoria_facts', kind: 'fact', id: 'id', text: 'value' },
-  { table: 'memoria_preferences', kind: 'preference', id: 'id', text: 'preference' },
-  { table: 'memoria_instructions', kind: 'instruction', id: 'id', text: 'instruction' },
-  { table: 'memoria_timelines', kind: 'timeline', id: 'event_id', text: 'description' },
-  { table: 'memoria_kg', kind: 'relation', id: 'id', text: "trim(coalesce(subject, '') || ' ' || coalesce(predicate, '') || ' ' || coalesce(object, ''))" },
+  { table: 'memoria_facts', kind: 'fact', id: 'id', text: 'value', needs: ['value'] },
+  { table: 'memoria_preferences', kind: 'preference', id: 'id', text: 'preference', needs: ['preference'] },
+  { table: 'memoria_instructions', kind: 'instruction', id: 'id', text: 'instruction', needs: ['instruction'] },
+  { table: 'memoria_timelines', kind: 'timeline', id: 'event_id', text: 'description', needs: ['description'] },
+  { table: 'memoria_kg', kind: 'relation', id: 'id', text: "trim(coalesce(subject, '') || ' ' || coalesce(predicate, '') || ' ' || coalesce(object, ''))", needs: ['subject', 'predicate', 'object'] },
 ] as const
 
 export type GalaxyKnowledge = { id: string; kind: string; text: string; memory: string }
 export type GalaxyMemory = { id: string; owner: string; tags: string[]; recalls: number; lastRecalled: string | null; created: string | null; label: string }
 export type GalaxyProject = { owner: string; label: string; count: number; recalls: number }
+
+/**
+ * The columns a table actually has: a legacy store may predate `source_memory_id`
+ * (and the other memoria columns) even though the table exists (review 2 LOW 1).
+ */
+function tableColumns(db: Database, table: string): Set<string> {
+  return new Set((db.query(`PRAGMA table_info(${table})`).all() as { name: string }[]).map(row => row.name))
+}
 
 /**
  * GET /api/galaxy: every memory (newest first, at most `limit`), its project and the
@@ -564,9 +573,17 @@ export function galaxyLevel(db: Database | null, limit = GALAXY_LIMIT): Answer {
     const marks = ids.map(() => '?').join(', ')
     for (const source of KNOWLEDGE_TABLES) {
       if (!present.has(source.table)) continue
-      const found = db
-        .query(`SELECT ${source.id} AS rowid, ${source.text} AS text, source_memory_id AS memory FROM ${source.table} WHERE source_memory_id IN (${marks}) ORDER BY ${source.id}`)
-        .all(...ids) as { rowid: number; text: string | null; memory: string }[]
+      // A legacy table can exist without the column the join needs: skip it, never throw.
+      const columns = tableColumns(db, source.table)
+      if (!columns.has(source.id) || !columns.has('source_memory_id') || !source.needs.every(column => columns.has(column))) continue
+      let found: { rowid: number; text: string | null; memory: string }[]
+      try {
+        found = db
+          .query(`SELECT ${source.id} AS rowid, ${source.text} AS text, source_memory_id AS memory FROM ${source.table} WHERE source_memory_id IN (${marks}) ORDER BY ${source.id}`)
+          .all(...ids) as { rowid: number; text: string | null; memory: string }[]
+      } catch {
+        continue
+      }
       for (const row of found) {
         knowledge.push({ id: `${source.kind}:${row.rowid}`, kind: source.kind, text: galaxyLabel(row.text), memory: row.memory })
       }

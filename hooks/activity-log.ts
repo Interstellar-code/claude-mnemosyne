@@ -53,8 +53,11 @@ export const SESSION_LIMIT = 64
 // The engine's veracity labels, and its author_type values (human, agent, system).
 const VERACITY_VALUES = new Set(['true', 'false', 'stated', 'inferred', 'tool', 'imported', 'unknown'])
 const AUTHOR_TYPE_VALUES = new Set(['human', 'agent', 'system'])
-// C0 and C1 control characters and DEL, removed from client and session.
-const CONTROL = /[\u0000-\u001f\u007f-\u009f]/g
+// C0 and C1 control characters and DEL, plus the bidirectional marks (U+061C,
+// U+200E/F, U+202A-E, U+2066-9) and zero-width characters (U+200B-D, U+FEFF), the
+// same set ui/server.ts's GALAXY_CONTROL removes: a client or session name must
+// never make a dashboard row read as something else.
+const CONTROL = /[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g
 const codePointsOf = (text: string, limit: number) => Array.from(text).slice(0, limit).join('')
 
 // A bounded string for the client (60) or session (64) field: control characters

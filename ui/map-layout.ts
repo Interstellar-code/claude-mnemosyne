@@ -351,10 +351,10 @@ export function rangeDays(range: TimelineRange, oldestDays = 0): number {
   return range === 'all' ? Math.max(0, oldestDays) + 2 : range
 }
 
-/** A lane's y: centred on zero, each lane LANE_SPAN / (lanes - 1) from the next. */
+/** A lane's y: centred on zero, lane 0 at the top (+LANE_SPAN/2), as the mockup's [120, 40, -40, -120]. */
 export function laneY(lane: number, lanes: number): number {
   if (lanes <= 1) return 0
-  return -LANE_SPAN / 2 + (lane * LANE_SPAN) / (lanes - 1)
+  return LANE_SPAN / 2 - (lane * LANE_SPAN) / (lanes - 1)
 }
 
 /** Where a node sits in the timeline layout: x from its age, y on its lane, z at its topic's depth. */
