@@ -10,16 +10,24 @@
 //
 // Every transition returns a new state; none changes the one it is given.
 import { plainLabel } from './escape'
-import { galaxyLayout, placeOne, randomOf, seedOf, type GalaxyInputMemory, type GalaxyLayout, type GalaxyStar, type TimelineRange, type Vec3 } from './map-layout'
+import { gauss, galaxyLayout, placeOne, randomOf, rangeDays, seedOf, ticks, timelinePosition, TIMELINE_DAYS_X, TIMELINE_TODAY_X, type GalaxyInputMemory, type GalaxyLayout, type GalaxyStar, type Tick, type TimelineRange, type Vec3 } from './map-layout'
 import type { MapEvent, MapEventKind } from './map-live'
 
 // ---- What the server sends ----
 
 type GalaxyProject = { owner: string; label: string; count: number; recalls: number }
 type GalaxyMemory = { id: string; owner: string; tags: string[]; recalls: number; lastRecalled: string | null; created: string | null; label: string }
-export type GalaxyReply = { projects: GalaxyProject[]; memories: GalaxyMemory[]; meaning: boolean; total: number; shown: number }
+/** The five kinds of knowledge a memory is mined into, in the order the chips show them. */
+export const KNOWLEDGE_KINDS = ['fact', 'preference', 'instruction', 'timeline', 'relation'] as const
+export type KnowledgeKind = (typeof KNOWLEDGE_KINDS)[number]
+/** One knowledge row of /api/galaxy: its id (`<kind>:<rowid>`), kind, text (the API cuts it to 80) and the memory it came from. */
+type KnowledgeRow = { id: string; kind: KnowledgeKind; text: string; memory: string }
+export type GalaxyReply = { projects: GalaxyProject[]; memories: GalaxyMemory[]; knowledge: KnowledgeRow[]; meaning: boolean; total: number; shown: number }
 
 const LABEL_CHARS = 80
+// Knowledge text is shown as the API gives it (a KSTORE item can be 500 characters, the route cuts it to 80); this only bounds a bad reply.
+const KNOWLEDGE_CHARS = 500
+const isKind = (value: unknown): value is KnowledgeKind => (KNOWLEDGE_KINDS as readonly unknown[]).includes(value)
 
 const text = (value: unknown, fallback = '') => (typeof value === 'string' ? value : fallback)
 const count = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0)
@@ -44,7 +52,12 @@ export function parseGalaxy(body: unknown): GalaxyReply | null {
   const projects = rows(raw.projects)
     .filter(row => typeof row.owner === 'string' && row.owner !== '')
     .map(row => ({ owner: text(row.owner), label: plainLabel(text(row.label, text(row.owner)), 60), count: count(row.count), recalls: count(row.recalls) }))
-  return { projects, memories, meaning: raw.meaning === true, total: Math.max(count(raw.total), memories.length), shown: memories.length }
+  const seenIds = new Set<string>()
+  const knowledge = rows(raw.knowledge)
+    .filter(row => typeof row.id === 'string' && row.id !== '' && isKind(row.kind) && typeof row.memory === 'string' && row.memory !== '')
+    .filter(row => !seenIds.has(row.id as string) && seenIds.add(row.id as string))
+    .map(row => ({ id: text(row.id), kind: row.kind as KnowledgeKind, text: plainLabel(text(row.text), KNOWLEDGE_CHARS), memory: text(row.memory) }))
+  return { projects, memories, knowledge, meaning: raw.meaning === true, total: Math.max(count(raw.total), memories.length), shown: memories.length }
 }
 
 // ---- WebGL, and the library's tooltip ----
@@ -177,14 +190,21 @@ export type Galaxy = {
   meaning: boolean
   total: number
   shown: number
-  /** Days since each star was saved, by star index. */
+  /** Days since each star was saved, by star index. Ages are rolling from the load time (or a memory's last update): they are not advanced while the page stays open. */
   ages: number[]
+  /** The age of the oldest memory still on the map; kept current by touchMemory and forgetMemory. */
   oldestAge: number
+  /** Ids of memories with no usable save date: drawn in Galaxy, left off the Timeline axis. */
+  undated: Set<string>
   maxRecalls: number
   /** Project colour by owner. */
   colours: Map<string, string>
   /** Memories forgotten while the page is open: their stars fade out and no count holds them. */
   gone: Set<string>
+  /** The knowledge rows of each memory (by memory id), in the order the server sent them; a Map so an id named like an Object member is safe. */
+  knowledge: Map<string, KnowledgeRow[]>
+  /** The same rows by their own id. */
+  knowledgeById: Map<string, KnowledgeRow>
 }
 
 const DAY_MS = 86_400_000
@@ -193,9 +213,16 @@ const DAY_MS = 86_400_000
 export function buildGalaxy(reply: GalaxyReply, now = Date.now()): Galaxy {
   const input: GalaxyInputMemory[] = reply.memories
   const layout = galaxyLayout({ projects: reply.projects, memories: input })
+  const undated = new Set<string>()
   const ages = layout.stars.map(star => {
     const saved = star.created ? Date.parse(star.created) : Number.NaN
-    return Number.isFinite(saved) ? Math.max(0, Math.floor((now - saved) / DAY_MS)) : 0
+    if (!Number.isFinite(saved)) {
+      // No usable date: age 0 keeps its Galaxy brightness and colour, but the Timeline leaves it off the axis.
+      undated.add(star.id)
+      return 0
+    }
+    // A date in the future counts as today.
+    return Math.max(0, Math.floor((now - saved) / DAY_MS))
   })
   const colours = new Map<string, string>()
   layout.cores.forEach((core, i) => {
@@ -208,10 +235,27 @@ export function buildGalaxy(reply: GalaxyReply, now = Date.now()): Galaxy {
     shown: reply.shown,
     ages,
     oldestAge: ages.reduce((a, b) => Math.max(a, b), 0),
+    undated,
     maxRecalls: layout.stars.reduce((a, star) => Math.max(a, star.recalls), 0),
     colours,
     gone: new Set(),
+    ...knowledgeIndex(reply.knowledge, input),
   }
+}
+
+/** The knowledge rows grouped by their memory; a row whose memory is not in the reply (cut by the 2000 limit) is dropped. */
+function knowledgeIndex(rows: readonly KnowledgeRow[], memories: readonly { id: string }[]): Pick<Galaxy, 'knowledge' | 'knowledgeById'> {
+  const known = new Set(memories.map(memory => memory.id))
+  const knowledge = new Map<string, KnowledgeRow[]>()
+  const knowledgeById = new Map<string, KnowledgeRow>()
+  for (const row of rows) {
+    if (!known.has(row.memory)) continue
+    const list = knowledge.get(row.memory) ?? []
+    list.push(row)
+    knowledge.set(row.memory, list)
+    knowledgeById.set(row.id, row)
+  }
+  return { knowledge, knowledgeById }
 }
 
 /** The stars still in the galaxy: all but the memories forgotten while the page was open. */
@@ -266,6 +310,8 @@ export type MapState = {
   layerWrite: boolean
   live: boolean
   rotating: boolean
+  /** Whether auto-rotate was on when Timeline was entered, so leaving Timeline can turn it back on (TIME.1). */
+  rotateBefore: boolean
   reducedMotion: boolean
   /** Owners whose stars are hidden (a Set: an owner may be named like an Object member). */
   hidden: ReadonlySet<string>
@@ -274,9 +320,16 @@ export type MapState = {
   topic: string | null
   selected: string | null
   query: string
+  /** Knowledge moons on (MOON.1): the knowledge rows of the selected memory orbit its star. */
+  moons: boolean
+  /** The selected knowledge row (its id) of the selected memory, or null. */
+  moon: string | null
+  /** The Knowledge chips picked (MOON.2): only memories with one of these kinds stay lit. */
+  kinds: ReadonlySet<KnowledgeKind>
 }
 
 export function initialState(options: { reducedMotion: boolean; layout?: LayoutName }): MapState {
+  const timeline = options.layout === 'timeline'
   return {
     layout: options.layout ?? 'galaxy',
     range: 'all',
@@ -286,13 +339,18 @@ export function initialState(options: { reducedMotion: boolean; layout?: LayoutN
     layerRecall: true,
     layerWrite: true,
     live: !options.reducedMotion,
-    rotating: !options.reducedMotion,
+    // Opening on Timeline starts as a switch to it would: no auto-rotate, remembered for the way back.
+    rotating: !options.reducedMotion && !timeline,
+    rotateBefore: !options.reducedMotion && timeline,
     reducedMotion: options.reducedMotion,
     hidden: new Set<string>(),
     project: null,
     topic: null,
     selected: null,
     query: '',
+    moons: true,
+    moon: null,
+    kinds: new Set<KnowledgeKind>(),
   }
 }
 
@@ -321,9 +379,13 @@ export function saveLayout(storage: Pick<Storage, 'setItem'> | undefined, layout
   }
 }
 
+/** Switch layout. Entering Timeline pauses auto-rotate (a time axis seen end-on reads as nothing) and remembers whether it was on; leaving turns it back on only if it was. */
 export function setLayout(state: MapState, layout: LayoutName, meaningAvailable: boolean): MapState {
   if (!LAYOUTS.includes(layout) || (layout === 'meaning' && !meaningAvailable)) return state
-  return layout === state.layout ? state : { ...state, layout }
+  if (layout === state.layout) return state
+  if (layout === 'timeline') return { ...state, layout, rotating: false, rotateBefore: state.rotating }
+  if (state.layout === 'timeline') return { ...state, layout, rotating: state.rotateBefore || state.rotating, rotateBefore: false }
+  return { ...state, layout }
 }
 export const setRange = (state: MapState, range: TimelineRange): MapState => (range === state.range || ![7, 30, 'all'].includes(range) ? state : { ...state, range })
 export const setColourBy = (state: MapState, colourBy: ColourBy): MapState => (COLOUR_BY.includes(colourBy) && colourBy !== state.colourBy ? { ...state, colourBy } : state)
@@ -334,22 +396,22 @@ export const toggleLayer = (state: MapState, layer: 'recall' | 'write'): MapStat
 export const setQuery = (state: MapState, query: string): MapState => (query === state.query ? state : { ...state, query })
 
 /** Focus a project: its stars stay bright, the others dim; no topic or memory is picked. */
-export const focusProject = (state: MapState, owner: string): MapState => ({ ...state, project: owner, topic: null, selected: null })
+export const focusProject = (state: MapState, owner: string): MapState => ({ ...state, project: owner, topic: null, selected: null, moon: null })
 
 /** Focus a topic (a hub key `<owner>/<tag>`): its project comes into focus too. */
 export function focusTopic(state: MapState, galaxy: Galaxy, key: string): MapState {
   const hub = galaxy.layout.hubs[slotOf(galaxy.layout.hubByKey, key)]
-  return hub === undefined ? state : { ...state, project: hub.project, topic: key, selected: null }
+  return hub === undefined ? state : { ...state, project: hub.project, topic: key, selected: null, moon: null }
 }
 
 /** Select a memory: its project and topic come into focus. */
 export function selectStar(state: MapState, galaxy: Galaxy, id: string): MapState {
   const star = galaxy.layout.stars[slotOf(galaxy.layout.starById, id)]
-  return star === undefined || galaxy.gone.has(id) ? state : { ...state, project: star.owner, topic: star.topic, selected: id }
+  return star === undefined || galaxy.gone.has(id) ? state : { ...state, project: star.owner, topic: star.topic, selected: id, moon: state.selected === id ? state.moon : null }
 }
 
 /** Reset view: no focus, no memory, no Find. */
-export const resetView = (state: MapState): MapState => ({ ...state, project: null, topic: null, selected: null, query: '' })
+export const resetView = (state: MapState): MapState => ({ ...state, project: null, topic: null, selected: null, moon: null, query: '' })
 
 /** Hide or show a project's stars; hiding the focused project clears the focus. */
 export function toggleProject(state: MapState, owner: string): MapState {
@@ -357,7 +419,7 @@ export function toggleProject(state: MapState, owner: string): MapState {
   if (hidden.has(owner)) hidden.delete(owner)
   else hidden.add(owner)
   const hiding = hidden.has(owner)
-  return hiding && state.project === owner ? { ...state, hidden, project: null, topic: null, selected: null } : { ...state, hidden }
+  return hiding && state.project === owner ? { ...state, hidden, project: null, topic: null, selected: null, moon: null } : { ...state, hidden }
 }
 
 // ---- The path bar ----
@@ -380,7 +442,7 @@ export function pathBar(state: MapState, galaxy: Galaxy): Crumb[] {
 export function goTo(state: MapState, level: PathLevel): MapState {
   if (level === 'all') return resetView(state)
   if (level === 'project') return state.project === null ? state : focusProject(state, state.project)
-  return state.topic === null ? state : { ...state, selected: null }
+  return state.topic === null ? state : { ...state, selected: null, moon: null }
 }
 
 // ---- Find ----
@@ -424,14 +486,18 @@ export const foundText = (query: string, found: Found) => (query.trim() === '' ?
 const DIM_OTHER_PROJECT = 0.14
 const DIM_OTHER_TOPIC = 0.4
 const DIM_NO_MATCH = 0.08
+/** A memory without any of the picked kinds keeps a tenth of its brightness (MOON.2). */
+export const DIM_NO_KNOWLEDGE = 0.1
 
-/** The opacity a star settles at: brightness by age, 0 hidden, 0.14 outside the focused project, 0.4 in its other topics, 0.08 off a Find, 1 when selected. */
+/** The opacity a star settles at: brightness by age, 0 hidden, 0 older than the Timeline range or without a save date, 0.14 outside the focused project, 0.4 in its other topics, 0.08 off a Find, a tenth without a picked kind of knowledge, 1 when selected. */
 export function starTarget(galaxy: Galaxy, index: number, state: MapState, found: Found | null): number {
   const star = galaxy.layout.stars[index]
   if (star === undefined) return 0
   if (state.hidden.has(star.owner) || galaxy.gone.has(star.id)) return 0
   if (state.selected === star.id) return 1
+  if (state.layout === 'timeline' && !onTimelineAxis(galaxy, index, timelineDays(galaxy, state.range))) return 0
   let a = starBrightness(galaxy.ages[index] ?? 0, galaxy.oldestAge)
+  if (!passesKnowledgeFilter(galaxy, star.id, state)) a *= DIM_NO_KNOWLEDGE
   if (state.project !== null && star.owner !== state.project) a *= DIM_OTHER_PROJECT
   if (state.topic !== null && star.topic !== state.topic && star.owner === state.project) a *= DIM_OTHER_TOPIC
   if (found !== null && state.query.trim() !== '' && !found.ids.has(star.id)) a *= DIM_NO_MATCH
@@ -452,11 +518,139 @@ export function hubTarget(state: MapState, project: string, key: string): number
 /** Topic labels show only for the focused project. */
 export const hubLabelTarget = (state: MapState, project: string) => (state.project === project && !state.hidden.has(project) ? 0.95 : 0)
 
+// ---- Knowledge moons (MOON.1) and the knowledge filter (MOON.2) ----
+//
+// Every knowledge row names the memory it was mined from. The selected star shows
+// its rows (at most 8) as moons on a circle of radius 18; the Knowledge chips
+// count the memories that have each kind and, when picked, dim the others. The
+// numbers below are the mockup's (design/MapGalaxy.dc.html: moonHex, moonRgb,
+// frame's moons block, knowChips, knowFilter). The data is whatever /api/galaxy
+// held at page load: an `extract` activity line does not refetch it, so knowledge
+// mined later shows after a reload (stated limit).
+
+export const MOON_LIMIT = 8
+export const MOON_RADIUS = 18
+/** Orbit speed in radians per second; 0 under prefers-reduced-motion (the moons stand still). */
+export const MOON_SPEED = 0.45
+export const MOON_SIZE = 6.5
+export const MOON_SIZE_SELECTED = 9
+/** The thin line from the star to each moon. */
+export const MOON_LINE_OPACITY = 0.35
+export const MOON_LINE_COLOUR = '#CFE3FF'
+export const MOON_PICK_RADIUS = 12
+export const MOON_COLOURS: Readonly<Record<KnowledgeKind, string>> = { fact: '#9ED1FF', preference: '#FF9EC7', instruction: '#9EF0A8', timeline: '#FFD17A', relation: '#C7A6FF' }
+/** What the chips and the moon labels call a kind. */
+export const KIND_LABELS: Readonly<Record<KnowledgeKind, string>> = { fact: 'Fact', preference: 'Preference', instruction: 'Instruction', timeline: 'Timeline event', relation: 'Relation' }
+export const CHIP_LABELS: Readonly<Record<KnowledgeKind, string>> = { fact: 'Facts', preference: 'Preferences', instruction: 'Instructions', timeline: 'Timeline', relation: 'Relations' }
+export const moonColour = (kind: KnowledgeKind) => MOON_COLOURS[kind]
+
+/** The knowledge rows of a memory in the order sent (all of them; the inspector lists every row, the moons take the first 8); none for a forgotten memory. */
+export function knowledgeOf(galaxy: Galaxy, id: string): KnowledgeRow[] {
+  return galaxy.gone.has(id) ? [] : (galaxy.knowledge.get(id) ?? [])
+}
+
+/** Whether the page holds any knowledge of a live memory: the controls stay disabled until it does (a forgotten memory's rows do not count). */
+export function hasKnowledge(galaxy: Galaxy): boolean {
+  for (const row of galaxy.knowledgeById.values()) if (!galaxy.gone.has(row.memory)) return true
+  return false
+}
+
+/** How many looks at the library's scene (afterData runs) are enough to say it drew no line to copy. */
+export const LINE_CHECKS = 2
+
+/** The plain-words status when the moons cannot get their lines: no Line class was found after the library had been looked at. Null otherwise. */
+export function moonLinesProblem(lineClassFound: boolean, checks: number, moonsShown: boolean): string | null {
+  if (lineClassFound || checks < LINE_CHECKS || !moonsShown) return null
+  return 'The knowledge moons are drawn without their thin lines to the star: the map library has not drawn any line to copy yet.'
+}
+
+/** The rows that orbit the selected memory: at most 8, and none while Knowledge moons is off or nothing is selected. */
+export function moonRows(galaxy: Galaxy, state: MapState): KnowledgeRow[] {
+  if (!state.moons || state.selected === null) return []
+  return knowledgeOf(galaxy, state.selected).slice(0, MOON_LIMIT)
+}
+
+/** The selected knowledge row, only while it belongs to the selected memory and is one of the moons shown or listed. */
+export function selectedMoon(galaxy: Galaxy, state: MapState): string | null {
+  if (state.moon === null || state.selected === null) return null
+  return knowledgeOf(galaxy, state.selected).some(row => row.id === state.moon) ? state.moon : null
+}
+
+/** Picks a knowledge row (a moon or a list item): the other one follows. A row of another memory is ignored. */
+export function selectMoon(state: MapState, galaxy: Galaxy, id: string): MapState {
+  if (state.selected === null || state.moon === id) return state
+  return knowledgeOf(galaxy, state.selected).some(row => row.id === id) ? { ...state, moon: id } : state
+}
+
+export const toggleMoons = (state: MapState): MapState => ({ ...state, moons: !state.moons })
+
+/**
+ * Where moon i of n is: on a circle of radius 18 around the star, flattened to 0.45 in height, turning at 0.45 rad/s.
+ * Under reduced motion the moons STAND STILL (speed 0): orchestrator decision, matching the mockup
+ * (MapGalaxy.dc.html: `this.reduced ? 0 : 0.45`) and accessibility. The plan's words "(still under reduced motion)"
+ * meant this; they are corrected in REL.
+ */
+export function moonPosition(centre: Vec3, i: number, n: number, seconds: number, reducedMotion: boolean): Vec3 {
+  const angle = seconds * (reducedMotion ? 0 : MOON_SPEED) + (i * Math.PI * 2) / Math.max(1, n)
+  return [centre[0] + Math.cos(angle) * MOON_RADIUS, centre[1] + Math.sin(angle) * MOON_RADIUS * 0.45, centre[2] + Math.sin(angle) * MOON_RADIUS]
+}
+
+/** A moon's glow size: 6.5, and 9 for the selected one. */
+export const moonSize = (selected: boolean) => (selected ? MOON_SIZE_SELECTED : MOON_SIZE)
+/** The selected moon's pulse: 0.4 + 0.3 sin(5t); the others do not pulse. */
+export const moonPulse = (selected: boolean, seconds: number) => (selected ? 0.4 + 0.3 * Math.sin(seconds * 5) : 0)
+
+/** The kinds a memory has knowledge of. */
+function kindsOf(galaxy: Galaxy, id: string): Set<KnowledgeKind> {
+  return new Set(knowledgeOf(galaxy, id).map(row => row.kind))
+}
+
+/** How many live memories have each kind (the chips' numbers). */
+export function knowledgeCounts(galaxy: Galaxy): Record<KnowledgeKind, number> {
+  const counts: Record<KnowledgeKind, number> = { fact: 0, preference: 0, instruction: 0, timeline: 0, relation: 0 }
+  for (const star of liveStars(galaxy)) for (const kind of kindsOf(galaxy, star.id)) counts[kind]++
+  return counts
+}
+
+/** Picks or drops a chip. */
+export function toggleKind(state: MapState, kind: KnowledgeKind): MapState {
+  if (!KNOWLEDGE_KINDS.includes(kind)) return state
+  const kinds = new Set(state.kinds)
+  if (kinds.has(kind)) kinds.delete(kind)
+  else kinds.add(kind)
+  return { ...state, kinds }
+}
+
+/** The one-line note under the chips. */
+export const knowledgeNote = (state: MapState) =>
+  state.kinds.size > 0 ? 'Showing only memories with the chosen knowledge; the rest are dimmed.' : 'Pick a kind to light up only the memories it was mined from.'
+
+/** The filter's rule: with no kind picked every memory passes; with some, a memory passes when it has at least one of them. */
+export function passesKnowledgeFilter(galaxy: Galaxy, id: string, state: MapState): boolean {
+  if (state.kinds.size === 0) return true
+  return knowledgeOf(galaxy, id).some(row => state.kinds.has(row.kind))
+}
+
+/** The hover text of a moon: its kind and its text. */
+export function moonTooltip(galaxy: Galaxy, id: string): { title: string; sub: string } | null {
+  const row = galaxy.knowledgeById.get(id)
+  return row === undefined ? null : { title: KIND_LABELS[row.kind], sub: row.text }
+}
+
+/** "its memory recalled 3 times, last 2 days ago" (the KAPI usage of the memory a row came from). */
+export function usageText(recalls: number, lastRecalled: string | null, now = Date.now()): string {
+  if (recalls <= 0) return 'its memory was never recalled'
+  const last = lastRecalled === null ? Number.NaN : Date.parse(lastRecalled)
+  if (!Number.isFinite(last)) return `its memory recalled ${plural(recalls, 'time')}`
+  const days = Math.max(0, Math.floor((now - last) / DAY_MS))
+  return `its memory recalled ${plural(recalls, 'time')}, last ${days === 0 ? 'today' : days === 1 ? 'yesterday' : `${days} days ago`}`
+}
+
 // ---- Picking and the tooltip ----
 
-export type Hit = { kind: 'star' | 'hub' | 'core'; id: string; sx: number; sy: number }
+export type Hit = { kind: 'star' | 'hub' | 'core' | 'moon'; id: string; sx: number; sy: number }
 export type Candidate = Hit & { radius: number; alpha: number }
-export const PICK_RADIUS = { star: 10, hub: 12, core: 22 } as const
+export const PICK_RADIUS = { star: 10, hub: 12, core: 22, moon: MOON_PICK_RADIUS } as const
 const PICK_MIN_ALPHA = 0.2
 
 /** The nearest candidate whose screen distance is inside its radius; a faint one (opacity under 0.2) cannot be picked. */
@@ -494,6 +688,7 @@ const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
 /** The tooltip for a hit: a memory says topic · project, recalls, saved date and label; a hub or core says how many memories and 'Click to fly in'. */
 export function tooltip(galaxy: Galaxy, hit: Hit): { title: string; sub: string } | null {
   const layout = galaxy.layout
+  if (hit.kind === 'moon') return moonTooltip(galaxy, hit.id)
   if (hit.kind === 'star') {
     const star = layout.stars[slotOf(layout.starById, hit.id)]
     if (star === undefined || galaxy.gone.has(star.id)) return null
@@ -555,6 +750,233 @@ export function flightPose(cameraAt: Vec3, lookingAt: Vec3, flight: Flight): { p
 /** A point between two, `k` of the way. */
 export const lerp3 = (a: Vec3, b: Vec3, k: number): Vec3 => [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k]
 
+// ---- The Timeline layout (TIME.1, TIME.2) ----
+//
+// The same stars move onto a time axis at LAYOUT.2's positions (timelinePosition):
+// x is age, one lane per project. The numbers below are the mockup's
+// (design/MapGalaxy.dc.html: syncSettings, posOf, tl, flyPose, the axis and grid
+// in frame). ui/map.ts holds only the timers; every curve, target and place is here.
+
+export const TIMELINE_HINT = 'Newest on the right; each lane is one project'
+/** The morph between Galaxy and Timeline takes this long, with cubic ease; none under prefers-reduced-motion. */
+export const MORPH_SECONDS = 1.4
+export const morphSeconds = (reducedMotion: boolean) => (reducedMotion ? 0 : MORPH_SECONDS)
+/** Where the morph is heading: 1 in Timeline, 0 in the other layouts. */
+export const morphTarget = (layout: LayoutName): 0 | 1 => (layout === 'timeline' ? 1 : 0)
+/** The morph's weight after `dt` more seconds: it moves linearly toward `target` and arrives at once when `seconds` is 0; the drawn blend is `ease(weight)`. A switch mid-morph turns around from where it is. */
+export function stepMorph(weight: number, target: number, dt: number, seconds: number): number {
+  if (seconds <= 0) return target
+  const step = Math.max(0, dt) / seconds
+  return weight < target ? Math.min(target, weight + step) : Math.max(target, weight - step)
+}
+/** The drawn blend of a morph weight: 0 Galaxy, 1 Timeline. */
+export const morphBlend = (weight: number) => ease(Math.min(1, Math.max(0, weight)))
+/** Project cores and the Claude core shrink to half size in Timeline. */
+export const TIMELINE_CORE_SCALE = 0.5
+export const coreScale = (blend: number) => 1 - (1 - TIMELINE_CORE_SCALE) * blend
+/** Topic hubs, threads, bridges and their particles fade out in Timeline: what is left of them at a blend. */
+export const galaxyOnlyFade = (blend: number) => Math.max(0, 1 - blend)
+/** Straight-on view of the axis: the camera 800 in front of it, the middle of the axis in view. */
+export const TIMELINE_POSE: { position: Vec3; target: Vec3 } = { position: [-20, 10, 800], target: [-20, 0, 0] }
+/** How fast the range follows a new choice, per second: 1 - e^(-4t) of the way. */
+export const RANGE_FOLLOW = 4
+/** The days the axis shows now, moving toward the range's days; at once under reduced motion or when close. */
+export function stepDays(shown: number, target: number, dt: number, reducedMotion: boolean): number {
+  if (reducedMotion || Math.abs(target - shown) < 0.01) return target
+  return shown + (target - shown) * (1 - Math.exp(-RANGE_FOLLOW * Math.max(0, dt)))
+}
+/** The days a range spans for a galaxy: 7, 30, or the oldest memory plus two days. */
+export const timelineDays = (galaxy: Galaxy, range: TimelineRange) => rangeDays(range, galaxy.oldestAge)
+/** A star older than the range fades out. */
+export const inTimelineRange = (age: number, days: number) => age <= days
+/** The left edge of the axis: where the oldest age the range shows sits (x = 280 - 560 = -280). */
+export const TIMELINE_LEFT_X = TIMELINE_TODAY_X - TIMELINE_DAYS_X
+/** Whether a star is on the Timeline axis for `days`: it has a save date and is no older than the range. */
+export const onTimelineAxis = (galaxy: Galaxy, index: number, days: number): boolean => {
+  const star = galaxy.layout.stars[index]
+  return star !== undefined && !galaxy.undated.has(star.id) && inTimelineRange(galaxy.ages[index] ?? 0, days)
+}
+
+/** Where every drawn thing sits in Timeline, in the layout's own order. */
+export type TimelinePlaces = { claude: Vec3; cores: Vec3[]; hubs: Vec3[]; stars: Vec3[] }
+
+/** Timeline places for `days` of axis: cores head their lanes, a topic sits at its memories' average age, a star at its age with a seeded jitter and its topic's depth (never left of the axis). */
+export function timelinePlaces(galaxy: Galaxy, days: number): TimelinePlaces {
+  const { cores, hubs, stars } = galaxy.layout
+  const lanes = cores.length
+  const laneOf = (owner: string) => Math.max(0, slotOf(galaxy.layout.coreByOwner, owner))
+  // A topic's depth is its place among its project's topics, 6 apart around the middle; its age the average of its memories'.
+  const perProject = new Map<string, number>()
+  const depthOf = hubs.map(hub => {
+    const n = perProject.get(hub.project) ?? 0
+    perProject.set(hub.project, n + 1)
+    return (n - 3) * 6
+  })
+  const sums = hubs.map(() => 0)
+  const counts = hubs.map(() => 0)
+  stars.forEach((star, i) => {
+    const h = slotOf(galaxy.layout.hubByKey, star.topic)
+    if (h < 0 || galaxy.undated.has(star.id)) return
+    sums[h] = sums[h]! + (galaxy.ages[i] ?? 0)
+    counts[h] = counts[h]! + 1
+  })
+  return {
+    claude: timelinePosition({ kind: 'claude' }, days),
+    cores: cores.map((core, lane) => timelinePosition({ kind: 'project', lane, lanes }, days)),
+    hubs: hubs.map((hub, h) => timelinePosition({ kind: 'topic', id: hub.key, lane: laneOf(hub.project), lanes, age: sums[h]! / Math.max(1, counts[h]!), depth: depthOf[h]! }, days)),
+    stars: stars.map((star, i) => {
+      const h = slotOf(galaxy.layout.hubByKey, star.topic)
+      const depth = (h < 0 ? 0 : depthOf[h]!) + gauss(randomOf(seedOf(`${star.id}:depth`))) * 3
+      const at = timelinePosition({ kind: 'memory', id: star.id, lane: laneOf(star.owner), lanes, age: galaxy.ages[i] ?? 0, depth }, days)
+      // A star past the range, or with no save date, is held at the left edge of the axis: only a selected one is lit there, and it must stay on screen.
+      return [galaxy.undated.has(star.id) ? TIMELINE_LEFT_X : Math.max(at[0], TIMELINE_LEFT_X), at[1], at[2]] as Vec3
+    }),
+  }
+}
+
+/** A place between Galaxy and Timeline. */
+export const blendPlace = (galaxyAt: Vec3, timelineAt: Vec3, blend: number): Vec3 => (blend <= 0 ? [...galaxyAt] : blend >= 1 ? [...timelineAt] : lerp3(galaxyAt, timelineAt, blend))
+
+// Furniture: tick labels with a faint gridline each, and a faint baseline per lane (mockup axis, grid, lanes).
+export const TICK_LABEL_Y = -178
+export const TICK_LABEL_HEIGHT = 14
+export const TICK_LABEL_COLOUR = '#A9B8C8'
+export const TICK_LABEL_OPACITY = 0.95
+export const GRID_Y: [number, number] = [-160, 160]
+export const GRID_Z = -20
+export const GRID_COLOUR = '#5A6B7D'
+export const GRID_OPACITY = 0.3
+export const LANE_X: [number, number] = [-310, 300]
+export const LANE_Z = -12
+export const LANE_OPACITY = 0.4
+
+/** The ticks of a range from LAYOUT.2's ticks(), for the days it spans. */
+export const rangeTicks = (range: TimelineRange, days: number): Tick[] => ticks(range, days)
+/** A tick's x while the axis shows `shownDays`: today stays at 280, older ticks slide as the range rescales. */
+export const tickX = (tickDays: number, shownDays: number) => TIMELINE_TODAY_X - (tickDays * TIMELINE_DAYS_X) / Math.max(1, shownDays)
+/** A gridline's two ends: from y -160 to 160 at the tick's x, behind the stars. */
+export const gridLine = (x: number): [Vec3, Vec3] => [
+  [x, GRID_Y[0], GRID_Z],
+  [x, GRID_Y[1], GRID_Z],
+]
+/** A lane's baseline: its project's colour, at the lane's y, from the cores to just past today. */
+export function laneLines(galaxy: Galaxy): { owner: string; colour: string; from: Vec3; to: Vec3 }[] {
+  const lanes = galaxy.layout.cores.length
+  return galaxy.layout.cores.map((core, lane) => {
+    const y = timelinePosition({ kind: 'project', lane, lanes }, 1)[1]
+    return { owner: core.owner, colour: projectColour(galaxy, core.owner), from: [LANE_X[0], y, LANE_Z], to: [LANE_X[1], y, LANE_Z] }
+  })
+}
+
+// ---- Timeline: the per-frame decisions (TIME R2) ----
+//
+// ui/map.ts only carries these out; every choice of what to do this frame is a pure function here, tested with real values.
+
+type VisualKind = 'core' | 'hub' | 'star' | 'claude'
+
+/** Where a visual goes in Timeline: its slot in the places lists (the Claude core has none). */
+export function awayPlace(places: TimelinePlaces, kind: VisualKind, slot: number): Vec3 | undefined {
+  return kind === 'star' ? places.stars[slot] : kind === 'hub' ? places.hubs[slot] : kind === 'core' ? places.cores[slot] : places.claude
+}
+
+/** A visual's place at a blend: its home when there is no Timeline place or no blend. */
+export const visualPlace = (home: Vec3, away: Vec3 | null | undefined, blend: number): Vec3 => (away == null ? [...home] : blendPlace(home, away, blend))
+
+export const samePlace = (a: Vec3, b: Vec3): boolean => a[0] === b[0] && a[1] === b[1] && a[2] === b[2]
+
+/** The Timeline places kept from one frame to the next: the same galaxy and days give the same places, until `stale` (a move, a new star, an update). */
+export type PlacesCache = { galaxy: Galaxy; days: number; places: TimelinePlaces } | null
+export function placesFor(cache: PlacesCache, galaxy: Galaxy, days: number, stale: boolean): { cache: NonNullable<PlacesCache>; places: TimelinePlaces } {
+  if (cache !== null && !stale && cache.galaxy === galaxy && cache.days === days) return { cache, places: cache.places }
+  const made = { galaxy, days, places: timelinePlaces(galaxy, days) }
+  return { cache: made, places: made.places }
+}
+
+/** One frame of the layout: the morph and the shown days move toward the state; `place` says whether any visual has to be written again. Days only matter once some Timeline is blended in. */
+type LayoutStep = { morph: number; days: number; place: boolean }
+export function layoutStep(morph: number, days: number, layout: LayoutName, targetDays: number, dt: number, reducedMotion: boolean, dirty: boolean): LayoutStep {
+  const next = stepMorph(morph, morphTarget(layout), dt, morphSeconds(reducedMotion))
+  const shown = stepDays(days, targetDays, dt, reducedMotion)
+  return { morph: next, days: shown, place: dirty || next !== morph || (shown !== days && morphBlend(next) > 0) }
+}
+
+/** The middle of the on-axis, still living stars among `ids`, at their Timeline places; null when none is on the axis. */
+export function timelineCentre(galaxy: Galaxy, places: TimelinePlaces, ids: Iterable<string>, days: number): Vec3 | null {
+  const sum: Vec3 = [0, 0, 0]
+  let n = 0
+  for (const id of ids) {
+    const slot = slotOf(galaxy.layout.starById, id)
+    const at = places.stars[slot]
+    if (at === undefined || galaxy.gone.has(id) || !onTimelineAxis(galaxy, slot, days)) continue
+    n++
+    for (let i = 0; i < 3; i++) sum[i] = sum[i]! + at[i]!
+  }
+  return n === 0 ? null : [sum[0] / n, sum[1] / n, sum[2] / n]
+}
+
+/** The middle of the lane (the baseline's middle): where a topic flight lands when the topic has no star on the axis. */
+export const LANE_CENTRE_X = (LANE_X[0] + LANE_X[1]) / 2
+
+/** What a flight aims at in Timeline. A topic hub is invisible there, so a topic flight aims at its project's lane and the average x of its on-axis stars (the lane centre when it has none). */
+export function timelineAim(galaxy: Galaxy, places: TimelinePlaces, kind: 'core' | 'hub' | 'star', id: string, days: number): Vec3 | null {
+  if (kind === 'core') return places.cores[slotOf(galaxy.layout.coreByOwner, id)] ?? null
+  if (kind === 'star') return places.stars[slotOf(galaxy.layout.starById, id)] ?? null
+  const hub = galaxy.layout.hubs[slotOf(galaxy.layout.hubByKey, id)]
+  const lane = hub === undefined ? undefined : places.cores[slotOf(galaxy.layout.coreByOwner, hub.project)]
+  if (lane === undefined) return null
+  const middle = timelineCentre(galaxy, places, galaxy.layout.stars.filter(star => star.topic === id).map(star => star.id), days)
+  return [middle === null ? LANE_CENTRE_X : middle[0], lane[1], 0]
+}
+
+/** The fade to write to the links this frame, or null when nothing changed: fully visible links need nothing, and the same fade needs nothing unless the links were rebuilt (`dirty`). */
+export function linkFadeToApply(fade: number, applied: number, dirty: boolean): number | null {
+  if (fade >= 1 && applied >= 1) return null
+  if (fade === applied && !dirty) return null
+  return fade
+}
+
+/** Where a spark starts: the Claude core's place now (it sits above today in Timeline), the origin before it is drawn. */
+export const sparkOrigin = (claude: Vec3 | null | undefined): Vec3 => claude ?? [0, 0, 0]
+
+/** The camera move a layout switch asks for: the straight-on view when Timeline is entered, the Galaxy view when it is left, none otherwise. */
+export const layoutFlight = (before: LayoutName, after: LayoutName): 'timeline' | 'galaxy' | null => (before === after ? null : after === 'timeline' ? 'timeline' : before === 'timeline' ? 'galaxy' : null)
+
+/** What the hubs' (and their labels') own fade is: only hubs leave in Timeline. */
+export const visualFade = (kind: VisualKind, galaxyFade: number): number => (kind === 'hub' ? galaxyFade : 1)
+
+/** A visual's drawn size: cores and the Claude core shrink with the blend; every one grows with its pulse. */
+export const visualScale = (kind: VisualKind, size: number, blend: number, pulse: number): number => size * (kind === 'core' || kind === 'claude' ? coreScale(blend) : 1) * (1 + pulse * 1.6)
+
+/** An opacity this close to its target snaps onto it, so a faded-out thing really reaches 0 and the furniture can go idle. */
+export const FURNITURE_EPSILON = 0.003
+export const easeToward = (value: number, target: number, follow: number): number => (Math.abs(target - value) <= FURNITURE_EPSILON ? target : value + (target - value) * follow)
+
+/** The ticks the axis wants at a blend: none while no Timeline is blended in. The list of the last range and days asked is kept, so a frame makes none. */
+const NO_TICKS: Tick[] = []
+let lastTicks: { range: TimelineRange; days: number; list: Tick[] } | null = null
+export function wantedTicks(range: TimelineRange, days: number, blend: number): Tick[] {
+  if (!(blend > 0)) return NO_TICKS
+  if (lastTicks === null || lastTicks.range !== range || lastTicks.days !== days) lastTicks = { range, days, list: rangeTicks(range, days) }
+  return lastTicks.list
+}
+/** Whether a tick of `days` is among the wanted ones. */
+export const tickWanted = (list: readonly Tick[], days: number): boolean => list.some(tick => tick.days === days)
+/** A tick label's opacity target, and its lane baseline's: they come in with the blend. */
+export const tickTarget = (wanted: boolean, blend: number): number => (wanted ? blend * TICK_LABEL_OPACITY : 0)
+export const laneTarget = (blend: number, hidden: boolean): number => (blend > 0 && !hidden ? blend * LANE_OPACITY : 0)
+/** A gridline's opacity follows its label's. */
+export const gridOpacity = (labelAlpha: number): number => (labelAlpha / TICK_LABEL_OPACITY) * GRID_OPACITY
+/** A gridline is made only once its tick is visible. */
+export const needsGridLine = (hasLine: boolean, labelAlpha: number): boolean => !hasLine && labelAlpha > FURNITURE_EPSILON
+/** A tick no longer wanted is let go once it has faded out. */
+export const tickReleased = (wanted: boolean, labelAlpha: number): boolean => !wanted && labelAlpha <= FURNITURE_EPSILON
+/** Nothing of the axis to draw or fade this frame: no Timeline blended in, no tick left, every lane baseline at 0. */
+export function furnitureIdle(blend: number, tickCount: number, lanes: Iterable<{ alpha: number }>): boolean {
+  if (blend > 0 || tickCount > 0) return false
+  for (const lane of lanes) if (lane.alpha > 0) return false
+  return true
+}
+
 // ---- The rail ----
 
 type ProjectRow = { owner: string; label: string; colour: string; count: number; shown: boolean; focused: boolean }
@@ -591,14 +1013,33 @@ type Inspector = {
   memory?: { text: string; tags: string[]; id: string }
   stats: { label: string; value: string }[]
   hint: string
-  /** The two sections of a memory; empty (with their note) until knowledge and embeddings are built. */
-  knowledge?: { note: string }
+  /** The two sections of a memory: what was mined from it (MOON.1), and the similar memories (empty until embeddings are built). */
+  knowledge?: { note: string; items: KnowledgeItem[] }
   similar?: { note: string }
 }
 
+/** One line of the inspector's "Knowledge from this memory". */
+type KnowledgeItem = { id: string; kind: KnowledgeKind; label: string; colour: string; text: string; usage: string; selected: boolean }
+
+/** Shown when a memory has no knowledge rows; the second sentence is the stated limit (an `extract` line does not refetch the galaxy). */
+export const NO_KNOWLEDGE_NOTE = 'Nothing extracted from this memory yet. Reload to see new knowledge.'
+
 const sum = (values: readonly number[]) => values.reduce((a, b) => a + b, 0)
 
-export function inspector(galaxy: Galaxy, state: MapState): Inspector {
+function knowledgeSection(galaxy: Galaxy, state: MapState, star: GalaxyStar, now: number): { note: string; items: KnowledgeItem[] } {
+  const rows = knowledgeOf(galaxy, star.id)
+  if (rows.length === 0) return { note: NO_KNOWLEDGE_NOTE, items: [] }
+  const picked = selectedMoon(galaxy, state)
+  // The galaxy memory's own recall fields: the same numbers KAPI's usage counts give for this memory, so no second source.
+  const usage = usageText(star.recalls, star.lastRecalled, now)
+  const more = rows.length > MOON_LIMIT ? ` Only the first ${MOON_LIMIT} orbit the star.` : ''
+  return {
+    note: `${state.moons ? 'Shown as moons around the star.' : 'Turn on Knowledge moons to see them around the star.'} Each item is also in the Knowledge tab.${more}`,
+    items: rows.map(row => ({ id: row.id, kind: row.kind, label: KIND_LABELS[row.kind], colour: MOON_COLOURS[row.kind], text: row.text, usage, selected: row.id === picked })),
+  }
+}
+
+export function inspector(galaxy: Galaxy, state: MapState, now = Date.now()): Inspector {
   const layout = galaxy.layout
   const star = state.selected === null || galaxy.gone.has(state.selected) ? undefined : layout.stars[slotOf(layout.starById, state.selected)]
   if (star !== undefined) {
@@ -616,7 +1057,7 @@ export function inspector(galaxy: Galaxy, state: MapState): Inspector {
         { label: 'Tags', value: star.tags.length === 0 ? 'none' : star.tags.join(', ') },
       ],
       hint: star.recalls === 0 ? 'Never recalled: a candidate to review or forget.' : 'Its star grows each time Claude recalls it.',
-      knowledge: { note: 'Nothing extracted from this memory yet.' },
+      knowledge: knowledgeSection(galaxy, state, star, now),
       similar: { note: 'Similar memories need embeddings.' },
     }
   }
@@ -667,7 +1108,7 @@ export function inspector(galaxy: Galaxy, state: MapState): Inspector {
       { label: 'Topics', value: String(layout.hubs.length) },
       { label: 'Bridges', value: String(layout.bridges.length) },
     ],
-    hint: 'Every star is one memory. Click a project core to fly in.',
+    hint: state.layout === 'timeline' ? TIMELINE_HINT : 'Every star is one memory. Click a project core to fly in.',
   }
 }
 
@@ -730,11 +1171,23 @@ export function recallMemory(galaxy: Galaxy, id: string): boolean {
   return true
 }
 
-/** An update makes the memory new again: age 0. */
+/** The age of the oldest memory still on the map (not forgotten). */
+export function liveOldestAge(galaxy: Galaxy): number {
+  let oldest = 0
+  galaxy.layout.stars.forEach((star, i) => {
+    if (!galaxy.gone.has(star.id)) oldest = Math.max(oldest, galaxy.ages[i] ?? 0)
+  })
+  return oldest
+}
+
+/** An update makes the memory new again: age 0, with a save date from now on. */
 export function touchMemory(galaxy: Galaxy, id: string): boolean {
   const index = slotOf(galaxy.layout.starById, id)
   if (index < 0 || galaxy.gone.has(id)) return false
   galaxy.ages[index] = 0
+  galaxy.undated.delete(id)
+  // The range All is the oldest memory plus two days: it narrows when the oldest memory is updated.
+  galaxy.oldestAge = liveOldestAge(galaxy)
   return true
 }
 
@@ -749,6 +1202,7 @@ export function forgetMemory(galaxy: Galaxy, id: string): boolean {
   if (core) core.count = Math.max(0, core.count - 1)
   galaxy.total = Math.max(0, galaxy.total - 1)
   galaxy.shown = Math.max(0, galaxy.shown - 1)
+  galaxy.oldestAge = liveOldestAge(galaxy)
   return true
 }
 

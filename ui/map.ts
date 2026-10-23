@@ -39,6 +39,10 @@ import {
   enqueueSparks,
   eventStars,
   forgetMemory,
+  galaxyOnlyFade,
+  GRID_COLOUR,
+  gridLine,
+  laneLines,
   layerOf,
   layerOn,
   leanRow,
@@ -50,6 +54,38 @@ import {
   FIND_FLY_DELAY_MS,
   isPrimary,
   liveLabel,
+  morphBlend,
+  morphTarget,
+  TICK_LABEL_COLOUR,
+  TICK_LABEL_HEIGHT,
+  TICK_LABEL_Y,
+  tickX,
+  TIMELINE_POSE,
+  timelineDays,
+  timelinePlaces,
+  type TimelinePlaces,
+  awayPlace,
+  easeToward,
+  furnitureIdle,
+  gridOpacity,
+  layoutFlight,
+  layoutStep,
+  linkFadeToApply,
+  needsGridLine,
+  placesFor,
+  type PlacesCache,
+  samePlace,
+  sparkOrigin,
+  tickReleased,
+  tickTarget,
+  tickWanted,
+  timelineAim,
+  timelineCentre,
+  laneTarget,
+  visualFade,
+  visualPlace,
+  visualScale,
+  wantedTicks,
   shouldFlyToFound,
   slotOf,
   SPARK_COLOURS,
@@ -85,10 +121,24 @@ import {
   initialState,
   inspector,
   isClick,
+  hasKnowledge,
   isHollow,
+  KNOWLEDGE_KINDS,
+  knowledgeCounts,
+  knowledgeNote,
+  type KnowledgeKind,
   labelScale,
   type LayoutName,
   lerp3,
+  MOON_LIMIT,
+  MOON_LINE_COLOUR,
+  MOON_LINE_OPACITY,
+  moonColour,
+  moonLinesProblem,
+  moonPosition,
+  moonPulse,
+  moonRows,
+  moonSize,
   type MapState,
   NO_TOOLTIP,
   parseGalaxy,
@@ -103,6 +153,8 @@ import {
   rgba,
   saveLayout,
   selectedPulse,
+  selectedMoon,
+  selectMoon,
   selectStar,
   setColourBy,
   setLayout,
@@ -115,7 +167,9 @@ import {
   STARFIELD_COUNT,
   threadOpacity,
   toggleBridges,
+  toggleKind,
   toggleLayer,
+  toggleMoons,
   toggleProject,
   toggleRotation,
   toggleSpokes,
@@ -250,6 +304,14 @@ type Visual = {
   labelBase: [number, number]
   labelOffset: number
   position: Vec3
+  /** Its place in the Galaxy layout; `position` is this blended toward its Timeline place. */
+  home: Vec3
+  /** Its index in the layout's cores, hubs or stars (0 for the Claude core). */
+  slot: number
+  /** The library node this is drawn at (positions are written to it). */
+  node: Any
+  /** What is left of it in Timeline: 1, or the share a topic hub keeps while it fades. */
+  fade: number
   size: number
   alpha: number
   target: number
@@ -289,6 +351,18 @@ export function createMap(host: MapHost): MapView {
   let raf = 0
   let lastFrame = 0
   let clock = 0
+  // Timeline: the morph weight (0 Galaxy, 1 Timeline), the days the axis shows, and the furniture.
+  let morph: number = morphTarget(state.layout)
+  let shownDays = 0
+  let placeDirty = true
+  let linkFade = 1
+  // The links were rebuilt or restyled since the fade was last written.
+  let linksDirty = true
+  let placesCache: PlacesCache = null
+  let lanesCache: ReturnType<typeof laneLines> | null = null
+  let claudeVisual: Visual | null = null
+  const tickItems = new Map<number, { label: Any | null; line: Any | null; alpha: number }>()
+  let laneItems = new Map<string, { line: Any; alpha: number }>()
   let flight: { t: number; seconds: number; from: { position: Vec3; target: Vec3 }; to: { position: Vec3; target: Vec3 } } | null = null
   let pointer: { x: number; y: number; moved: boolean } = { x: 0, y: 0, moved: false }
   let down: { x: number; y: number } | null = null
@@ -310,6 +384,20 @@ export function createMap(host: MapHost): MapView {
   let findTimer: ReturnType<typeof setTimeout> | 0 = 0
   let lastFound: Vec3 | null = null
   let connected = false
+  // Knowledge moons: eight glow sprites, eight lines and their kind labels, kept in the scene and shown for the selected star.
+  let moonSprites: Any[] = []
+  let moonLines: Any[] = []
+  let moonLabels: Any[] = []
+  let moonKey = ''
+  // What the moons need only when the galaxy or the selection changes (not every frame): rows, colours, the picked row.
+  let moonPlan: { galaxy: Galaxy | null; selected: string | null; moons: boolean; moon: string | null; gone: number; key: string; rows: ReturnType<typeof moonRows>; colours: Vec3[]; picked: string | null } | null = null
+  // One label look (texture and size) per kind, made once and shared by every moon of that kind.
+  const moonLabelStyle = new Map<KnowledgeKind, { map: Any; scale: [number, number] }>()
+  // Looks at the library's scene so far (afterData runs), and whether the missing-line status was said.
+  let sceneChecks = 0
+  let moonLinesTold = false
+  let moonSpots: { id: string; position: Vec3; sprite: Any }[] = []
+  let lineClasses: { Line: new (geometry: Any, material: Any) => Any; Material: new (params: Record<string, unknown>) => Any } | null = null
 
   const canvasBox = byId('map-canvas')
   const stage = byId('map-stage')
@@ -362,21 +450,51 @@ export function createMap(host: MapHost): MapView {
     if (flight.t >= 1) flight = null
   }
 
+  /** Flies the camera to a pose (position and what it looks at), as the Timeline view does. */
+  function flyToPose(pose: { position: Vec3; target: Vec3 }) {
+    if (graph === null) return
+    const camera = loose().camera?.()
+    const controls = graph.controls() as Any
+    if (!camera || !controls) return
+    const cam = camera.position
+    const look = controls.target
+    const seconds = flightSeconds(state.reducedMotion)
+    flight = { t: 0, seconds, from: { position: [cam.x, cam.y, cam.z], target: [look.x, look.y, look.z] }, to: { position: [...pose.position], target: [...pose.target] } }
+    if (seconds <= 0) stepFlight(0)
+  }
+
+  /** Where a flight or Find aims in Timeline for the range showing: a core's or star's place, and for a topic (its hub is invisible there) its lane and the average x of its stars. */
+  function timelineAt(kind: 'core' | 'hub' | 'star', id: string): Vec3 | null {
+    const g = galaxy
+    if (g === null) return null
+    const days = timelineDays(g, state.range)
+    return timelineAim(g, timelinePlaces(g, days), kind, id, days)
+  }
+
+  /** A flight to a core, hub or star, or Reset view: to where it is in the layout now (Reset view in Timeline is its straight-on view). */
+  function flyHere(kind: 'core' | 'hub' | 'star' | 'reset', id = '') {
+    if (galaxy === null) return
+    if (state.layout !== 'timeline') return fly(flightTo(galaxy, kind, id))
+    if (kind === 'reset') return flyToPose(TIMELINE_POSE)
+    const flight = flightTo(galaxy, kind, id)
+    if (flight !== null) fly({ target: timelineAt(kind, id) ?? flight.target, distance: flight.distance })
+  }
+
   // Actions the rail, the path bar, the map and Find all share.
   function flyToProject(owner: string) {
     if (galaxy === null) return
     dispatch(focusProject(state, owner))
-    fly(flightTo(galaxy, 'core', owner))
+    flyHere('core', owner)
   }
   function flyToTopic(key: string) {
     if (galaxy === null) return
     dispatch(focusTopic(state, galaxy, key))
-    fly(flightTo(galaxy, 'hub', key))
+    flyHere('hub', key)
   }
   function flyToStar(id: string) {
     if (galaxy === null) return
     dispatch(selectStar(state, galaxy, id))
-    fly(flightTo(galaxy, 'star', id))
+    flyHere('star', id)
   }
   function reset() {
     if (galaxy === null) return
@@ -385,7 +503,15 @@ export function createMap(host: MapHost): MapView {
     findTimer = 0
     lastFound = null
     dispatch(resetView(state))
-    fly(flightTo(galaxy, 'reset'))
+    flyHere('reset')
+  }
+  /** The middle of the stars a query found, where they are now: in Timeline their Timeline places. */
+  function foundCentre(hit: Found): Vec3 {
+    const g = galaxy
+    if (g === null || state.layout !== 'timeline' || hit.ids.size === 0) return hit.centre ?? [0, 0, 0]
+    const days = timelineDays(g, state.range)
+    // Only the stars on the axis count: the others are faded out, and the camera should not fly to an empty place.
+    return timelineCentre(g, timelinePlaces(g, days), hit.ids, days) ?? hit.centre ?? [0, 0, 0]
   }
   function search(value: string) {
     if (galaxy === null) return
@@ -401,7 +527,7 @@ export function createMap(host: MapHost): MapView {
       findTimer = 0
       if (found === null || found.centre === null || !shouldFlyToFound(found, lastFound)) return
       lastFound = found.centre
-      fly({ target: found.centre, distance: found.distance })
+      fly({ target: foundCentre(found), distance: found.distance })
     }, FIND_FLY_DELAY_MS)
   }
 
@@ -440,8 +566,8 @@ export function createMap(host: MapHost): MapView {
           if (part.level === 'all') return reset()
           const next = goTo(state, part.level)
           dispatch(next)
-          if (part.level === 'project' && next.project !== null) fly(flightTo(g, 'core', next.project))
-          if (part.level === 'topic' && next.topic !== null) fly(flightTo(g, 'hub', next.topic))
+          if (part.level === 'project' && next.project !== null) flyHere('core', next.project)
+          if (part.level === 'topic' && next.topic !== null) flyHere('hub', next.topic)
         })
         span.append(button)
         return span
@@ -536,6 +662,21 @@ export function createMap(host: MapHost): MapView {
       if (!section) continue
       const block = el('section', undefined, 'insp-section')
       block.append(el('h3', title, 'insp-section-title'), el('p', section.note, 'insp-note'))
+      // Knowledge text comes from the store: textContent only (el), never markup.
+      if ('items' in section && section.items.length > 0) {
+        const list = el('div', undefined, 'rail-list')
+        for (const item of section.items) {
+          const button = el('button', undefined, item.selected ? 'rail-item is-selected' : 'rail-item')
+          button.type = 'button'
+          button.dataset.knowledge = item.id
+          button.setAttribute('aria-pressed', String(item.selected))
+          button.title = `${item.label}: ${item.text}`
+          button.append(dot(item.colour), el('span', item.text, 'rail-name'), el('span', item.label, 'rail-mark'))
+          button.addEventListener('click', () => dispatch(selectMoon(state, g, item.id)))
+          list.append(button, el('p', `${item.label}, ${item.usage}`, 'insp-note'))
+        }
+        block.append(list)
+      }
       parts.push(block)
     }
     if (view.memory) {
@@ -561,6 +702,7 @@ export function createMap(host: MapHost): MapView {
     byId<HTMLInputElement>('map-bridges').checked = state.bridges
     byId<HTMLInputElement>('map-layer-recall').checked = state.layerRecall
     byId<HTMLInputElement>('map-layer-write').checked = state.layerWrite
+    renderKnowledgeControls(g)
     rotate.setAttribute('aria-pressed', String(state.rotating))
     byId('map-found').textContent = found === null ? '' : foundText(state.query, found)
     const pillText = liveLabel(state, connected)
@@ -569,6 +711,25 @@ export function createMap(host: MapHost): MapView {
     byId('map-live-state').parentElement?.setAttribute('aria-pressed', String(state.live))
     renderStrip()
     syncDemoTimer()
+  }
+
+  /** Knowledge moons and the five chips: disabled until the page holds some knowledge, then live. */
+  function renderKnowledgeControls(g: Galaxy) {
+    const any = hasKnowledge(g)
+    const moons = byId<HTMLInputElement>('map-moons')
+    moons.disabled = !any
+    moons.checked = state.moons
+    const counts = knowledgeCounts(g)
+    for (const chip of byId('map-know').querySelectorAll<HTMLButtonElement>('button[data-kind]')) {
+      const kind = chip.dataset.kind as KnowledgeKind
+      if (!KNOWLEDGE_KINDS.includes(kind)) continue
+      chip.setAttribute('aria-pressed', String(state.kinds.has(kind)))
+      if (any) chip.removeAttribute('aria-disabled')
+      else chip.setAttribute('aria-disabled', 'true')
+      const number = chip.querySelector('span.mono')
+      if (number) number.textContent = String(counts[kind])
+    }
+    byId('map-know-note').textContent = any ? knowledgeNote(state) : 'No knowledge extracted yet. Run /mnemosyne-knowledge, then reload.'
   }
 
   // ---- The scene ----
@@ -598,26 +759,29 @@ export function createMap(host: MapHost): MapView {
     return { label: sprite, labelBase: (sprite ? [sprite.scale.x, sprite.scale.y] : [1, 1]) as [number, number], labelOffset: offset }
   }
 
-  function addVisual(id: string, position: Vec3, visual: Omit<Visual, 'position' | 'index' | 'alpha' | 'target' | 'labelAlpha' | 'labelTarget' | 'pulse'>) {
-    const v: Visual = { ...visual, position, index: visuals.length, alpha: 0, target: 0, labelAlpha: 0, labelTarget: 0, pulse: 0 }
+  function addVisual(id: string, home: Vec3, slot: number, visual: Omit<Visual, 'position' | 'home' | 'slot' | 'node' | 'fade' | 'index' | 'alpha' | 'target' | 'labelAlpha' | 'labelTarget' | 'pulse'>) {
+    const node: GraphNode = { id, vi: visuals.length, fx: home[0], fy: home[1], fz: home[2] }
+    const v: Visual = { ...visual, position: home, home, slot, node, fade: 1, index: visuals.length, alpha: 0, target: 0, labelAlpha: 0, labelTarget: 0, pulse: 0 }
     visuals.push(v)
-    graphNodes.push({ id, vi: v.index, fx: position[0], fy: position[1], fz: position[2] })
+    graphNodes.push(node)
+    // Born while Timeline is showing (or on the way): placed where the layout is now, not at its Galaxy place.
+    if (morph > 0) placeDirty = true
     return v
   }
 
-  function addCore(g: Galaxy, core: Galaxy['layout']['cores'][number]) {
-    const v = addVisual(`c:${core.owner}`, core.position, { kind: 'core', key: core.owner, owner: core.owner, sprite: makeSprite('glow', projectColour(g, core.owner)), size: coreSize(core.count), ...labelFor(core.label, 16.8, '#E8EEF4', core.radius * 0.55 + 14) })
+  function addCore(g: Galaxy, core: Galaxy['layout']['cores'][number], slot: number) {
+    const v = addVisual(`c:${core.owner}`, core.position, slot, { kind: 'core', key: core.owner, owner: core.owner, sprite: makeSprite('glow', projectColour(g, core.owner)), size: coreSize(core.count), ...labelFor(core.label, 16.8, '#E8EEF4', core.radius * 0.55 + 14) })
     coreVisual.set(core.owner, v)
   }
 
-  function addHub(g: Galaxy, hub: GalaxyHub) {
-    const v = addVisual(`h:${hub.key}`, hub.position, { kind: 'hub', key: hub.key, owner: hub.project, sprite: makeSprite('glow', hubColour(projectColour(g, hub.project))), size: HUB_SIZE, ...labelFor(hub.name, 12.6, '#C4D0DC', 9) })
+  function addHub(g: Galaxy, hub: GalaxyHub, slot: number) {
+    const v = addVisual(`h:${hub.key}`, hub.position, slot, { kind: 'hub', key: hub.key, owner: hub.project, sprite: makeSprite('glow', hubColour(projectColour(g, hub.project))), size: HUB_SIZE, ...labelFor(hub.name, 12.6, '#C4D0DC', 9) })
     hubVisual.set(hub.key, v)
     graphLinks.push({ source: `c:${hub.project}`, target: `h:${hub.key}`, kind: 'spoke', owner: hub.project })
   }
 
   function addStar(g: Galaxy, star: GalaxyStar, i: number) {
-    const v = addVisual(`s:${star.id}`, star.position, { kind: 'star', key: star.id, owner: star.owner, sprite: makeSprite(isHollow(star.recalls) ? 'ring' : 'glow', starColour(g, i, state.colourBy)), size: starSize(star.recalls), label: null, labelBase: [1, 1], labelOffset: 0 })
+    const v = addVisual(`s:${star.id}`, star.position, i, { kind: 'star', key: star.id, owner: star.owner, sprite: makeSprite(isHollow(star.recalls) ? 'ring' : 'glow', starColour(g, i, state.colourBy)), size: starSize(star.recalls), label: null, labelBase: [1, 1], labelOffset: 0 })
     starVisual.set(star.id, v)
     graphLinks.push({ source: `h:${star.topic}`, target: `s:${star.id}`, kind: 'spoke', owner: star.owner, star: star.id })
   }
@@ -641,18 +805,27 @@ export function createMap(host: MapHost): MapView {
   function drawGalaxy(g: Galaxy) {
     if (graph === null || lib === null || three === null) return
     disposeVisuals()
+    disposeLanes()
+    disposeTicks()
+    placesCache = null
+    // Fresh links are fully visible.
+    linkFade = 1
     visuals = []
     graphNodes = []
     graphLinks = []
     starVisual.clear()
     hubVisual.clear()
     coreVisual.clear()
+    // A fresh drawing opens on the layout in state, without a morph.
+    morph = morphTarget(state.layout)
+    shownDays = timelineDays(g, state.range)
+    placeDirty = true
     const layout = g.layout
-    layout.cores.forEach(core => addCore(g, core))
-    layout.hubs.forEach(hub => addHub(g, hub))
+    layout.cores.forEach((core, i) => addCore(g, core, i))
+    layout.hubs.forEach((hub, i) => addHub(g, hub, i))
     layout.stars.forEach((star, i) => addStar(g, star, i))
     for (const bridge of layout.bridges) graphLinks.push({ source: `h:${bridge.a}`, target: `h:${bridge.b}`, kind: 'bridge', owner: '' })
-    addVisual('claude', [0, 0, 0], { kind: 'claude', key: '', owner: '', sprite: makeSprite('glow', CLAUDE_COLOUR), size: CLAUDE_SIZE, ...labelFor('Claude', 16.8, '#FFFFFF', 18) })
+    claudeVisual = addVisual('claude', [0, 0, 0], 0, { kind: 'claude', key: '', owner: '', sprite: makeSprite('glow', CLAUDE_COLOUR), size: CLAUDE_SIZE, ...labelFor('Claude', 16.8, '#FFFFFF', 18) })
     // One hidden node the library draws as its default sphere: that mesh is where the starfield's classes come from.
     graphNodes.push({ id: 'probe', vi: -1, fx: 0, fy: 0, fz: 0 })
 
@@ -668,6 +841,7 @@ export function createMap(host: MapHost): MapView {
       return group
     })
     setLinkStyle()
+    placeVisuals()
     graph.graphData({ nodes: graphNodes, links: graphLinks })
     // The library builds its objects a moment later: the links' look is set, and the starfield made, once they exist.
     setTimeout(afterData, 100)
@@ -680,14 +854,19 @@ export function createMap(host: MapHost): MapView {
   function growGalaxy(g: Galaxy, index: number) {
     if (graph === null) return
     const layout = g.layout
-    layout.cores.forEach(core => {
-      if (!coreVisual.has(core.owner)) addCore(g, core)
+    layout.cores.forEach((core, i) => {
+      if (!coreVisual.has(core.owner)) addCore(g, core, i)
     })
-    layout.hubs.forEach(hub => {
-      if (!hubVisual.has(hub.key)) addHub(g, hub)
+    layout.hubs.forEach((hub, i) => {
+      if (!hubVisual.has(hub.key)) addHub(g, hub, i)
     })
+    // Lanes are spaced by the project count: a new project moves every lane.
+    placeDirty = true
+    lanesCache = null
+    linksDirty = true
     const star = layout.stars[index]
     if (star) addStar(g, star, index)
+    placeVisuals()
     graph.graphData({ nodes: graphNodes, links: graphLinks })
     setTimeout(afterData, 100)
     recolour()
@@ -697,6 +876,7 @@ export function createMap(host: MapHost): MapView {
   // The links' look depends on the state: a fresh accessor makes the library read it again.
   function setLinkStyle() {
     if (graph === null) return
+    linksDirty = true
     const g = galaxy
     const hidden = (owner: string) => state.hidden.has(owner)
     const ends = (link: Any) => {
@@ -733,14 +913,19 @@ export function createMap(host: MapHost): MapView {
     if (graph === null) return
     const scene = (graph as unknown as Loose).scene?.() as Any
     if (!scene) return
+    // The library has made its link lines by now: the fade is written to them again.
+    linksDirty = true
     let mesh: Any = null
     scene.traverse((object: Any) => {
       if (object.isLine && object.material) {
         object.material.blending = ADDITIVE
         object.material.depthWrite = false
+        // The library's own Line and its material class make the moons' lines too (the bundle exports neither).
+        if (lineClasses === null && typeof object.constructor === 'function' && typeof object.material.constructor === 'function') lineClasses = { Line: object.constructor, Material: object.material.constructor }
       }
       if (mesh === null && object.isMesh && object.geometry && object.material) mesh = object
     })
+    sceneChecks++
     if (!starfieldMade && mesh !== null) addStarfield(scene, mesh)
   }
 
@@ -829,8 +1014,168 @@ export function createMap(host: MapHost): MapView {
       setTimeout(afterData, 100)
     }
     retarget()
+    if (before !== null && before.layout !== state.layout) {
+      // Timeline: a straight-on view of the axis (auto-rotate was paused by the state change). Leaving it: the Galaxy view.
+      const flightKind = layoutFlight(before.layout, state.layout)
+      if (flightKind === 'timeline') flyToPose(TIMELINE_POSE)
+      else if (flightKind === 'galaxy') fly(flightTo(galaxy, 'reset'))
+    }
     const controls = graph?.controls()
     if (controls) controls.autoRotate = state.rotating && shown
+  }
+
+  // ---- Timeline: places, links, furniture ----
+
+  /** Every visual at its place for the morph and the days showing: its Galaxy place blended toward its Timeline place. The library is re-armed only when something moved. */
+  function placeVisuals() {
+    const g = galaxy
+    if (g === null) return
+    const blend = morphBlend(morph)
+    let places: TimelinePlaces | null = null
+    if (blend > 0) {
+      const made = placesFor(placesCache, g, shownDays, placeDirty)
+      placesCache = made.cache
+      places = made.places
+    }
+    let moved = false
+    for (const v of visuals) {
+      const next = visualPlace(v.home, places === null ? null : awayPlace(places, v.kind, v.slot), blend)
+      if (!samePlace(next, v.position)) moved = true
+      v.position = next
+      const node = v.node as Any
+      node.x = node.fx = next[0]
+      node.y = node.fy = next[1]
+      node.z = node.fz = next[2]
+    }
+    placeDirty = false
+    // The library copies node places to its objects and links only while its engine counts as running (cooldownTicks is 0): this arms one pass, with no d3 tick, so the move shows.
+    if (moved) loose().d3ReheatSimulation?.()
+  }
+
+  /** Per frame: the morph and the range move toward where the state points, and the visuals follow when they have to. */
+  function stepLayout(dt: number, g: Galaxy) {
+    const step = layoutStep(morph, shownDays, state.layout, timelineDays(g, state.range), dt, state.reducedMotion, placeDirty)
+    morph = step.morph
+    shownDays = step.days
+    if (step.place) placeVisuals()
+  }
+
+  /** Threads, bridges and their particles fade with the topic hubs: each link's own line material (cloned once) carries the fade. */
+  function fadeLinks(wanted: number) {
+    const fade = linkFadeToApply(wanted, linkFade, linksDirty)
+    if (fade === null) return
+    linkFade = fade
+    linksDirty = false
+    for (const link of graphLinks as Any[]) {
+      const line = link.__lineObj
+      if (line?.material) {
+        if (!line.material.userData.timeFade) {
+          const own = line.material.clone()
+          own.userData.timeFade = { base: line.material.opacity }
+          own.transparent = true
+          line.material = own
+        }
+        line.material.opacity = line.material.userData.timeFade.base * fade
+      }
+      if (line) line.visible = fade > 0.01
+      const photons = link.__photonsObj
+      if (photons) {
+        photons.visible = fade > 0.01
+        for (const particle of photons.children) particle.scale.setScalar(Math.max(fade, 0.001))
+      }
+    }
+  }
+
+  function makeFurnitureLine(colour: string) {
+    const scene = (graph as unknown as Loose | null)?.scene?.() as Any
+    const T = three
+    if (!scene || T === null || lineClasses === null) return null
+    const geometry = new T.BufferGeometry()
+    geometry.setAttribute('position', new T.BufferAttribute(new Float32Array(6), 3))
+    const line = new lineClasses.Line(geometry, new lineClasses.Material({ color: Number.parseInt(colour.slice(1), 16), transparent: true, opacity: 0, depthWrite: false, blending: ADDITIVE }))
+    line.frustumCulled = false
+    line.visible = false
+    scene.add(line)
+    return line
+  }
+
+  function setLine(line: Any, a: Vec3, b: Vec3, opacity: number) {
+    const array = line.geometry.attributes.position.array as Float32Array
+    array.set(a, 0)
+    array.set(b, 3)
+    line.geometry.attributes.position.needsUpdate = true
+    line.material.opacity = opacity
+    line.visible = opacity > 0.003
+  }
+
+  /** Takes furniture parts out of the scene and frees what they hold. */
+  function releaseParts(...parts: (Any | null)[]) {
+    for (const part of parts) {
+      part?.parent?.remove(part)
+      part?.material?.map?.dispose?.()
+      part?.geometry?.dispose?.()
+      part?.material?.dispose?.()
+    }
+  }
+
+  function disposeLanes() {
+    for (const { line } of laneItems.values()) releaseParts(line)
+    laneItems = new Map()
+    lanesCache = null
+  }
+
+  function disposeTicks() {
+    for (const { label, line } of tickItems.values()) releaseParts(label, line)
+    tickItems.clear()
+  }
+
+  /** The axis: a tick label with a faint gridline each (ticks() of the range), and a faint baseline per lane in its project colour; all fade in with the morph. At blend 0, with everything faded, a frame does nothing. */
+  function updateFurniture(blend: number, follow: number, g: Galaxy) {
+    if (furnitureIdle(blend, tickItems.size, laneItems.values())) return
+    const scene = (graph as unknown as Loose | null)?.scene?.() as Any
+    if (!scene || three === null) return
+    const wanted = wantedTicks(state.range, timelineDays(g, state.range), blend)
+    for (const tick of wanted) {
+      if (!tickItems.has(tick.days)) {
+        // Tick text is made by ticks() from numbers; it is drawn on a canvas, never as markup.
+        const label = makeLabel(tick.label, TICK_LABEL_HEIGHT, TICK_LABEL_COLOUR)
+        if (label !== null) scene.add(label)
+        tickItems.set(tick.days, { label, line: null, alpha: 0 })
+      }
+    }
+    for (const [days, item] of tickItems) {
+      const isWanted = tickWanted(wanted, days)
+      item.alpha = easeToward(item.alpha, tickTarget(isWanted, blend), follow)
+      if (needsGridLine(item.line !== null, item.alpha)) item.line = makeFurnitureLine(GRID_COLOUR)
+      const x = tickX(days, shownDays)
+      if (item.label) {
+        item.label.position.set(x, TICK_LABEL_Y, 0)
+        item.label.material.opacity = item.alpha
+        item.label.visible = item.alpha > 0.003
+      }
+      if (item.line) {
+        const [a, b] = gridLine(x)
+        setLine(item.line, a, b, gridOpacity(item.alpha))
+      }
+      // A tick of a range no longer showing is let go once it has faded out.
+      if (tickReleased(isWanted, item.alpha)) {
+        releaseParts(item.label, item.line)
+        tickItems.delete(days)
+      }
+    }
+    lanesCache ??= laneLines(g)
+    for (const lane of lanesCache) {
+      let item = laneItems.get(lane.owner)
+      if (item === undefined && blend > 0) {
+        const line = makeFurnitureLine(lane.colour)
+        if (line === null) continue
+        item = { line, alpha: 0 }
+        laneItems.set(lane.owner, item)
+      }
+      if (item === undefined) continue
+      item.alpha = easeToward(item.alpha, laneTarget(blend, state.hidden.has(lane.owner)), follow)
+      setLine(item.line, lane.from, lane.to, item.alpha)
+    }
   }
 
   // ---- Per frame ----
@@ -843,25 +1188,32 @@ export function createMap(host: MapHost): MapView {
     clock += dt
     if (graph === null || galaxy === null || !shown) return
     syncSettings()
+    stepLayout(dt, galaxy)
     stepFlight(dt)
+    const blend = morphBlend(morph)
+    const galaxyFade = galaxyOnlyFade(blend)
+    fadeLinks(galaxyFade)
+    updateFurniture(blend, state.reducedMotion ? 1 : Math.min(1, dt * 5), galaxy)
     const camera = (graph as unknown as Loose).camera?.() as Any
     const cam: Vec3 = camera ? [camera.position.x, camera.position.y, camera.position.z] : HOME
     const follow = Math.min(1, dt * 5)
     const selectedKey = state.selected
     for (const spark of stepSparks(sparkPool, dt)) arrive(spark)
+    updateMoons(follow)
     for (const v of visuals) {
+      v.fade = visualFade(v.kind, galaxyFade)
       v.alpha += (v.target - v.alpha) * follow
       v.labelAlpha += (v.labelTarget - v.labelAlpha) * follow
       v.pulse = v.kind === 'star' && v.key === selectedKey ? selectedPulse(clock) : v.kind === 'core' || v.kind === 'claude' ? 0.1 + 0.07 * Math.sin(clock * 1.5 + v.index) : v.pulse * Math.exp(-dt * 2.2)
       if (v.sprite) {
-        const scale = v.size * (1 + v.pulse * 1.6)
+        const scale = visualScale(v.kind, v.size, blend, v.pulse)
         v.sprite.scale.set(scale, scale, 1)
-        v.sprite.material.opacity = Math.min(1, v.alpha)
+        v.sprite.material.opacity = Math.min(1, v.alpha) * v.fade
       }
       if (v.label) {
         const k = labelScale(Math.hypot(v.position[0] - cam[0], v.position[1] + v.labelOffset - cam[1], v.position[2] - cam[2]))
         v.label.scale.set(v.labelBase[0] * k, v.labelBase[1] * k, 1)
-        v.label.material.opacity = Math.min(1, v.labelAlpha)
+        v.label.material.opacity = Math.min(1, v.labelAlpha) * v.fade
       }
     }
     sparkPool.active.forEach((spark, i) => {
@@ -872,7 +1224,7 @@ export function createMap(host: MapHost): MapView {
         sprite.material.opacity = 0
         return
       }
-      const at = sparkAt([0, 0, 0], to.position, spark.curve, sparkProgress(spark))
+      const at = sparkAt(sparkOrigin(claudeVisual?.position), to.position, spark.curve, sparkProgress(spark))
       const [r, g, b] = SPARK_COLOURS[spark.kind]
       sprite.position.set(at[0], at[1], at[2])
       sprite.material.color.setRGB(r, g, b)
@@ -903,6 +1255,143 @@ export function createMap(host: MapHost): MapView {
     })
   }
 
+  // ---- Knowledge moons: the selected star's knowledge rows, orbiting it ----
+
+  /** Eight glow sprites and eight label sprites in the library's scene, one per possible moon; each frame shows as many as the selected star has. */
+  function makeMoonSprites() {
+    const scene = (graph as unknown as Loose | null)?.scene?.() as Any
+    const T = three
+    if (!scene || T === null) return
+    moonSprites = Array.from({ length: MOON_LIMIT }, () => {
+      const sprite = makeSprite('glow', '#FFFFFF')
+      if (sprite === null) return null
+      sprite.scale.set(moonSize(false), moonSize(false), 1)
+      scene.add(sprite)
+      return sprite
+    })
+    // The labels get their texture from the per-kind cache (setMoonLabels); until then they are invisible.
+    moonLabels = Array.from({ length: MOON_LIMIT }, () => {
+      const label = new T.Sprite(new T.SpriteMaterial({ transparent: true, depthWrite: false, opacity: 0 }))
+      scene.add(label)
+      return label
+    })
+  }
+
+  /** The thin lines, once the library has drawn its own (their classes are where ours come from); says so once when it never does. */
+  function makeMoonLines(shown: boolean) {
+    const scene = (graph as unknown as Loose | null)?.scene?.() as Any
+    const T = three
+    if (!scene || T === null || moonLines.length > 0) return
+    if (lineClasses === null) {
+      const problem = moonLinesProblem(false, sceneChecks, shown)
+      if (problem !== null && !moonLinesTold) {
+        moonLinesTold = true
+        host.status(problem, 'error')
+      }
+      return
+    }
+    const { Line, Material } = lineClasses
+    moonLines = Array.from({ length: MOON_LIMIT }, () => {
+      const geometry = new T.BufferGeometry()
+      geometry.setAttribute('position', new T.BufferAttribute(new Float32Array(6), 3))
+      const line = new Line(geometry, new Material({ color: Number.parseInt(MOON_LINE_COLOUR.slice(1), 16), transparent: true, opacity: 0, depthWrite: false, blending: ADDITIVE }))
+      line.frustumCulled = false
+      line.visible = false
+      scene.add(line)
+      return line
+    })
+  }
+
+  /** The look of the label of a kind: its texture and size, made once (five kinds in all) and shared by every moon of that kind. */
+  function moonLabelLook(kind: KnowledgeKind) {
+    let look = moonLabelStyle.get(kind)
+    if (look === undefined) {
+      const source = makeLabel(kind, 4.4, moonColour(kind))
+      if (source === null) return null
+      look = { map: source.material.map, scale: [source.scale.x, source.scale.y] }
+      moonLabelStyle.set(kind, look)
+    }
+    return look
+  }
+
+  /** When the selected star or its moons change: each label sprite takes the cached look of its moon's kind (no new texture). */
+  function setMoonLabels(rows: readonly { kind: KnowledgeKind }[], key: string) {
+    moonKey = key
+    rows.forEach((row, i) => {
+      const label = moonLabels[i]
+      const look = label ? moonLabelLook(row.kind) : null
+      if (!label || look === null) return
+      label.material.map = look.map
+      label.material.needsUpdate = true
+      label.scale.set(look.scale[0], look.scale[1], 1)
+    })
+  }
+
+  /** The moons' data, recomputed only when the galaxy, the selection, the moons switch, the picked moon or the forgotten set changes. */
+  function moonPlanFor(g: Galaxy | null) {
+    const gone = g === null ? 0 : g.gone.size
+    const p = moonPlan
+    if (p !== null && p.galaxy === g && p.selected === state.selected && p.moons === state.moons && p.moon === state.moon && p.gone === gone) return p
+    const rows = g === null ? [] : moonRows(g, state)
+    moonPlan = {
+      galaxy: g,
+      selected: state.selected,
+      moons: state.moons,
+      moon: state.moon,
+      gone,
+      key: `${state.selected}|${rows.map(row => row.id).join(',')}`,
+      rows,
+      colours: rows.map(row => rgb01(moonColour(row.kind))),
+      picked: g === null ? null : selectedMoon(g, state),
+    }
+    return moonPlan
+  }
+
+  /** Per frame: the moons of the selected star at their orbit places, the lines to the star, the labels and the selected moon's pulse. */
+  function updateMoons(follow: number) {
+    const g = galaxy
+    const plan = moonPlanFor(g)
+    const rows = plan.rows
+    const star = state.selected === null ? undefined : starVisual.get(state.selected)
+    const key = star === undefined ? '' : plan.key
+    if (key !== moonKey) setMoonLabels(star === undefined ? [] : rows, key)
+    if (moonLines.length === 0) makeMoonLines(star !== undefined && rows.length > 0)
+    moonSpots = []
+    moonSprites.forEach((sprite, i) => {
+      if (!sprite) return
+      const row = star === undefined ? undefined : rows[i]
+      const line = moonLines[i]
+      const label = moonLabels[i]
+      if (row === undefined || star === undefined) {
+        sprite.material.opacity += (0 - sprite.material.opacity) * follow
+        if (line) line.visible = false
+        if (label) label.material.opacity += (0 - label.material.opacity) * follow
+        return
+      }
+      const at = moonPosition(star.position, i, rows.length, clock, state.reducedMotion)
+      const chosen = row.id === plan.picked
+      const [r, gr, b] = plan.colours[i]!
+      sprite.position.set(at[0], at[1], at[2])
+      sprite.material.color.setRGB(r, gr, b)
+      const size = moonSize(chosen) * (1 + moonPulse(chosen, clock) * 1.6)
+      sprite.scale.set(size, size, 1)
+      sprite.material.opacity += (0.95 - sprite.material.opacity) * follow
+      if (line) {
+        const array = line.geometry.attributes.position.array as Float32Array
+        array.set(star.position, 0)
+        array.set(at, 3)
+        line.geometry.attributes.position.needsUpdate = true
+        line.material.opacity = MOON_LINE_OPACITY
+        line.visible = true
+      }
+      if (label) {
+        label.position.set(at[0], at[1] + 5, at[2])
+        label.material.opacity += (0.9 - label.material.opacity) * follow
+      }
+      moonSpots.push({ id: row.id, position: at, sprite })
+    })
+  }
+
   /** A spark lands: the star pulses, and a real event changes the galaxy (a demo one changes nothing). */
   function arrive(spark: Spark) {
     const g = galaxy
@@ -928,6 +1417,8 @@ export function createMap(host: MapHost): MapView {
       render()
     } else if (spark.kind === 'update') {
       if (!touchMemory(g, id)) return
+      // In Timeline an updated memory jumps to today.
+      placeDirty = true
       retarget()
       recolour()
       render()
@@ -1064,7 +1555,13 @@ export function createMap(host: MapHost): MapView {
       // In front of the camera only.
       if (view[2]! * v.position[0] + view[6]! * v.position[1] + view[10]! * v.position[2] + view[14]! >= 0) continue
       const screen = l.graph2ScreenCoords(v.position[0], v.position[1], v.position[2]) as { x: number; y: number }
-      out.push({ kind: v.kind, id: v.key, sx: screen.x, sy: screen.y, radius: PICK_RADIUS[v.kind], alpha: v.alpha })
+      out.push({ kind: v.kind, id: v.key, sx: screen.x, sy: screen.y, radius: PICK_RADIUS[v.kind], alpha: v.alpha * v.fade })
+    }
+    // The moons of the selected star are picked like stars, in screen space.
+    for (const spot of moonSpots) {
+      if (view[2]! * spot.position[0] + view[6]! * spot.position[1] + view[10]! * spot.position[2] + view[14]! >= 0) continue
+      const screen = l.graph2ScreenCoords(spot.position[0], spot.position[1], spot.position[2]) as { x: number; y: number }
+      out.push({ kind: 'moon', id: spot.id, sx: screen.x, sy: screen.y, radius: PICK_RADIUS.moon, alpha: spot.sprite.material.opacity })
     }
     return out
   }
@@ -1103,6 +1600,9 @@ export function createMap(host: MapHost): MapView {
     const hit = pick()
     if (hit === null) return
     if (hit.kind === 'star') flyToStar(hit.id)
+    else if (hit.kind === 'moon') {
+      if (galaxy !== null) dispatch(selectMoon(state, galaxy, hit.id))
+    }
     else if (hit.kind === 'hub') flyToTopic(hit.id)
     else flyToProject(hit.id)
   }
@@ -1128,6 +1628,14 @@ export function createMap(host: MapHost): MapView {
   }
   byId('map-spokes').addEventListener('change', () => dispatch(toggleSpokes(state)))
   byId('map-bridges').addEventListener('change', () => dispatch(toggleBridges(state)))
+  byId('map-moons').addEventListener('change', () => dispatch(toggleMoons(state)))
+  for (const chip of byId('map-know').querySelectorAll<HTMLButtonElement>('button[data-kind]')) {
+    chip.addEventListener('click', () => {
+      // A chip is inert until the page holds some knowledge.
+      if (galaxy === null || !hasKnowledge(galaxy)) return
+      dispatch(toggleKind(state, chip.dataset.kind as KnowledgeKind))
+    })
+  }
   byId('map-layer-recall').addEventListener('change', () => {
     dispatch(toggleLayer(state, 'recall'))
     if (!state.layerRecall) dropLayer('recall')
@@ -1232,6 +1740,7 @@ export function createMap(host: MapHost): MapView {
       glowTexture.glow = textures.glow
       glowTexture.ring = textures.ring
       makeSparkSprites()
+      makeMoonSprites()
     } catch (err) {
       graph = null
       say(`The 3D map could not start (${err instanceof Error ? err.message : String(err)}).`)
@@ -1269,7 +1778,8 @@ export function createMap(host: MapHost): MapView {
       host.status(`The glow effect could not start (${err instanceof Error ? err.message : String(err)}); the map is drawn without it.`, 'error')
     }
     if (bloom?.basic && typeof bloom.basic.constructor === 'function') bloomPassBasic = bloom.basic.constructor
-    graph.cameraPosition({ x: HOME[0], y: HOME[1], z: HOME[2] }, { x: 0, y: 0, z: 0 }, 0)
+    const opening = state.layout === 'timeline' ? TIMELINE_POSE : { position: HOME, target: [0, 0, 0] as Vec3 }
+    graph.cameraPosition({ x: opening.position[0], y: opening.position[1], z: opening.position[2] }, { x: opening.target[0], y: opening.target[1], z: opening.target[2] }, 0)
     const fit = () => {
       if (graph === null) return
       const box = stage.getBoundingClientRect()
