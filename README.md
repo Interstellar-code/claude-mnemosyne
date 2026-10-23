@@ -111,6 +111,34 @@ This is a dry run: it sends the text of each untagged memory to Claude's Haiku m
 
 `apply` makes no model call. It writes the saved tags through `memory_update`, and skips any memory that was deleted, already got tags, or whose text changed since the dry run.
 
+### Knowledge extraction: what Claude learned
+
+After each save, and after an update that changes a memory's text, Mnemosyne asks the `extractionModel` (Haiku by default) to pull out the facts, preferences, instructions, dated events and relations in that memory. The save returns at once; the call runs in the background. The engine's own prompt builds the request, and the engine checks and stores the answer. Every run is one line in the activity log, action `extract`.
+
+Only the memory's text goes to the model, through Claude Code's own model channel; nothing leaves your machine for another service. One model call per save is the cost. With `extractionModel` `off`, nothing is extracted and `/mnemosyne-tags` and `/mnemosyne-knowledge` say so.
+
+If Claude Code cancels the background call (Esc on that turn, or the session ends), a small pending file under `~/.claude/mnemosyne/knowledge-pending/` records which memory needs it. Finish it, and extract the older memories, with:
+
+```
+/mnemosyne-knowledge
+```
+
+That is a dry run: it counts, per project, the memories with no knowledge and the pending entries, and changes nothing. Then:
+
+```
+/mnemosyne-knowledge apply
+```
+
+`apply` finishes the pending entries first (each from its current text and hash, so a memory you edited is redone, never stored stale), then extracts the older memories with no knowledge. It makes one model call per memory, batched per project, and never edits or deletes a memory. A memory whose extraction found nothing is noted in `~/.claude/mnemosyne/knowledge-empty.json` and skipped while its text is unchanged.
+
+Outside agents' saves (through the MCP proxy) get no extraction: the proxy has no model channel. Run `/mnemosyne-knowledge apply` to cover them.
+
+Try `apply` on a copy of the store first.
+
+### Who wrote a memory
+
+A save records who wrote it. When a prompt starts with a remember term, the first save that turn is yours: it is stored with `author_type` `human` and veracity `stated`. Claude's own saves are `agent`; so are outside agents' saves, named by their MCP client. `stated` ranks a little higher in recall than the default `unknown` (1.0 against 0.8), which is why a fact you asked for is found first.
+
 ### Activity log
 
 With `activityLog` on (the default), each memory call adds one line to `~/.claude/mnemosyne/activity.jsonl`: recalls, saves, updates, forgets and stats, from Claude, from the plugin's own lookups, from the dashboard and from other MCP clients. The Activity tab reads it.
@@ -130,6 +158,7 @@ Change any time from `/plugin` → Mnemosyne → configure.
 | `activityLog` | `on` | `on`: each memory call adds one line to `~/.claude/mnemosyne/activity.jsonl` (see [Activity log](#activity-log)). `off`: nothing is written. |
 | `memoryDir` | `~/.claude/mnemosyne/store` | Where memories are stored. |
 | `externalMcp` | off | Lets other MCP clients use the same memory (see below). |
+| `extractionModel` | `haiku` | The model that pulls facts, preferences, instructions, dated events and relations out of each saved memory in the background (an alias or a full model id). It also drives `/mnemosyne-tags`. `off` turns extraction off: no model call, and `/mnemosyne-tags` and `/mnemosyne-knowledge` say so. |
 
 ## Use the memory from other tools
 
@@ -149,7 +178,7 @@ For Cursor, Codex and others, use the same path as the server command. It offers
 
 The plugin hooks into Claude Code at four points:
 
-- **Session start:** adds the memory tools and the `/mnemosyne-setup`, `/mnemosyne-ui` and `/mnemosyne-tags` commands, and says so if the installed engine is older than the plugin's.
+- **Session start:** adds the memory tools and the `/mnemosyne-setup`, `/mnemosyne-ui`, `/mnemosyne-tags` and `/mnemosyne-knowledge` commands, and says so if the installed engine is older than the plugin's.
 - **System prompt:** adds a short, fixed set of rules telling Claude when to save and recall.
 - **Your prompt:** on the first prompt (again after a compaction), or one starting with a term above, looks up memories and attaches them to that prompt.
 - **Tool calls:** when Claude calls a memory tool, runs the engine once and returns the answer.

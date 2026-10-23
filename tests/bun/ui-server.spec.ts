@@ -566,6 +566,9 @@ describe('SRV.1: the server runs the engine as the hooks do', () => {
     MNEMOPI_MCP_BANK: '',
     MNEMOPI_LLM_BASE_URL: '',
     MNEMOPI_HOST_LLM_ENABLED: '',
+    MNEMOPI_AUTHOR_ID: '',
+    MNEMOPI_AUTHOR_TYPE: '',
+    MNEMOPI_POLYPHONIC_RECALL: '0',
   })
 
   test('its own environment with engineEnv laid over it; the variables match the hooks for the same owner', async () => {

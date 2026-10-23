@@ -157,6 +157,9 @@ void (async () => {
           ...args,
           source: 'imported',
           scope: args.scope === 'global' || isGlobalOwner ? 'global' : 'channel',
+          // KNOWX.1.a3: an outside agent's save is an agent's, named by its client.
+          author_id: client === 'unknown' ? 'unknown' : client,
+          author_type: 'agent',
         }
       }
     }
