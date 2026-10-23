@@ -25,8 +25,9 @@ Ours, not upstream's (engine-diff ignores them): `UPSTREAM.md`, `bun.lock` (our 
 | 18.12.3 | d0695211df102b64fa729ebb6c403c5167971f661f0fbf1693e1823d4245c72d |
 | 18.12.3-mnemosyne.1 | 4d196435eec21c5fc1932baa91e5de3a30da6cf9ed224fac2f247a65cdb17e2d |
 | 18.12.3-mnemosyne.2 | b6e40fdcd82f7bb7a96ff5be1609944d684337a1b25351736a24419efbef91b6 |
+| 18.12.3-mnemosyne.3 | 68cb174dee8ac991c6594c9f9079ca3830e6371b850ebe75edc84fc1832027ef |
 
-The `18.12.3` row is the untouched upstream source, for reference. `.1` had changes 1 to 3; `.2` makes the change 1 merge keep a `__proto__` key as plain data (it was dropped).
+The `18.12.3` row is the untouched upstream source, for reference. `.1` had changes 1 to 3; `.2` makes the change 1 merge keep a `__proto__` key as plain data (it was dropped); `.3` adds the two knowledge tools (change 4) and keeps the first author on dedupe with empty author env unset (change 5).
 
 ## Changes
 
@@ -52,10 +53,26 @@ Status is `open` (ours only) or `merged-upstream` (drop it at the next rebase).
 
 ### 3. Packaging: our build number
 
-- What: `package.json` `version` is `18.12.3-mnemosyne.2` (our build number) instead of `18.12.3`, so the plugin can tell its own build from the npm one (`ENGINE_BUILD` in `hooks/engine-build.ts`, the `isCurrent` check in `hooks/register.ts`, the proxy's check in `bin/mcp-proxy.ts`). Nothing else in `package.json` changes: the dependencies stay pinned at `18.12.3`.
+- What: `package.json` `version` is `18.12.3-mnemosyne.3` (our build number) instead of `18.12.3`, so the plugin can tell its own build from the npm one (`ENGINE_BUILD` in `hooks/engine-build.ts`, the `isCurrent` check in `hooks/register.ts`, the proxy's check in `bin/mcp-proxy.ts`). Nothing else in `package.json` changes: the dependencies stay pinned at `18.12.3`.
 - Why: a stale engine (the npm one, or an older build of ours) must be spotted and refused for features that need changes 1 and 2.
 - Files: `package.json`
 - Upstream issue: none (ours only)
+- Status: open
+
+### 4. mnemopi_knowledge_prompt and mnemopi_knowledge_store
+
+- What: two engine tools for knowledge extraction. `mnemopi_knowledge_prompt` builds extraction prompt with `buildExtractionPrompt` over content clipped at `DEFAULT_INPUT_CHARS` (8192) via `clipToWindow` and returns `{ prompt, sha256 }` with the sha256 of the stored content. `mnemopi_knowledge_store` parses reply with `parseExtractedFactCategories`, validates categories (known kinds only, max 20 per kind, 60 total, max 500 chars, control chars removed, duplicates dropped, kg requires subject, predicate, object), and in one `BEGIN IMMEDIATE` transaction verifies owner (`session_id = MNEMOPI_SESSION_ID`), verifies content sha256 staleness, deletes prior rows for that memory, and executes direct INSERTs into `memoria_facts`, `memoria_preferences`, `memoria_instructions`, `memoria_timelines`, and `memoria_kg`. Column map: facts have `fact_type = 'fact'` and `key` NULL; timelines have `date` NULL unless the item parses as a date; kg with confidence 0.7. Returns `{ stored: { facts, preferences, instructions, timelines, kg } }` or `{ refused: 'gone' | 'stale' | 'unparseable' | 'invalid' }`.
+- Why: the plugin extracts knowledge with Haiku in the background without importing engine code into the hooks; guarded against owner mismatches, stale replies, and invalid outputs.
+- Files: `src/mcp-tools.ts` `src/core/beam/knowledge.ts` `src/core/beam/index.ts` `src/core/extraction.ts` `src/core/beam/store.ts`
+- Tests: `test/knowledge-guards.spec.ts`
+- Status: open
+
+### 5. Dedupe keeps first author and veracity; empty author env unset
+
+- What: On a dedupe re-save in `remember()`, `author_id` and `author_type` are preserved from the existing row via `COALESCE(author_id, ?)` and `COALESCE(author_type, ?)`. `veracity` takes the new veracity unless the new one is 'unknown'. In `mcp-tools.ts`, empty `MNEMOPI_AUTHOR_ID` or `MNEMOPI_AUTHOR_TYPE` environment variables count as unset (`null`).
+- Why: a Claude re-save of a user memory must keep the human author and stated veracity; plugin pins author env to empty string.
+- Files: `src/core/beam/store.ts` `src/mcp-tools.ts`
+- Tests: `test/dedupe-author.spec.ts`
 - Status: open
 
 Not changed: `dist/types/*.d.ts` still describe upstream 18.12.3 (no `metadata` on `updateWorking`). Nothing in the plugin reads them; regenerating them needs upstream's monorepo build.

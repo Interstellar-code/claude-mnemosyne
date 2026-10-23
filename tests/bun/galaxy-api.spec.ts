@@ -6,7 +6,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { Database } from 'bun:sqlite'
 import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { GALAXY_LIMIT, galaxyLabel, startServer } from '../../ui/server'
+import { GALAXY_LIMIT, galaxyLabel, galaxyLevel, startServer } from '../../ui/server'
 import type { Started } from '../../ui/server'
 import { body, engineCall, ROOT, tempDir, toolCall } from './helpers'
 
@@ -183,6 +183,70 @@ describe('GET /api/galaxy on a real store', () => {
     const level = (await map.json()) as { level: string; nodes: { id: string }[] }
     expect(level.level).toBe('projects')
     expect(level.nodes.map(node => node.id)).toContain('project-alpha-1a2b')
+  })
+
+  test('review 2 LOW 1: no database and a store with only working_memory both give empty lists', async () => {
+    // galaxyLevel(null): the server's store file is absent.
+    const none = galaxyLevel(null)
+    expect(none.status).toBe(200)
+    expect(none.body).toEqual({ projects: [], memories: [], knowledge: [], meaning: false, total: 0, shown: 0 })
+
+    // A store that has only working_memory: every memoria table is missing.
+    const bare = tempDir('galaxy-only-memory')
+    try {
+      const bareStore = join(bare.dir, 'store')
+      mkdirSync(bareStore, { recursive: true })
+      await remember(bareStore, 'global', 'one memory only')
+      const db = new Database(join(bareStore, 'mnemopi.db'))
+      try {
+        for (const table of ['memoria_facts', 'memoria_preferences', 'memoria_instructions', 'memoria_timelines', 'memoria_kg']) db.run(`DROP TABLE IF EXISTS ${table}`)
+      } finally {
+        db.close()
+      }
+      const openDb = new Database(join(bareStore, 'mnemopi.db'), { readonly: true })
+      try {
+        const reply = galaxyLevel(openDb)
+        expect(reply.status).toBe(200)
+        const body = reply.body as Reply
+        expect(body.knowledge).toEqual([])
+        expect(body.memories).toHaveLength(1)
+      } finally {
+        openDb.close()
+      }
+    } finally {
+      bare.dispose()
+    }
+  })
+
+  test('review 2 LOW 1: a legacy memoria_facts without source_memory_id is skipped, not a 500', async () => {
+    const legacy = tempDir('galaxy-legacy')
+    try {
+      const legacyStore = join(legacy.dir, 'store')
+      mkdirSync(legacyStore, { recursive: true })
+      await remember(legacyStore, 'global', 'a memory beside a legacy table')
+      const db = new Database(join(legacyStore, 'mnemopi.db'))
+      try {
+        db.run('DROP TABLE IF EXISTS memoria_facts')
+        db.run('CREATE TABLE memoria_facts (id INTEGER PRIMARY KEY AUTOINCREMENT, fact_type TEXT, key TEXT, value TEXT)')
+        db.run("INSERT INTO memoria_facts (fact_type, key, value) VALUES ('fact', NULL, 'legacy row')")
+        db.run("INSERT INTO memoria_preferences (session_id, preference, source_memory_id) VALUES ('global', 'still works', (SELECT id FROM working_memory LIMIT 1))")
+      } finally {
+        db.close()
+      }
+      const legacyServer = await startServer({ root: join(legacy.dir, 'root'), store: legacyStore, cli: CLI, activityLog: '', pluginRoot: ROOT })
+      try {
+        const response = await fetch(`http://127.0.0.1:${legacyServer.port}/api/galaxy`, { headers: { Authorization: `Bearer ${legacyServer.token}` } })
+        expect(response.status).toBe(200)
+        const body = (await response.json()) as Reply
+        // The legacy fact table is skipped; the table that has the column still answers.
+        expect(body.knowledge.map(row => row.text)).toEqual(['still works'])
+        expect(body.memories).toHaveLength(1)
+      } finally {
+        legacyServer.stop()
+      }
+    } finally {
+      legacy.dispose()
+    }
   })
 
   test('GDATA.3: the dashboard’s search and forget lines carry client dashboard', async () => {

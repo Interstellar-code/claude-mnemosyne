@@ -337,4 +337,13 @@ for await (const chunk of Bun.stdin.stream()) {
     const { log: lines } = await rawProxy(`${initialize()}\n${recall()}\n`, log)
     expect(lines[0]).toMatchObject({ action: 'recall', client: 'unknown' })
   })
+
+  test('review 2 LOW 3: an empty name with a version is logged as unknown, never the version', async () => {
+    const log = join(temp.dir, 'logs-version', 'activity.jsonl')
+    const { log: lines } = await rawProxy(`${initialize({ name: '   ', version: '9.9.9' })}\n${recall()}\n`, log)
+    expect(lines[0]).toMatchObject({ action: 'recall', client: 'unknown' })
+    const named = join(temp.dir, 'logs-named', 'activity.jsonl')
+    const { log: namedLines } = await rawProxy(`${initialize({ name: 'codex-mcp-client', version: '9.9.9' })}\n${recall()}\n`, named)
+    expect(namedLines[0]).toMatchObject({ client: 'codex-mcp-client' })
+  })
 })

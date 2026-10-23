@@ -7,6 +7,7 @@ import {
   coreRadius,
   firstTag,
   galaxyLayout,
+  gauss,
   GOLDEN_ANGLE,
   HUB_RING,
   LANE_JITTER,
@@ -14,6 +15,7 @@ import {
   laneY,
   placeOne,
   PROJECT_CORE_X,
+  randomOf,
   rangeDays,
   seedOf,
   TIMELINE_DAYS_X,
@@ -206,21 +208,25 @@ describe('LAYOUT.2: timelinePosition and ticks', () => {
     // One lane, centred.
     expect(laneY(0, 1)).toBe(0)
     expect(timelinePosition(nodes[1]!, 7)).toEqual([PROJECT_CORE_X, 0, 0])
-    // Three lanes: -120, 0, 120.
-    expect([laneY(0, 3), laneY(1, 3), laneY(2, 3)]).toEqual([-120, 0, 120])
-    // Seeded jitter: same id, same y; within 9 * 4 units; different ids differ.
+    // The mockup's lane order: project 0 at the top. Two lanes: +120, -120; three: 120, 0, -120; four: 120, 40, -40, -120.
+    expect([laneY(0, 2), laneY(1, 2)]).toEqual([120, -120])
+    expect([laneY(0, 3), laneY(1, 3), laneY(2, 3)]).toEqual([120, 0, -120])
+    expect([laneY(0, 4), laneY(1, 4), laneY(2, 4), laneY(3, 4)]).toEqual([120, 40, -40, -120])
+    // Seeded jitter: same id, same y; the 9-unit scale, not just a bound; a different id differs.
     const a = timelinePosition(nodes[3]!, 7)
     const b = timelinePosition(nodes[3]!, 7)
     expect(a).toEqual(b)
     const jitter = a[1] - laneY(1, 3)
-    expect(Math.abs(jitter)).toBeLessThan(LANE_JITTER * 5)
+    // The exact seeded draw: gauss(randomOf(seedOf(id))) * LANE_JITTER.
+    const expectedJitter = gauss(randomOf(seedOf('m1'))) * LANE_JITTER
+    expect(jitter).toBeCloseTo(expectedJitter, 12)
     expect(a[2]).toBe(6)
     expect(timelinePosition(nodes[2]!, 7)).toEqual([280 - (2 * 560) / 7, laneY(1, 3), 6])
   })
 
   test('LAYOUT.2.a2: cores at x = -340 on their lane; Claude above today at (300, 185, 0)', () => {
     expect(PROJECT_CORE_X).toBe(-340)
-    expect(timelinePosition({ kind: 'project', lane: 2, lanes: 3 }, 30)).toEqual([-340, 120, 0])
+    expect(timelinePosition({ kind: 'project', lane: 2, lanes: 3 }, 30)).toEqual([-340, -120, 0])
     expect(timelinePosition({ kind: 'claude' }, 7)).toEqual([300, 185, 0])
   })
 

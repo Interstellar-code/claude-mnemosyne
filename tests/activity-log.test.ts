@@ -96,6 +96,18 @@ test('CTX.1.a2: the extract action is part of the line format', () => {
   expect(JSON.parse(activityLine({ action: 'extract', origin: 'hook', owner: 'global', ok: true })).action).toBe('extract')
 })
 
+test('review 2 LOW 4: client and session drop bidi and zero-width characters too', () => {
+  const entry = activityEntry({
+    action: 'recall', origin: 'external', owner: 'global', ok: true,
+    client: 'code\u202Ex-mcp\u200Bclient\u200E',
+    session: 's\u202A1\u200C\u2066x\u2069',
+  })
+  expect(entry.client).toBe('codex-mcpclient')
+  expect(entry.session).toBe('s1x')
+  expect(entry.client).not.toMatch(/[\u061c\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/)
+  expect(entry.session).not.toMatch(/[\u061c\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/)
+})
+
 test('CTX.1.a3: a line without the new fields parses and renders exactly as before', () => {
   const line = activityLine({ action: 'recall', origin: 'hook', owner: 'global', text: 'q', ids: ['a'], count: 1, ok: true, t: '2026-10-23T00:00:00.000Z' })
   expect(JSON.parse(line)).toEqual({ t: '2026-10-23T00:00:00.000Z', action: 'recall', origin: 'hook', owner: 'global', text: 'q', ids: ['a'], count: 1, ok: true })
