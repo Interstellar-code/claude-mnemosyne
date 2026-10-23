@@ -10,7 +10,7 @@
 //
 // Every transition returns a new state; none changes the one it is given.
 import { plainLabel } from './escape'
-import { galaxyLayout, placeOne, randomOf, seedOf, type GalaxyInputMemory, type GalaxyLayout, type GalaxyStar, type TimelineRange, type Vec3 } from './map-layout'
+import { gauss, galaxyLayout, placeOne, randomOf, rangeDays, seedOf, ticks, timelinePosition, TIMELINE_DAYS_X, TIMELINE_TODAY_X, type GalaxyInputMemory, type GalaxyLayout, type GalaxyStar, type Tick, type TimelineRange, type Vec3 } from './map-layout'
 import type { MapEvent, MapEventKind } from './map-live'
 
 // ---- What the server sends ----
@@ -299,6 +299,8 @@ export type MapState = {
   layerWrite: boolean
   live: boolean
   rotating: boolean
+  /** Whether auto-rotate was on when Timeline was entered, so leaving Timeline can turn it back on (TIME.1). */
+  rotateBefore: boolean
   reducedMotion: boolean
   /** Owners whose stars are hidden (a Set: an owner may be named like an Object member). */
   hidden: ReadonlySet<string>
@@ -316,6 +318,7 @@ export type MapState = {
 }
 
 export function initialState(options: { reducedMotion: boolean; layout?: LayoutName }): MapState {
+  const timeline = options.layout === 'timeline'
   return {
     layout: options.layout ?? 'galaxy',
     range: 'all',
@@ -325,7 +328,9 @@ export function initialState(options: { reducedMotion: boolean; layout?: LayoutN
     layerRecall: true,
     layerWrite: true,
     live: !options.reducedMotion,
-    rotating: !options.reducedMotion,
+    // Opening on Timeline starts as a switch to it would: no auto-rotate, remembered for the way back.
+    rotating: !options.reducedMotion && !timeline,
+    rotateBefore: !options.reducedMotion && timeline,
     reducedMotion: options.reducedMotion,
     hidden: new Set<string>(),
     project: null,
@@ -363,9 +368,13 @@ export function saveLayout(storage: Pick<Storage, 'setItem'> | undefined, layout
   }
 }
 
+/** Switch layout. Entering Timeline pauses auto-rotate (a time axis seen end-on reads as nothing) and remembers whether it was on; leaving turns it back on only if it was. */
 export function setLayout(state: MapState, layout: LayoutName, meaningAvailable: boolean): MapState {
   if (!LAYOUTS.includes(layout) || (layout === 'meaning' && !meaningAvailable)) return state
-  return layout === state.layout ? state : { ...state, layout }
+  if (layout === state.layout) return state
+  if (layout === 'timeline') return { ...state, layout, rotating: false, rotateBefore: state.rotating }
+  if (state.layout === 'timeline') return { ...state, layout, rotating: state.rotateBefore || state.rotating, rotateBefore: false }
+  return { ...state, layout }
 }
 export const setRange = (state: MapState, range: TimelineRange): MapState => (range === state.range || ![7, 30, 'all'].includes(range) ? state : { ...state, range })
 export const setColourBy = (state: MapState, colourBy: ColourBy): MapState => (COLOUR_BY.includes(colourBy) && colourBy !== state.colourBy ? { ...state, colourBy } : state)
@@ -469,12 +478,13 @@ const DIM_NO_MATCH = 0.08
 /** A memory without any of the picked kinds keeps a tenth of its brightness (MOON.2). */
 export const DIM_NO_KNOWLEDGE = 0.1
 
-/** The opacity a star settles at: brightness by age, 0 hidden, 0.14 outside the focused project, 0.4 in its other topics, 0.08 off a Find, a tenth without a picked kind of knowledge, 1 when selected. */
+/** The opacity a star settles at: brightness by age, 0 hidden, 0 older than the Timeline range, 0.14 outside the focused project, 0.4 in its other topics, 0.08 off a Find, a tenth without a picked kind of knowledge, 1 when selected. */
 export function starTarget(galaxy: Galaxy, index: number, state: MapState, found: Found | null): number {
   const star = galaxy.layout.stars[index]
   if (star === undefined) return 0
   if (state.hidden.has(star.owner) || galaxy.gone.has(star.id)) return 0
   if (state.selected === star.id) return 1
+  if (state.layout === 'timeline' && !inTimelineRange(galaxy.ages[index] ?? 0, timelineDays(galaxy, state.range))) return 0
   let a = starBrightness(galaxy.ages[index] ?? 0, galaxy.oldestAge)
   if (!passesKnowledgeFilter(galaxy, star.id, state)) a *= DIM_NO_KNOWLEDGE
   if (state.project !== null && star.owner !== state.project) a *= DIM_OTHER_PROJECT
@@ -712,6 +722,115 @@ export function flightPose(cameraAt: Vec3, lookingAt: Vec3, flight: Flight): { p
 /** A point between two, `k` of the way. */
 export const lerp3 = (a: Vec3, b: Vec3, k: number): Vec3 => [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k]
 
+// ---- The Timeline layout (TIME.1, TIME.2) ----
+//
+// The same stars move onto a time axis at LAYOUT.2's positions (timelinePosition):
+// x is age, one lane per project. The numbers below are the mockup's
+// (design/MapGalaxy.dc.html: syncSettings, posOf, tl, flyPose, the axis and grid
+// in frame). ui/map.ts holds only the timers; every curve, target and place is here.
+
+export const TIMELINE_HINT = 'Newest on the right; each lane is one project'
+/** The morph between Galaxy and Timeline takes this long, with cubic ease; none under prefers-reduced-motion. */
+export const MORPH_SECONDS = 1.4
+export const morphSeconds = (reducedMotion: boolean) => (reducedMotion ? 0 : MORPH_SECONDS)
+/** Where the morph is heading: 1 in Timeline, 0 in the other layouts. */
+export const morphTarget = (layout: LayoutName): 0 | 1 => (layout === 'timeline' ? 1 : 0)
+/** The morph's weight after `dt` more seconds: it moves linearly toward `target` and arrives at once when `seconds` is 0; the drawn blend is `ease(weight)`. A switch mid-morph turns around from where it is. */
+export function stepMorph(weight: number, target: number, dt: number, seconds: number): number {
+  if (seconds <= 0) return target
+  const step = Math.max(0, dt) / seconds
+  return weight < target ? Math.min(target, weight + step) : Math.max(target, weight - step)
+}
+/** The drawn blend of a morph weight: 0 Galaxy, 1 Timeline. */
+export const morphBlend = (weight: number) => ease(Math.min(1, Math.max(0, weight)))
+/** Project cores and the Claude core shrink to half size in Timeline. */
+export const TIMELINE_CORE_SCALE = 0.5
+export const coreScale = (blend: number) => 1 - (1 - TIMELINE_CORE_SCALE) * blend
+/** Topic hubs, threads, bridges and their particles fade out in Timeline: what is left of them at a blend. */
+export const galaxyOnlyFade = (blend: number) => Math.max(0, 1 - blend)
+/** Straight-on view of the axis: the camera 800 in front of it, the middle of the axis in view. */
+export const TIMELINE_POSE: { position: Vec3; target: Vec3 } = { position: [-20, 10, 800], target: [-20, 0, 0] }
+/** How fast the range follows a new choice, per second: 1 - e^(-4t) of the way. */
+export const RANGE_FOLLOW = 4
+/** The days the axis shows now, moving toward the range's days; at once under reduced motion or when close. */
+export function stepDays(shown: number, target: number, dt: number, reducedMotion: boolean): number {
+  if (reducedMotion || Math.abs(target - shown) < 0.01) return target
+  return shown + (target - shown) * (1 - Math.exp(-RANGE_FOLLOW * Math.max(0, dt)))
+}
+/** The days a range spans for a galaxy: 7, 30, or the oldest memory plus two days. */
+export const timelineDays = (galaxy: Galaxy, range: TimelineRange) => rangeDays(range, galaxy.oldestAge)
+/** A star older than the range fades out. */
+export const inTimelineRange = (age: number, days: number) => age <= days
+
+/** Where every drawn thing sits in Timeline, in the layout's own order. */
+export type TimelinePlaces = { claude: Vec3; cores: Vec3[]; hubs: Vec3[]; stars: Vec3[] }
+
+/** Timeline places for `days` of axis: cores head their lanes, a topic sits at its memories' average age, a star at its age with a seeded jitter and its topic's depth. */
+export function timelinePlaces(galaxy: Galaxy, days: number): TimelinePlaces {
+  const { cores, hubs, stars } = galaxy.layout
+  const lanes = cores.length
+  const laneOf = (owner: string) => Math.max(0, slotOf(galaxy.layout.coreByOwner, owner))
+  // A topic's depth is its place among its project's topics, 6 apart around the middle; its age the average of its memories'.
+  const perProject = new Map<string, number>()
+  const depthOf = hubs.map(hub => {
+    const n = perProject.get(hub.project) ?? 0
+    perProject.set(hub.project, n + 1)
+    return (n - 3) * 6
+  })
+  const sums = hubs.map(() => 0)
+  const counts = hubs.map(() => 0)
+  stars.forEach((star, i) => {
+    const h = slotOf(galaxy.layout.hubByKey, star.topic)
+    if (h < 0) return
+    sums[h] = sums[h]! + (galaxy.ages[i] ?? 0)
+    counts[h] = counts[h]! + 1
+  })
+  return {
+    claude: timelinePosition({ kind: 'claude' }, days),
+    cores: cores.map((core, lane) => timelinePosition({ kind: 'project', lane, lanes }, days)),
+    hubs: hubs.map((hub, h) => timelinePosition({ kind: 'topic', id: hub.key, lane: laneOf(hub.project), lanes, age: sums[h]! / Math.max(1, counts[h]!), depth: depthOf[h]! }, days)),
+    stars: stars.map((star, i) => {
+      const h = slotOf(galaxy.layout.hubByKey, star.topic)
+      const depth = (h < 0 ? 0 : depthOf[h]!) + gauss(randomOf(seedOf(`${star.id}:depth`))) * 3
+      return timelinePosition({ kind: 'memory', id: star.id, lane: laneOf(star.owner), lanes, age: galaxy.ages[i] ?? 0, depth }, days)
+    }),
+  }
+}
+
+/** A place between Galaxy and Timeline. */
+export const blendPlace = (galaxyAt: Vec3, timelineAt: Vec3, blend: number): Vec3 => (blend <= 0 ? [...galaxyAt] : blend >= 1 ? [...timelineAt] : lerp3(galaxyAt, timelineAt, blend))
+
+// Furniture: tick labels with a faint gridline each, and a faint baseline per lane (mockup axis, grid, lanes).
+export const TICK_LABEL_Y = -178
+export const TICK_LABEL_HEIGHT = 14
+export const TICK_LABEL_COLOUR = '#A9B8C8'
+export const TICK_LABEL_OPACITY = 0.95
+export const GRID_Y: [number, number] = [-160, 160]
+export const GRID_Z = -20
+export const GRID_COLOUR = '#5A6B7D'
+export const GRID_OPACITY = 0.3
+export const LANE_X: [number, number] = [-310, 300]
+export const LANE_Z = -12
+export const LANE_OPACITY = 0.4
+
+/** The ticks of a range from LAYOUT.2's ticks(), for the days it spans. */
+export const rangeTicks = (range: TimelineRange, days: number): Tick[] => ticks(range, days)
+/** A tick's x while the axis shows `shownDays`: today stays at 280, older ticks slide as the range rescales. */
+export const tickX = (tickDays: number, shownDays: number) => TIMELINE_TODAY_X - (tickDays * TIMELINE_DAYS_X) / Math.max(1, shownDays)
+/** A gridline's two ends: from y -160 to 160 at the tick's x, behind the stars. */
+export const gridLine = (x: number): [Vec3, Vec3] => [
+  [x, GRID_Y[0], GRID_Z],
+  [x, GRID_Y[1], GRID_Z],
+]
+/** A lane's baseline: its project's colour, at the lane's y, from the cores to just past today. */
+export function laneLines(galaxy: Galaxy): { owner: string; colour: string; from: Vec3; to: Vec3 }[] {
+  const lanes = galaxy.layout.cores.length
+  return galaxy.layout.cores.map((core, lane) => {
+    const y = timelinePosition({ kind: 'project', lane, lanes }, 1)[1]
+    return { owner: core.owner, colour: projectColour(galaxy, core.owner), from: [LANE_X[0], y, LANE_Z], to: [LANE_X[1], y, LANE_Z] }
+  })
+}
+
 // ---- The rail ----
 
 type ProjectRow = { owner: string; label: string; colour: string; count: number; shown: boolean; focused: boolean }
@@ -842,7 +961,7 @@ export function inspector(galaxy: Galaxy, state: MapState, now = Date.now()): In
       { label: 'Topics', value: String(layout.hubs.length) },
       { label: 'Bridges', value: String(layout.bridges.length) },
     ],
-    hint: 'Every star is one memory. Click a project core to fly in.',
+    hint: state.layout === 'timeline' ? TIMELINE_HINT : 'Every star is one memory. Click a project core to fly in.',
   }
 }
 

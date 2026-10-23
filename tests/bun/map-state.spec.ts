@@ -10,7 +10,7 @@ import { mkdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { Database } from 'bun:sqlite'
 import { plainLabel } from '../../ui/escape'
-import { galaxyLayout } from '../../ui/map-layout'
+import { CLAUDE_CORE, galaxyLayout, LANE_SPAN, PROJECT_CORE_X, ticks, TIMELINE_DAYS_X, TIMELINE_TODAY_X } from '../../ui/map-layout'
 import { simulate, toMapEvent, type MapEvent } from '../../ui/map-live'
 import {
   FIND_FLY_DELAY_MS,
@@ -146,6 +146,37 @@ import {
   toggleKind,
   toggleMoons,
   usageText,
+  blendPlace,
+  coreScale,
+  galaxyOnlyFade,
+  GRID_COLOUR,
+  GRID_OPACITY,
+  gridLine,
+  inTimelineRange,
+  LANE_OPACITY,
+  laneLines,
+  MORPH_SECONDS,
+  morphBlend,
+  morphSeconds,
+  morphTarget,
+  RANGE_FOLLOW,
+  rangeTicks,
+  stepDays,
+  stepMorph,
+  TICK_LABEL_OPACITY,
+  tickX,
+  TIMELINE_CORE_SCALE,
+  TIMELINE_HINT,
+  TIMELINE_POSE,
+  timelineDays,
+  timelinePlaces,
+  TICK_LABEL_Y,
+  TICK_LABEL_HEIGHT,
+  TICK_LABEL_COLOUR,
+  GRID_Y,
+  GRID_Z,
+  LANE_X,
+  LANE_Z,
 } from '../../ui/map-state'
 import { startServer } from '../../ui/server'
 import type { Started } from '../../ui/server'
@@ -518,7 +549,7 @@ describe('the galaxy on a real /api/galaxy reply', () => {
 
   test('GAL.2.a6: every setting the scene reacts to is plain data in the state, changed by pure functions', () => {
     const s = base()
-    expect(Object.keys(s).sort()).toEqual(['bridges', 'colourBy', 'hidden', 'kinds', 'layerRecall', 'layerWrite', 'layout', 'live', 'moon', 'moons', 'project', 'query', 'range', 'reducedMotion', 'rotating', 'selected', 'spokes', 'topic'].sort())
+    expect(Object.keys(s).sort()).toEqual(['bridges', 'colourBy', 'hidden', 'kinds', 'layerRecall', 'layerWrite', 'layout', 'live', 'moon', 'moons', 'project', 'query', 'range', 'reducedMotion', 'rotateBefore', 'rotating', 'selected', 'spokes', 'topic'].sort())
     expect(setColourBy(s, 'age').colourBy).toBe('age')
     expect(setColourBy(s, 'nope' as never)).toBe(s)
     expect(setRange(s, 7).range).toBe(7)
@@ -528,7 +559,7 @@ describe('the galaxy on a real /api/galaxy reply', () => {
     // The scene file reads its state in one place per frame.
     const map = readFileSync(join(ROOT, 'ui', 'map.ts'), 'utf8')
     expect(map).toMatch(/function syncSettings\(\)/)
-    expect(map).toMatch(/syncSettings\(\)\s*\n\s*stepFlight/)
+    expect(map).toMatch(/syncSettings\(\)\s*\n\s*stepLayout\(dt, galaxy\)\s*\n\s*stepFlight/)
   })
 
   test('GAL.3.a2: the inspector: Overview, Project, Topic and Memory as in the mockup', () => {
@@ -1835,5 +1866,422 @@ describe('MOON: moons on a clicked star and the knowledge filter', () => {
     expect(map).toContain("kind: 'moon'")
     expect(map).toContain('selectMoon(state, galaxy, hit.id)')
     expect(map).toContain('toggleKind(state')
+  })
+})
+
+// ---- TIME: the Timeline layout, on a real /api/galaxy reply ----
+//
+// Memories are written by the real engine into a real temporary store, their save
+// dates are set in that store (as the specs above set recall counts), and the real
+// server's /api/galaxy is read back; the positions are LAYOUT.2's real timelinePosition
+// and ticks. Only the browser (the drawing, the flights, the look) is the orchestrator's QA.
+
+describe('TIME: the Timeline layout', () => {
+  const temp = tempDir('map-time')
+  const store = join(temp.dir, 'store')
+  let started: Started
+  let galaxy: Galaxy
+  let rawBody: unknown
+  const ids: Record<string, string> = {}
+  const alpha = 'project-alpha-1a2b'
+  const beta = 'project-beta-9z8y'
+  const old = 'project-old-77aa'
+  const now = Date.parse('2026-10-23T12:00:00Z')
+  const DAY = 86_400_000
+  const daysAgo = (n: number) => new Date(now - n * DAY).toISOString()
+
+  async function remember(owner: string, key: string, tags: string[]) {
+    const answer = body((await engineCall(CLI, store, owner, [toolCall(1, 'mnemopi_remember', { content: `note ${key}`, metadata: { tags } })])).get(1))
+    if (typeof answer?.memory_id !== 'string') throw new Error(`remember failed: ${JSON.stringify(answer)}`)
+    ids[key] = answer.memory_id as string
+  }
+
+  beforeAll(async () => {
+    mkdirSync(store, { recursive: true })
+    // alpha: today, 3 days, 10 days; beta: 6 days, 40 days; old: only a memory 40 days old (nothing in 7 days or 30 days).
+    for (const [owner, key, tag, age] of [
+      [alpha, 'a0', 'fruit', 0],
+      [alpha, 'a3', 'fruit', 3],
+      [alpha, 'a10', 'veg', 10],
+      [beta, 'b6', 'fruit', 6],
+      [beta, 'b40', 'veg', 40],
+      [old, 'o40', 'misc', 40],
+    ] as [string, string, string, number][]) {
+      await remember(owner, key, [tag])
+      ages[key] = age
+    }
+    const db = new Database(join(store, 'mnemopi.db'))
+    try {
+      for (const [key, age] of Object.entries(ages)) db.run('UPDATE working_memory SET timestamp = ? WHERE id = ?', [daysAgo(age), ids[key]!])
+    } finally {
+      db.close()
+    }
+    started = await startServer({ root: join(temp.dir, 'root'), store, cli: CLI, activityLog: join(temp.dir, 'activity.jsonl'), pluginRoot: ROOT })
+    const response = await fetch(`http://127.0.0.1:${started.port}/api/galaxy`, { headers: { Authorization: `Bearer ${started.token}` } })
+    expect(response.status).toBe(200)
+    rawBody = await response.json()
+    const reply = parseGalaxy(rawBody)
+    if (reply === null) throw new Error('not a galaxy')
+    galaxy = buildGalaxy(reply, now)
+  }, 180_000)
+
+  afterAll(() => {
+    started?.stop()
+    temp.dispose()
+  })
+
+  const ages: Record<string, number> = {}
+  const base = (layout: 'galaxy' | 'timeline' = 'galaxy'): MapState => initialState({ reducedMotion: false, layout })
+  const slot = (key: string) => galaxy.layout.starById[ids[key]!]!
+  const timeline = (range: MapState['range'] = 'all'): MapState => ({ ...base('timeline'), range })
+  const target = (key: string, state: MapState) => starTarget(galaxy, slot(key), state, null)
+
+  test('the real reply has the ages the spec set, and three project lanes', () => {
+    expect(galaxy.layout.stars.length).toBe(6)
+    for (const [key, age] of Object.entries(ages)) expect(galaxy.ages[slot(key)]).toBe(age)
+    expect(galaxy.oldestAge).toBe(40)
+    expect(galaxy.layout.cores.length).toBe(3)
+  })
+
+  // ---- TIME.1.a1: the morph ----
+
+  test('TIME.1.a1: the morph takes 1.4 s with a cubic ease, and none under prefers-reduced-motion', () => {
+    expect(MORPH_SECONDS).toBe(1.4)
+    expect(morphSeconds(false)).toBe(1.4)
+    expect(morphSeconds(true)).toBe(0)
+    // The weight moves linearly; the drawn blend is the cubic ease of it: 0 at t=0, 0.5 at t=0.5, 1 at t=1.
+    expect(morphBlend(0)).toBe(0)
+    expect(morphBlend(0.5)).toBeCloseTo(0.5)
+    expect(morphBlend(1)).toBe(1)
+    expect(morphBlend(0.25)).toBeCloseTo(0.0625)
+    expect(morphBlend(0.75)).toBeCloseTo(0.9375)
+    expect(morphBlend(-3)).toBe(0)
+    expect(morphBlend(9)).toBe(1)
+    expect(stepMorph(0, 1, 0.7, 1.4)).toBeCloseTo(0.5)
+    expect(stepMorph(0, 1, 1.4, 1.4)).toBe(1)
+    expect(stepMorph(0, 1, 5, 1.4)).toBe(1)
+    // 84 frames of 1/60 s end exactly on the target; a frame of 0 or less moves nothing.
+    let weight = 0
+    for (let i = 0; i < 84; i++) weight = stepMorph(weight, 1, 1 / 60, 1.4)
+    expect(weight).toBeCloseTo(1, 6)
+    expect(stepMorph(0.3, 1, 0, 1.4)).toBe(0.3)
+    expect(stepMorph(0.3, 1, -1, 1.4)).toBe(0.3)
+    // A switch back mid-morph turns around from where it is, at the same speed.
+    expect(stepMorph(0.6, 0, 0.14, 1.4)).toBeCloseTo(0.5)
+    expect(stepMorph(0.05, 0, 1, 1.4)).toBe(0)
+  })
+
+  test('TIME.1.a1: under reduced motion the morph is instant, both ways', () => {
+    expect(stepMorph(0, 1, 0.016, morphSeconds(true))).toBe(1)
+    expect(stepMorph(1, 0, 0.016, morphSeconds(true))).toBe(0)
+    expect(stepMorph(0.4, 1, 0, morphSeconds(true))).toBe(1)
+    expect(stepDays(30, 7, 0.016, true)).toBe(7)
+  })
+
+  test('TIME.1.a1: the morph aims at 1 in Timeline and 0 in the other layouts', () => {
+    expect(morphTarget('timeline')).toBe(1)
+    expect(morphTarget('galaxy')).toBe(0)
+    expect(morphTarget('meaning')).toBe(0)
+  })
+
+  test('TIME.1.a1: cores shrink to half in Timeline; hubs, threads, bridges and particles fade out', () => {
+    expect(TIMELINE_CORE_SCALE).toBe(0.5)
+    expect(coreScale(0)).toBe(1)
+    expect(coreScale(1)).toBe(0.5)
+    expect(coreScale(0.5)).toBeCloseTo(0.75)
+    expect(galaxyOnlyFade(0)).toBe(1)
+    expect(galaxyOnlyFade(1)).toBe(0)
+    expect(galaxyOnlyFade(0.25)).toBeCloseTo(0.75)
+    expect(galaxyOnlyFade(1.5)).toBe(0)
+  })
+
+  test('TIME.1.a1: the places are the Galaxy ones at blend 0 and LAYOUT.2’s at blend 1, halfway between in the middle', () => {
+    const places = timelinePlaces(galaxy, 42)
+    galaxy.layout.stars.forEach((star, i) => {
+      expect(blendPlace(star.position, places.stars[i]!, 0)).toEqual(star.position)
+      expect(blendPlace(star.position, places.stars[i]!, 1)).toEqual(places.stars[i]!)
+    })
+    const mid = blendPlace([0, 0, 0], [10, 20, 30], 0.5)
+    expect(mid).toEqual([5, 10, 15])
+  })
+
+  test('TIME.1.a1: every drawn thing has a Timeline place: stars by age and lane, cores heading lanes, the Claude core above today', () => {
+    const days = timelineDays(galaxy, 'all')
+    expect(days).toBe(42)
+    const places = timelinePlaces(galaxy, days)
+    expect(places.stars.length).toBe(galaxy.layout.stars.length)
+    expect(places.hubs.length).toBe(galaxy.layout.hubs.length)
+    expect(places.cores.length).toBe(3)
+    expect(places.claude).toEqual(CLAUDE_CORE)
+    for (const key of Object.keys(ages)) {
+      const at = places.stars[slot(key)]!
+      // x = 280 - age * 560 / days: today on the right.
+      expect(at[0]).toBeCloseTo(TIMELINE_TODAY_X - (ages[key]! * TIMELINE_DAYS_X) / days)
+    }
+    expect(places.stars[slot('a0')]![0]).toBeGreaterThan(places.stars[slot('a10')]![0])
+    // One lane per project, centred, 120 apart for three, lane 0 on top; each core heads its lane at x = -340.
+    expect(places.cores.map(c => c[0])).toEqual([PROJECT_CORE_X, PROJECT_CORE_X, PROJECT_CORE_X])
+    expect(places.cores.map(c => c[1])).toEqual([LANE_SPAN / 2, 0, -LANE_SPAN / 2])
+    galaxy.layout.stars.forEach((star, i) => {
+      const lane = galaxy.layout.coreByOwner[star.owner]!
+      // A star sits within the seeded jitter (9 units, a few sigma) of its lane.
+      expect(Math.abs(places.stars[i]![1] - places.cores[lane]![1])).toBeLessThan(9 * 5)
+    })
+    // The same galaxy gives the same places on every call.
+    expect(timelinePlaces(galaxy, days)).toEqual(places)
+    // A topic sits at its memories' average age: alpha's 'fruit' topic holds ages 0 and 3.
+    const fruit = galaxy.layout.hubByKey[`${alpha}/fruit`]!
+    expect(places.hubs[fruit]![0]).toBeCloseTo(TIMELINE_TODAY_X - (1.5 * TIMELINE_DAYS_X) / days)
+  })
+
+  test('TIME.1.a1: moons still orbit the selected star, wherever the morph has put it', () => {
+    const places = timelinePlaces(galaxy, 42)
+    const centre = places.stars[slot('a3')]!
+    const orbit = (i: number) => moonPosition(centre, i, 3, 0, true)
+    for (let i = 0; i < 3; i++) expect(Math.hypot(orbit(i)[0] - centre[0], orbit(i)[2] - centre[2])).toBeCloseTo(MOON_RADIUS)
+  })
+
+  // ---- TIME.1.a2: the camera and auto-rotate ----
+
+  test('TIME.1.a2: Timeline has a straight-on pose facing the axis; leaving it flies to the Galaxy reset view', () => {
+    expect(TIMELINE_POSE).toEqual({ position: [-20, 10, 800], target: [-20, 0, 0] })
+    // Straight on: the camera looks along -z at the axis, its x equal to the target's.
+    expect(TIMELINE_POSE.position[0]).toBe(TIMELINE_POSE.target[0])
+    expect(flightTo(galaxy, 'reset')).toEqual({ target: [0, 0, 0], distance: 720 })
+  })
+
+  test('TIME.1.a2: entering Timeline pauses auto-rotate; leaving it restores it if it was on', () => {
+    const on = base()
+    expect(on.rotating).toBe(true)
+    const entered = setLayout(on, 'timeline', true)
+    expect(entered.layout).toBe('timeline')
+    expect(entered.rotating).toBe(false)
+    expect(entered.rotateBefore).toBe(true)
+    const left = setLayout(entered, 'galaxy', true)
+    expect(left.layout).toBe('galaxy')
+    expect(left.rotating).toBe(true)
+    expect(left.rotateBefore).toBe(false)
+  })
+
+  test('TIME.1.a2: auto-rotate that was off stays off after Timeline', () => {
+    const off = toggleRotation(base())
+    expect(off.rotating).toBe(false)
+    const entered = setLayout(off, 'timeline', true)
+    expect(entered.rotating).toBe(false)
+    expect(entered.rotateBefore).toBe(false)
+    const left = setLayout(entered, 'galaxy', true)
+    expect(left.rotating).toBe(false)
+    // Reduced motion starts with it off, so it stays off.
+    const calm = initialState({ reducedMotion: true })
+    expect(setLayout(setLayout(calm, 'timeline', true), 'galaxy', true).rotating).toBe(false)
+  })
+
+  test('TIME.1.a2: leaving Timeline for Meaning restores it too; one the person turned on inside Timeline is kept', () => {
+    const entered = setLayout(base(), 'timeline', true)
+    expect(setLayout(entered, 'meaning', true).rotating).toBe(true)
+    const chosen = toggleRotation(setLayout(toggleRotation(base()), 'timeline', true))
+    expect(chosen.rotating).toBe(true)
+    expect(setLayout(chosen, 'galaxy', true).rotating).toBe(true)
+    // A switch to the layout already showing, and one to Meaning without it, change nothing.
+    expect(setLayout(entered, 'timeline', true)).toBe(entered)
+    expect(setLayout(base(), 'meaning', false)).toEqual(base())
+    // A switch between Galaxy and Meaning never touches the rotation.
+    const meaning = setLayout(base(), 'meaning', true)
+    expect(meaning.rotating).toBe(true)
+    expect(meaning.rotateBefore).toBe(false)
+  })
+
+  test('TIME.1.a2: opening on a stored Timeline layout starts as a switch to it would: rotation paused, remembered for the way back', () => {
+    const opened = base('timeline')
+    expect(opened).toMatchObject({ layout: 'timeline', rotating: false, rotateBefore: true })
+    expect(setLayout(opened, 'galaxy', true).rotating).toBe(true)
+    expect(initialState({ reducedMotion: true, layout: 'timeline' })).toMatchObject({ rotating: false, rotateBefore: false })
+    expect(base('galaxy')).toMatchObject({ rotating: true, rotateBefore: false })
+  })
+
+  // ---- TIME.1.a3: the range ----
+
+  test('TIME.1.a3: the range spans 7 days, 30 days, or the oldest memory plus two days', () => {
+    expect(timelineDays(galaxy, 7)).toBe(7)
+    expect(timelineDays(galaxy, 30)).toBe(30)
+    expect(timelineDays(galaxy, 'all')).toBe(42)
+    expect(inTimelineRange(7, 7)).toBe(true)
+    expect(inTimelineRange(8, 7)).toBe(false)
+  })
+
+  test('TIME.1.a3: stars older than the range fade out in Timeline, and in no other layout', () => {
+    const seven = timeline(7)
+    expect(target('a0', seven)).toBeGreaterThan(0)
+    expect(target('a3', seven)).toBeGreaterThan(0)
+    expect(target('b6', seven)).toBeGreaterThan(0)
+    expect(target('a10', seven)).toBe(0)
+    expect(target('b40', seven)).toBe(0)
+    const thirty = timeline(30)
+    expect(target('a10', thirty)).toBeGreaterThan(0)
+    expect(target('b40', thirty)).toBe(0)
+    for (const key of Object.keys(ages)) expect(target(key, timeline('all'))).toBeGreaterThan(0)
+    // Galaxy and Meaning ignore the range.
+    for (const layout of ['galaxy', 'meaning'] as const) expect(target('b40', { ...base(), layout, range: 7 })).toBeGreaterThan(0)
+    // A star the person has selected stays lit, so it can be found.
+    expect(target('b40', { ...seven, selected: ids.b40! })).toBe(1)
+  })
+
+  test('TIME.1.a3: a range change rescales smoothly toward the new days, never past them', () => {
+    let days = 30
+    const trail: number[] = []
+    for (let i = 0; i < 120; i++) {
+      days = stepDays(days, 7, 1 / 60, false)
+      trail.push(days)
+    }
+    expect(trail.every((d, i) => d <= (trail[i - 1] ?? 30) && d >= 7)).toBe(true)
+    expect(trail[0]).toBeGreaterThan(7)
+    expect(trail[0]).toBeLessThan(30)
+    expect(trail.at(-1)).toBe(7)
+    // The other way, and the rate: 1 - e^(-RANGE_FOLLOW t) of the gap in t seconds.
+    expect(stepDays(7, 30, 0.5, false)).toBeCloseTo(7 + 23 * (1 - Math.exp(-RANGE_FOLLOW * 0.5)))
+    expect(stepDays(7, 7, 1, false)).toBe(7)
+    expect(stepDays(30, 42, 0, false)).toBe(30)
+  })
+
+  test('TIME.1.a3: tick marks slide with the shown days; today stays put', () => {
+    expect(tickX(0, 7)).toBe(TIMELINE_TODAY_X)
+    expect(tickX(0, 42)).toBe(TIMELINE_TODAY_X)
+    expect(tickX(7, 7)).toBeCloseTo(TIMELINE_TODAY_X - TIMELINE_DAYS_X)
+    expect(tickX(7, 30)).toBeCloseTo(TIMELINE_TODAY_X - (7 * TIMELINE_DAYS_X) / 30)
+    expect(tickX(5, 0)).toBe(TIMELINE_TODAY_X - 5 * TIMELINE_DAYS_X)
+  })
+
+  test('TIME.1.a3: the real galaxy at 7, 30 and All: stars land on the scale of the range showing', () => {
+    for (const range of [7, 30, 'all'] as const) {
+      const days = timelineDays(galaxy, range)
+      const at = timelinePlaces(galaxy, days).stars[slot('b6')]!
+      expect(at[0]).toBeCloseTo(TIMELINE_TODAY_X - (6 * TIMELINE_DAYS_X) / days)
+    }
+    // A star at exactly the range’s age sits on the left edge.
+    expect(timelinePlaces(galaxy, 6).stars[slot('b6')]![0]).toBeCloseTo(-TIMELINE_TODAY_X)
+  })
+
+  test('TIME.1.a3: a project with nothing in the range keeps its lane and its core, with every star faded', () => {
+    for (const range of [7, 30] as const) {
+      const state = timeline(range)
+      const own = galaxy.layout.stars.filter(star => star.owner === old)
+      expect(own.length).toBe(1)
+      expect(own.every(star => starTarget(galaxy, galaxy.layout.starById[star.id]!, state, null) === 0)).toBe(true)
+      expect(coreTarget(state, old)).toBe(1)
+    }
+    const lanes = laneLines(galaxy)
+    expect(lanes.map(lane => lane.owner).sort()).toEqual([alpha, beta, old].sort())
+    expect(new Set(lanes.map(lane => lane.from[1])).size).toBe(3)
+  })
+
+  test('TIME.1.a3: a galaxy with 0 memories has the 2-day All range, only the Claude core, no lanes, and no star to fade', () => {
+    const empty = buildGalaxy({ memories: [], projects: [], knowledge: [], meaning: false, total: 0, shown: 0 } as unknown as GalaxyReply, now)
+    expect(timelineDays(empty, 'all')).toBe(2)
+    expect(timelineDays(empty, 7)).toBe(7)
+    const places = timelinePlaces(empty, 2)
+    expect(places).toEqual({ claude: CLAUDE_CORE, cores: [], hubs: [], stars: [] })
+    expect(laneLines(empty)).toEqual([])
+    expect(inspector(empty, timeline()).title).toBe('0 memories')
+    expect(inspector(empty, timeline()).hint).toBe(TIMELINE_HINT)
+  })
+
+  test('TIME.1.a3: a store with one project puts its lane in the middle', () => {
+    const one = buildGalaxy(
+      parseGalaxy({ ...(rawBody as Record<string, unknown>), projects: [(rawBody as { projects: unknown[] }).projects.find(p => (p as { owner: string }).owner === alpha)], memories: (rawBody as { memories: { owner: string }[] }).memories.filter(m => m.owner === alpha), knowledge: [] })!,
+      now,
+    )
+    expect(one.layout.cores.length).toBe(1)
+    expect(timelinePlaces(one, 30).cores[0]).toEqual([PROJECT_CORE_X, 0, 0])
+  })
+
+  // ---- TIME.1.a4: the hint ----
+
+  test('TIME.1.a4: the overview hint in Timeline reads "Newest on the right; each lane is one project"', () => {
+    expect(TIMELINE_HINT).toBe('Newest on the right; each lane is one project')
+    expect(inspector(galaxy, timeline()).hint).toBe('Newest on the right; each lane is one project')
+    expect(inspector(galaxy, base()).hint).toBe('Every star is one memory. Click a project core to fly in.')
+    // A selected star keeps its own hint in Timeline.
+    expect(inspector(galaxy, selectStar(timeline(), galaxy, ids.a0!)).hint).toBe('Never recalled: a candidate to review or forget.')
+  })
+
+  // ---- TIME.2: ticks, gridlines and lane baselines ----
+
+  test('TIME.2.a1: tick labels are LAYOUT.2’s ticks(), with a faint gridline each', () => {
+    expect(rangeTicks(7, 7)).toEqual(ticks(7, 7))
+    expect(rangeTicks(7, 7).map(t => t.label)).toEqual(['today', '1 day ago', '2 days ago', '3 days ago', '4 days ago', '5 days ago', '6 days ago', '7 days ago'])
+    expect(rangeTicks(30, 30).map(t => t.days)).toEqual([0, 7, 14, 21, 28])
+    expect(rangeTicks('all', 42).map(t => t.days)).toEqual([0, 14, 28, 42])
+    // A gridline runs from y -160 to 160 at the tick, behind the stars, faint.
+    expect(gridLine(100)).toEqual([[100, GRID_Y[0], GRID_Z], [100, GRID_Y[1], GRID_Z]])
+    expect(GRID_Y).toEqual([-160, 160])
+    expect(GRID_Z).toBeLessThan(0)
+    expect(GRID_OPACITY).toBeLessThan(0.5)
+    expect(GRID_COLOUR).toBe('#5A6B7D')
+    // The labels sit under the lanes, large enough to read at the default view (camera 800 away).
+    expect(TICK_LABEL_Y).toBeLessThan(-LANE_SPAN / 2)
+    expect(TICK_LABEL_HEIGHT).toBeGreaterThanOrEqual(12)
+    expect(TICK_LABEL_OPACITY).toBeGreaterThan(0.8)
+    expect(TICK_LABEL_COLOUR).toMatch(/^#[0-9A-F]{6}$/)
+  })
+
+  test('TIME.2.a2: a faint baseline per lane in its project colour, from the cores to just past today', () => {
+    const lanes = laneLines(galaxy)
+    expect(lanes.length).toBe(galaxy.layout.cores.length)
+    galaxy.layout.cores.forEach((core, i) => {
+      const lane = lanes[i]!
+      expect(lane.owner).toBe(core.owner)
+      expect(lane.colour).toBe(projectColour(galaxy, core.owner))
+      expect(lane.from).toEqual([LANE_X[0], timelinePlaces(galaxy, 30).cores[i]![1], LANE_Z])
+      expect(lane.to).toEqual([LANE_X[1], lane.from[1], LANE_Z])
+    })
+    expect(LANE_X[0]).toBeLessThan(PROJECT_CORE_X + 40)
+    expect(LANE_X[1]).toBeGreaterThan(TIMELINE_TODAY_X)
+    expect(LANE_OPACITY).toBeLessThan(0.5)
+    // Every lane has its own colour.
+    expect(new Set(lanes.map(l => l.colour)).size).toBe(lanes.length)
+  })
+
+  test('TIME.2.a3: sparks fly from the Claude core, which sits above today in Timeline', () => {
+    const claude = timelinePlaces(galaxy, 42).claude
+    expect(claude).toEqual(CLAUDE_CORE)
+    expect(claude[0]).toBeGreaterThan(TIMELINE_TODAY_X)
+    expect(claude[1]).toBeGreaterThan(LANE_SPAN / 2)
+    const to = timelinePlaces(galaxy, 42).stars[slot('a0')]!
+    expect(sparkAt(claude, to, 0, 0)).toEqual(claude)
+    expect(sparkAt(claude, to, 0, 1)).toEqual(to)
+    // The scene starts every spark at the Claude visual's place, not at the origin.
+    const map = readFileSync(join(ROOT, 'ui', 'map.ts'), 'utf8')
+    expect(map).toContain('sparkAt(claudeVisual?.position ?? [0, 0, 0], to.position,')
+    expect(map).not.toContain('sparkAt([0, 0, 0],')
+  })
+
+  test('the scene file moves every visual by the state functions, and never makes markup from a label', () => {
+    const map = readFileSync(join(ROOT, 'ui', 'map.ts'), 'utf8')
+    const timelinePart = map.slice(map.indexOf('// ---- Timeline: places, links, furniture ----'), map.indexOf('// ---- Per frame ----'))
+    for (const call of ['timelinePlaces(g, shownDays)', 'blendPlace(v.home, away, blend)', 'stepMorph(morph, morphTarget(state.layout), dt, morphSeconds(state.reducedMotion))', 'stepDays(shownDays', 'rangeTicks(state.range', 'laneLines(g)', 'gridLine(x)', 'tickX(days, shownDays)']) expect(timelinePart).toContain(call)
+    // The library copies node places only while its engine counts as running: every move re-arms it, and writes to the visual's own node (the probe node sits between the Claude core and grown stars).
+    expect(timelinePart).toContain('d3ReheatSimulation')
+    expect(timelinePart).toContain('const node = v.node as Any')
+    expect(timelinePart).not.toContain('graphNodes[v.index]')
+    // An update event moves its star to today.
+    expect(map).toMatch(/touchMemory\(g, id\)\) return\s*\n\s*\/\/ In Timeline an updated memory jumps to today\.\s*\n\s*placeDirty = true/)
+    expect(map).toContain('flyToPose(TIMELINE_POSE)')
+    expect(map).toContain("fly(flightTo(galaxy, 'reset'))")
+    expect(map).not.toMatch(/innerHTML|insertAdjacentHTML|outerHTML/)
+    // Tick text is drawn on a canvas by the label maker.
+    expect(timelinePart).toContain('makeLabel(tick.label')
+  })
+
+  test('the Timeline code keeps GAL’s and MOON’s fixes: no Object-key collisions, one primary button, disposal of old visuals', () => {
+    const map = readFileSync(join(ROOT, 'ui', 'map.ts'), 'utf8')
+    expect(map).toContain('disposeVisuals()')
+    expect(map).toContain('isPrimary(event)')
+    expect(map).toContain('slotOf(g.layout.starById')
+    // A project named like an Object member still gets a lane.
+    const odd = buildGalaxy({ projects: [{ owner: 'constructor', label: 'constructor', count: 1, recalls: 0 }, { owner: 'toString', label: 'toString', count: 1, recalls: 0 }], memories: [{ id: 'x1', owner: 'constructor', tags: [], recalls: 0, lastRecalled: null, created: daysAgo(1), label: 'x' }, { id: 'x2', owner: 'toString', tags: ['t'], recalls: 0, lastRecalled: null, created: daysAgo(2), label: 'y' }], knowledge: [], meaning: false, total: 2, shown: 2 } as unknown as GalaxyReply, now)
+    const places = timelinePlaces(odd, 30)
+    expect(places.cores.length).toBe(2)
+    expect(places.stars.length).toBe(2)
+    expect(new Set(places.stars.map(s => s[1] > 0)).size).toBe(2)
   })
 })
