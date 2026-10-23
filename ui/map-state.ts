@@ -10,7 +10,7 @@
 //
 // Every transition returns a new state; none changes the one it is given.
 import { plainLabel } from './escape'
-import { gauss, galaxyLayout, placeOne, randomOf, rangeDays, seedOf, ticks, timelinePosition, TIMELINE_DAYS_X, TIMELINE_TODAY_X, type GalaxyInputMemory, type GalaxyLayout, type GalaxyStar, type Tick, type TimelineRange, type Vec3 } from './map-layout'
+import { gauss, galaxyLayout, placeOne, randomOf, rangeDays, seedOf, ticks, timelinePosition, LANE_SPAN, TIMELINE_DAYS_X, TIMELINE_TODAY_X, type GalaxyInputMemory, type GalaxyLayout, type GalaxyStar, type Tick, type TimelineRange, type Vec3 } from './map-layout'
 import type { MapEvent, MapEventKind } from './map-live'
 
 // ---- What the server sends ----
@@ -595,6 +595,23 @@ export function moonPosition(centre: Vec3, i: number, n: number, seconds: number
   return [centre[0] + Math.cos(angle) * MOON_RADIUS, centre[1] + Math.sin(angle) * MOON_RADIUS * 0.45, centre[2] + Math.sin(angle) * MOON_RADIUS]
 }
 
+/** The camera distance a flight to a star ends at: where a moon label has its full size. */
+export const MOON_LABEL_REF = 170
+/** A moon label's size factor: it shrinks as the camera comes close, so it keeps one size on screen (clamp(distance / 170, 0.25, 1)); star labels do the same with labelScale. */
+export const moonLabelScale = (distance: number) => Math.min(1, Math.max(0.25, distance / MOON_LABEL_REF))
+/** The pixels one world unit covers at `distance` from a camera of `fovDegrees` over a view `viewHeight` px tall. */
+export const pixelsPerUnit = (viewHeight: number, fovDegrees: number, distance: number) => viewHeight / (2 * Math.tan((fovDegrees * Math.PI) / 360) * Math.max(1, distance))
+/** A moon's pick radius in px: never under MOON_PICK_RADIUS, and at least the radius of the glow as drawn (`size` world units), so the whole drawn moon can be hovered. */
+export const moonPickRadius = (size: number, pxPerUnit: number) => Math.max(MOON_PICK_RADIUS, (size * pxPerUnit) / 2)
+export const MOON_LABEL_GAP = 3.5
+export const MOON_LABEL_ROW = 4.8
+/** The row of a moon's label: neighbours on the orbit alternate rows 0 and 1, and the last of an odd count takes row 2 (its neighbours are the first, row 0, and the one before it, row 1). */
+export const moonLabelRow = (i: number, n: number) => (n > 1 && n % 2 === 1 && i === n - 1 ? 2 : i % 2)
+/** How far above its moon a label sits: clear of the glow, one label height more for each row, at the label's own scale `k` (moonLabelScale). */
+export const moonLabelLift = (i: number, n: number, k: number) => MOON_LABEL_GAP + moonLabelRow(i, n) * MOON_LABEL_ROW * k
+/** Drawn after the stars' glows: lines, then moons, then labels, none hidden by depth; moons use normal blending so a bright bloom cannot wash them out. */
+export const MOON_RENDER_ORDER = { line: 20, sprite: 21, label: 22 } as const
+
 /** A moon's glow size: 6.5, and 9 for the selected one. */
 export const moonSize = (selected: boolean) => (selected ? MOON_SIZE_SELECTED : MOON_SIZE)
 /** The selected moon's pulse: 0.4 + 0.3 sin(5t); the others do not pulse. */
@@ -620,6 +637,15 @@ export function toggleKind(state: MapState, kind: KnowledgeKind): MapState {
   else kinds.add(kind)
   return { ...state, kinds }
 }
+
+const KIND_CHIP_NAMES: Readonly<Record<KnowledgeKind, string>> = { fact: 'Facts', preference: 'Preferences', instruction: 'Instructions', timeline: 'Timeline', relation: 'Relations' }
+/** The Overview's note while chips dim the map ("Dimmed by: Facts. Click to clear."); null with no chip picked. */
+export function dimNote(state: MapState): string | null {
+  const names = KNOWLEDGE_KINDS.filter(kind => state.kinds.has(kind)).map(kind => KIND_CHIP_NAMES[kind])
+  return names.length === 0 ? null : `Dimmed by: ${names.join(', ')}. Click to clear.`
+}
+/** Drops every picked chip. */
+export const clearKinds = (state: MapState): MapState => (state.kinds.size === 0 ? state : { ...state, kinds: new Set() })
 
 /** The one-line note under the chips. */
 export const knowledgeNote = (state: MapState) =>
@@ -671,8 +697,10 @@ export function pickNearest(candidates: readonly Candidate[], mx: number, my: nu
 /** Only the main button picks or flies: a right or middle click is not a click on a star. */
 export const isPrimary = (event: { button: number }) => event.button === 0
 
-/** A pointer that moved more than 5 px between press and release was an orbit, never a click. */
-export const isClick = (down: { x: number; y: number }, up: { x: number; y: number }) => Math.hypot(up.x - down.x, up.y - down.y) <= 5
+/** A press that moved over 3 px, or was held over 250 ms, was a drag (an orbit), never a click; `t` is the event time in ms. A drag that ends on the pixel it began on is told by its time. */
+export const CLICK_MAX_MOVE = 3
+export const CLICK_MAX_HELD_MS = 250
+export const isClick = (down: { x: number; y: number; t?: number }, up: { x: number; y: number; t?: number }) => Math.hypot(up.x - down.x, up.y - down.y) <= CLICK_MAX_MOVE && (up.t ?? 0) - (down.t ?? 0) <= CLICK_MAX_HELD_MS
 
 /** A date as YYYY-MM-DD, local time; '' when there is none. */
 function savedDay(value: string | null | undefined): string {
@@ -859,6 +887,13 @@ export const gridLine = (x: number): [Vec3, Vec3] => [
   [x, GRID_Y[0], GRID_Z],
   [x, GRID_Y[1], GRID_Z],
 ]
+/** How far above its lane's line a project label sits: just above its own core, and never nearer to a neighbouring lane than to its own line (under 40% of the lane spacing). */
+export const LANE_LABEL_LIFT = 22
+export function laneLabelLift(lanes: number): number {
+  return lanes <= 1 ? LANE_LABEL_LIFT : Math.min(LANE_LABEL_LIFT, (LANE_SPAN / (lanes - 1)) * 0.4)
+}
+/** A project label's height above its core at a blend: the Galaxy offset in Galaxy, the lane lift in Timeline, between while it morphs. */
+export const coreLabelOffset = (galaxyOffset: number, lanes: number, blend: number): number => galaxyOffset + (laneLabelLift(lanes) - galaxyOffset) * blend
 /** A lane's baseline: its project's colour, at the lane's y, from the cores to just past today. */
 export function laneLines(galaxy: Galaxy): { owner: string; colour: string; from: Vec3; to: Vec3 }[] {
   const lanes = galaxy.layout.cores.length
@@ -1222,6 +1257,14 @@ type Layer = 'recall' | 'write'
 export const layerOf = (kind: MapEventKind): Layer => (kind === 'recall' ? 'recall' : 'write')
 export const layerOn = (state: MapState, kind: MapEventKind) => (layerOf(kind) === 'recall' ? state.layerRecall : state.layerWrite)
 export const toggleLive = (state: MapState): MapState => ({ ...state, live: !state.live })
+
+/** The strip lists the events since the page was opened, not the log: its empty line says so. */
+export const STRIP_EMPTY_TEXT = 'No new activity since you opened this page.'
+/** The Live pill switches live updates (and the demo timer) on or off. */
+export const LIVE_PILL_TITLE = 'Press to switch live updates on or off'
+
+/** A frame re-picks under the pointer when it moved, or while it rests on the map with moons shown (they orbit under it). */
+export const needsHover = (moved: boolean, inside: boolean, moonsShown: boolean): boolean => moved || (inside && moonsShown)
 
 /** The Live pill: On only while the page's stream is connected and Live is on; otherwise Paused, so it never says On over a feed that cannot fill. */
 export const liveLabel = (state: MapState, connected: boolean): 'On' | 'Paused' => (state.live && connected ? 'On' : 'Paused')

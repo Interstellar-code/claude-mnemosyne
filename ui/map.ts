@@ -134,6 +134,17 @@ import {
   MOON_LINE_COLOUR,
   MOON_LINE_OPACITY,
   moonColour,
+  moonLabelLift,
+  moonLabelScale,
+  moonPickRadius,
+  MOON_RENDER_ORDER,
+  pixelsPerUnit,
+  coreLabelOffset,
+  needsHover,
+  dimNote,
+  clearKinds,
+  STRIP_EMPTY_TEXT,
+  LIVE_PILL_TITLE,
   moonLinesProblem,
   moonPosition,
   moonPulse,
@@ -198,6 +209,7 @@ const LIB_URL = '/vendor/map-lib.js'
 const ROTATE_SPEED = 0.35
 const HOME: Vec3 = [0, 160, 700]
 const ADDITIVE = 2
+const NORMAL = 1
 
 // ---- DOM helpers ----
 
@@ -364,8 +376,8 @@ export function createMap(host: MapHost): MapView {
   const tickItems = new Map<number, { label: Any | null; line: Any | null; alpha: number }>()
   let laneItems = new Map<string, { line: Any; alpha: number }>()
   let flight: { t: number; seconds: number; from: { position: Vec3; target: Vec3 }; to: { position: Vec3; target: Vec3 } } | null = null
-  let pointer: { x: number; y: number; moved: boolean } = { x: 0, y: 0, moved: false }
-  let down: { x: number; y: number } | null = null
+  let pointer: { x: number; y: number; moved: boolean; inside: boolean } = { x: 0, y: 0, moved: false, inside: false }
+  let down: { x: number; y: number; t: number } | null = null
   let hovered = ''
   let starfieldMade = false
   let lastSaid = ''
@@ -396,7 +408,7 @@ export function createMap(host: MapHost): MapView {
   // Looks at the library's scene so far (afterData runs), and whether the missing-line status was said.
   let sceneChecks = 0
   let moonLinesTold = false
-  let moonSpots: { id: string; position: Vec3; sprite: Any }[] = []
+  let moonSpots: { id: string; position: Vec3; sprite: Any; radius: number }[] = []
   let lineClasses: { Line: new (geometry: Any, material: Any) => Any; Material: new (params: Record<string, unknown>) => Any } | null = null
 
   const canvasBox = byId('map-canvas')
@@ -685,6 +697,14 @@ export function createMap(host: MapHost): MapView {
       const id = view.memory.id
       open.addEventListener('click', () => host.openMemory(id))
       parts.push(open)
+    }
+    // A knowledge chip dims the map; the Overview says so, with a way to clear it.
+    const dimmed = view.kind === 'Overview' ? dimNote(state) : null
+    if (dimmed !== null) {
+      const clear = el('button', dimmed, 'btn insp-dim')
+      clear.type = 'button'
+      clear.addEventListener('click', () => dispatch(clearKinds(state)))
+      parts.push(clear)
     }
     if (view.hint) parts.push(el('p', view.hint, 'insp-hint'))
     box.replaceChildren(...parts)
@@ -1199,7 +1219,7 @@ export function createMap(host: MapHost): MapView {
     const follow = Math.min(1, dt * 5)
     const selectedKey = state.selected
     for (const spark of stepSparks(sparkPool, dt)) arrive(spark)
-    updateMoons(follow)
+    updateMoons(follow, cam, (camera?.fov as number | undefined) ?? 40)
     for (const v of visuals) {
       v.fade = visualFade(v.kind, galaxyFade)
       v.alpha += (v.target - v.alpha) * follow
@@ -1210,8 +1230,9 @@ export function createMap(host: MapHost): MapView {
         v.sprite.scale.set(scale, scale, 1)
         v.sprite.material.opacity = Math.min(1, v.alpha) * v.fade
       }
+      if (v.label && v.kind === 'core') v.label.position.y = coreLabelOffset(v.labelOffset, galaxy.layout.cores.length, blend)
       if (v.label) {
-        const k = labelScale(Math.hypot(v.position[0] - cam[0], v.position[1] + v.labelOffset - cam[1], v.position[2] - cam[2]))
+        const k = labelScale(Math.hypot(v.position[0] - cam[0], v.position[1] + (v.kind === 'core' ? v.label.position.y : v.labelOffset) - cam[1], v.position[2] - cam[2]))
         v.label.scale.set(v.labelBase[0] * k, v.labelBase[1] * k, 1)
         v.label.material.opacity = Math.min(1, v.labelAlpha) * v.fade
       }
@@ -1230,7 +1251,7 @@ export function createMap(host: MapHost): MapView {
       sprite.material.color.setRGB(r, g, b)
       sprite.material.opacity = sparkAlpha(spark)
     })
-    if (pointer.moved) {
+    if (needsHover(pointer.moved, pointer.inside, moonSpots.length > 0)) {
       pointer.moved = false
       hover()
     }
@@ -1266,12 +1287,17 @@ export function createMap(host: MapHost): MapView {
       const sprite = makeSprite('glow', '#FFFFFF')
       if (sprite === null) return null
       sprite.scale.set(moonSize(false), moonSize(false), 1)
+      // Normal blending, drawn after the stars and their bloom: a moon keeps its colour over a white glow.
+      sprite.material.blending = NORMAL
+      sprite.material.depthTest = false
+      sprite.renderOrder = MOON_RENDER_ORDER.sprite
       scene.add(sprite)
       return sprite
     })
     // The labels get their texture from the per-kind cache (setMoonLabels); until then they are invisible.
     moonLabels = Array.from({ length: MOON_LIMIT }, () => {
-      const label = new T.Sprite(new T.SpriteMaterial({ transparent: true, depthWrite: false, opacity: 0 }))
+      const label = new T.Sprite(new T.SpriteMaterial({ transparent: true, depthWrite: false, depthTest: false, opacity: 0 }))
+      label.renderOrder = MOON_RENDER_ORDER.label
       scene.add(label)
       return label
     })
@@ -1294,9 +1320,10 @@ export function createMap(host: MapHost): MapView {
     moonLines = Array.from({ length: MOON_LIMIT }, () => {
       const geometry = new T.BufferGeometry()
       geometry.setAttribute('position', new T.BufferAttribute(new Float32Array(6), 3))
-      const line = new Line(geometry, new Material({ color: Number.parseInt(MOON_LINE_COLOUR.slice(1), 16), transparent: true, opacity: 0, depthWrite: false, blending: ADDITIVE }))
+      const line = new Line(geometry, new Material({ color: Number.parseInt(MOON_LINE_COLOUR.slice(1), 16), transparent: true, opacity: 0, depthWrite: false, depthTest: false, blending: ADDITIVE }))
       line.frustumCulled = false
       line.visible = false
+      line.renderOrder = MOON_RENDER_ORDER.line
       scene.add(line)
       return line
     })
@@ -1348,7 +1375,7 @@ export function createMap(host: MapHost): MapView {
   }
 
   /** Per frame: the moons of the selected star at their orbit places, the lines to the star, the labels and the selected moon's pulse. */
-  function updateMoons(follow: number) {
+  function updateMoons(follow: number, cam: Vec3, fov: number) {
     const g = galaxy
     const plan = moonPlanFor(g)
     const rows = plan.rows
@@ -1375,6 +1402,7 @@ export function createMap(host: MapHost): MapView {
       sprite.material.color.setRGB(r, gr, b)
       const size = moonSize(chosen) * (1 + moonPulse(chosen, clock) * 1.6)
       sprite.scale.set(size, size, 1)
+      const distance = Math.hypot(at[0] - cam[0], at[1] - cam[1], at[2] - cam[2])
       sprite.material.opacity += (0.95 - sprite.material.opacity) * follow
       if (line) {
         const array = line.geometry.attributes.position.array as Float32Array
@@ -1385,10 +1413,15 @@ export function createMap(host: MapHost): MapView {
         line.visible = true
       }
       if (label) {
-        label.position.set(at[0], at[1] + 5, at[2])
+        // The label keeps one size on screen as the camera comes close, and alternates rows so neighbours do not overlap.
+        const k = moonLabelScale(distance)
+        const look = moonLabelLook(row.kind)
+        if (look !== null) label.scale.set(look.scale[0] * k, look.scale[1] * k, 1)
+        label.position.set(at[0], at[1] + moonLabelLift(i, rows.length, k), at[2])
         label.material.opacity += (0.9 - label.material.opacity) * follow
       }
-      moonSpots.push({ id: row.id, position: at, sprite })
+      // Picked where it is drawn this frame, within the size it is drawn at.
+      moonSpots.push({ id: row.id, position: at, sprite, radius: moonPickRadius(size, pixelsPerUnit(canvasBox.clientHeight, fov, distance)) })
     })
   }
 
@@ -1505,7 +1538,7 @@ export function createMap(host: MapHost): MapView {
     const rows = stripRows(strip, state)
     byId('map-feed').replaceChildren(
       ...(rows.length === 0
-        ? [el('li', 'No activity yet.', 'mini-empty')]
+        ? [el('li', STRIP_EMPTY_TEXT, 'mini-empty')]
         : rows.map(row => {
             const item = el('li')
             item.append(el('span', row.time, 'mono muted'), el('span', row.badge, `mini-badge ${BADGE_CLASS[row.kind]}`))
@@ -1561,7 +1594,7 @@ export function createMap(host: MapHost): MapView {
     for (const spot of moonSpots) {
       if (view[2]! * spot.position[0] + view[6]! * spot.position[1] + view[10]! * spot.position[2] + view[14]! >= 0) continue
       const screen = l.graph2ScreenCoords(spot.position[0], spot.position[1], spot.position[2]) as { x: number; y: number }
-      out.push({ kind: 'moon', id: spot.id, sx: screen.x, sy: screen.y, radius: PICK_RADIUS.moon, alpha: spot.sprite.material.opacity })
+      out.push({ kind: 'moon', id: spot.id, sx: screen.x, sy: screen.y, radius: spot.radius, alpha: spot.sprite.material.opacity })
     }
     return out
   }
@@ -1654,7 +1687,7 @@ export function createMap(host: MapHost): MapView {
   if (pill) {
     pill.setAttribute('role', 'button')
     pill.setAttribute('tabindex', '0')
-    pill.title = 'Press to switch the demo events on or off'
+    pill.title = LIVE_PILL_TITLE
     pill.style.cursor = 'pointer'
     pill.addEventListener('click', () => dispatch(toggleLive(state)))
     pill.addEventListener('keydown', event => {
@@ -1668,15 +1701,16 @@ export function createMap(host: MapHost): MapView {
   canvasBox.addEventListener('pointerdown', event => {
     // A right or middle press is not a click on a star.
     if (!isPrimary(event)) return
-    down = { x: event.clientX, y: event.clientY }
+    down = { x: event.clientX, y: event.clientY, t: event.timeStamp }
     flight = null
   })
   canvasBox.addEventListener('pointermove', event => {
     const box = canvasBox.getBoundingClientRect()
-    pointer = { x: event.clientX - box.left, y: event.clientY - box.top, moved: true }
+    pointer = { x: event.clientX - box.left, y: event.clientY - box.top, moved: true, inside: true }
   })
   canvasBox.addEventListener('pointerleave', () => {
     pointer.moved = false
+    pointer.inside = false
     hovered = ''
     tip.hidden = true
     canvasBox.style.cursor = 'grab'
@@ -1684,9 +1718,9 @@ export function createMap(host: MapHost): MapView {
   canvasBox.addEventListener('pointerup', event => {
     const start = down
     down = null
-    if (!isPrimary(event) || start === null || !isClick(start, { x: event.clientX, y: event.clientY })) return
+    if (!isPrimary(event) || start === null || !isClick(start, { x: event.clientX, y: event.clientY, t: event.timeStamp })) return
     const box = canvasBox.getBoundingClientRect()
-    pointer = { x: event.clientX - box.left, y: event.clientY - box.top, moved: false }
+    pointer = { x: event.clientX - box.left, y: event.clientY - box.top, moved: false, inside: true }
     click()
   })
 

@@ -4,6 +4,8 @@
 import { describe, expect, test } from 'bun:test'
 import {
   CORE_SPREAD,
+  tickStep,
+  TICK_MIN_SPACING,
   coreRadius,
   firstTag,
   galaxyLayout,
@@ -230,7 +232,7 @@ describe('LAYOUT.2: timelinePosition and ticks', () => {
     expect(timelinePosition({ kind: 'claude' }, 7)).toEqual([300, 185, 0])
   })
 
-  test('LAYOUT.2.a3: rangeDays 7 / 30 / all = oldest + 2; ticks every 1 / 7 / 14 days with labels', () => {
+  test('LAYOUT.2.a3: rangeDays 7 / 30 / all = oldest + 2; ticks every 1 / 7 days, and a round step for all', () => {
     expect(rangeDays(7)).toBe(7)
     expect(rangeDays(30)).toBe(30)
     expect(rangeDays('all', 12)).toBe(14)
@@ -242,7 +244,7 @@ describe('LAYOUT.2: timelinePosition and ticks', () => {
     const month = ticks(30)
     expect(month.map(tick => tick.days)).toEqual([0, 7, 14, 21, 28])
     const all = ticks('all', 14)
-    expect(all.map(tick => tick.days)).toEqual([0, 14])
+    expect(all.map(tick => tick.days)).toEqual([0, 7, 14])
     expect(all[all.length - 1]!.x).toBe(280 - (14 * 560) / 14)
   })
 
@@ -258,5 +260,19 @@ describe('LAYOUT.2: timelinePosition and ticks', () => {
       expect(position[1]).toBeLessThan(LANE_JITTER * 5)
       expect(ticks(range, days).length).toBeGreaterThan(0)
     }
+  })
+
+  test('QAMAP.1: tickStep and the All ticks of a 300-day store never pile up', () => {
+    expect(tickStep(7)).toBe(1)
+    expect(tickStep(30)).toBe(7)
+    const days = rangeDays('all', 300)
+    const all = ticks('all', days)
+    expect(all.length).toBeLessThanOrEqual(12)
+    const xs = all.map(tick => tick.x).sort((a, b) => a - b)
+    for (let i = 1; i < xs.length; i++) expect(xs[i]! - xs[i - 1]!).toBeGreaterThanOrEqual(TICK_MIN_SPACING)
+    expect(all.at(-1)).toMatchObject({ days, label: `${days}d` })
+    // Under the old rule (every 14 days) the same range had 22 ticks 26 units apart.
+    expect(Math.ceil(days / 14) + 1).toBe(23)
+    expect((14 * 560) / days).toBeLessThan(TICK_MIN_SPACING)
   })
 })
