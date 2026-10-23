@@ -17,8 +17,10 @@
 // and textContent.
 import type { ForceGraph3DInstance, GraphNode } from './vendor/map-lib.js'
 import { plainLabel } from './escape'
-import type { GalaxyHub, Vec3 } from './map-layout'
+import type { GalaxyHub, GalaxyStar, Vec3 } from './map-layout'
+import { simulate, toMapEvent, type MapEvent } from './map-live'
 import {
+  addMemory,
   announcement,
   BACKGROUND,
   BLOOM,
@@ -31,6 +33,32 @@ import {
   type Candidate,
   coreSize,
   coreTarget,
+  DEMO_EVERY_MS,
+  demoKind,
+  demoTimerOn,
+  enqueueSparks,
+  eventStars,
+  forgetMemory,
+  layerOf,
+  layerOn,
+  leanRow,
+  newSparkPool,
+  PULSE,
+  pushRow,
+  recallMemory,
+  simulationInput,
+  SPARK_COLOURS,
+  sparkAlpha,
+  sparkAt,
+  sparkProgress,
+  sparksFor,
+  type Spark,
+  stepSparks,
+  stripRow,
+  stripRows,
+  type StripRow,
+  toggleLive,
+  touchMemory,
   ease,
   find,
   flightPose,
@@ -98,6 +126,8 @@ export type MapHost = {
   api: (path: string) => Promise<Response>
   openMemory: (id: string) => void
   status: (text: string, kind?: 'ok' | 'error' | 'plain') => void
+  /** The page's one activity stream: calls the listener with every new line; returns the way to stop. */
+  events?: (listener: (line: Record<string, unknown>) => void) => () => void
 }
 
 export type MapView = { visible: (shown: boolean) => void; show: (memoryId: string) => void }
@@ -223,6 +253,7 @@ type Visual = {
 }
 
 type Loose = Record<string, (...args: Any[]) => Any>
+type GraphLinkData = { source: string; target: string; kind: 'spoke' | 'bridge'; owner: string; star?: string }
 
 /** Builds the Map tab once; the page calls visible() on every tab change. */
 export function createMap(host: MapHost): MapView {
@@ -257,6 +288,17 @@ export function createMap(host: MapHost): MapView {
   let hovered = ''
   let starfieldMade = false
   let lastSaid = ''
+  // Live: the graph's data, the strip, the sparks and the demo timer.
+  let graphNodes: GraphNode[] = []
+  let graphLinks: GraphLinkData[] = []
+  let strip: StripRow[] = []
+  const sparkPool = newSparkPool()
+  let sparkSprites: Any[] = []
+  let demoPressed = false
+  let demoTimer: ReturnType<typeof setInterval> | 0 = 0
+  let stopEvents: (() => void) | null = null
+  let chain: Promise<void> = Promise.resolve()
+  const fetching = new Set<string>()
 
   const canvasBox = byId('map-canvas')
   const stage = byId('map-stage')
@@ -496,6 +538,9 @@ export function createMap(host: MapHost): MapView {
     byId('map-found').textContent = found === null ? '' : foundText(state.query, found)
     byId('map-live-state').textContent = state.live ? 'On' : 'Paused'
     byId('map-live-state').parentElement?.classList.toggle('is-on', state.live)
+    byId('map-live-state').parentElement?.setAttribute('aria-pressed', String(state.live))
+    renderStrip()
+    syncDemoTimer()
   }
 
   // ---- The scene ----
@@ -520,45 +565,52 @@ export function createMap(host: MapHost): MapView {
     return label
   }
 
+  const labelFor = (text: string, height: number, colour: string, offset: number) => {
+    const sprite = makeLabel(text, height, colour)
+    return { label: sprite, labelBase: (sprite ? [sprite.scale.x, sprite.scale.y] : [1, 1]) as [number, number], labelOffset: offset }
+  }
+
+  function addVisual(id: string, position: Vec3, visual: Omit<Visual, 'position' | 'index' | 'alpha' | 'target' | 'labelAlpha' | 'labelTarget' | 'pulse'>) {
+    const v: Visual = { ...visual, position, index: visuals.length, alpha: 0, target: 0, labelAlpha: 0, labelTarget: 0, pulse: 0 }
+    visuals.push(v)
+    graphNodes.push({ id, vi: v.index, fx: position[0], fy: position[1], fz: position[2] })
+    return v
+  }
+
+  function addCore(g: Galaxy, core: Galaxy['layout']['cores'][number]) {
+    const v = addVisual(`c:${core.owner}`, core.position, { kind: 'core', key: core.owner, owner: core.owner, sprite: makeSprite('glow', projectColour(g, core.owner)), size: coreSize(core.count), ...labelFor(core.label, 16.8, '#E8EEF4', core.radius * 0.55 + 14) })
+    coreVisual.set(core.owner, v)
+  }
+
+  function addHub(g: Galaxy, hub: GalaxyHub) {
+    const v = addVisual(`h:${hub.key}`, hub.position, { kind: 'hub', key: hub.key, owner: hub.project, sprite: makeSprite('glow', hubColour(projectColour(g, hub.project))), size: HUB_SIZE, ...labelFor(hub.name, 12.6, '#C4D0DC', 9) })
+    hubVisual.set(hub.key, v)
+    graphLinks.push({ source: `c:${hub.project}`, target: `h:${hub.key}`, kind: 'spoke', owner: hub.project })
+  }
+
+  function addStar(g: Galaxy, star: GalaxyStar, i: number) {
+    const v = addVisual(`s:${star.id}`, star.position, { kind: 'star', key: star.id, owner: star.owner, sprite: makeSprite(isHollow(star.recalls) ? 'ring' : 'glow', starColour(g, i, state.colourBy)), size: starSize(star.recalls), label: null, labelBase: [1, 1], labelOffset: 0 })
+    starVisual.set(star.id, v)
+    graphLinks.push({ source: `h:${star.topic}`, target: `s:${star.id}`, kind: 'spoke', owner: star.owner, star: star.id })
+  }
+
   /** The graph data and a visual per node for a galaxy; threads and bridges are the library's links. */
   function drawGalaxy(g: Galaxy) {
     if (graph === null || lib === null || three === null) return
     visuals = []
+    graphNodes = []
+    graphLinks = []
     starVisual.clear()
     hubVisual.clear()
     coreVisual.clear()
     const layout = g.layout
-    const nodes: GraphNode[] = []
-    const links: { source: string; target: string; kind: 'spoke' | 'bridge'; owner: string }[] = []
-    const add = (id: string, position: Vec3, visual: Omit<Visual, 'position' | 'index' | 'alpha' | 'target' | 'labelAlpha' | 'labelTarget' | 'pulse'>) => {
-      const v: Visual = { ...visual, position, index: visuals.length, alpha: 0, target: 0, labelAlpha: 0, labelTarget: 0, pulse: 0 }
-      visuals.push(v)
-      nodes.push({ id, vi: v.index, fx: position[0], fy: position[1], fz: position[2] })
-      return v
-    }
-    const label = (text: string, height: number, colour: string, offset: number) => {
-      const sprite = makeLabel(text, height, colour)
-      return { label: sprite, labelBase: (sprite ? [sprite.scale.x, sprite.scale.y] : [1, 1]) as [number, number], labelOffset: offset }
-    }
-    layout.cores.forEach(core => {
-      const v = add(`c:${core.owner}`, core.position, { kind: 'core', key: core.owner, owner: core.owner, sprite: makeSprite('glow', projectColour(g, core.owner)), size: coreSize(core.count), ...label(core.label, 16.8, '#E8EEF4', core.radius * 0.55 + 14) })
-      coreVisual.set(core.owner, v)
-    })
-    layout.hubs.forEach((hub: GalaxyHub) => {
-      const v = add(`h:${hub.key}`, hub.position, { kind: 'hub', key: hub.key, owner: hub.project, sprite: makeSprite('glow', hubColour(projectColour(g, hub.project))), size: HUB_SIZE, ...label(hub.name, 12.6, '#C4D0DC', 9) })
-      hubVisual.set(hub.key, v)
-      links.push({ source: `c:${hub.project}`, target: `h:${hub.key}`, kind: 'spoke', owner: hub.project })
-    })
-    layout.stars.forEach((star, i) => {
-      const colour = starColour(g, i, state.colourBy)
-      const v = add(`s:${star.id}`, star.position, { kind: 'star', key: star.id, owner: star.owner, sprite: makeSprite(isHollow(star.recalls) ? 'ring' : 'glow', colour), size: starSize(star.recalls), label: null, labelBase: [1, 1], labelOffset: 0 })
-      starVisual.set(star.id, v)
-      links.push({ source: `h:${star.topic}`, target: `s:${star.id}`, kind: 'spoke', owner: star.owner })
-    })
-    for (const bridge of layout.bridges) links.push({ source: `h:${bridge.a}`, target: `h:${bridge.b}`, kind: 'bridge', owner: '' })
-    add('claude', [0, 0, 0], { kind: 'claude', key: '', owner: '', sprite: makeSprite('glow', CLAUDE_COLOUR), size: CLAUDE_SIZE, ...label('Claude', 16.8, '#FFFFFF', 18) })
+    layout.cores.forEach(core => addCore(g, core))
+    layout.hubs.forEach(hub => addHub(g, hub))
+    layout.stars.forEach((star, i) => addStar(g, star, i))
+    for (const bridge of layout.bridges) graphLinks.push({ source: `h:${bridge.a}`, target: `h:${bridge.b}`, kind: 'bridge', owner: '' })
+    addVisual('claude', [0, 0, 0], { kind: 'claude', key: '', owner: '', sprite: makeSprite('glow', CLAUDE_COLOUR), size: CLAUDE_SIZE, ...labelFor('Claude', 16.8, '#FFFFFF', 18) })
     // One hidden node the library draws as its default sphere: that mesh is where the starfield's classes come from.
-    nodes.push({ id: 'probe', vi: -1, fx: 0, fy: 0, fz: 0 })
+    graphNodes.push({ id: 'probe', vi: -1, fx: 0, fy: 0, fz: 0 })
 
     graph.nodeThreeObject((node: GraphNode) => {
       const v = visuals[Number(node.vi)]
@@ -572,10 +624,28 @@ export function createMap(host: MapHost): MapView {
       return group
     })
     setLinkStyle()
-    graph.graphData({ nodes, links })
+    graph.graphData({ nodes: graphNodes, links: graphLinks })
     // The library builds its objects a moment later: the links' look is set, and the starfield made, once they exist.
     setTimeout(afterData, 100)
     setTimeout(afterData, 600)
+    recolour()
+    retarget()
+  }
+
+  /** A new memory joins the drawing: its star, and the topic hub or project core it needs; no other star moves. */
+  function growGalaxy(g: Galaxy, index: number) {
+    if (graph === null) return
+    const layout = g.layout
+    layout.cores.forEach(core => {
+      if (!coreVisual.has(core.owner)) addCore(g, core)
+    })
+    layout.hubs.forEach(hub => {
+      if (!hubVisual.has(hub.key)) addHub(g, hub)
+    })
+    const star = layout.stars[index]
+    if (star) addStar(g, star, index)
+    graph.graphData({ nodes: graphNodes, links: graphLinks })
+    setTimeout(afterData, 100)
     recolour()
     retarget()
   }
@@ -603,7 +673,7 @@ export function createMap(host: MapHost): MapView {
       return rgba(colour, state.spokes && !hidden(String(link.owner)) ? threadOpacity(state.project !== null) : 0)
     })
     l.linkVisibility?.((link: Any) => {
-      if (link.kind !== 'bridge') return state.spokes && !hidden(String(link.owner))
+      if (link.kind !== 'bridge') return state.spokes && !hidden(String(link.owner)) && !(link.star !== undefined && g?.gone.has(String(link.star)))
       const [a, b] = ends(link)
       return state.bridges && !hidden(hubOwner(a)) && !hidden(hubOwner(b))
     })
@@ -733,6 +803,7 @@ export function createMap(host: MapHost): MapView {
     const cam: Vec3 = camera ? [camera.position.x, camera.position.y, camera.position.z] : HOME
     const follow = Math.min(1, dt * 5)
     const selectedKey = state.selected
+    for (const spark of stepSparks(sparkPool, dt)) arrive(spark)
     for (const v of visuals) {
       v.alpha += (v.target - v.alpha) * follow
       v.labelAlpha += (v.labelTarget - v.labelAlpha) * follow
@@ -748,10 +819,190 @@ export function createMap(host: MapHost): MapView {
         v.label.material.opacity = Math.min(1, v.labelAlpha)
       }
     }
+    sparkPool.active.forEach((spark, i) => {
+      const sprite = sparkSprites[i]
+      if (!sprite) return
+      const to = spark ? targetOf(spark) : undefined
+      if (!spark || !to || spark.age < spark.delay) {
+        sprite.material.opacity = 0
+        return
+      }
+      const at = sparkAt([0, 0, 0], to.position, spark.curve, sparkProgress(spark))
+      const [r, g, b] = SPARK_COLOURS[spark.kind]
+      sprite.position.set(at[0], at[1], at[2])
+      sprite.material.color.setRGB(r, g, b)
+      sprite.material.opacity = sparkAlpha(spark)
+    })
     if (pointer.moved) {
       pointer.moved = false
       hover()
     }
+  }
+
+  // ---- Live: events become sparks, pulses and changes to the galaxy ----
+
+  const BADGE_CLASS = { recall: 'a-recall', save: 'a-remember', update: 'a-update', forget: 'a-forget' } as const
+
+  const targetOf = (spark: Spark): Visual | undefined => (spark.toKind === 'star' ? starVisual.get(spark.to) : hubVisual.get(spark.to))
+
+  /** The spark pool: our own glow sprites in the library's scene, not links. */
+  function makeSparkSprites() {
+    const scene = (graph as unknown as Loose | null)?.scene?.() as Any
+    if (!scene || three === null) return
+    sparkSprites = sparkPool.active.map(() => {
+      const sprite = makeSprite('glow', '#FFFFFF')
+      if (sprite === null) return null
+      sprite.scale.set(9, 9, 1)
+      scene.add(sprite)
+      return sprite
+    })
+  }
+
+  /** A spark lands: the star pulses, and a real event changes the galaxy (a demo one changes nothing). */
+  function arrive(spark: Spark) {
+    const g = galaxy
+    if (g === null) return
+    const v = targetOf(spark)
+    if (v) v.pulse = Math.max(v.pulse, PULSE[spark.kind])
+    if (spark.demo || spark.toKind !== 'star') return
+    const id = spark.to
+    const star = g.layout.stars[g.layout.starById[id] ?? -1]
+    if (star === undefined) return
+    if (spark.kind === 'recall') {
+      const was = star.recalls
+      if (!recallMemory(g, id)) return
+      if (v) {
+        v.size = starSize(star.recalls)
+        // A star that was a hollow ring becomes a glow with its first recall.
+        if (was === 0 && v.sprite && glowTexture.glow) {
+          v.sprite.material.map = glowTexture.glow
+          v.sprite.material.needsUpdate = true
+        }
+      }
+      recolour()
+      render()
+    } else if (spark.kind === 'update') {
+      if (!touchMemory(g, id)) return
+      retarget()
+      recolour()
+      render()
+    } else if (spark.kind === 'forget') {
+      if (!forgetMemory(g, id)) return
+      if (state.selected === id) dispatch({ ...state, selected: null })
+      setLinkStyle()
+      retarget()
+      render()
+    }
+  }
+
+  /** Real saves: each new memory is fetched with the existing GET /api/memories/<id>, made a lean row and placed. */
+  async function addSaved(g: Galaxy, event: MapEvent) {
+    await Promise.all(
+      event.ids
+        .filter(id => g.layout.starById[id] === undefined && !fetching.has(id))
+        .map(async id => {
+          fetching.add(id)
+          try {
+            const response = await host.api(`/api/memories/${encodeURIComponent(id)}`)
+            if (!response.ok) return
+            const row = leanRow(await response.json().catch(() => null))
+            if (row === null || row.id !== id) return
+            const index = addMemory(g, row)
+            if (index < 0) return
+            growGalaxy(g, index)
+            render()
+          } catch {
+            // a memory that cannot be fetched stays off the map until the next reload
+          } finally {
+            fetching.delete(id)
+          }
+        }),
+    )
+  }
+
+  async function play(event: MapEvent) {
+    const g = galaxy
+    if (g === null) return
+    if (event.kind === 'save' && event.demo !== true) await addSaved(g, event)
+    let targets: { to: string; toKind: 'star' | 'hub' }[]
+    if (event.demo && event.kind === 'save') {
+      // A demo save has no memory: its spark lands on the topic's hub.
+      const key = `${event.owner ?? ''}/${event.topic ?? 'Untagged'}`
+      targets = g.layout.hubByKey[key] === undefined ? [] : [{ to: key, toKind: 'hub' }]
+    } else {
+      targets = eventStars(g, event).map(id => ({ to: id, toKind: 'star' as const }))
+    }
+    // An event whose memories are not on the map draws nothing.
+    if (targets.length === 0) return
+    strip = pushRow(strip, stripRow(g, event, targets.length))
+    renderStrip()
+    const sparks = graph !== null && shown && layerOn(state, event.kind) ? sparksFor(event, targets, state.reducedMotion, Math.random) : []
+    if (sparks.length === 0) {
+      for (const target of targets) arrive({ ...target, kind: event.kind, delay: 0, curve: 0, age: 0, demo: event.demo === true })
+      return
+    }
+    enqueueSparks(sparkPool, sparks)
+  }
+
+  // Events play one after another, in the order they came.
+  function enqueueEvent(event: MapEvent) {
+    chain = chain.then(() => play(event)).catch(() => {})
+  }
+
+  /** A layer switched off: its sparks stop at once, and what they carried is applied. */
+  function dropLayer(layer: 'recall' | 'write') {
+    sparkPool.active.forEach((spark, i) => {
+      if (spark && layerOf(spark.kind) === layer) {
+        sparkPool.active[i] = null
+        arrive(spark)
+      }
+    })
+    const keep: Spark[] = []
+    for (const spark of sparkPool.queue) {
+      if (layerOf(spark.kind) === layer) arrive(spark)
+      else keep.push(spark)
+    }
+    sparkPool.queue = keep
+  }
+
+  function renderStrip() {
+    const rows = stripRows(strip, state)
+    byId('map-feed').replaceChildren(
+      ...(rows.length === 0
+        ? [el('li', 'No activity yet.', 'mini-empty')]
+        : rows.map(row => {
+            const item = el('li')
+            item.append(el('span', row.time, 'mono muted'), el('span', row.badge, `mini-badge ${BADGE_CLASS[row.kind]}`))
+            if (row.demo) item.append(el('span', 'demo', 'mini-badge'))
+            item.append(el('span', row.text))
+            if (row.app !== '') item.append(el('span', row.app, 'muted small'))
+            return item
+          })),
+    )
+  }
+
+  /** Demo events play on their own every 3.4 s while Live is On and a Simulate button was pressed in this page load. */
+  function syncDemoTimer() {
+    const want = shown && demoTimerOn(state, demoPressed)
+    if (want && demoTimer === 0) {
+      demoTimer = setInterval(() => {
+        const kind = demoKind(state, Math.random)
+        if (kind === null || galaxy === null) return
+        const event = simulate(kind, simulationInput(galaxy))
+        if (event) enqueueEvent(event)
+      }, DEMO_EVERY_MS)
+    } else if (!want && demoTimer !== 0) {
+      clearInterval(demoTimer)
+      demoTimer = 0
+    }
+  }
+
+  function simulateOnce(kind: 'recall' | 'write') {
+    demoPressed = true
+    syncDemoTimer()
+    if (galaxy === null) return
+    const event = simulate(kind, simulationInput(galaxy))
+    if (event) enqueueEvent(event)
   }
 
   // ---- Picking: the star nearest the pointer in screen space ----
@@ -832,15 +1083,33 @@ export function createMap(host: MapHost): MapView {
   }
   byId('map-spokes').addEventListener('change', () => dispatch(toggleSpokes(state)))
   byId('map-bridges').addEventListener('change', () => dispatch(toggleBridges(state)))
-  byId('map-layer-recall').addEventListener('change', () => dispatch(toggleLayer(state, 'recall')))
-  byId('map-layer-write').addEventListener('change', () => dispatch(toggleLayer(state, 'write')))
+  byId('map-layer-recall').addEventListener('change', () => {
+    dispatch(toggleLayer(state, 'recall'))
+    if (!state.layerRecall) dropLayer('recall')
+  })
+  byId('map-layer-write').addEventListener('change', () => {
+    dispatch(toggleLayer(state, 'write'))
+    if (!state.layerWrite) dropLayer('write')
+  })
   rotate.addEventListener('click', () => dispatch(toggleRotation(state)))
   byId('map-reset').addEventListener('click', reset)
-  // Simulate a recall / write and the live layers are wired by the live phase; here they are drawn and inert.
-  for (const id of ['map-sim-recall', 'map-sim-write']) {
-    const button = byId<HTMLButtonElement>(id)
-    button.disabled = true
-    button.title = 'Needs the live layer'
+  // Simulate a recall / write play demo events: they never call the server and never reach the Activity tab.
+  byId<HTMLButtonElement>('map-sim-recall').addEventListener('click', () => simulateOnce('recall'))
+  byId<HTMLButtonElement>('map-sim-write').addEventListener('click', () => simulateOnce('write'))
+  // The Live pill is also the switch for the demo timer (On / Paused).
+  const pill = byId('map-live-state').parentElement
+  if (pill) {
+    pill.setAttribute('role', 'button')
+    pill.setAttribute('tabindex', '0')
+    pill.title = 'Press to switch the demo events on or off'
+    pill.style.cursor = 'pointer'
+    pill.addEventListener('click', () => dispatch(toggleLive(state)))
+    pill.addEventListener('keydown', event => {
+      if ((event as KeyboardEvent).key === 'Enter' || (event as KeyboardEvent).key === ' ') {
+        event.preventDefault()
+        dispatch(toggleLive(state))
+      }
+    })
   }
   find$.addEventListener('input', () => search(find$.value))
   canvasBox.addEventListener('pointerdown', event => {
@@ -880,6 +1149,12 @@ export function createMap(host: MapHost): MapView {
       found = null
       drawGalaxy(galaxy)
       render()
+      if (host.events && stopEvents === null) {
+        stopEvents = host.events(line => {
+          const event = toMapEvent(line)
+          if (event !== null) enqueueEvent(event)
+        })
+      }
       if (pending !== null) {
         const id = pending
         pending = null
@@ -909,6 +1184,7 @@ export function createMap(host: MapHost): MapView {
       const textures = glowTextures(three)
       glowTexture.glow = textures.glow
       glowTexture.ring = textures.ring
+      makeSparkSprites()
     } catch (err) {
       graph = null
       say(`The 3D map could not start (${err instanceof Error ? err.message : String(err)}).`)
@@ -973,6 +1249,7 @@ export function createMap(host: MapHost): MapView {
         else graph.pauseAnimation()
         graph.controls().autoRotate = state.rotating && shown
       }
+      syncDemoTimer()
       if (next) {
         lastFrame = performance.now()
         if (failed) void loadGalaxy()

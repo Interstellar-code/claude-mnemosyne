@@ -10,7 +10,8 @@
 //
 // Every transition returns a new state; none changes the one it is given.
 import { plainLabel } from './escape'
-import { galaxyLayout, randomOf, seedOf, type GalaxyInputMemory, type GalaxyLayout, type GalaxyStar, type TimelineRange, type Vec3 } from './map-layout'
+import { galaxyLayout, placeOne, randomOf, seedOf, type GalaxyInputMemory, type GalaxyLayout, type GalaxyStar, type TimelineRange, type Vec3 } from './map-layout'
+import type { MapEvent, MapEventKind } from './map-live'
 
 // ---- What the server sends ----
 
@@ -182,6 +183,8 @@ export type Galaxy = {
   maxRecalls: number
   /** Project colour by owner. */
   colours: Record<string, string>
+  /** Memories forgotten while the page is open: their stars fade out and no count holds them. */
+  gone: Set<string>
 }
 
 const DAY_MS = 86_400_000
@@ -207,8 +210,12 @@ export function buildGalaxy(reply: GalaxyReply, now = Date.now()): Galaxy {
     oldestAge: ages.reduce((a, b) => Math.max(a, b), 0),
     maxRecalls: layout.stars.reduce((a, star) => Math.max(a, star.recalls), 0),
     colours,
+    gone: new Set(),
   }
 }
+
+/** The stars still in the galaxy: all but the memories forgotten while the page was open. */
+export const liveStars = (galaxy: Galaxy) => galaxy.layout.stars.filter(star => !galaxy.gone.has(star.id))
 
 /** A project's colour (grey for one the galaxy does not hold). */
 export const projectColour = (galaxy: Galaxy, owner: string) => galaxy.colours[owner] ?? GLOBAL_COLOUR
@@ -335,7 +342,7 @@ export function focusTopic(state: MapState, galaxy: Galaxy, key: string): MapSta
 /** Select a memory: its project and topic come into focus. */
 export function selectStar(state: MapState, galaxy: Galaxy, id: string): MapState {
   const star = galaxy.layout.stars[galaxy.layout.starById[id] ?? -1]
-  return star === undefined ? state : { ...state, project: star.owner, topic: star.topic, selected: id }
+  return star === undefined || galaxy.gone.has(id) ? state : { ...state, project: star.owner, topic: star.topic, selected: id }
 }
 
 /** Reset view: no focus, no memory, no Find. */
@@ -378,7 +385,7 @@ export function goTo(state: MapState, level: PathLevel): MapState {
 /** Whether a star matches a Find query: a tag, the project, or its 80-character label contains it (case aside); never the full text. */
 export function matchesQuery(galaxy: Galaxy, star: GalaxyStar, query: string): boolean {
   const q = query.trim().toLowerCase()
-  if (q === '') return false
+  if (q === '' || galaxy.gone.has(star.id)) return false
   return star.tags.some(tag => tag.toLowerCase().includes(q)) || star.owner.toLowerCase().includes(q) || coreLabel(galaxy, star.owner).toLowerCase().includes(q) || star.label.toLowerCase().includes(q)
 }
 
@@ -410,7 +417,7 @@ const DIM_NO_MATCH = 0.08
 export function starTarget(galaxy: Galaxy, index: number, state: MapState, found: Found | null): number {
   const star = galaxy.layout.stars[index]
   if (star === undefined) return 0
-  if (state.hidden[star.owner]) return 0
+  if (state.hidden[star.owner] || galaxy.gone.has(star.id)) return 0
   if (state.selected === star.id) return 1
   let a = starBrightness(galaxy.ages[index] ?? 0, galaxy.oldestAge)
   if (state.project !== null && star.owner !== state.project) a *= DIM_OTHER_PROJECT
@@ -474,7 +481,7 @@ export function tooltip(galaxy: Galaxy, hit: Hit): { title: string; sub: string 
   const layout = galaxy.layout
   if (hit.kind === 'star') {
     const star = layout.stars[layout.starById[hit.id] ?? -1]
-    if (star === undefined) return null
+    if (star === undefined || galaxy.gone.has(star.id)) return null
     const saved = savedDay(star.created)
     return { title: `${topicName(galaxy, star)} · ${coreLabel(galaxy, star.owner)}`, sub: `${plural(star.recalls, 'recall')}${saved ? ` · saved ${saved}` : ''}${star.label ? ` — ${star.label}` : ''}` }
   }
@@ -544,7 +551,7 @@ export function projectRows(galaxy: Galaxy, state: MapState): ProjectRow[] {
     owner: core.owner,
     label: core.label,
     colour: projectColour(galaxy, core.owner),
-    count: galaxy.layout.stars.filter(star => star.owner === core.owner).length,
+    count: liveStars(galaxy).filter(star => star.owner === core.owner).length,
     shown: !state.hidden[core.owner],
     focused: state.project === core.owner,
   }))
@@ -578,7 +585,7 @@ const sum = (values: readonly number[]) => values.reduce((a, b) => a + b, 0)
 
 export function inspector(galaxy: Galaxy, state: MapState): Inspector {
   const layout = galaxy.layout
-  const star = state.selected === null ? undefined : layout.stars[layout.starById[state.selected] ?? -1]
+  const star = state.selected === null || galaxy.gone.has(state.selected) ? undefined : layout.stars[layout.starById[state.selected] ?? -1]
   if (star !== undefined) {
     const saved = savedDay(star.created)
     return {
@@ -600,7 +607,7 @@ export function inspector(galaxy: Galaxy, state: MapState): Inspector {
   }
   const hub = state.topic === null ? undefined : layout.hubs[layout.hubByKey[state.topic] ?? -1]
   if (hub !== undefined) {
-    const members = layout.stars.filter(s => s.topic === hub.key)
+    const members = liveStars(galaxy).filter(s => s.topic === hub.key)
     const shared = sharedWith(galaxy, hub.key)
     return {
       kind: 'Topic',
@@ -618,7 +625,7 @@ export function inspector(galaxy: Galaxy, state: MapState): Inspector {
   }
   const core = state.project === null ? undefined : layout.cores[layout.coreByOwner[state.project] ?? -1]
   if (core !== undefined) {
-    const members = layout.stars.filter(s => s.owner === core.owner)
+    const members = liveStars(galaxy).filter(s => s.owner === core.owner)
     return {
       kind: 'Project',
       title: core.label,
@@ -639,9 +646,9 @@ export function inspector(galaxy: Galaxy, state: MapState): Inspector {
     colour: '#0B6665',
     sub: galaxy.shown < galaxy.total ? `showing ${galaxy.shown} of ${galaxy.total}` : '',
     stats: [
-      { label: 'Memories', value: String(layout.stars.length) },
-      { label: 'Recalls, all time', value: String(sum(layout.stars.map(s => s.recalls))) },
-      { label: 'Never recalled', value: String(layout.stars.filter(s => s.recalls === 0).length) },
+      { label: 'Memories', value: String(liveStars(galaxy).length) },
+      { label: 'Recalls, all time', value: String(sum(liveStars(galaxy).map(s => s.recalls))) },
+      { label: 'Never recalled', value: String(liveStars(galaxy).filter(s => s.recalls === 0).length) },
       { label: 'Topics', value: String(layout.hubs.length) },
       { label: 'Bridges', value: String(layout.bridges.length) },
     ],
@@ -655,3 +662,221 @@ export function announcement(galaxy: Galaxy, state: MapState): string {
   return view.kind === 'Overview' ? `All memories: ${view.title}` : `${view.kind}: ${view.title}`
 }
 
+
+// ---- Live events (plan LIVE): what an event does to the galaxy ----
+//
+// The page applies a real event's change to the galaxy it holds, so every count
+// and the inspector agree with the store without a reload: a save places one new
+// star (placeOne moves no other), a recall raises a count, an update resets an
+// age, a forget removes a star. A demo event changes nothing: it only plays.
+
+/** A /api/memories/<id> reply as the galaxy's lean row (label cut to 80 characters); null when it is not a memory. */
+export function leanRow(detail: unknown): GalaxyMemory | null {
+  if (detail === null || typeof detail !== 'object' || Array.isArray(detail)) return null
+  const raw = detail as Record<string, unknown>
+  if (typeof raw.id !== 'string' || raw.id === '') return null
+  const firstLine = text(raw.content).split('\n').find(part => part.trim() !== '') ?? ''
+  const metadataTags = raw.metadata !== null && typeof raw.metadata === 'object' ? (raw.metadata as Record<string, unknown>).tags : undefined
+  const tags = [raw.tags, metadataTags].find(Array.isArray) as unknown[] | undefined
+  return {
+    id: raw.id,
+    owner: text(raw.owner, 'global') || 'global',
+    tags: (tags ?? []).filter((tag): tag is string => typeof tag === 'string' && tag !== ''),
+    recalls: count(raw.recall_count),
+    lastRecalled: stamp(raw.last_recalled),
+    created: stamp(raw.timestamp),
+    label: plainLabel(firstLine, LABEL_CHARS),
+  }
+}
+
+/** The ids of an event that are stars of the galaxy now (a forgotten one is not). */
+export const eventStars = (galaxy: Galaxy, event: MapEvent): string[] => event.ids.filter(id => galaxy.layout.starById[id] !== undefined && !galaxy.gone.has(id))
+
+/** Places one new star by the layout's rule and counts it everywhere; its index, or -1 when the memory is already on the map. */
+export function addMemory(galaxy: Galaxy, row: GalaxyMemory): number {
+  if (galaxy.layout.starById[row.id] !== undefined) return -1
+  const star = placeOne(galaxy.layout, row)
+  const core = galaxy.layout.cores[galaxy.layout.coreByOwner[star.owner] ?? -1]
+  if (core) core.count++
+  galaxy.ages.push(0)
+  galaxy.total++
+  galaxy.shown++
+  galaxy.maxRecalls = Math.max(galaxy.maxRecalls, star.recalls)
+  if (galaxy.colours[star.owner] === undefined) galaxy.colours[star.owner] = PALETTE[(galaxy.layout.cores.length - 1) % PALETTE.length]!
+  return galaxy.layout.starById[row.id] ?? -1
+}
+
+/** A recall raises the star's count (its size and colour follow); false when it is not on the map. */
+export function recallMemory(galaxy: Galaxy, id: string): boolean {
+  const star = galaxy.layout.stars[galaxy.layout.starById[id] ?? -1]
+  if (star === undefined || galaxy.gone.has(id)) return false
+  star.recalls++
+  galaxy.maxRecalls = Math.max(galaxy.maxRecalls, star.recalls)
+  return true
+}
+
+/** An update makes the memory new again: age 0. */
+export function touchMemory(galaxy: Galaxy, id: string): boolean {
+  const index = galaxy.layout.starById[id]
+  if (index === undefined || galaxy.gone.has(id)) return false
+  galaxy.ages[index] = 0
+  return true
+}
+
+/** A forget removes the star from every count; false when it is not on the map. */
+export function forgetMemory(galaxy: Galaxy, id: string): boolean {
+  const star = galaxy.layout.stars[galaxy.layout.starById[id] ?? -1]
+  if (star === undefined || galaxy.gone.has(id)) return false
+  galaxy.gone.add(id)
+  const hub = galaxy.layout.hubs[galaxy.layout.hubByKey[star.topic] ?? -1]
+  if (hub) hub.count = Math.max(0, hub.count - 1)
+  const core = galaxy.layout.cores[galaxy.layout.coreByOwner[star.owner] ?? -1]
+  if (core) core.count = Math.max(0, core.count - 1)
+  galaxy.total = Math.max(0, galaxy.total - 1)
+  galaxy.shown = Math.max(0, galaxy.shown - 1)
+  return true
+}
+
+/** What a Simulate button's event needs from the galaxy: projects with their counts, and memories with owner and tags. */
+export function simulationInput(galaxy: Galaxy) {
+  return {
+    projects: galaxy.layout.cores.map(core => ({ owner: core.owner, count: core.count })),
+    memories: liveStars(galaxy).map(star => ({ id: star.id, owner: star.owner, tags: star.tags })),
+  }
+}
+
+// ---- The live strip ----
+
+export const STRIP_KEEP = 4
+export const STRIP_STORE = 12
+type Layer = 'recall' | 'write'
+export const layerOf = (kind: MapEventKind): Layer => (kind === 'recall' ? 'recall' : 'write')
+export const layerOn = (state: MapState, kind: MapEventKind) => (layerOf(kind) === 'recall' ? state.layerRecall : state.layerWrite)
+export const toggleLive = (state: MapState): MapState => ({ ...state, live: !state.live })
+
+/** The app a client name stands for: Codex, Cursor, Claude Code, a demo, else the name itself ('' when unknown). */
+export function appName(client: string): string {
+  const name = client.trim()
+  if (name === '' || name === 'unknown') return ''
+  if (name === 'demo') return 'Demo'
+  if (/codex/i.test(name)) return 'Codex'
+  if (/cursor/i.test(name)) return 'Cursor'
+  if (/^claude[-_ ]?code/i.test(name)) return 'Claude Code'
+  return plainLabel(name, 40)
+}
+
+export type StripRow = { kind: MapEventKind; time: string; badge: string; text: string; app: string; demo: boolean }
+
+const BADGE: Record<MapEventKind, string> = { recall: 'recall', save: 'save', update: 'update', forget: 'forget' }
+
+const clockOf = (value: string) => {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return '--:--:--'
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+}
+
+/** One row of the strip: time, kind badge, a sentence naming the topic and project, the app, and whether it is a demo. */
+export function stripRow(galaxy: Galaxy, event: MapEvent, hits: number): StripRow {
+  const first = galaxy.layout.stars[galaxy.layout.starById[event.ids[0] ?? ''] ?? -1]
+  const topic = first ? topicName(galaxy, first) : (event.topic ?? '')
+  const owner = first?.owner ?? event.owner ?? ''
+  const where = [topic, owner === '' ? '' : coreLabel(galaxy, owner)].filter(part => part !== '').join(' · ')
+  const tail = where === '' ? '' : ` · ${where}`
+  const text =
+    event.kind === 'recall'
+      ? `Recalled ${hits}${tail}`
+      : event.kind === 'save'
+        ? `Saved a new memory${tail}`
+        : event.kind === 'update'
+          ? `Updated a memory in place${tail}`
+          : `Forgot ${hits === 1 ? 'a memory' : `${hits} memories`}${tail}`
+  return { kind: event.kind, time: clockOf(event.t), badge: BADGE[event.kind], text: plainLabel(text, 120), app: appName(event.client), demo: event.demo === true }
+}
+
+/** The rows the strip shows: the last four of the layers that are on, newest first (`rows` is newest first). */
+export const stripRows = (rows: readonly StripRow[], state: MapState): StripRow[] => rows.filter(row => layerOn(state, row.kind)).slice(0, STRIP_KEEP)
+
+/** A new row at the front, the store capped at 12. */
+export const pushRow = (rows: readonly StripRow[], row: StripRow): StripRow[] => [row, ...rows].slice(0, STRIP_STORE)
+
+/** Whether a demo event plays on its own now: Live is On and a Simulate button was pressed in this page load. */
+export const demoTimerOn = (state: MapState, pressed: boolean) => state.live && pressed
+export const DEMO_EVERY_MS = 3400
+
+/** The demo timer's draw: recall three times in five, write two, among the layers that are on; null when both are off. */
+export function demoKind(state: MapState, random: () => number): 'recall' | 'write' | null {
+  const kinds: ('recall' | 'write')[] = []
+  if (state.layerRecall) kinds.push('recall', 'recall', 'recall')
+  if (state.layerWrite) kinds.push('write', 'write')
+  return kinds.length === 0 ? null : kinds[Math.floor(random() * kinds.length)]!
+}
+
+// ---- Sparks: our own glow points, flying from the Claude core to a star ----
+
+export const SPARK_POOL = 48
+export const SPARK_SECONDS = 1.1
+export const SPARK_STAGGER = 0.12
+export const SPARK_COLOURS: Record<MapEventKind, Vec3> = { recall: [1, 0.82, 0.45], save: [0.37, 0.95, 0.85], update: [0.37, 0.95, 0.85], forget: [1, 0.42, 0.42] }
+/** The pulse a star gets when a spark lands. */
+export const PULSE: Record<MapEventKind, number> = { recall: 1.4, save: 2, update: 1.6, forget: 1.2 }
+
+export type Spark = {
+  /** What it flies to: a star's memory id, or a topic hub's key (a demo save has no star). */
+  to: string
+  toKind: 'star' | 'hub'
+  kind: MapEventKind
+  /** Seconds to wait before it leaves. */
+  delay: number
+  /** -1..1: which way its curve bows. */
+  curve: number
+  /** Seconds since it was started, delay included. */
+  age: number
+  /** True for a demo event: it plays and changes nothing. */
+  demo: boolean
+}
+type SparkPool = { active: (Spark | null)[]; queue: Spark[] }
+
+export const newSparkPool = (size = SPARK_POOL): SparkPool => ({ active: Array.from({ length: size }, () => null), queue: [] })
+
+/** The sparks an event sends: one per target, staggered 0.12 s; none under prefers-reduced-motion (the stars still pulse). */
+export function sparksFor(event: MapEvent, targets: readonly { to: string; toKind: 'star' | 'hub' }[], reducedMotion: boolean, random: () => number): Spark[] {
+  if (reducedMotion) return []
+  return targets.map((target, i) => ({ ...target, kind: event.kind, delay: i * SPARK_STAGGER, curve: random() * 2 - 1, age: 0, demo: event.demo === true }))
+}
+
+/** Adds sparks to the queue; the next step starts them as slots free up (an extra event waits, it is never dropped). */
+export function enqueueSparks(pool: SparkPool, sparks: readonly Spark[]): void {
+  for (const spark of sparks) pool.queue.push({ ...spark, age: 0 })
+}
+
+/** Moves every spark on by `dt` seconds, fills free slots from the queue, and returns the sparks that landed (their slot is free again). */
+export function stepSparks(pool: SparkPool, dt: number): Spark[] {
+  const landed: Spark[] = []
+  for (let i = 0; i < pool.active.length; i++) {
+    const spark = pool.active[i]
+    if (spark) {
+      spark.age += dt
+      if (spark.age - spark.delay >= SPARK_SECONDS) {
+        landed.push(spark)
+        pool.active[i] = null
+      }
+    }
+    if (!pool.active[i] && pool.queue.length > 0) pool.active[i] = pool.queue.shift()!
+  }
+  return landed
+}
+
+/** How far along a spark is, 0..1 (0 while it still waits). */
+export const sparkProgress = (spark: Spark) => Math.min(1, Math.max(0, (spark.age - spark.delay) / SPARK_SECONDS))
+
+/** Where a spark is: a curve from `from` to `to`, bowing sideways and up, eased. */
+export function sparkAt(from: Vec3, to: Vec3, curve: number, u: number): Vec3 {
+  const mid: Vec3 = [(from[0] + to[0]) / 2 + curve * 60, (from[1] + to[1]) / 2 + 70, (from[2] + to[2]) / 2 - curve * 40]
+  const k = ease(Math.min(1, Math.max(0, u)))
+  const at = (i: 0 | 1 | 2) => (1 - k) * (1 - k) * from[i] + 2 * (1 - k) * k * mid[i] + k * k * to[i]
+  return [at(0), at(1), at(2)]
+}
+
+/** A spark's brightness: 0 while it waits, then 1 fading a little as it lands. */
+export const sparkAlpha = (spark: Spark) => (spark.age < spark.delay ? 0 : 1 - sparkProgress(spark) * 0.3)

@@ -15,6 +15,7 @@
 // Styles live in style.css: the CSP refuses inline ones.
 
 import { createMap, type MapView } from './map'
+import { createStream, type StreamApi, type StreamHandle, type StreamListener, type StreamStatus } from './stream'
 
 const TOKEN_KEY = 'mnemosyne.token'
 const VIEWS = ['map', 'memories', 'activity', 'search'] as const
@@ -506,10 +507,14 @@ function show(view: View) {
   if (!opened.has(view)) {
     opened.add(view)
     if (view === 'memories') void loadMemories()
-    if (view === 'activity') void startActivity()
+    if (view === 'activity') startActivity()
     if (view === 'search') byId<HTMLInputElement>('search-query').focus()
     // The map (and its library, under /vendor/) loads only when the Map tab first opens.
-    if (view === 'map') map = createMap({ api: path => api(path), openMemory: openInMemories, status: setStatus })
+    if (view === 'map') map = createMap({ api: path => api(path), openMemory: openInMemories, status: setStatus, events: listener => useEvents().subscribe(listener) })
+  }
+  if (view === 'activity' && feedDirty) {
+    feedDirty = false
+    drawFeed()
   }
   map?.visible(view === 'map')
 }
@@ -828,58 +833,134 @@ async function loadActivity() {
   return body.off === true
 }
 
-const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+// ---- The one activity stream, shared by the Activity tab and the Map tab ----
 
-async function follow() {
-  let attempt = 0
-  for (;;) {
-    try {
-      const from = feed.cursor ? `?cursor=${encodeURIComponent(feed.cursor)}` : ''
-      const response = await api(`/api/activity/stream${from}`)
-      if (response.status === 404) {
-        setLive('Log off')
-        return
+/** How many delivered lines a reader remembers to recognise a replay. */
+const REPLAY_KEEP = 20_000
+
+/**
+ * Drops the lines a reconnect sends again. The shared reader restarts from the cursor it
+ * began at, so after a drop it first repeats what this page already took in: `reconnecting()`
+ * starts the comparison and `accept()` skips each repeated line, then lets the first new one through.
+ */
+export function replayFilter() {
+  const seen: string[] = []
+  let at = -1
+  return {
+    reconnecting() {
+      at = 0
+    },
+    accept(line: Record<string, unknown>): boolean {
+      const key = JSON.stringify(line)
+      if (at >= 0) {
+        if (at < seen.length && seen[at] === key) {
+          at++
+          return false
+        }
+        at = -1
       }
-      if (!response.ok || response.body === null) throw new Error(`the server answered ${response.status}`)
-      setLive('Live')
-      attempt = 0
-      const reader = response.body.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ''
-      for (;;) {
-        const { value, done } = await reader.read()
-        if (done) break
-        buffer = receiveChunk(feed, buffer + decoder.decode(value, { stream: true }), drawFeed)
-      }
-    } catch (err) {
-      if (err instanceof Expired) return
-    }
-    // The stream ended (the server's time cap, a restart, the network): catch up, then follow again from the new cursor.
-    setLive('Reconnecting')
-    await sleep(Math.min(30_000, 1_000 * 2 ** attempt++))
-    if (expired) return
-    try {
-      await loadActivity()
-    } catch (err) {
-      if (err instanceof Expired) return
-    }
+      if (seen.length < REPLAY_KEEP) seen.push(key)
+      return true
+    },
   }
 }
 
-async function startActivity() {
+/**
+ * The page's one stream: `prepare` runs once, when the first tab needs lines, and answers the cursor to follow
+ * from (the Activity tab reads its history there); then ONE createStream reader serves every subscriber.
+ */
+export function shareStream(api: StreamApi, prepare: () => Promise<string>) {
+  const listeners = new Set<StreamListener>()
+  const watchers = new Set<(status: StreamStatus) => void>()
+  let handle: StreamHandle | null = null
+  let starting: Promise<StreamHandle> | null = null
+  const ensure = () =>
+    (starting ??= prepare()
+      .catch(() => '')
+      .then(cursor => {
+        const reader = createStream({ api, cursor })
+        const filter = replayFilter()
+        reader.onStatus(status => {
+          if (status === 'reconnecting') filter.reconnecting()
+          for (const watcher of watchers) watcher(status)
+        })
+        reader.subscribe(line => {
+          if (!filter.accept(line)) return
+          for (const listener of listeners) listener(line)
+        })
+        handle = reader
+        return reader
+      }))
+  return {
+    /** Every new line goes to the listener; returns the way to stop. */
+    subscribe(listener: StreamListener) {
+      listeners.add(listener)
+      void ensure()
+      return () => void listeners.delete(listener)
+    },
+    onStatus(watcher: (status: StreamStatus) => void) {
+      watchers.add(watcher)
+      if (handle !== null) watcher(handle.status())
+      return () => void watchers.delete(watcher)
+    },
+    /** The reader once it exists (a spec counts its polls). */
+    reader: () => handle,
+  }
+}
+
+const LIVE_WORDS: Record<StreamStatus, string> = { idle: 'Connecting', connecting: 'Connecting', live: 'Live', off: 'Log off', reconnecting: 'Reconnecting', expired: 'Connecting' }
+
+// The reader calls api() for the token; a link that stopped working ends it quietly (api() has already said so).
+const streamApi: StreamApi = async (path, init) => {
+  if (expired) return new Response(null, { status: 401 })
+  try {
+    return await api(path, init)
+  } catch (err) {
+    if (err instanceof Expired) return new Response(null, { status: 401 })
+    throw err
+  }
+}
+
+const events = shareStream(streamApi, async () => {
+  try {
+    await loadActivity()
+  } catch (err) {
+    if (!(err instanceof Expired)) setStatus(`Could not load the activity log: ${failure(err)}`, 'error')
+  }
+  return feed.cursor
+})
+
+let eventsWired = false
+let feedDirty = false
+let drawQueued = false
+
+// Lines of one chunk are drawn once, after the whole chunk is in; a hidden tab draws when it is shown.
+function scheduleDraw() {
+  if (drawQueued) return
+  drawQueued = true
+  queueMicrotask(() => {
+    drawQueued = false
+    if (current === 'activity') drawFeed()
+    else feedDirty = true
+  })
+}
+
+/** Starts the shared stream for the first tab that needs it, with the Activity feed listening from the first line. */
+function useEvents() {
+  if (!eventsWired) {
+    eventsWired = true
+    events.onStatus(status => setLive(LIVE_WORDS[status]))
+    events.subscribe(line => {
+      if (feedAdd(feed, [line as ActivityLine])) scheduleDraw()
+    })
+  }
+  return events
+}
+
+function startActivity() {
   if (feedView.started) return
   feedView.started = true
-  try {
-    const off = await loadActivity()
-    if (off) {
-      setLive('Log off')
-      return
-    }
-  } catch (err) {
-    if (err instanceof Expired) return
-    setStatus(`Could not load the activity log: ${failure(err)}`, 'error')
-  }
-  void follow()
+  useEvents()
 }
 
 export function wireActivity() {

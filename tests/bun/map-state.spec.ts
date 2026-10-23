@@ -11,7 +11,9 @@ import { join } from 'node:path'
 import { Database } from 'bun:sqlite'
 import { plainLabel } from '../../ui/escape'
 import { galaxyLayout } from '../../ui/map-layout'
+import { simulate, toMapEvent, type MapEvent } from '../../ui/map-live'
 import {
+  addMemory,
   ageColour,
   announcement,
   BLOOM,
@@ -19,7 +21,39 @@ import {
   buildGalaxy,
   type Candidate,
   coreSize,
+  appName,
   coreTarget,
+  DEMO_EVERY_MS,
+  demoKind,
+  demoTimerOn,
+  enqueueSparks,
+  eventStars,
+  forgetMemory,
+  layerOf,
+  layerOn,
+  leanRow,
+  liveStars,
+  newSparkPool,
+  PULSE,
+  pushRow,
+  recallMemory,
+  simulationInput,
+  SPARK_COLOURS,
+  SPARK_POOL,
+  SPARK_SECONDS,
+  SPARK_STAGGER,
+  sparkAlpha,
+  sparkAt,
+  sparkProgress,
+  sparksFor,
+  stepSparks,
+  STRIP_KEEP,
+  STRIP_STORE,
+  stripRow,
+  stripRows,
+  toggleLayer,
+  toggleLive,
+  touchMemory,
   ease,
   find,
   flightPose,
@@ -171,6 +205,8 @@ function fakeDom(html: string) {
       nodes.get(group)!.groups.push(node)
     }
   }
+  // The Live pill is the parent of the state text.
+  nodes.get('map-live-state')!.parentElement = new FakeNode('span')
   const document = {
     createElement: (tag: string) => new FakeNode(tag.toLowerCase()),
     createTextNode: (data: string) => new FakeText(data),
@@ -523,7 +559,7 @@ describe('the galaxy on a real /api/galaxy reply', () => {
       expect(node('map-path').texts()).toEqual(['All memories'])
       expect(node('map-inspector').texts()).toContain('Overview')
       expect(node('map-topics-box').hidden).toBe(true)
-      expect(node('map-sim-recall').disabled).toBe(true)
+      expect(node('map-sim-recall').disabled).toBe(false)
       // Clicking a project's name focuses it: the path, the inspector and the topics list follow.
       const alphaRow = rows.find(row => row.texts().join('').includes('alpha'))!
       alphaRow.all().find(n => n.tagName === 'button')!.fire('click', { preventDefault() {} })
@@ -562,6 +598,136 @@ describe('the galaxy on a real /api/galaxy reply', () => {
       expect(node('map-inspector').texts()).toContain('Memory')
       node('map-inspector').all().find(n => n.textContent === 'Open in Memories')!.fire('click')
       expect(opened).toEqual([ids.a1!])
+    } finally {
+      g.document = saved.document
+      g.CSS = saved.CSS
+      g.HTMLElement = saved.HTMLElement
+    }
+  })
+
+  test('LIVE: real activity lines play on the map: a save adds a star, a recall and an update count, a forget removes one; failed, extract and unknown lines draw nothing; demo events change nothing and ask nothing', async () => {
+    const html = readFileSync(join(ROOT, 'ui', 'index.html'), 'utf8')
+    const fake = fakeDom(html)
+    const g = globalThis as Record<string, unknown>
+    const saved = { document: g.document, CSS: g.CSS, HTMLElement: g.HTMLElement }
+    g.document = fake.document
+    g.CSS = { escape: (v: string) => v }
+    g.HTMLElement = class {}
+    try {
+      const { createMap } = (await import(join(ROOT, 'ui', 'map.ts'))) as { createMap: (host: unknown) => { visible: (shown: boolean) => void; show: (id: string) => void } }
+      const asked: string[] = []
+      let push: (line: Record<string, unknown>) => void = () => {}
+      let stopped = 0
+      const newId = 'a'.repeat(32)
+      createMap({
+        api: async (path: string) => {
+          asked.push(path)
+          if (path === '/api/galaxy') return new Response(JSON.stringify(rawBody), { status: 200 })
+          if (path === `/api/memories/${newId}`) {
+            return new Response(JSON.stringify({ id: newId, owner: alpha, content: `\n  A brand new note about veg\nsecond line`, recall_count: 0, timestamp: new Date().toISOString(), tags: ['veg'], metadata: { tags: ['veg'] } }), { status: 200 })
+          }
+          return new Response('{"error":"not found"}', { status: 404 })
+        },
+        openMemory: () => {},
+        status: () => {},
+        events: (listener: (line: Record<string, unknown>) => void) => {
+          push = listener
+          return () => stopped++
+        },
+      })
+      await Bun.sleep(40)
+      const node = (id: string) => fake.nodes.get(id)!
+      const stat = (label: string) => {
+        const texts = node('map-inspector').texts()
+        return texts[texts.indexOf(label) + 1]
+      }
+      const strip = () => (node('map-feed').children as FakeNode[]).map(row => row.texts().join(' | '))
+      const line = (action: string, ids: string[], extra: Record<string, unknown> = {}) => ({ t: new Date().toISOString(), action, origin: 'tool', owner: alpha, text: 'x', ids, count: ids.length, ok: true, client: 'claude-code', session: 'a1b2c3d4-0000-4000-8000-aaaaaaaaaaaa', ...extra })
+      const play = async (l: Record<string, unknown>) => {
+        push(l)
+        await Bun.sleep(25)
+      }
+      const callsBefore = asked.length
+      expect(node('map-inspector').texts()).toContain('7 memories')
+      expect(strip()).toEqual(['No activity yet.'])
+      expect(stat('Memories')).toBe('7')
+      expect(stat('Recalls, all time')).toBe('18')
+
+      // A save: the memory is fetched with the existing route, placed, and counted everywhere.
+      const before = 0
+      await play(line('remember', [newId]))
+      expect(asked.slice(callsBefore)).toEqual([`/api/memories/${newId}`])
+      expect(node('map-inspector').texts()).toContain('8 memories')
+      expect(stat('Memories')).toBe('8')
+      expect(strip()[0]).toContain('Saved a new memory')
+      expect(strip()[0]).toContain('Claude Code')
+      expect(strip()[0]).toContain('save')
+
+      // A recall of two ids, one of them not on the map: one found.
+      await play(line('recall', [ids.a1!, 'f'.repeat(32)]))
+      expect(strip()[0]).toContain('Recalled 1')
+      expect(stat('Recalls, all time')).toBe('19')
+
+      // An update, then a forget of a never-recalled memory.
+      await play(line('update', [ids.a3!]))
+      expect(strip()[0]).toContain('Updated a memory in place')
+      expect(stat('Never recalled')).toBe('4')
+      await play(line('forget', [ids.a2!]))
+      expect(strip()[0]).toContain('Forgot a memory')
+      expect(stat('Memories')).toBe('7')
+      expect(stat('Never recalled')).toBe('3')
+      expect(node('map-inspector').texts()).toContain('7 memories')
+      // The project's count in the rail fell too.
+      expect(node('map-toggles').texts().join(' ')).toContain('alpha')
+
+      // Lines that draw nothing: failed, extract, stats, and ids that are not on the map.
+      const rows = strip().length
+      await play(line('recall', [ids.a1!], { ok: false, error: 'engine down' }))
+      await play(line('extract', [ids.a1!], { origin: 'hook', count: 3 }))
+      await play(line('stats', []))
+      await play(line('recall', ['e'.repeat(32)]))
+      await play(line('forget', ['d'.repeat(32)]))
+      expect(strip().length).toBe(rows)
+      expect(stat('Recalls, all time')).toBe('19')
+
+      // A forgotten memory forgotten again, or recalled, does nothing.
+      await play(line('forget', [ids.a2!]))
+      await play(line('recall', [ids.a2!]))
+      expect(strip()[0]).toContain('Forgot a memory')
+      expect(stat('Memories')).toBe('7')
+
+      // The strip holds the last four.
+      for (let i = 0; i < 6; i++) await play(line('recall', [ids.b1!]))
+      expect(strip().length).toBe(STRIP_KEEP)
+
+      // Layers: with Recall off its rows go; Write rows stay.
+      node('map-layer-recall').checked = false
+      node('map-layer-recall').fire('change')
+      expect(strip().every(row => !row.includes('Recalled'))).toBe(true)
+      expect(strip()[0]).toContain('Forgot a memory')
+      node('map-layer-recall').checked = true
+      node('map-layer-recall').fire('change')
+      expect(strip()[0]).toContain('Recalled')
+
+      // Simulate buttons: demo rows with a "demo" badge, nothing asked of the server, no count changed.
+      const asking = asked.length
+      const total = stat('Memories')
+      const recallsAll = stat('Recalls, all time')
+      expect(node('map-sim-recall').disabled).toBe(false)
+      for (let i = 0; i < 4; i++) {
+        node('map-sim-recall').fire('click')
+        node('map-sim-write').fire('click')
+        await Bun.sleep(15)
+      }
+      expect(strip().some(row => row.includes('demo'))).toBe(true)
+      expect(strip().length).toBe(STRIP_KEEP)
+      expect(asked.length).toBe(asking)
+      expect(stat('Memories')).toBe(total)
+      expect(stat('Recalls, all time')).toBe(recallsAll)
+      // Live On is the pill's text; pressing the pill pauses it.
+      expect(node('map-live-state').textContent).toBe('On')
+      node('map-live-state').parentElement!.fire('click')
+      expect(node('map-live-state').textContent).toBe('Paused')
     } finally {
       g.document = saved.document
       g.CSS = saved.CSS
@@ -828,3 +994,266 @@ describe('GAL.4: nothing in ui/ is left of the level-by-level map', () => {
 })
 
 export type { Reply }
+
+// ---- LIVE: events change the galaxy, the strip, the sparks ----
+
+const LIVE_NOW = Date.parse('2026-10-23T12:00:00Z')
+const liveReply = reply(
+  [
+    memory('m1', 'project-x-1', { tags: ['fruit'], recalls: 2, created: '2026-10-20T12:00:00Z', label: 'apple' }),
+    memory('m2', 'project-x-1', { tags: ['fruit'], recalls: 0, created: '2026-10-10T12:00:00Z', label: 'pear' }),
+    memory('m3', 'project-y-2', { tags: ['fruit'], recalls: 5, created: '2026-10-22T12:00:00Z', label: 'plum' }),
+    memory('m4', 'global', { recalls: 0, created: '2026-09-01T12:00:00Z', label: 'loose note' }),
+  ],
+  { projects: [{ owner: 'project-x-1', label: 'x', count: 2, recalls: 2 }, { owner: 'project-y-2', label: 'y', count: 1, recalls: 5 }, { owner: 'global', label: 'Global', count: 1, recalls: 0 }] },
+)
+const freshGalaxy = () => buildGalaxy(liveReply, LIVE_NOW)
+const calm = () => initialState({ reducedMotion: false })
+const event = (kind: MapEvent['kind'], ids: string[], extra: Partial<MapEvent> = {}): MapEvent => ({ kind, ids, client: 'claude-code', t: '2026-10-23T10:15:30.000Z', owner: 'project-x-1', ...extra })
+
+describe('LIVE.1: what an event does to the galaxy', () => {
+  test('LIVE.1.a1: an event keeps only the ids that are stars on the map', () => {
+    const g = freshGalaxy()
+    expect(eventStars(g, event('recall', ['m1', 'nope', 'm3']))).toEqual(['m1', 'm3'])
+    expect(eventStars(g, event('recall', ['nope']))).toEqual([])
+    forgetMemory(g, 'm1')
+    expect(eventStars(g, event('recall', ['m1', 'm3']))).toEqual(['m3'])
+  })
+
+  test('LIVE.1.a2: the lean row of a saved memory: label cut to 80 characters, tags, owner, created', () => {
+    const row = leanRow({ id: 'new', owner: 'project-x-1', content: `\n  ${'w'.repeat(200)}\nsecond`, recall_count: 0, timestamp: '2026-10-23T11:00:00Z', tags: ['veg', 4, ''], metadata: { tags: ['other'] } })!
+    expect(row).toMatchObject({ id: 'new', owner: 'project-x-1', tags: ['veg'], recalls: 0, created: '2026-10-23T11:00:00Z', lastRecalled: null })
+    expect(Array.from(row.label)).toHaveLength(80)
+    expect(row.label.endsWith('…')).toBe(true)
+    // The tags may come only from the metadata; text is plain even when it is markup.
+    expect(leanRow({ id: 'n2', owner: 'global', content: MARKUP, metadata: { tags: ['m'] } })).toMatchObject({ tags: ['m'], label: MARKUP })
+    expect(leanRow({ id: 'n3', content: 'x' })!.owner).toBe('global')
+    expect(leanRow(null)).toBeNull()
+    expect(leanRow({ content: 'no id' })).toBeNull()
+    expect(leanRow([])).toBeNull()
+  })
+
+  test('LIVE.1.a2: a save places one new star without moving any other, and counts it everywhere', () => {
+    const g = freshGalaxy()
+    const before = g.layout.stars.map(star => [...star.position])
+    const hubBefore = g.layout.hubs.map(hub => [...hub.position])
+    const index = addMemory(g, leanRow({ id: 'new', owner: 'project-x-1', content: 'a new fruit', tags: ['fruit'], timestamp: '2026-10-23T11:00:00Z' })!)
+    expect(index).toBe(g.layout.starById.new!)
+    expect(g.layout.stars.slice(0, before.length).map(star => [...star.position])).toEqual(before)
+    expect(g.layout.hubs.slice(0, hubBefore.length).map(hub => [...hub.position])).toEqual(hubBefore)
+    expect(g.ages[index]).toBe(0)
+    expect(g.total).toBe(5)
+    expect(g.shown).toBe(5)
+    expect(g.layout.cores[g.layout.coreByOwner['project-x-1']!]!.count).toBe(3)
+    expect(g.layout.hubs[g.layout.hubByKey['project-x-1/fruit']!]!.count).toBe(3)
+    expect(inspector(g, calm()).title).toBe('5 memories')
+    expect(projectRows(g, calm()).find(row => row.owner === 'project-x-1')!.count).toBe(3)
+    // The same memory again is not added twice.
+    expect(addMemory(g, leanRow({ id: 'new', owner: 'project-x-1', content: 'again' })!)).toBe(-1)
+    expect(g.total).toBe(5)
+    // A memory of a project and topic the galaxy has not seen makes them.
+    const odd = addMemory(g, leanRow({ id: 'odd', owner: 'project-z-9', content: 'z', tags: ['brand-new'] })!)
+    expect(odd).toBeGreaterThan(0)
+    expect(g.layout.coreByOwner['project-z-9']).toBeDefined()
+    expect(g.layout.hubByKey['project-z-9/brand-new']).toBeDefined()
+    expect(g.colours['project-z-9']).toBeDefined()
+  })
+
+  test('LIVE.1.a3: a recall raises the star\'s count and size (and the most recalled); an update makes it new again', () => {
+    const g = freshGalaxy()
+    const i = g.layout.starById.m1!
+    expect(starSize(g.layout.stars[i]!.recalls)).toBeCloseTo(7 + Math.sqrt(2) * 3.4)
+    expect(recallMemory(g, 'm1')).toBe(true)
+    expect(g.layout.stars[i]!.recalls).toBe(3)
+    expect(starSize(g.layout.stars[i]!.recalls)).toBeGreaterThan(starSize(2))
+    expect(recallMemory(g, 'nope')).toBe(false)
+    // m3 has the most recalls (5); raising m1 above it moves the colour scale.
+    for (let n = 0; n < 4; n++) recallMemory(g, 'm1')
+    expect(g.maxRecalls).toBe(7)
+    expect(g.ages[i]).toBe(3)
+    expect(touchMemory(g, 'm1')).toBe(true)
+    expect(g.ages[i]).toBe(0)
+    expect(starTarget(g, i, calm(), null)).toBe(1)
+    expect(starTarget(g, g.layout.starById.m4!, calm(), null)).toBeLessThan(0.5)
+    expect(touchMemory(g, 'nope')).toBe(false)
+  })
+
+  test('LIVE.1.a2: a forget removes the star from every count and every list, and a second forget is nothing', () => {
+    const g = freshGalaxy()
+    expect(forgetMemory(g, 'm2')).toBe(true)
+    expect(forgetMemory(g, 'm2')).toBe(false)
+    expect(g.total).toBe(3)
+    expect(g.shown).toBe(3)
+    expect(g.layout.cores[g.layout.coreByOwner['project-x-1']!]!.count).toBe(1)
+    expect(g.layout.hubs[g.layout.hubByKey['project-x-1/fruit']!]!.count).toBe(1)
+    expect(liveStars(g).map(star => star.id).sort()).toEqual(['m1', 'm3', 'm4'])
+    expect(inspector(g, calm()).title).toBe('3 memories')
+    expect(inspector(g, calm()).stats.find(stat => stat.label === 'Never recalled')!.value).toBe('1')
+    expect(projectRows(g, calm()).find(row => row.owner === 'project-x-1')!.count).toBe(1)
+    expect(starTarget(g, g.layout.starById.m2!, calm(), null)).toBe(0)
+    expect(find(g, 'pear').count).toBe(0)
+    expect(selectStar(calm(), g, 'm2')).toEqual(calm())
+    expect(tooltip(g, { kind: 'star', id: 'm2', sx: 0, sy: 0 })).toBeNull()
+    expect(inspector(g, { ...calm(), selected: 'm2' }).kind).toBe('Overview')
+    expect(tooltip(g, { kind: 'core', id: 'project-x-1', sx: 0, sy: 0 })!.sub).toContain('1 memory')
+    expect(forgetMemory(g, 'nope')).toBe(false)
+  })
+})
+
+describe('LIVE.2: sparks and pulses', () => {
+  const random = () => 0.5
+  const targets = [{ to: 'm1', toKind: 'star' as const }, { to: 'm2', toKind: 'star' as const }, { to: 'm3', toKind: 'star' as const }]
+
+  test('LIVE.2.a1/a2: colours and pulses by kind, and the flight takes 1.1 s on a curve from the Claude core', () => {
+    expect(SPARK_COLOURS).toEqual({ recall: [1, 0.82, 0.45], save: [0.37, 0.95, 0.85], update: [0.37, 0.95, 0.85], forget: [1, 0.42, 0.42] })
+    expect(PULSE).toEqual({ recall: 1.4, save: 2, update: 1.6, forget: 1.2 })
+    expect(SPARK_SECONDS).toBe(1.1)
+    expect(sparkAt([0, 0, 0], [100, 0, 0], 0, 0)).toEqual([0, 0, 0])
+    const end = sparkAt([0, 0, 0], [100, 50, -20], 0.4, 1)
+    expect(end.map(v => Math.round(v))).toEqual([100, 50, -20])
+    // Mid-flight it is off the straight line (bowed up and sideways).
+    const mid = sparkAt([0, 0, 0], [100, 0, 0], 1, 0.5)
+    expect(mid[1]).toBeGreaterThan(20)
+    expect(mid[0]).not.toBeCloseTo(50, 0)
+    expect(ease(0.5)).toBeCloseTo(0.5)
+  })
+
+  test('LIVE.2.a2: a recall\'s sparks are staggered 0.12 s; none fly under prefers-reduced-motion', () => {
+    const sparks = sparksFor(event('recall', ['m1', 'm2', 'm3']), targets, false, random)
+    expect(sparks.map(spark => spark.delay)).toEqual([0, SPARK_STAGGER, SPARK_STAGGER * 2])
+    expect(sparks.every(spark => spark.kind === 'recall' && spark.demo === false)).toBe(true)
+    expect(sparksFor(event('recall', ['m1']), targets, true, random)).toEqual([])
+    expect(sparksFor({ ...event('save', ['d']), demo: true }, targets.slice(0, 1), false, random)[0]!.demo).toBe(true)
+    expect(SPARK_STAGGER).toBe(0.12)
+  })
+
+  test('LIVE.2.a3: a pool of 48; extra sparks wait in the queue and start as slots free up, none dropped', () => {
+    expect(SPARK_POOL).toBe(48)
+    const pool = newSparkPool()
+    expect(pool.active).toHaveLength(48)
+    const many = Array.from({ length: 60 }, () => sparksFor(event('recall', ['m1']), targets.slice(0, 1), false, random)[0]!)
+    enqueueSparks(pool, many)
+    expect(pool.queue).toHaveLength(60)
+    let landed = stepSparks(pool, 0.016)
+    expect(landed).toHaveLength(0)
+    expect(pool.active.filter(Boolean)).toHaveLength(48)
+    expect(pool.queue).toHaveLength(12)
+    // 1.1 s later the first 48 land, and the 12 that waited take their places.
+    landed = stepSparks(pool, SPARK_SECONDS)
+    expect(landed).toHaveLength(48)
+    expect(pool.active.filter(Boolean)).toHaveLength(12)
+    let total = 48
+    for (let i = 0; i < 4; i++) total += stepSparks(pool, SPARK_SECONDS).length
+    expect(total).toBe(60)
+    expect(pool.queue).toHaveLength(0)
+  })
+
+  test('LIVE.2: a spark waits out its delay, then flies; its brightness and progress follow', () => {
+    const pool = newSparkPool(2)
+    const [first, second] = sparksFor(event('recall', ['m1', 'm2']), targets.slice(0, 2), false, random)
+    enqueueSparks(pool, [first!, second!])
+    stepSparks(pool, 0)
+    const waiting = pool.active[1]!
+    expect(sparkAlpha(waiting)).toBe(0)
+    expect(sparkProgress(waiting)).toBe(0)
+    stepSparks(pool, 0.12 + 0.55)
+    expect(sparkProgress(pool.active[1]!)).toBeCloseTo(0.5, 1)
+    expect(sparkAlpha(pool.active[1]!)).toBeCloseTo(0.85, 1)
+    const landed = stepSparks(pool, 1)
+    expect(landed.map(spark => spark.to)).toEqual(['m1', 'm2'])
+  })
+})
+
+describe('LIVE.3: the live strip, the layers and the demo timer', () => {
+  test('LIVE.3.a2: a row has the time, the kind badge, a sentence with the topic and project, the app and the demo mark', () => {
+    const g = freshGalaxy()
+    const row = stripRow(g, event('recall', ['m1', 'm3']), 2)
+    expect(row.badge).toBe('recall')
+    expect(row.text).toBe('Recalled 2 · fruit · x')
+    expect(row.app).toBe('Claude Code')
+    expect(row.demo).toBe(false)
+    expect(row.time).toMatch(/^\d\d:\d\d:\d\d$/)
+    expect(stripRow(g, event('save', ['m4']), 1).text).toBe('Saved a new memory · Untagged · Global')
+    expect(stripRow(g, event('update', ['m2']), 1).text).toBe('Updated a memory in place · fruit · x')
+    expect(stripRow(g, event('forget', ['m2']), 1).text).toBe('Forgot a memory · fruit · x')
+    expect(stripRow(g, event('forget', ['m1', 'm2']), 2).text).toContain('Forgot 2 memories')
+    const demo = stripRow(g, { ...event('save', ['demo-1'], { client: 'demo', topic: 'fruit' }), demo: true }, 1)
+    expect(demo).toMatchObject({ demo: true, app: 'Demo', text: 'Saved a new memory · fruit · x' })
+    expect(stripRow(g, event('recall', ['m1'], { client: 'unknown', t: 'garbage' }), 1)).toMatchObject({ app: '', time: '--:--:--' })
+    // The app name is plain text, however it is spelt.
+    expect(appName('codex-mcp-client')).toBe('Codex')
+    expect(appName('cursor-vscode')).toBe('Cursor')
+    expect(appName('Claude-Code')).toBe('Claude Code')
+    expect(appName('zed')).toBe('zed')
+    expect(appName(MARKUP)).toBe(MARKUP)
+    expect(appName('')).toBe('')
+  })
+
+  test('LIVE.3.a1: the strip shows the last four of the layers that are on, newest first; the store holds 12', () => {
+    const g = freshGalaxy()
+    let rows: ReturnType<typeof stripRow>[] = []
+    const kinds: MapEvent['kind'][] = ['recall', 'save', 'recall', 'update', 'forget', 'recall', 'recall', 'save']
+    kinds.forEach((kind, i) => {
+      rows = pushRow(rows, stripRow(g, event(kind, ['m1'], { t: `2026-10-23T10:00:0${i}.000Z` }), 1))
+    })
+    expect(rows).toHaveLength(8)
+    for (let i = 0; i < 10; i++) rows = pushRow(rows, stripRow(g, event('recall', ['m1']), 1))
+    expect(rows).toHaveLength(STRIP_STORE)
+    expect(STRIP_KEEP).toBe(4)
+    const state = calm()
+    expect(stripRows(rows, state)).toHaveLength(4)
+    const noRecall = toggleLayer(state, 'recall')
+    expect(noRecall.layerRecall).toBe(false)
+    expect(stripRows(pushRow(rows, stripRow(g, event('save', ['m1']), 1)), noRecall).every(row => row.kind !== 'recall')).toBe(true)
+    expect(stripRows([stripRow(g, event('recall', ['m1']), 1)], toggleLayer(toggleLayer(state, 'recall'), 'write'))).toEqual([])
+    expect(layerOf('recall')).toBe('recall')
+    expect(['save', 'update', 'forget'].map(kind => layerOf(kind as MapEvent['kind']))).toEqual(['write', 'write', 'write'])
+    expect(layerOn(noRecall, 'recall')).toBe(false)
+    expect(layerOn(noRecall, 'forget')).toBe(true)
+  })
+
+  test('LIVE.3.a3: a demo event plays every 3.4 s only while Live is On and a Simulate button was pressed in this page load', () => {
+    expect(DEMO_EVERY_MS).toBe(3400)
+    const on = calm()
+    expect(demoTimerOn(on, false)).toBe(false)
+    expect(demoTimerOn(on, true)).toBe(true)
+    expect(demoTimerOn(toggleLive(on), true)).toBe(false)
+    expect(toggleLive(toggleLive(on))).toEqual(on)
+    // Reduced motion starts Live paused.
+    expect(demoTimerOn(initialState({ reducedMotion: true }), true)).toBe(false)
+    // The draw: recall 3 in 5, write 2 in 5, among the layers that are on.
+    const draws = [0, 0.19, 0.59, 0.61, 0.8].map(r => demoKind(on, () => r))
+    expect(draws).toEqual(['recall', 'recall', 'recall', 'write', 'write'])
+    expect(demoKind(toggleLayer(on, 'recall'), () => 0)).toBe('write')
+    expect(demoKind(toggleLayer(on, 'write'), () => 0.99)).toBe('recall')
+    expect(demoKind(toggleLayer(toggleLayer(on, 'write'), 'recall'), () => 0)).toBeNull()
+  })
+
+  test('LIVE.3.a4: Simulate makes demo events from the galaxy the page holds, with no server in reach', () => {
+    const g = freshGalaxy()
+    const input = simulationInput(g)
+    expect(input.projects.map(p => p.owner).sort()).toEqual(['global', 'project-x-1', 'project-y-2'])
+    expect(input.memories.map(m => m.id).sort()).toEqual(['m1', 'm2', 'm3', 'm4'])
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (() => {
+      throw new Error('a demo event asked the network')
+    }) as unknown as typeof fetch
+    try {
+      for (const kind of ['recall', 'write'] as const) {
+        for (let i = 0; i < 40; i++) {
+          const made = simulate(kind, input, () => (i * 7919) % 100 / 100)
+          expect(made?.demo).toBe(true)
+          expect(made?.client).toBe('demo')
+        }
+      }
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+    // A forgotten memory is no longer drawn on for a demo.
+    forgetMemory(g, 'm1')
+    expect(simulationInput(g).memories.map(m => m.id)).not.toContain('m1')
+    // The events a real line makes are not demos.
+    expect(toMapEvent({ action: 'recall', ids: ['m1'], ok: true, client: 'cursor-vscode' })).toMatchObject({ kind: 'recall', client: 'cursor-vscode' })
+    expect(toMapEvent({ action: 'recall', ids: ['m1'], ok: true })?.demo).toBeUndefined()
+  })
+})

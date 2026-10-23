@@ -3,6 +3,8 @@
 // the stream is drawn once).
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test'
 import { join } from 'node:path'
+import { readFileSync } from 'node:fs'
+import { toMapEvent } from '../../ui/map-live'
 import { ROOT } from './helpers'
 
 type Line = { text: string }
@@ -380,5 +382,167 @@ describe('ACT: the Activity list on real-shaped lines', () => {
     expect(f('external', 'Claude Code', '')).toEqual([])
     // A line with no session never matches a session filter.
     expect(f('all', 'all', 'nope')).toEqual([])
+  })
+})
+
+// ---- LIVE.4: the Activity tab and the map read ONE shared stream ----
+
+/** A fake api: one open NDJSON stream per call, controlled by the test (only the network edge is faked). */
+function fakeStreamApi() {
+  const calls: string[] = []
+  const controllers: ReadableStreamDefaultController<Uint8Array>[] = []
+  const api = async (path: string) => {
+    calls.push(path)
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controllers.push(controller)
+      },
+    })
+    return new Response(body, { status: 200 })
+  }
+  const push = (...lines: object[]) => controllers[controllers.length - 1]?.enqueue(new TextEncoder().encode(lines.map(line => `${JSON.stringify(line)}\n`).join('')))
+  const end = () => controllers[controllers.length - 1]?.close()
+  return { api, calls, push, end }
+}
+
+const tick = () => new Promise(resolve => setTimeout(resolve, 0))
+
+// Real-shaped lines of the CTX format (client and session), an extract line and a failed one.
+const recallLine = { t: '2026-10-23T10:00:01.000Z', action: 'recall', origin: 'tool', owner: 'project-x-1a2b', text: 'apple', ids: ['m1', 'm2'], count: 2, ok: true, client: 'claude-code', session: 'a1b2c3d4-0000-4000-8000-aaaaaaaaaaaa' }
+const rememberLine = { ...recallLine, t: '2026-10-23T10:00:02.000Z', action: 'remember', ids: ['m3'], count: 1 }
+const extractLine = { ...recallLine, t: '2026-10-23T10:00:03.000Z', action: 'extract', origin: 'hook', ids: ['m3'], count: 3 }
+const failedLine = { ...recallLine, t: '2026-10-23T10:00:04.000Z', action: 'recall', ids: [], count: 0, ok: false, error: 'engine down' }
+
+describe('LIVE.4: one shared stream for the Activity tab and the Map tab', () => {
+  let app: Record<string, any>
+
+  beforeAll(async () => {
+    app = await import(join(ROOT, 'ui', 'app.ts'))
+  })
+
+  test('LIVE.4.a1: the Activity feed and the map get the SAME line from ONE reader, with one request', async () => {
+    const fake = fakeStreamApi()
+    let prepared = 0
+    const shared = app.shareStream(fake.api, async () => {
+      prepared++
+      return '7:100'
+    })
+    const feed = app.newFeed()
+    const mapEvents: unknown[] = []
+    shared.subscribe((line: Record<string, unknown>) => app.feedAdd(feed, [line]))
+    shared.subscribe((line: Record<string, unknown>) => {
+      const event = toMapEvent(line)
+      if (event !== null) mapEvents.push(event)
+    })
+    await tick()
+    await tick()
+    expect(prepared).toBe(1)
+    expect(fake.calls).toEqual(['/api/activity/stream?cursor=7%3A100'])
+    expect(shared.reader().polls()).toBe(1)
+    fake.push(recallLine)
+    await tick()
+    // The Activity feed holds the line, the map got its event, from that one read.
+    expect(feed.lines).toEqual([recallLine])
+    expect(mapEvents).toEqual([{ kind: 'recall', ids: ['m1', 'm2'], client: 'claude-code', t: recallLine.t, owner: 'project-x-1a2b' }])
+    shared.reader().close()
+  })
+
+  test('LIVE.4.a1: an extract line and a failed line reach the Activity feed, and the map draws nothing for them', async () => {
+    const fake = fakeStreamApi()
+    const shared = app.shareStream(fake.api, async () => '')
+    const feed = app.newFeed()
+    const mapEvents: unknown[] = []
+    shared.subscribe((line: Record<string, unknown>) => app.feedAdd(feed, [line]))
+    shared.subscribe((line: Record<string, unknown>) => {
+      const event = toMapEvent(line)
+      if (event !== null) mapEvents.push(event)
+    })
+    await tick()
+    await tick()
+    fake.push(rememberLine, extractLine, failedLine)
+    await tick()
+    expect(feed.lines.map((line: { action: string; ok: boolean }) => [line.action, line.ok])).toEqual([['recall', false], ['extract', true], ['remember', true]])
+    expect(mapEvents.map((event: any) => event.kind)).toEqual(['save'])
+    shared.reader().close()
+  })
+
+  test('LIVE.4.a1: a listener that leaves stops hearing; the reader stays for the other', async () => {
+    const fake = fakeStreamApi()
+    const shared = app.shareStream(fake.api, async () => '')
+    const one: unknown[] = []
+    const two: unknown[] = []
+    const off = shared.subscribe((line: unknown) => one.push(line))
+    shared.subscribe((line: unknown) => two.push(line))
+    await tick()
+    await tick()
+    fake.push(recallLine)
+    await tick()
+    off()
+    fake.push(rememberLine)
+    await tick()
+    expect(one).toHaveLength(1)
+    expect(two).toHaveLength(2)
+    expect(fake.calls).toHaveLength(1)
+    shared.reader().close()
+  })
+
+  test('LIVE.4.a1: a history read that fails still starts the stream, from the start', async () => {
+    const fake = fakeStreamApi()
+    const shared = app.shareStream(fake.api, async () => {
+      throw new Error('history failed')
+    })
+    shared.subscribe(() => {})
+    await tick()
+    await tick()
+    expect(fake.calls).toEqual(['/api/activity/stream'])
+    shared.reader().close()
+  })
+
+  test('LIVE.4.a1: after a reconnect the repeated lines are dropped and the new ones come through once', async () => {
+    const fake = fakeStreamApi()
+    const shared = app.shareStream(fake.api, async () => '7:100')
+    const seen: string[] = []
+    const statuses: string[] = []
+    shared.onStatus((status: string) => statuses.push(status))
+    shared.subscribe((line: { t: string }) => seen.push(line.t))
+    await tick()
+    await tick()
+    fake.push(recallLine, rememberLine)
+    await tick()
+    fake.end()
+    // The reader waits 1 s and reconnects from the same cursor: the server repeats both lines, then sends a new one.
+    await new Promise(resolve => setTimeout(resolve, 1100))
+    expect(fake.calls).toHaveLength(2)
+    fake.push(recallLine, rememberLine, extractLine)
+    await tick()
+    expect(seen).toEqual([recallLine.t, rememberLine.t, extractLine.t])
+    expect(statuses).toContain('reconnecting')
+    shared.reader().close()
+  })
+
+  test('replayFilter: skips what repeats in order, lets the first different line through, and works again after the next reconnect', () => {
+    const filter = app.replayFilter()
+    expect(filter.accept(recallLine)).toBe(true)
+    expect(filter.accept(rememberLine)).toBe(true)
+    filter.reconnecting()
+    expect(filter.accept(recallLine)).toBe(false)
+    expect(filter.accept(rememberLine)).toBe(false)
+    expect(filter.accept(extractLine)).toBe(true)
+    // A new line equal to an old one, after the replay is over, is a real line.
+    expect(filter.accept(recallLine)).toBe(true)
+    // A log that was rotated: the first line differs, so nothing is skipped.
+    filter.reconnecting()
+    expect(filter.accept(failedLine)).toBe(true)
+  })
+
+  test('LIVE.4.a1: ui/app.ts has no request loop of its own: one createStream, no /api/activity/stream path, no follow()', () => {
+    const source = readFileSync(join(ROOT, 'ui', 'app.ts'), 'utf8')
+    expect(source.match(/\bcreateStream\(/g)?.length).toBe(1)
+    expect(source).not.toMatch(/\/api\/activity\/stream/)
+    expect(source).not.toMatch(/function follow\(/)
+    // The map gets the shared stream through its host, not a reader of its own.
+    expect(source).toMatch(/events: listener => useEvents\(\)\.subscribe\(listener\)/)
+    const imports = [...readFileSync(join(ROOT, 'ui', 'stream.ts'), 'utf8').matchAll(/^\s*import[^\n]*from\s+['"]([^'"]+)['"]/gm)].map(m => m[1]!)
+    expect(imports.some(path => path.includes('app'))).toBe(false)
   })
 })
