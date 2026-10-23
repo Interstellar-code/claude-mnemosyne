@@ -109,15 +109,40 @@
       <div class="tile"><div class="tile-label">Updated today</div><div id="tile-update" class="tile-value">0</div></div>
       <div class="tile"><div class="tile-label">Failed calls</div><div id="tile-failed" class="tile-value">0</div></div>
     </div>
-    <div role="group" aria-label="Show" class="chips" id="act-filters">
-      <button type="button" class="chip-btn" data-filter="all" aria-pressed="true">All</button>
-      <button type="button" class="chip-btn" data-filter="recall" aria-pressed="false">Recall</button>
-      <button type="button" class="chip-btn" data-filter="remember" aria-pressed="false">Remember</button>
-      <button type="button" class="chip-btn" data-filter="update" aria-pressed="false">Update</button>
-      <button type="button" class="chip-btn" data-filter="forget" aria-pressed="false">Forget</button>
-      <button type="button" class="chip-btn" data-filter="external" aria-pressed="false">Outside agents</button>
+    <div class="act-bar">
+      <div role="group" aria-label="Show" class="chips" id="act-filters">
+        <button type="button" class="chip-btn" data-filter="all" aria-pressed="true">All</button>
+        <button type="button" class="chip-btn" data-filter="recall" aria-pressed="false">Recall</button>
+        <button type="button" class="chip-btn" data-filter="remember" aria-pressed="false">Remember</button>
+        <button type="button" class="chip-btn" data-filter="update" aria-pressed="false">Update</button>
+        <button type="button" class="chip-btn" data-filter="forget" aria-pressed="false">Forget</button>
+        <button type="button" class="chip-btn" data-filter="external" aria-pressed="false">Outside agents</button>
+      </div>
+      <label class="field">App
+        <select id="act-app" class="input">
+          <option value="all">All apps</option>
+          <option value="Claude Code">Claude Code</option>
+          <option value="Codex">Codex</option>
+          <option value="Cursor">Cursor</option>
+          <option value="Dashboard">Dashboard</option>
+        </select>
+      </label>
+      <button id="act-session" type="button" class="chip-btn" aria-label="Clear session filter" hidden></button>
     </div>
-    <ol id="act-list" class="feed"></ol>
+    <div class="feed-box">
+      <div class="feed-head">
+        <span>Time</span><span>Action</span><span>Source</span><span>Project</span><span>What</span><span>Result</span>
+      </div>
+      <ol id="act-list" class="feed"></ol>
+    </div>
+    <dl id="act-key" class="key" aria-label="Where a line comes from">
+      <dt class="mono">hook</dt><dd>Claude Code ran it on its own: the recall on your first prompt, and the re-arm after a compaction.</dd>
+      <dt class="mono">tool</dt><dd>Claude called a Mnemosyne tool itself: remember, recall, update, forget or stats.</dd>
+      <dt class="mono">trigger</dt><dd>You wrote a trigger phrase such as “remember this”, and the plugin saved it.</dd>
+      <dt class="mono">external</dt><dd>Another app's agent, such as Codex or Cursor, used the same memory through the outside MCP server.</dd>
+      <dt class="mono">ui</dt><dd>You did it in this dashboard: a search or a forget.</dd>
+      <dt class="mono">backfill</dt><dd>A background job that added topic tags to older memories.</dd>
+    </dl>
     <p class="muted small">From the activity log on this machine. Text previews are cut short and secrets are masked.</p>
   </main>
 

@@ -68,6 +68,9 @@ export type ActivityLine = {
   error?: string
   // A dashboard search across owners: how many it searched.
   owners?: number
+  // The calling app's clientInfo name, and the Claude Code session (written from v0.6; older lines have neither).
+  client?: string
+  session?: string
 }
 
 // ---- Pure helpers (exported for tests/bun/inert.spec.ts) ----
@@ -127,6 +130,27 @@ export function clock(value: string | undefined): string {
   return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
 }
 
+const textOf = (value: unknown) => (typeof value === 'string' ? value.trim() : '')
+
+/** The app a clientInfo name belongs to when it is a known one, else undefined. */
+function knownApp(client: string): string | undefined {
+  if (/codex/i.test(client)) return 'Codex'
+  if (/cursor/i.test(client)) return 'Cursor'
+  if (/^claude[-_ ]?code/i.test(client)) return 'Claude Code'
+  return undefined
+}
+
+/** The app an activity line came from: 'Claude Code', 'Codex', 'Cursor', 'Dashboard', another client's own name, or '' when unknown. */
+export function appOf(line: ActivityLine): string {
+  if (line.origin === 'ui') return 'Dashboard'
+  const client = textOf(line.client)
+  if (client) return knownApp(client) ?? firstLine(client, 40)
+  return line.origin && line.origin !== 'external' ? 'Claude Code' : ''
+}
+
+/** A session id cut to its first 8 characters. */
+export const shortSession = (session: string) => Array.from(session).slice(0, 8).join('')
+
 /** Where an activity line came from, in words. */
 export function originLabel(line: ActivityLine): string {
   switch (line.origin) {
@@ -137,7 +161,7 @@ export function originLabel(line: ActivityLine): string {
     case 'tool':
       return 'Claude tool'
     case 'external':
-      return 'outside agent'
+      return appOf(line) || 'outside agent'
     case 'ui':
       return 'dashboard'
     case 'backfill':
@@ -149,6 +173,10 @@ export function originLabel(line: ActivityLine): string {
 
 /** What an activity line's call came to, in words. */
 export function resultLabel(line: ActivityLine): string {
+  if (line.action === 'extract') {
+    if (line.ok === false) return textOf(line.error) ? `failed: ${firstLine(textOf(line.error), 60)}` : 'failed'
+    return `${line.count ?? 0} ${line.count === 1 ? 'item' : 'items'}`
+  }
   if (line.ok === false) return 'failed'
   switch (line.action) {
     case 'recall':
@@ -166,7 +194,8 @@ export function resultLabel(line: ActivityLine): string {
   }
 }
 
-const actionLabel = (action: string | undefined) => (action === 'rearm' ? 're-arm' : (action ?? ''))
+/** An action in words: 'rearm' shows as 're-arm', 'extract' (knowledge learned from a save) as 'learn'. */
+export const actionLabel = (action: string | undefined) => (action === 'rearm' ? 're-arm' : action === 'extract' ? 'learn' : (action ?? ''))
 
 // The bar's width, in twentieths (style.css has .w0 … .w20).
 const barClass = (score: number) => `w${Math.round(Math.min(1, Math.max(0, score)) * 20)}`
@@ -320,17 +349,33 @@ export function memoryDetail(memory: Memory, forget: (memory: Memory, done: (err
   return panel
 }
 
-/** One line of the Activity feed. */
-export function activityItem(line: ActivityLine) {
+/** One line of the Activity feed; `pickSession`, when given, makes the session a button. */
+export function activityItem(line: ActivityLine, pickSession?: (session: string) => void) {
   const item = el('li', undefined, 'event')
   const action = line.action ?? ''
   const what = line.text || (action === 'forget' ? (line.ids ?? []).join(', ') : action === 'rearm' ? 'will recall on next prompt' : '')
   const result = el('span', resultLabel(line), line.ok === false ? 'result is-failed' : 'result')
   if (line.ok === false && line.error) result.title = line.error
+  const source = el('span', undefined, 'source')
+  const raw = el('span', undefined, 'origin-raw mono muted')
+  if (line.origin) raw.append(el('span', String(line.origin)))
+  const session = textOf(line.session)
+  if (session) {
+    if (pickSession) {
+      const button = el('button', shortSession(session), 'link mono session')
+      button.type = 'button'
+      button.title = 'Show only this session'
+      button.addEventListener('click', () => pickSession(session))
+      raw.append(button)
+    } else {
+      raw.append(el('span', shortSession(session), 'session'))
+    }
+  }
+  source.append(el('span', originLabel(line), 'muted origin'), raw)
   item.append(
     el('span', clock(line.t), 'mono muted time'),
     el('span', actionLabel(action), `badge a-${/^[a-z]+$/.test(action) ? action : 'other'}`),
-    el('span', originLabel(line), 'muted origin'),
+    source,
     project(line.owner, 'project owner-col', typeof line.owners === 'number' && line.owners > 1 ? `all projects (${line.owners})` : undefined),
     el('span', what, 'what'),
     result,
@@ -687,26 +732,74 @@ export function receiveChunk(feed: Feed, buffer: string, draw: () => void): stri
   return rest
 }
 
-const feed = newFeed()
-const feedView = { filter: 'all', started: false, live: 'Connecting' }
+/** The Activity filters; they combine: a line must pass all three. */
+export type FeedFilter = { action: string; app: string; session: string }
+
+export const newFilter = (): FeedFilter => ({ action: 'all', app: 'all', session: '' })
+
+/** Whether a line passes the action chip ('all', 'external' or an action), the App drop-down ('all' or an app) and the clicked session ('' for any). */
+export function showLine(line: ActivityLine, filter: FeedFilter): boolean {
+  if (filter.action === 'external' ? line.origin !== 'external' : filter.action !== 'all' && line.action !== filter.action) return false
+  if (filter.app !== 'all' && appOf(line) !== filter.app) return false
+  return filter.session === '' || textOf(line.session) === filter.session
+}
+
+const FIXED_APPS = ['Claude Code', 'Codex', 'Cursor', 'Dashboard']
+
+/** The App drop-down's entries: the four fixed apps, then any other client seen (and the one picked), by name. */
+export function appOptions(lines: readonly ActivityLine[], picked = 'all'): string[] {
+  const others = new Set<string>()
+  for (const name of [...lines.map(appOf), picked]) if (name !== '' && name !== 'all' && !FIXED_APPS.includes(name)) others.add(name)
+  return [...FIXED_APPS, ...[...others].sort((a, b) => a.localeCompare(b))]
+}
+
+export const feed = newFeed()
+export const feedView = { filter: newFilter(), started: false, live: 'Connecting', apps: '' }
 
 const isToday = (t: string | undefined) => day(t) === day(new Date().toISOString())
 
-function shown(line: ActivityLine) {
-  if (feedView.filter === 'all') return true
-  if (feedView.filter === 'external') return line.origin === 'external'
-  return line.action === feedView.filter
+/** Picks one session ('' clears it): the chip shows it and the list narrows to it. */
+function setSessionFilter(session: string) {
+  feedView.filter.session = session
+  const chip = byId('act-session')
+  chip.hidden = session === ''
+  chip.textContent = session === '' ? '' : `Session: ${shortSession(session)} ×`
+  chip.title = session === '' ? '' : 'Showing only this session. Press to show all.'
+  chip.setAttribute('aria-label', session === '' ? 'Clear session filter' : `Clear session filter: ${shortSession(session)}`)
+  drawFeed()
 }
 
-function drawFeed() {
+/** Keeps the App drop-down's entries current without resetting it while the stream adds lines. */
+function drawApps() {
+  const names = appOptions(feed.lines, feedView.filter.app)
+  const key = names.join('\n')
+  if (key === feedView.apps) return
+  feedView.apps = key
+  const select = byId<HTMLSelectElement>('act-app')
+  const all = el('option', 'All apps')
+  all.value = 'all'
+  select.replaceChildren(
+    all,
+    ...names.map(name => {
+      const option = el('option', name)
+      option.value = name
+      return option
+    }),
+  )
+  select.value = feedView.filter.app
+}
+
+export function drawFeed() {
   const today = feed.lines.filter(line => isToday(line.t))
   const count = (test: (line: ActivityLine) => boolean) => String(today.filter(test).length)
   byId('tile-recall').textContent = count(line => line.action === 'recall' && line.ok !== false)
   byId('tile-remember').textContent = count(line => line.action === 'remember' && line.ok !== false)
   byId('tile-update').textContent = count(line => line.action === 'update' && line.ok !== false)
   byId('tile-failed').textContent = count(line => line.ok === false)
-  const list = feed.lines.filter(shown).slice(0, FEED_SHOW)
-  byId('act-list').replaceChildren(...(list.length > 0 ? list.map(activityItem) : [el('li', 'No activity yet.', 'event muted')]))
+  drawApps()
+  const list = feed.lines.filter(line => showLine(line, feedView.filter)).slice(0, FEED_SHOW)
+  const none = feed.lines.length > 0 ? 'No activity matches these filters.' : 'No activity yet.'
+  byId('act-list').replaceChildren(...(list.length > 0 ? list.map(line => activityItem(line, setSessionFilter)) : [el('li', none, 'event empty muted')]))
 }
 
 function setLive(text: string) {
@@ -777,7 +870,7 @@ async function startActivity() {
   void follow()
 }
 
-function wireActivity() {
+export function wireActivity() {
   const pause = byId<HTMLButtonElement>('pause')
   pause.addEventListener('click', () => {
     const redraw = feedPause(feed, !feed.paused)
@@ -788,11 +881,16 @@ function wireActivity() {
   const filters = byId('act-filters')
   for (const button of filters.querySelectorAll<HTMLButtonElement>('button[data-filter]')) {
     button.addEventListener('click', () => {
-      feedView.filter = button.dataset.filter ?? 'all'
+      feedView.filter.action = button.dataset.filter ?? 'all'
       for (const other of filters.querySelectorAll<HTMLButtonElement>('button[data-filter]')) other.setAttribute('aria-pressed', String(other === button))
       drawFeed()
     })
   }
+  byId<HTMLSelectElement>('act-app').addEventListener('change', event => {
+    feedView.filter.app = (event.target as HTMLSelectElement).value || 'all'
+    drawFeed()
+  })
+  byId('act-session').addEventListener('click', () => setSessionFilter(''))
 }
 
 // ---- Search: one at a time ----

@@ -250,20 +250,35 @@ a:hover { color: var(--accent-dark); }
   cursor: pointer;
 }
 .chip-btn[aria-pressed='true'] { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); font-weight: 600; }
-.feed { margin: 0; padding: 0; list-style: none; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
-.event { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 14px 16px; border-bottom: 1px solid #EEEFEC; }
+.act-bar { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px 16px; }
+.feed-box { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.feed { margin: 0; padding: 0; list-style: none; }
+/* The header and every row share this one rule, so the columns line up and wrap alike. */
+.feed-head, .event { display: grid; grid-template-columns: 64px 84px 150px 150px minmax(0, 1fr) 120px; align-items: center; gap: 8px 16px; padding: 14px 16px; }
+@media (max-width: 760px) {
+  .feed-head, .event { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .what { white-space: normal; overflow-wrap: anywhere; }
+}
+.feed-head { padding-top: 10px; padding-bottom: 10px; border-bottom: 1px solid var(--line); background: #F7F8F6; color: var(--muted); font-size: 12px; font-weight: 600; }
+.event { border-bottom: 1px solid #EEEFEC; }
 .event:last-child { border-bottom: 0; }
-.time { width: 64px; }
+.event.empty { display: block; }
 .badge { width: 84px; padding: 3px 0; border-radius: 6px; text-align: center; font-size: 12px; font-weight: 600; background: #F0F1EE; color: var(--muted); }
 .a-recall { background: #E6F2F1; color: #0B6665; }
 .a-remember { background: #EAF1FA; color: #1F5592; }
 .a-update { background: #F1ECFA; color: #5A3AA6; }
 .a-forget { background: #FBEAEA; color: var(--danger); }
-.origin { width: 120px; font-size: 13px; }
-.owner-col { width: 150px; font-size: 13px; gap: 6px; overflow: hidden; }
-.what { flex: 1 1 240px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.result { font-size: 13px; color: var(--muted); }
+.a-extract { background: #FBF1DE; color: #8A5A00; }
+.source { display: flex; flex-direction: column; gap: 2px; min-width: 0; font-size: 13px; }
+.origin-raw { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; font-size: 11px; }
+.session { font-size: 11px; }
+.owner-col { font-size: 13px; gap: 6px; overflow: hidden; }
+.what { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.result { font-size: 13px; color: var(--muted); min-width: 0; overflow-wrap: anywhere; }
 .result.is-failed { color: var(--danger); }
+.key { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 16px; margin: 0; font-size: 13px; color: var(--muted); }
+.key dt { color: var(--text); }
+.key dd { margin: 0; }
 
 /* Search. */
 .search-form { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; }
