@@ -14,6 +14,8 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, PluginOptions, Register } from 'claude-code'
 
 import type { Recalled } from '../types'
+import { activityLine, callOutcome, callText, TOOL_ACTIONS } from './activity-log'
+import type { ActivityFields } from './activity-log'
 import { ENGINE_BUILD, SETUP_TIMEOUT_MS } from './engine-build'
 import { mnemosyneStats } from './surface'
 import { cleanTags } from './tags'
@@ -178,6 +180,7 @@ async function paths($: EngineInterface, options: PluginOptions) {
     cli: `${engine}/node_modules/${ENGINE_PACKAGE}/src/cli.ts`,
     store,
     wrapper: `${root}/bin/mnemosyne-mcp${windows ? '.cmd' : ''}`,
+    activity: `${root}/activity.jsonl`,
   }
 }
 
@@ -211,7 +214,7 @@ async function secure($: EngineInterface, options: PluginOptions) {
 // port, so no token: access is whoever can run files as this user, guarded by
 // the folder modes above.
 async function syncWrapper($: EngineInterface, options: PluginOptions) {
-  const { root, cli, store, wrapper, windows } = await paths($, options)
+  const { root, cli, store, wrapper, windows, activity: log } = await paths($, options)
   // Rewritten at each session start, so an updated plugin's proxy path stays current.
   const proxy = `${slashes($.plugin.root)}/bin/mcp-proxy.ts`
   if (options.externalMcp !== true) {
@@ -219,15 +222,18 @@ async function syncWrapper($: EngineInterface, options: PluginOptions) {
     return
   }
   await bunFs($, `fs.mkdirSync(a[0], { recursive: true }); ${windows ? '' : 'fs.chmodSync(a[0], 0o700);'}`, `${root}/bin`)
-  const text = windows ? cmdWrapper(store, cli, proxy) : shWrapper(store, cli, proxy)
+  // The proxy logs to activity.jsonl unless activityLog is off; it reads this at its next start.
+  const activity = options.activityLog === 'off' ? '' : log
+  const text = windows ? cmdWrapper(store, cli, proxy, activity) : shWrapper(store, cli, proxy, activity)
   await bunFs($, `fs.writeFileSync(a[0], a[1]); ${windows ? '' : 'fs.chmodSync(a[0], 0o700);'}`, wrapper, text)
 }
 
 const WRAPPER_NOTE = `Written by the Mnemosyne plugin (externalMcp). A stdio MCP server over its store,
 serving only remember / recall / update / forget / stats.
-MNEMOSYNE_OWNER picks the owner: global (default) or a project-... id.`
+MNEMOSYNE_OWNER picks the owner: global (default) or a project-... id.
+MNEMOSYNE_ACTIVITY_LOG is the activity log each call is recorded in; empty when activityLog is off.`
 
-const shWrapper = (store: string, cli: string, proxy: string) => `#!/bin/sh
+const shWrapper = (store: string, cli: string, proxy: string, activity: string) => `#!/bin/sh
 ${WRAPPER_NOTE.replace(/^/gm, '# ')}
 export MNEMOPI_DATA_DIR=${shellQuote(store)}
 export MNEMOPI_SESSION_ID="\${MNEMOSYNE_OWNER:-global}"
@@ -237,11 +243,12 @@ export MNEMOPI_MCP_BANK=
 export MNEMOPI_LLM_BASE_URL=
 export MNEMOPI_HOST_LLM_ENABLED=
 export MNEMOSYNE_CLI=${shellQuote(cli)}
+export MNEMOSYNE_ACTIVITY_LOG=${activity ? shellQuote(activity) : ''}
 exec bun ${shellQuote(proxy)}
 `
 
 // cmd has no safe quoting for " or %; paths() refuses a store holding either.
-const cmdWrapper = (store: string, cli: string, proxy: string) => `@echo off\r
+const cmdWrapper = (store: string, cli: string, proxy: string, activity: string) => `@echo off\r
 ${WRAPPER_NOTE.replace(/^/gm, 'rem ').replace(/\n/g, '\r\n')}\r
 set "MNEMOPI_DATA_DIR=${store}"\r
 if not defined MNEMOSYNE_OWNER set "MNEMOSYNE_OWNER=global"\r
@@ -252,6 +259,7 @@ set "MNEMOPI_MCP_BANK="\r
 set "MNEMOPI_LLM_BASE_URL="\r
 set "MNEMOPI_HOST_LLM_ENABLED="\r
 set "MNEMOSYNE_CLI=${cli}"\r
+set "MNEMOSYNE_ACTIVITY_LOG=${activity}"\r
 bun "${proxy}"\r
 `
 
@@ -388,6 +396,53 @@ function activity($: EngineInterface, options: PluginOptions, line: string, stat
   }
 }
 
+// How a hook hands its activity lines to `bun bin/activity.ts <log>` (DESIGN
+// §3.2). A hook cannot append to a file, so one short Bun process per memory
+// event does it.
+//   spawn  a $.process.spawn loop drained in a detached task; the script caps itself at 5 s (default)
+//   run    $.process.run with a 5 s timeout, not awaited
+//   await  $.process.run awaited, capped at 1 s
+// `spawn` is the default because the host documents that a spawned child's loop
+// runs on after the hook returns; it says nothing either way about an
+// un-awaited run. MNEMOSYNE_ACTIVITY_APPEND in Claude Code's environment picks
+// a fallback; DEFAULT_APPEND otherwise.
+export const APPEND_MODES = ['run', 'spawn', 'await'] as const
+type AppendMode = (typeof APPEND_MODES)[number]
+const DEFAULT_APPEND: AppendMode = 'spawn'
+export const APPEND_TIMEOUT_MS = 5_000
+export const APPEND_AWAIT_CAP_MS = 1_000
+
+type Activity = Omit<ActivityFields, 'owner'> & { owner?: string }
+
+// Records memory calls in activity.jsonl unless activityLog is off. Waits only
+// for the paths (host calls), never for the write, and never throws.
+async function record($: EngineInterface, options: PluginOptions, entries: readonly Activity[]) {
+  if (options.activityLog === 'off' || entries.length === 0) return
+  try {
+    const [{ activity: log }, asked, me] = await Promise.all([
+      paths($, options),
+      $.env.get('MNEMOSYNE_ACTIVITY_APPEND').catch(() => undefined),
+      entries.every(entry => entry.owner) ? undefined : owner($, options).catch(() => GLOBAL_OWNER),
+    ])
+    const mode = APPEND_MODES.find(m => m === asked) ?? DEFAULT_APPEND
+    const argv = ['bun', `${slashes($.plugin.root)}/bin/activity.ts`, log]
+    const stdin = entries.map(entry => `${activityLine({ ...entry, owner: entry.owner ?? me ?? GLOBAL_OWNER })}\n`).join('')
+    if (mode === 'spawn') {
+      void (async () => {
+        for await (const _piece of $.process.spawn({ argv, input: stdin })) {
+          // drained only: the script writes nothing worth reading
+        }
+      })().catch(() => undefined)
+    } else if (mode === 'await') {
+      await $.process.run(argv, { stdin, timeoutMs: APPEND_AWAIT_CAP_MS }).catch(() => undefined)
+    } else {
+      void $.process.run(argv, { stdin, timeoutMs: APPEND_TIMEOUT_MS }).catch(() => undefined)
+    }
+  } catch {
+    // a log failure must not break a hook
+  }
+}
+
 export const register: Register = (on, options) => {
   const isPerProject = options.scope === 'per-project'
 
@@ -472,25 +527,36 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: /^mcp__mnemosyne__memory_/ }, async ($, e) => {
     const tool = e.tool.replace('mcp__mnemosyne__', '')
     const input = e as unknown as Record<string, unknown>
-    try {
-      if (tool === 'memory_update') {
-        const refused = updateArgs(input)
-        if (typeof refused === 'string') return { deny: `Mnemosyne: ${refused}` }
+    // A row is changed or deleted as its owner: a global fact from another project names its own.
+    const ownsRow = tool === 'memory_forget' || tool === 'memory_update'
+    const as = ownsRow && typeof input.owner === 'string' && input.owner ? input.owner : undefined
+    // A memory_* name outside the five is not a memory call: not logged.
+    const action = TOOL_ACTIONS[tool]
+    const answer = await (async (): Promise<{ result: string; reply: string } | { deny: string }> => {
+      try {
+        if (tool === 'memory_update') {
+          const refused = updateArgs(input)
+          if (typeof refused === 'string') return { deny: `Mnemosyne: ${refused}` }
+        }
+        if (!(await isInstalled($, options))) {
+          await paths($, options) // a bad HOME or memoryDir says so rather than "not installed"
+          return { deny: NOT_INSTALLED }
+        }
+        if (tool === 'memory_update' && !(await isCurrent($, options))) return { deny: NOT_CURRENT }
+        const [name, args] = engineArgs(tool, input)
+        const text = await call($, options, name, args, as)
+        return { reply: text, result: name === 'mnemopi_recall' ? JSON.stringify(compact(text)) : name === 'mnemopi_stats' ? mnemosyneStats(text) : text }
+      } catch (err) {
+        return { deny: `Mnemosyne: ${(err as Error).message}` }
       }
-      if (!(await isInstalled($, options))) {
-        await paths($, options) // a bad HOME or memoryDir says so rather than "not installed"
-        return { deny: NOT_INSTALLED }
-      }
-      if (tool === 'memory_update' && !(await isCurrent($, options))) return { deny: NOT_CURRENT }
-      const [name, args] = engineArgs(tool, input)
-      // A row is changed or deleted as its owner: a global fact from another project names its own.
-      const ownsRow = tool === 'memory_forget' || tool === 'memory_update'
-      const as = ownsRow && typeof input.owner === 'string' && input.owner ? input.owner : undefined
-      const text = await call($, options, name, args, as)
-      return { result: name === 'mnemopi_recall' ? JSON.stringify(compact(text)) : name === 'mnemopi_stats' ? mnemosyneStats(text) : text }
-    } catch (err) {
-      return { deny: `Mnemosyne: ${(err as Error).message}` }
+    })()
+    if (action !== undefined) {
+      const outcome = 'deny' in answer ? { ok: false, error: answer.deny } : callOutcome(action, input, answer.reply)
+      // Tags as the engine gets them, cleaned, as the proxy logs them.
+      const shown = Array.isArray(input.tags) ? { ...input, tags: cleanTags(input.tags) } : input
+      await record($, options, [{ action, origin: 'tool', owner: as, text: callText(action, shown), ...outcome }])
     }
+    return 'deny' in answer ? { deny: answer.deny } : { result: answer.result }
   }).catch(() => ({ deny: 'Mnemosyne: its tool failed.' }))
 
   const rememberTerms = terms(options.rememberTerms)
@@ -510,6 +576,7 @@ export const register: Register = (on, options) => {
       const session = await $.session.id()
       await update($, recalled, ({ [session]: _, ...rest }) => rest)
       activity($, options, 'conversation compacted; will recall again on the next prompt', 'recalls again next prompt')
+      await record($, options, [{ action: 'rearm', origin: 'hook', text: 'will recall again on the next prompt', ok: true }])
     }
     return result
   }).catch((_$, e, next) => next(e))
@@ -530,20 +597,27 @@ export const register: Register = (on, options) => {
     if (isFirst) await update($, recalled, seen => ({ ...seen, [session]: true as const }))
 
     const context: string[] = []
+    const logged: Activity[] = []
     if (remember) {
       activity($, options, 'remember term matched; asking Claude to save it')
+      // The save itself is Claude's memory_remember call, logged with origin tool.
+      logged.push({ action: 'remember', origin: 'trigger', text: remember, ok: true })
       context.push(
         `The user invoked a Mnemosyne remember trigger. Call mcp__mnemosyne__memory_remember exactly once with a self-contained version of:\n${remember}\nIf it is a secret or credential, do not save it; say so.`,
       )
     }
+    // A recall term is the reason for the recall, even on a first prompt.
+    const origin = asked !== undefined ? 'trigger' : 'hook'
+    let queries: string[] = []
     try {
       // The engine drops a row matching under ~22% of the query's words, so a long
       // prompt recalls nothing as one query: ask per sentence, in one process.
       const sentences = (text: string) => text.split(/(?<=[.?!])\s+|\n+/).map(t => t.trim()).filter(Boolean)
       // A recall term's query is the first sentence after it: "recall: heron? and then…" asks for heron.
       const topic = asked ? sentences(asked)[0]?.replace(/[?.!]+$/, '') : undefined
-      const queries = [...(topic ? [topic] : []), ...(isFirst ? sentences(e.text).slice(0, 4) : [])]
-      const answers = queries.length === 0 ? [] : await runAll($, options, [...new Set(queries)].map(query => ['mnemopi_recall', { query: query.slice(0, 300), limit: RECALL_LIMIT }] as const))
+      // Each query as the engine gets it: at most 300 characters.
+      queries = [...new Set([...(topic ? [topic] : []), ...(isFirst ? sentences(e.text).slice(0, 4) : [])])].map(query => query.slice(0, 300))
+      const answers = queries.length === 0 ? [] : await runAll($, options, queries.map(query => ['mnemopi_recall', { query, limit: RECALL_LIMIT }] as const))
       const byId = new Map<string, { id: string; owner: string; content: string }>()
       for (const answer of answers) if (typeof answer === 'string') for (const row of compact(answer)) byId.set(row.id, row)
       const found = [...byId.values()].slice(0, RECALL_LIMIT)
@@ -551,7 +625,12 @@ export const register: Register = (on, options) => {
       const noun = n === 1 ? 'memory' : 'memories'
       const where = asked !== undefined ? `"${topic ?? asked}"` : 'this prompt'
       // runAll hands back an Error per failed request: all of them failing is a failure, not "nothing".
-      if (answers.length > 0 && answers.every(answer => answer instanceof Error)) activity($, options, 'recall failed')
+      const failed = answers.length > 0 && answers.every(answer => answer instanceof Error)
+      if (queries.length > 0) {
+        const error = failed ? (answers.find(answer => answer instanceof Error) as Error).message : undefined
+        logged.push({ action: 'recall', origin, text: queries.join(' | '), ids: found.map(r => r.id), count: n, ok: !failed, error })
+      }
+      if (failed) activity($, options, 'recall failed')
       else if (asked !== undefined) activity($, options, n > 0 ? `recalled ${n} ${noun} for ${where}` : `found nothing for ${where}`, n > 0 ? `recalled ${n}` : 'found nothing')
       else if (isFirst) activity($, options, n > 0 ? `recalled ${n} ${noun} for ${where}` : `recall found nothing for ${where}`, n > 0 ? `recalled ${n}` : 'found nothing')
       if (found.length > 0) {
@@ -560,10 +639,12 @@ export const register: Register = (on, options) => {
       } else if (asked !== undefined) {
         context.push(`Mnemosyne recall for "${topic ?? asked}" found nothing.`)
       }
-    } catch {
+    } catch (err) {
       // recall is best effort; the prompt goes on without it
       activity($, options, 'recall failed')
+      logged.push({ action: 'recall', origin, text: queries.join(' | '), ok: false, error: (err as Error)?.message })
     }
+    await record($, options, logged)
     return context.length > 0 ? next({ ...e, context: [...(e.context ?? []), ...context] }) : next(e)
   }).catch((_$, e, next) => next(e))
 }

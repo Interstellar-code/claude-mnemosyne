@@ -39,6 +39,16 @@
       "default": "on",
       "description": "on: a dim line in the conversation each time Mnemosyne recalls memories, or will recall again after a compaction, plus a status line under the prompt. status: the status line only. off: silent."
     },
+    "activityLog": {
+      "title": "Activity log",
+      "type": "string",
+      "options": [
+        "on",
+        "off"
+      ],
+      "default": "on",
+      "description": "on: each memory call (recall, remember, update, forget, stats, and calls from other MCP clients) adds one line to ~/.claude/mnemosyne/activity.jsonl, owner-only, capped at 1 MB with one backup, secrets masked. off: nothing is written."
+    },
     "memoryDir": {
       "title": "Memory store",
       "type": "string",

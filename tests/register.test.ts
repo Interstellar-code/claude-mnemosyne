@@ -5,25 +5,44 @@ import { afterTerm, ENGINE_BUILD, ENGINE_VERSION } from '../hooks/register'
 import { ENGINE_BUILD as BUILD_FILE, INSTALL_CHECK_TIMEOUT_MS, INSTALL_STEP_TIMEOUT_MS, SETUP_TIMEOUT_MS } from '../hooks/engine-build'
 import { engineTool, mnemosyneStats, publicTool } from '../hooks/surface'
 
-type Run = { argv: readonly string[]; init?: ProcessRunInit }
+type Run = { argv: readonly string[]; init?: ProcessRunInit; via?: 'run' | 'spawn' }
 
 const INSTALLED_PACKAGE = '/home/u/.claude/mnemosyne/engine/node_modules/@oh-my-pi/pi-mnemopi/package.json'
 
+const ACTIVITY_LOG = '/home/u/.claude/mnemosyne/activity.jsonl'
+const isAppend = (argv: readonly string[]) => (argv[1] ?? '').endsWith('/bin/activity.ts')
+
 // The world beneath the plugin: an installed engine of build `build` whose
-// every call answers `reply`, and a record of each process run.
-function world(on: On, reply: string, isInstalled = true, exitCode = 0, build: string = ENGINE_BUILD) {
-  const runs: Run[] = []
-  on('env.get', () => ({ value: '/home/u' }))
+// every call answers `reply`, and a record of each process run. Activity log
+// appends (`bun bin/activity.ts <log>`, by $.process.spawn or $.process.run) are
+// kept apart, in `runs.appends`, with `via` and the lines as `init.stdin`;
+// `extra.append` makes each append hang forever or throw, `extra.env` sets variables.
+type Extra = { append?: 'ok' | 'hang' | 'throw'; env?: Record<string, string> }
+function world(on: On, reply: string, isInstalled = true, exitCode = 0, build: string = ENGINE_BUILD, extra: Extra = {}) {
+  const runs: Run[] & { appends: Run[] } = Object.assign([] as Run[], { appends: [] as Run[] })
+  on('env.get', (_$, e) => ({ value: extra.env?.[(e as { name: string }).name] ?? '/home/u' }))
   on('fs.stat', () => (isInstalled ? { value: { kind: 'file' } } : { deny: 'ENOENT' }) as never)
   on('fs.read', (_$, e) => (e.path === INSTALLED_PACKAGE && isInstalled ? { value: JSON.stringify({ name: '@oh-my-pi/pi-mnemopi', version: build }) } : { deny: 'ENOENT' }) as never)
   on('session.id', () => ({ value: 's1' }))
   on('session.repo', () => ({ value: { root: '/work/My Repo' } }) as never)
   on('process.run', (_$, e) => {
+    if (isAppend(e.argv)) {
+      runs.appends.push({ ...e, via: 'run' })
+      if (extra.append === 'hang') return new Promise(() => {}) as never
+      if (extra.append === 'throw') throw new Error('append failed')
+      return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
+    }
     runs.push(e)
     const ids = (e.init?.stdin ?? '').split('\n').filter(Boolean).map(line => JSON.parse(line).id)
     const stdout = exitCode !== 0 ? '' : ids.map(id => `${JSON.stringify({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: reply }] } })}\n`).join('')
     return { value: { exitCode, stdout, stderr: '' } } as never
   })
+  on('process.spawn', async function* (_$: unknown, e: { argv: readonly string[]; input?: string }) {
+    runs.appends.push({ argv: e.argv, init: { stdin: e.input }, via: 'spawn' })
+    if (extra.append === 'hang') await new Promise(() => {})
+    if (extra.append === 'throw') throw new Error('append failed')
+    return { value: { code: 0, signal: null } }
+  } as never)
   return runs
 }
 
@@ -551,3 +570,250 @@ test('setup gives the installer the host limit, and the installer\'s own limits 
   expect(install?.init?.timeoutMs).toBe(SETUP_TIMEOUT_MS)
   expect(INSTALL_STEP_TIMEOUT_MS + INSTALL_CHECK_TIMEOUT_MS).toBeLessThanOrEqual(SETUP_TIMEOUT_MS - 30_000)
 })
+
+// LOG.2 / LOG.3 / LOG.4: every memory call hands one activity line to `bun bin/activity.ts <log>`.
+
+/** The activity lines each append carried, one array per append. */
+const appended = (runs: { appends: Run[] }) => runs.appends.map(run => (run.init?.stdin ?? '').split('\n').filter(Boolean).map(line => JSON.parse(line)))
+const lines = (runs: { appends: Run[] }) => appended(runs).flat()
+
+const RECALL_REPLY = JSON.stringify({ results: [{ id: 'm1', session_id: 'global', content: 'use pnpm' }, { id: 'm2', session_id: 'global', content: 'use bun' }] })
+
+test('the first-prompt recall logs action recall, origin hook, its queries and result ids, through one detached spawn (the default)', async ($, on) => {
+  const runs = world(on, RECALL_REPLY)
+  on('prompt.submit', (_$, e) => ({ text: e.text, context: e.context }))
+  await $.prompt.submit({ text: 'How do I install deps? Then run the build.' } as never)
+
+  expect(runs.appends.length).toBe(1)
+  const append = runs.appends[0]!
+  expect(append.via).toBe('spawn')
+  expect(append.argv[0]).toBe('bun')
+  expect(append.argv[1]?.endsWith('/bin/activity.ts')).toBe(true)
+  expect(append.argv[2]).toBe(ACTIVITY_LOG)
+  const [line] = lines(runs)
+  expect(line).toMatchObject({ action: 'recall', origin: 'hook', owner: 'global', text: 'How do I install deps? | Then run the build.', ids: ['m1', 'm2'], count: 2, ok: true })
+  expect(line.error).toBeUndefined()
+  expect(Number.isNaN(Date.parse(line.t))).toBe(false)
+})
+
+test('a recall term and a remember term log origin trigger', async ($, on) => {
+  const runs = world(on, RECALL_REPLY)
+  on('prompt.submit', (_$, e) => ({ text: e.text, context: e.context }))
+  await $.prompt.submit({ text: 'hello', origin: { kind: 'composer' } } as never) // first prompt: hook
+  await $.prompt.submit({ text: 'recall: pnpm? and more', origin: { kind: 'composer' } } as never)
+  await $.prompt.submit({ text: 'remember that we deploy on Fridays', origin: { kind: 'composer' } } as never)
+
+  expect(lines(runs).map(l => [l.action, l.origin, l.text])).toEqual([
+    ['recall', 'hook', 'hello'],
+    ['recall', 'trigger', 'pnpm'],
+    ['remember', 'trigger', 'we deploy on Fridays'],
+  ])
+})
+
+test('a recall the engine fails logs ok false with the error', async ($, on) => {
+  const runs = world(on, RECALL_REPLY, true, 1)
+  on('prompt.submit', (_$, e) => ({ text: e.text, context: e.context }))
+  await $.prompt.submit({ text: 'How do I install deps?' } as never)
+  expect(lines(runs)).toMatchObject([{ action: 'recall', origin: 'hook', ok: false, error: 'engine exited 1:', ids: [], count: 0 }])
+})
+
+test('each of the five tools logs origin tool, with its owner, ids and count', { options: { scope: 'per-project' } }, async ($, on) => {
+  const runs = world(on, RECALL_REPLY)
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_recall', query: 'pnpm' })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'we use pnpm' })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1', owner: 'project-Other-abc', tags: ['Build', 'CI'] })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_forget', memory_id: 'm2', owner: 'project-Other-abc' })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_stats' })
+
+  const got = lines(runs)
+  expect(got.map(l => [l.action, l.origin, l.ok])).toEqual([
+    ['recall', 'tool', true],
+    ['remember', 'tool', true],
+    ['update', 'tool', true],
+    ['forget', 'tool', true],
+    ['stats', 'tool', true],
+  ])
+  expect(got[0]).toMatchObject({ text: 'pnpm', ids: ['m1', 'm2'], count: 2 })
+  expect(got[0].owner).toMatch(/^project-My-Repo-/)
+  expect(got[1]).toMatchObject({ text: 'we use pnpm' })
+  // tags as the engine gets them: cleaned, as the proxy logs them
+  expect(got[2]).toMatchObject({ owner: 'project-Other-abc', ids: ['m1'], count: 1, text: 'tags: build, ci' })
+  expect(got[3]).toMatchObject({ owner: 'project-Other-abc', ids: ['m2'], count: 1, text: '' })
+})
+
+test('a tool call the engine fails logs ok false and the error text', async ($, on) => {
+  const failing = world(on, '{}', true, 1)
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'fact' })
+  expect(ran.deny).toContain('engine exited 1')
+  expect(lines(failing)).toMatchObject([{ action: 'remember', origin: 'tool', ok: false, error: 'Mnemosyne: engine exited 1:' }])
+})
+
+test('an engine reply with an error, or not_found, logs ok false while the tool result is unchanged', async ($, on) => {
+  const runs = world(on, '{"status":"not_found","memory_id":"m9","bank":"default"}')
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_forget', memory_id: 'm9' })
+  expect(ran.result).toBe('{"status":"not_found","memory_id":"m9","bank":"default"}')
+  expect(lines(runs)).toMatchObject([{ action: 'forget', ok: false, error: 'not_found' }])
+})
+
+test('a refused tool call logs ok false with the refusal', async ($, on) => {
+  const runs = world(on, '{}', true, 0, '18.12.3')
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1', tags: ['a'] })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1' })
+  const got = lines(runs)
+  expect(got.map(l => [l.action, l.origin, l.ok])).toEqual([
+    ['update', 'tool', false],
+    ['update', 'tool', false],
+  ])
+  expect(got[0].error).toContain('Mnemosyne Memory engine is out of date')
+  expect(got[1].error).toBe('Mnemosyne: memory_update needs content, importance or tags.')
+})
+
+test('a compaction logs action rearm, origin hook', async ($, on) => {
+  const runs = world(on, RECALL_REPLY)
+  on('prompt.submit', (_$, e) => ({ text: e.text, context: e.context }))
+  on('session.compact', () => ({ messages: [summary] }))
+  await $.prompt.submit({ text: 'How do I install deps?' } as never)
+  await $.session.compact({ trigger: 'manual', messages: [summary] } as never)
+  expect(lines(runs).at(-1)).toMatchObject({ action: 'rearm', origin: 'hook', owner: 'global', ok: true })
+})
+
+const SECRETS = [
+  'sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz012345',
+  'ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
+  'AKIAIOSFODNN7EXAMPLE',
+  'hunter2-Very-Secret',
+  '0123456789abcdef0123456789abcdef01234567',
+  'QmFzZTY0U2VjcmV0VmFsdWVUaGF0SXNMb25nRW5vdWdo',
+]
+
+test('text is redacted, then cut to 200 characters: no credential-shaped string reaches the line', async ($, on) => {
+  const runs = world(on, '{"status":"stored","memory_id":"m7"}')
+  const content = `deploy key ${SECRETS[0]} and token ${SECRETS[1]}, aws ${SECRETS[2]}, password=${SECRETS[3]}, sha ${SECRETS[4]}, blob ${SECRETS[5]}. ${'tail '.repeat(80)}`
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content })
+
+  const line = runs.appends[0]!.init!.stdin!
+  for (const secret of SECRETS) expect(line).not.toContain(secret)
+  const [entry] = lines(runs)
+  expect(entry.text).toContain('[redacted]')
+  expect(entry.text.startsWith('deploy key [redacted] and token [redacted], aws [redacted], password=[redacted]')).toBe(true)
+  expect(entry.text.length).toBeLessThanOrEqual(200)
+})
+
+// The default (spawn) and the run fallback: neither ever holds up or changes a hook.
+for (const mode of ['spawn', 'run'] as const) {
+  test(`${mode}: an append that never resolves leaves every hook result unchanged`, async ($, on) => {
+    const runs = world(on, RECALL_REPLY, true, 0, ENGINE_BUILD, { append: 'hang', env: { MNEMOSYNE_ACTIVITY_APPEND: mode } })
+    const seen: (readonly string[] | undefined)[] = []
+    on('prompt.submit', (_$, e) => {
+      seen.push(e.context)
+      return { text: e.text, context: e.context }
+    })
+    on('session.compact', () => ({ messages: [summary] }))
+
+    await $.prompt.submit({ text: 'How do I install deps?' } as never)
+    const recall = await $.tool.call({ tool: 'mcp__mnemosyne__memory_recall', query: 'pnpm' })
+    const compacted = await $.session.compact({ trigger: 'manual', messages: [summary] } as never)
+
+    expect(seen[0]?.at(-1)).toContain('- [m1 owner=global] use pnpm')
+    expect(JSON.parse(recall.result as string).map((r: { id: string }) => r.id)).toEqual(['m1', 'm2'])
+    expect(compacted.messages).toEqual([summary])
+    expect(runs.appends.map(a => a.via)).toEqual([mode, mode, mode]) // each append was started, none waited on
+  })
+
+  test(`${mode}: an append that throws leaves every hook result unchanged`, async ($, on) => {
+    const runs = world(on, RECALL_REPLY, true, 0, ENGINE_BUILD, { append: 'throw', env: { MNEMOSYNE_ACTIVITY_APPEND: mode } })
+    const seen: (readonly string[] | undefined)[] = []
+    on('prompt.submit', (_$, e) => {
+      seen.push(e.context)
+      return { text: e.text, context: e.context }
+    })
+    await $.prompt.submit({ text: 'How do I install deps?' } as never)
+    const recall = await $.tool.call({ tool: 'mcp__mnemosyne__memory_recall', query: 'pnpm' })
+
+    expect(seen[0]?.at(-1)).toContain('- [m1 owner=global] use pnpm')
+    expect(JSON.parse(recall.result as string).map((r: { id: string }) => r.id)).toEqual(['m1', 'm2'])
+    expect(recall.deny).toBeUndefined()
+    expect(runs.appends.map(a => a.via)).toEqual([mode, mode])
+  })
+}
+
+test('activityLog off: no hook starts an append', { options: { activityLog: 'off' } }, async ($, on) => {
+  const runs = world(on, RECALL_REPLY)
+  on('prompt.submit', (_$, e) => ({ text: e.text, context: e.context }))
+  on('session.compact', () => ({ messages: [summary] }))
+  await $.prompt.submit({ text: 'How do I install deps?' } as never)
+  await $.prompt.submit({ text: 'recall: pnpm', origin: { kind: 'composer' } } as never)
+  await $.prompt.submit({ text: 'remember that x', origin: { kind: 'composer' } } as never)
+  for (const tool of ['memory_recall', 'memory_remember', 'memory_update', 'memory_forget', 'memory_stats']) {
+    await $.tool.call({ tool: `mcp__mnemosyne__${tool}`, query: 'q', content: 'c', memory_id: 'm1' })
+  }
+  await $.session.compact({ trigger: 'manual', messages: [summary] } as never)
+
+  expect(runs.length).toBeGreaterThan(0) // the memory calls themselves still ran
+  expect(runs.appends).toEqual([])
+})
+
+test('MNEMOSYNE_ACTIVITY_APPEND=await awaits the append, capped at 1 s', async ($, on) => {
+  const runs = world(on, '{"status":"stored","memory_id":"m7"}', true, 0, ENGINE_BUILD, { env: { MNEMOSYNE_ACTIVITY_APPEND: 'await' } })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'fact' })
+  expect(runs.appends.length).toBe(1)
+  expect(runs.appends[0]!.init?.timeoutMs).toBe(1000)
+})
+
+test('MNEMOSYNE_ACTIVITY_APPEND=run starts an un-awaited $.process.run with a 5 s timeout instead', async ($, on) => {
+  const runs = world(on, '{"status":"stored","memory_id":"m7"}', true, 0, ENGINE_BUILD, { env: { MNEMOSYNE_ACTIVITY_APPEND: 'run' } })
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'fact' })
+
+  expect(ran.result).toBe('{"status":"stored","memory_id":"m7"}')
+  expect(runs.appends.map(a => a.via)).toEqual(['run'])
+  expect(runs.appends[0]!.argv[2]).toBe(ACTIVITY_LOG)
+  expect(runs.appends[0]!.init?.timeoutMs).toBe(5000)
+  expect(lines(runs)).toMatchObject([{ action: 'remember', origin: 'tool', ids: ['m7'], ok: true }])
+})
+
+test('a memory_* tool outside the five is not logged', async ($, on) => {
+  const runs = world(on, '{}')
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_sleep' })
+  expect(runs.appends).toEqual([])
+})
+
+// LOG.3.a1 / LOG.4.a2: the wrapper hands the proxy the log path, or nothing when off.
+
+async function wrapperText($: Engine, on: On) {
+  const runs = world(on, '{}')
+  on('command.register', () => ({ value: {} }) as never)
+  on('tool.register', () => ({ value: {} }) as never)
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/w', surface: null, isInteractive: false } as never)
+  return runs.find(r => r.argv[2]?.includes('writeFileSync'))?.argv[4] ?? ''
+}
+
+test('the sh wrapper exports MNEMOSYNE_ACTIVITY_LOG as <root>/activity.jsonl', { options: { externalMcp: true } }, async ($, on) => {
+  expect(await wrapperText($, on)).toContain(`export MNEMOSYNE_ACTIVITY_LOG='${ACTIVITY_LOG}'\n`)
+})
+
+test('activityLog off: the wrapper\'s MNEMOSYNE_ACTIVITY_LOG is empty', { options: { externalMcp: true, activityLog: 'off' } }, async ($, on) => {
+  const text = await wrapperText($, on)
+  expect(text).toContain('export MNEMOSYNE_ACTIVITY_LOG=\n')
+  expect(text).not.toContain('activity.jsonl')
+})
+
+for (const activityLog of ['on', 'off']) {
+  test(`on Windows the cmd wrapper sets MNEMOSYNE_ACTIVITY_LOG (activityLog ${activityLog})`, { options: { externalMcp: true, activityLog } }, async ($, on) => {
+    const runs: { argv: readonly string[] }[] = []
+    on('env.get', (_$, e) => ({ value: ({ OS: 'Windows_NT', USERPROFILE: 'C:\\Users\\u' } as Record<string, string>)[(e as { name: string }).name] }))
+    on('fs.stat', () => ({ value: { kind: 'file' } }) as never)
+    on('process.run', (_$, e) => {
+      runs.push(e)
+      return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
+    })
+    on('command.register', () => ({ value: {} }) as never)
+    on('tool.register', () => ({ value: {} }) as never)
+    on('session.start', (_$, e) => ({ cwd: e.cwd }))
+    await $.session.start({ cwd: 'C:\\w', surface: null, isInteractive: false } as never)
+
+    const text = runs.find(r => r.argv[2]?.includes('writeFileSync'))?.argv[4] ?? ''
+    expect(text).toContain(activityLog === 'on' ? 'set "MNEMOSYNE_ACTIVITY_LOG=C:/Users/u/.claude/mnemosyne/activity.jsonl"\r\n' : 'set "MNEMOSYNE_ACTIVITY_LOG="\r\n')
+  })
+}

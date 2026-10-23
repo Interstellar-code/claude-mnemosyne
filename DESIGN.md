@@ -193,6 +193,89 @@ of the plugin:
   can take minutes and needs the network). The four older tools keep working
   on a stale engine; `memory_update` refuses, and so does the proxy (§5.8).
 
+### 3.2 The activity log: activity.jsonl (v0.5.0)
+
+Every memory call the plugin makes, and every call through the external MCP
+proxy, adds one JSON line to `~/.claude/mnemosyne/activity.jsonl` (`paths()`
+gives it as `activity`, `<root>/activity.jsonl`). The dashboard reads it.
+
+- A line: `t` (ISO time), `action` (recall, remember, update, forget, stats,
+  rearm), `origin` (hook = first-prompt recall or compaction, trigger = a
+  recall or remember term, tool = Claude's tool call, external = the proxy;
+  ui and backfill come later), `owner`, `text`, `ids`, `count`, `ok`, and
+  `error` only when not ok. `ids` holds at most 50; `count` is the full
+  number. `hooks/activity-log.ts` builds it and imports nothing, so the hooks,
+  the proxy and the server build the same line.
+- `text` is the query (as the engine gets it, 300 characters at most), the
+  fact, or what an update sets (`tags: a, b`, cleaned as the engine gets
+  them). It is cut to 2000 code points (dropping the cut word, so no half
+  secret is left), then secret shapes are replaced by `[redacted]`, then it is
+  cut to 200 code points. Redaction is pattern-based, so a secret of an
+  unknown shape, or a short unnamed one, can get through. It covers API keys
+  and tokens by prefix, JWTs, private key blocks, Slack and Discord webhook
+  URLs, `scheme://user:password@` (spaces in the password too), `password=`,
+  `token:` or `"api_key": "…"` values (quoted values up to the closing
+  quote), `password is …` phrases, Bearer values, hex runs of 32+, and
+  letter-and-digit runs of 32+ that are not paths (a run with `+` or a
+  trailing `=` counts as base64 whatever its slashes). Every pattern that can
+  backtrack is bounded: 100 KB and 200 KB inputs redact in a few ms (kit
+  test, under 200 ms). A forget logs only the id, in `ids`. A remember term
+  logs a `remember`/`trigger` line, and Claude's save that follows logs its
+  own `remember`/`tool` line. A `memory_*` tool outside the five is not
+  logged.
+- The writer is `bin/activity.ts`: `appendActivity(path, lines)` for Bun code,
+  or `bun bin/activity.ts <path>` with the lines on stdin. It writes only a
+  file whose name ends in `.jsonl`. It creates the folder 0700 and sets the
+  file to 0600 at every open, and the backup too (no chmod on Windows), writes
+  the batch in one `O_APPEND` write, and drops anything that is not one JSON
+  object. Past 1 MB it renames the file to `activity.jsonl.1` (one backup);
+  only a writer that creates `activity.jsonl.lock` with `O_EXCL` rotates, and
+  it checks the size again under the lock, so two writers rotate once. A lock
+  older than 10 s is taken over: the taker first renames it to a name of its
+  own, so of two takers only one rename succeeds; if what it renamed turns out
+  fresh (another writer had just taken the lock), it links it back and does
+  not rotate. A third writer arriving inside that microsecond gap could still
+  hold a lock beside another; the size check under the lock keeps even that
+  to one rotation unless both check before either renames. That race is not
+  tested (it cannot be forced from one process). A line that races a rotation
+  lands in `.1`. It never throws, and the script always exits 0 and stops
+  itself after 5 s.
+- A hook cannot append to a file (`$.fs` has no append, mode or rename), so
+  each memory event starts one short Bun process for its lines. The hook waits
+  for the paths only (host calls), never for the write; an append that hangs or
+  fails leaves the hook's result unchanged (kit tests for both). Measured on an
+  Apple M4 with Bun 1.4.3 (40 runs after 3 warm-ups, one line on stdin): one
+  append process takes 11 ms wall time at the median (8 ms min, 12–21 ms p90).
+  It runs beside the hook, so a prompt or tool call does not wait for it.
+- How the hook hands the lines over is `APPEND_MODES` in `hooks/register.ts`:
+  - `spawn` (default): a `$.process.spawn` loop drained in a detached task;
+    the script's own 5 s cap bounds it.
+  - `run`: `$.process.run` with a 5 s timeout, not awaited.
+  - `await`: `$.process.run` awaited, capped at 1 s (the hook waits ~11 ms).
+  `spawn` is the default (orchestrator decision, 2026-10-23, review r1 MED 2)
+  because the plugin API's types document that a spawned child's loop runs on
+  after the hook returns ("nothing else does, a hook's return included"),
+  while they say nothing either way about an un-awaited `run`. The live check
+  (plan LOG.5) has not run yet; it confirms the choice. Caveat: `session.end`
+  has a 1.5 s bound and aborts any `$` call still in flight, and leaving the
+  loop or the module unloading kills a spawned child, so an append started in
+  the last moments of a session can be lost. The hooks that log (prompt, tool
+  call, compaction) do not run at session end, so this is a narrow window. To
+  switch, start Claude Code with `MNEMOSYNE_ACTIVITY_APPEND=run` (or `await`)
+  in its environment; to change the default, edit `DEFAULT_APPEND` in
+  `hooks/register.ts` and record the result here.
+- The proxy imports `appendActivity` and writes synchronously, so every line is
+  on disk before it exits. It keeps the calls it sent by JSON-RPC id and writes
+  the line when the reply comes back (ok, ids and count read from it); a call
+  it refuses (stale engine, bad tags) is logged at once with `ok: false`; a
+  tool outside the five is not a memory call and is not logged; a call the
+  engine never answered is logged as failed at exit. The wrapper passes the
+  path as `MNEMOSYNE_ACTIVITY_LOG`, empty when the log is off; a log failure
+  never changes what the client receives (Bun test).
+- The `activityLog` setting (`on` by default, or `off`) turns it all off: the
+  hooks read it on each call, and the wrapper is rewritten at session start,
+  so the proxy follows from the next session.
+
 ## 4. Why a plugin, and why mod tools rather than an MCP server
 
 A skill cannot do this. A skill loads when invoked or when the model decides it

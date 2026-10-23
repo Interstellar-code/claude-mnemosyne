@@ -4,7 +4,7 @@
 // engine installed by bin/install-engine.ts into a temp folder, and a temp store.
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { Database } from 'bun:sqlite'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { cliOf } from '../../bin/install-engine'
 import { ENGINE_BUILD } from '../../hooks/engine-build'
@@ -12,10 +12,10 @@ import { engineEnv, ROOT, runInstaller, tempDir, toolCall } from './helpers'
 
 const PROXY = join(ROOT, 'bin', 'mcp-proxy.ts')
 
-/** One proxy process: sends `messages`, closes stdin, returns its replies by id. */
-async function proxy(cli: string, store: string, messages: readonly object[], owner = 'global') {
+/** One proxy process: sends `messages`, closes stdin, returns its replies by id. `log` is MNEMOSYNE_ACTIVITY_LOG. */
+async function proxy(cli: string, store: string, messages: readonly object[], owner = 'global', log = '') {
   const child = Bun.spawn([process.execPath, PROXY], {
-    env: { ...(process.env as Record<string, string>), ...engineEnv(store, owner), MNEMOSYNE_CLI: cli },
+    env: { ...(process.env as Record<string, string>), ...engineEnv(store, owner), MNEMOSYNE_CLI: cli, MNEMOSYNE_ACTIVITY_LOG: log },
     stdin: 'pipe',
     stdout: 'pipe',
     stderr: 'pipe',
@@ -156,5 +156,104 @@ describe('the proxy against a real installed engine', () => {
     } finally {
       writeFileSync(pkgPath, original)
     }
+  })
+  // LOG.3: each call through the proxy is one activity line, origin external.
+
+  const logLines = (path: string) => (existsSync(path) ? readFileSync(path, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line)) : [])
+
+  test('each allowed tool call logs one line with origin external, the owner, and ok, ids and count from the reply', async () => {
+    const log = join(temp.dir, 'logs-1', 'activity.jsonl')
+    const owner = 'project-proxylog-1'
+    const saved = await proxy(cli, store, [toolCall(1, 'memory_remember', { content: 'the heron nests by the proxy log', tags: ['Birds'] })], owner, log)
+    const id = text(saved.get(1)).memory_id as string
+    const replies = await proxy(
+      cli,
+      store,
+      [
+        toolCall(2, 'memory_recall', { query: 'heron nests' }),
+        toolCall(3, 'memory_update', { memory_id: id, tags: ['Birds', 'Water'] }),
+        toolCall(4, 'memory_sleep', {}),
+        toolCall(5, 'memory_stats', {}),
+        toolCall(6, 'memory_forget', { memory_id: id }),
+      ],
+      owner,
+      log,
+    )
+    expect(replies.get(4).error.message).toBe('Tool not available: memory_sleep')
+
+    // the proxy has exited: every write finished before it did
+    const lines = logLines(log)
+    expect(lines.map(l => [l.action, l.origin, l.owner, l.ok])).toEqual([
+      ['remember', 'external', owner, true],
+      ['recall', 'external', owner, true],
+      ['update', 'external', owner, true],
+      ['stats', 'external', owner, true],
+      ['forget', 'external', owner, true],
+    ])
+    expect(lines[0]).toMatchObject({ text: 'the heron nests by the proxy log', ids: [id], count: 1 })
+    expect(lines[1].text).toBe('heron nests')
+    expect(lines[1].ids).toContain(id)
+    expect(lines[1].count).toBe(text(replies.get(2)).results.length)
+    expect(lines[2]).toMatchObject({ text: 'tags: birds, water', ids: [id], count: 1 })
+    expect(lines[4]).toMatchObject({ ids: [id], count: 1 })
+    for (const line of lines) expect(Number.isNaN(Date.parse(line.t))).toBe(false)
+    if (process.platform !== 'win32') expect(statSync(log).mode & 0o777).toBe(0o600)
+  })
+
+  test('a refused call, or one the engine fails, logs ok false with the error', async () => {
+    const log = join(temp.dir, 'logs-2', 'activity.jsonl')
+    await proxy(cli, store, [
+      toolCall(1, 'memory_update', { memory_id: 'missing', tags: 'not-a-list' }),
+      toolCall(2, 'memory_forget', { memory_id: 'no-such-memory' }),
+    ], 'global', log)
+    expect(logLines(log).map(l => [l.action, l.ok, l.error])).toEqual([
+      ['update', false, 'tags must be an array of strings'],
+      ['forget', false, 'not_found'],
+    ])
+  })
+
+  test('memory_update refused on a stale engine logs ok false', async () => {
+    const log = join(temp.dir, 'logs-3', 'activity.jsonl')
+    const pkgPath = join(engine, 'node_modules', '@oh-my-pi', 'pi-mnemopi', 'package.json')
+    const original = readFileSync(pkgPath, 'utf8')
+    writeFileSync(pkgPath, original.replace(`"version": "${ENGINE_BUILD}"`, '"version": "18.12.3"'))
+    try {
+      // A tag object whose toString is not a function: String() on it throws.
+      const replies = await proxy(
+        cli,
+        store,
+        [toolCall(1, 'memory_update', { memory_id: 'x', tags: ['a'] }), toolCall(2, 'memory_update', { memory_id: 'x', tags: [{ toString: 1 }, 'b'] }), toolCall(3, 'memory_stats', {})],
+        'global',
+        log,
+      )
+      // the log never breaks the proxy: every call still gets its reply (review r1 LOW 7)
+      expect(replies.get(2).error.message).toContain(`needs the Mnemosyne engine build ${ENGINE_BUILD}`)
+      expect(text(replies.get(3)).status).toBe('ok')
+    } finally {
+      writeFileSync(pkgPath, original)
+    }
+    const [line, hostile] = logLines(log)
+    expect(line).toMatchObject({ action: 'update', origin: 'external', ok: false, text: 'tags: a' })
+    expect(line.error).toContain(`needs the Mnemosyne engine build ${ENGINE_BUILD}`)
+    expect(hostile).toMatchObject({ action: 'update', ok: false, text: 'tags: b' })
+  })
+
+  test('a log that cannot be written never changes what the client receives', async () => {
+    const blocker = join(temp.dir, 'not-a-folder')
+    writeFileSync(blocker, 'x')
+    const messages = [
+      { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+      toolCall(2, 'memory_stats', {}),
+      toolCall(3, 'memory_forget', { memory_id: 'no-such-memory' }),
+      toolCall(4, 'memory_update', { memory_id: 'x', tags: 'bad' }),
+      toolCall(5, 'memory_sleep', {}),
+    ]
+    const off = await proxy(cli, store, messages)
+    const broken = await proxy(cli, store, messages, 'global', join(blocker, 'activity.jsonl'))
+    const working = await proxy(cli, store, messages, 'global', join(temp.dir, 'logs-4', 'activity.jsonl'))
+    const json = (replies: Map<unknown, unknown>) => JSON.stringify([...replies.entries()].sort())
+    expect(json(broken)).toBe(json(off))
+    expect(json(working)).toBe(json(off))
+    expect(logLines(join(temp.dir, 'logs-4', 'activity.jsonl')).length).toBe(3)
   })
 })

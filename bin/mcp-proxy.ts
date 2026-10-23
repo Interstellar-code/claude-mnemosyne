@@ -11,12 +11,17 @@
 // A client never picks a bank (it would move writes to <store>/banks/<x>) and
 // never writes metadata: only `tags`, cleaned by hooks/tags.ts, reach the
 // engine, as metadata.tags. memory_update needs this plugin's engine build.
+// Each call of the five tools is recorded in MNEMOSYNE_ACTIVITY_LOG (empty: off)
+// as one activity line with origin external, written once its reply is read.
 // Run by ~/.claude/mnemosyne/bin/mnemosyne-mcp, which sets the environment.
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { activityLine, callOutcome, callText, TOOL_ACTIONS } from '../hooks/activity-log'
+import type { ActivityAction } from '../hooks/activity-log'
 import { ENGINE_BUILD } from '../hooks/engine-build'
 import { engineTool, mnemosyneStats, publicTool } from '../hooks/surface'
 import { cleanTags } from '../hooks/tags'
+import { appendActivity } from './activity'
 
 const ALLOWED = new Set(['memory_remember', 'memory_recall', 'memory_update', 'memory_forget', 'memory_stats'])
 const TAGGED = new Set(['memory_remember', 'memory_update'])
@@ -27,7 +32,9 @@ const TAGS_PROPERTY = {
 }
 const cli = process.env.MNEMOSYNE_CLI
 if (!cli) throw new Error('MNEMOSYNE_CLI is not set: run this through mnemosyne-mcp.')
-const isGlobalOwner = (process.env.MNEMOPI_SESSION_ID ?? 'global') === 'global'
+const owner = process.env.MNEMOPI_SESSION_ID || 'global'
+const isGlobalOwner = owner === 'global'
+const activityLog = process.env.MNEMOSYNE_ACTIVITY_LOG ?? ''
 
 // The installed engine's build, from <engine>/node_modules/@oh-my-pi/pi-mnemopi/package.json.
 function installedBuild(cliPath: string) {
@@ -43,6 +50,32 @@ const engine = Bun.spawn(['bun', cli, 'mcp'], { stdin: 'pipe', stdout: 'pipe', s
 const listIds = new Set<unknown>()
 const statsIds = new Set<unknown>()
 const send = (message: unknown) => process.stdout.write(`${JSON.stringify(message)}\n`)
+
+// The calls on their way to the engine, by JSON-RPC id: what to log once the reply comes back.
+type Pending = { action: ActivityAction; text: string; args: Record<string, unknown> }
+const pending = new Map<unknown, Pending>()
+
+// One activity line, written synchronously (so it is on disk before the proxy
+// exits); appendActivity never throws, so a log failure never reaches the client.
+function log(call: Pending, outcome: { ok: boolean; ids?: readonly string[]; count?: number; error?: string }) {
+  if (!activityLog) return
+  try {
+    appendActivity(activityLog, [activityLine({ action: call.action, origin: 'external', owner, text: call.text, ...outcome })])
+  } catch {
+    // building the line failed: the client's reply is already sent and stays as it was
+  }
+}
+
+// A refused call of one of the five tools: logged now, as the engine never sees it.
+function refuse(id: unknown, action: ActivityAction | undefined, args: Record<string, unknown>, error: { code: number; message: string }) {
+  send({ jsonrpc: '2.0', id, error })
+  if (!action) return
+  try {
+    log({ action, text: callText(action, args), args }, { ok: false, error: error.message })
+  } catch {
+    // as in log(): never reaches the client
+  }
+}
 
 async function* lines(stream: ReadableStream<Uint8Array>) {
   const decoder = new TextDecoder()
@@ -71,20 +104,23 @@ void (async () => {
     if (message?.method === 'tools/list') listIds.add(message.id)
     if (message?.method === 'tools/call') {
       const name = message.params?.name
+      const raw = message.params?.arguments
+      const given: Record<string, unknown> = raw !== null && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}
+      // Tools outside the five are not memory calls and are not logged.
+      const action = ALLOWED.has(name) ? TOOL_ACTIONS[name] : undefined
       if (!ALLOWED.has(name)) {
-        send({ jsonrpc: '2.0', id: message.id, error: { code: -32601, message: `Tool not available: ${name}` } })
+        refuse(message.id, undefined, given, { code: -32601, message: `Tool not available: ${name}` })
         continue
       }
       if (name === 'memory_update' && build !== ENGINE_BUILD) {
         const reason = `memory_update needs the Mnemosyne engine build ${ENGINE_BUILD}; installed is ${build}. Run /mnemosyne-setup in Claude Code.`
-        send({ jsonrpc: '2.0', id: message.id, error: { code: -32000, message: reason } })
+        refuse(message.id, action, given, { code: -32000, message: reason })
         continue
       }
-      const raw = message.params.arguments
-      const { bank: _bank, metadata: _metadata, tags, ...args } = raw !== null && typeof raw === 'object' && !Array.isArray(raw) ? raw : ({} as Record<string, unknown>)
+      const { bank: _bank, metadata: _metadata, tags, ...args } = given
       if (TAGGED.has(name) && tags !== undefined) {
         if (!Array.isArray(tags)) {
-          send({ jsonrpc: '2.0', id: message.id, error: { code: -32602, message: 'tags must be an array of strings' } })
+          refuse(message.id, action, given, { code: -32602, message: 'tags must be an array of strings' })
           continue
         }
         const clean = cleanTags(tags)
@@ -98,6 +134,7 @@ void (async () => {
         if (typeof importance === 'number' && Number.isFinite(importance)) args.importance = Math.min(1, Math.max(0, importance))
         else delete args.importance
       }
+      if (action && message.id !== undefined) pending.set(message.id, { action, text: callText(action, { ...args, tags: Array.isArray(tags) ? cleanTags(tags) : undefined }), args: { ...args } })
       message.params.name = engineTool(name)
       message.params.arguments = args
       if (name === 'memory_stats') statsIds.add(message.id)
@@ -147,9 +184,18 @@ for await (const line of lines(engine.stdout)) {
   }
   if (message?.result?.serverInfo?.name === 'mnemopi') message.result.serverInfo.name = 'mnemosyne'
   const text = message?.result?.content?.[0]
+  const call = pending.get(message?.id)
+  pending.delete(message?.id)
   if (statsIds.delete(message?.id) && typeof text?.text === 'string') text.text = mnemosyneStats(text.text)
   send(message)
+  if (call) {
+    const failure = message?.error?.message ?? (message?.result?.isError ? String(text?.text ?? 'failed') : undefined)
+    log(call, failure !== undefined ? { ok: false, error: failure } : callOutcome(call.action, call.args, String(text?.text ?? '')))
+  }
 }
-process.exit(await engine.exited)
+// A call the engine never answered still gets its line before the proxy exits.
+const exitCode = await engine.exited
+for (const call of pending.values()) log(call, { ok: false, error: `engine exited ${exitCode} without a reply` })
+process.exit(exitCode)
 
 export {}
