@@ -253,17 +253,34 @@ async function main(argv: readonly string[]) {
     const root = pending.shift() ?? ''
     if (!root || root.startsWith('-')) throw new Error('usage: pending write|remove|list <root> [...]')
     if (action === 'write') {
-      const parsed = JSON.parse(await Bun.stdin.text()) as Partial<PendingEntry>
-      if (typeof parsed.id !== 'string' || typeof parsed.owner !== 'string' || typeof parsed.sha256 !== 'string') throw new Error('pending write needs { id, owner, sha256 } on stdin')
-      writePending(root, { id: parsed.id, owner: parsed.owner, sha256: parsed.sha256 })
+      // One entry, or a list of them (the backfill writes an owner's entries in one process).
+      const parsed = JSON.parse(await Bun.stdin.text()) as unknown
+      const list = (Array.isArray(parsed) ? parsed : [parsed]) as Partial<PendingEntry>[]
+      for (const entry of list) {
+        if (typeof entry?.id !== 'string' || typeof entry.owner !== 'string' || typeof entry.sha256 !== 'string') throw new Error('pending write needs { id, owner, sha256 } (or a list of them) on stdin')
+        // All or nothing: every entry is checked before the first file is written.
+        if (!isMemoryFileId(entry.id)) throw new Error('a pending entry needs a hex memory id')
+        if (!/^[0-9a-f]{64}$/.test(entry.sha256)) throw new Error('a pending entry needs a sha256')
+      }
+      for (const entry of list) writePending(root, { id: entry.id!, owner: entry.owner!, sha256: entry.sha256! })
     } else if (action === 'remove') {
       const id = pending[0] ?? ''
       const sha = pending[1]
       removePending(root, id, sha)
+    } else if (action === 'remove-many') {
+      // [{ id, sha256? }] on stdin: each removed as `remove` would.
+      const parsed = JSON.parse(await Bun.stdin.text()) as unknown
+      if (!Array.isArray(parsed)) throw new Error('pending remove-many needs a list of { id, sha256? } on stdin')
+      for (const entry of parsed as { id?: unknown; sha256?: unknown }[]) {
+        if (typeof entry?.id !== 'string' || (entry.sha256 !== undefined && typeof entry.sha256 !== 'string')) throw new Error('pending remove-many needs a list of { id, sha256? } on stdin')
+        // All or nothing: one bad id refuses the whole list before any file is removed.
+        if (!isMemoryFileId(entry.id)) throw new Error('a pending entry needs a hex memory id')
+      }
+      for (const entry of parsed as { id: string; sha256?: string }[]) removePending(root, entry.id, entry.sha256)
     } else if (action === 'list') {
       process.stdout.write(`${JSON.stringify(listPending(root))}\n`)
     } else {
-      throw new Error('usage: pending write <root> (JSON on stdin) | pending remove <root> <id> [sha256] | pending list <root>')
+      throw new Error('usage: pending write <root> (JSON on stdin) | pending remove <root> <id> [sha256] | pending remove-many <root> (JSON on stdin) | pending list <root>')
     }
   } else if (command === 'save') {
     if (store || rest.length !== 1 || !rest[0] || rest[0].startsWith('-')) throw new Error('usage: save <file>  (the proposals JSON on stdin)')

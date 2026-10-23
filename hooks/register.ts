@@ -34,8 +34,8 @@ import {
   tagPrompt,
 } from './backfill'
 import type { Proposal, Row } from './backfill'
-import { extractOne, reasonLine, storedCount } from './knowledge'
-import type { ExtractOutcome } from './knowledge'
+import { extractMany, extractOne, reasonLine, storedCount } from './knowledge'
+import type { ExtractOutcome, KnowledgeEngine } from './knowledge'
 import { buildRequests, engineEnv, parseReplies } from './engine'
 import type { EngineRequest } from './engine'
 import { ENGINE_BUILD, SETUP_TIMEOUT_MS } from './engine-build'
@@ -227,8 +227,12 @@ async function owner($: EngineInterface, options: PluginOptions) {
 
 // Folder work runs through Bun, which every install has: mkdir, rm and chmod
 // are not commands on Windows.
-const bunFs = ($: EngineInterface, code: string, ...args: string[]) =>
-  $.process.run(['bun', '-e', `const fs = require('fs'); const a = process.argv.slice(1); ${code}`, ...args])
+const bunFs = async ($: EngineInterface, code: string, ...args: string[]) => {
+  const ran = await $.process.run(['bun', '-e', `const fs = require('fs'); const a = process.argv.slice(1); ${code}`, ...args])
+  // run() resolves on a non-zero exit; a script that failed (a syntax error, a full disk) must not pass as done.
+  if (ran.exitCode !== 0) throw new Error(`bun -e failed (exit ${ran.exitCode}): ${ran.stderr.trim().slice(0, 300)}`)
+  return ran
+}
 
 // Single-quoted for sh: the store path comes from settings and may hold anything.
 const shellQuote = (text: string) => `'${text.replace(/'/g, `'\\''`)}'`
@@ -471,7 +475,8 @@ const MEMORIES_TIMEOUT_MS = 60_000
 async function memoriesCli($: EngineInterface, options: PluginOptions, args: readonly string[], stdin?: string) {
   const { store } = await paths($, options)
   // --store goes first, before the command: the script refuses a second one, so no id can redirect the read.
-  const ran = await $.process.run(['bun', `${slashes($.plugin.root)}/bin/memories.ts`, ...(args[0] === 'save' ? [] : ['--store', store]), ...args], {
+  // save and pending name their own folder (the data root) and refuse --store.
+  const ran = await $.process.run(['bun', `${slashes($.plugin.root)}/bin/memories.ts`, ...(args[0] === 'save' || args[0] === 'pending' ? [] : ['--store', store]), ...args], {
     ...(stdin === undefined ? {} : { stdin }),
     timeoutMs: MEMORIES_TIMEOUT_MS,
   })
@@ -561,11 +566,14 @@ export async function tagsDryRun($: EngineInterface, options: PluginOptions, sig
 
 // ---- Knowledge extraction (KNOWX.2, hooks/knowledge.ts) ----
 
+// One engine process answers a batch of prompts or stores; the longest wait is the batch's.
+const KNOWLEDGE_ENGINE_TIMEOUT_MS = 120_000
+
 // The memory id a remember/update reply names, or undefined when it names none.
 function savedId(reply: string): string | undefined {
   try {
     const value = JSON.parse(reply) as Record<string, unknown>
-    // remember answers memory_id; update echoes it when content or metadata changed.
+    // remember answers memory_id; update echoes it for any change, so the caller also checks the content changed.
     const id = typeof value?.memory_id === 'string' ? value.memory_id : undefined
     return id !== undefined && /^[0-9a-f]{1,64}$/.test(id) ? id : undefined
   } catch {
@@ -573,13 +581,9 @@ function savedId(reply: string): string | undefined {
   }
 }
 
-/** The engine call for knowledge: (name, args, owner) -> text, rejecting on an engine error. */
-function knowledgeEngine($: EngineInterface, options: PluginOptions) {
-  return async (name: string, args: Record<string, unknown>, owner: string) => {
-    const [answer] = await runAll($, options, [[name, args]], owner)
-    if (answer instanceof Error) throw answer
-    return answer ?? ''
-  }
+/** The engine call for knowledge: requests -> per request its text or its error, in one engine process, as the owner. */
+function knowledgeEngine($: EngineInterface, options: PluginOptions): KnowledgeEngine {
+  return (requests, owner) => runAll($, options, requests.map(([name, args]) => [name, args] as const), owner, KNOWLEDGE_ENGINE_TIMEOUT_MS)
 }
 
 /**
@@ -587,7 +591,7 @@ function knowledgeEngine($: EngineInterface, options: PluginOptions) {
  * every outcome - stored, empty, failed, stale, gone - is one 'extract' activity
  * line, and nothing runs while the engine is stale or extraction is off.
  */
-export async function extraction($: EngineInterface, options: PluginOptions, id: string, as: string) {
+export async function extraction($: EngineInterface, options: PluginOptions, id: string, as: string, queue?: <T>(work: () => Promise<T>) => Promise<T>) {
   const model = extractionModelOf(options)
   if (extractionOff(model)) return
   if (!(await isCurrent($, options))) {
@@ -602,6 +606,7 @@ export async function extraction($: EngineInterface, options: PluginOptions, id:
       owner: as,
       root,
       model,
+      ...(queue === undefined ? {} : { queue }),
       engine: knowledgeEngine($, options),
       memories: (args, stdin) => memoriesCli($, options, args as string[], stdin),
       modelCall: async request => {
@@ -659,7 +664,7 @@ async function writeEmptyFile($: EngineInterface, root: string, empty: Record<st
   // The same atomic 0600 write bunFs gives the other plugin files; fs.chmod is a no-op on Windows.
   await bunFs(
     $,
-    'const fs = require("fs"); const t = a[0] + ".tmp"; fs.writeFileSync(t, a[1], { mode: 0o600 }); fs.renameSync(t, a[0]);',
+    'const t = a[0] + ".tmp"; fs.rmSync(t, { force: true }); fs.writeFileSync(t, a[1], { mode: 0o600, flag: "wx" }); fs.chmodSync(t, 0o600); fs.renameSync(t, a[0]);',
     `${root}/${EMPTY_NAME}`,
     `${JSON.stringify({ empty: list }, null, 2)}\n`,
   )
@@ -683,9 +688,9 @@ export async function knowledgeDryRun($: EngineInterface, options: PluginOptions
   if (!(await isCurrent($, options))) return 'The Mnemosyne engine is out of date (the backfill needs the knowledge tools): run /mnemosyne-setup, then try again.'
   const { root, pending, rows } = await knowledgeSurvey($, options)
   const empty = await readEmptyFile($, root)
-  const perOwner = new Map<string, { missing: number; pending: number; empty: number }>()
-  const bump = (owner: string, field: 'missing' | 'pending' | 'empty') => {
-    const entry = perOwner.get(owner) ?? { missing: 0, pending: 0, empty: 0 }
+  const perOwner = new Map<string, { missing: number; pending: number; empty: number; forgotten: number }>()
+  const bump = (owner: string, field: 'missing' | 'pending' | 'empty' | 'forgotten') => {
+    const entry = perOwner.get(owner) ?? { missing: 0, pending: 0, empty: 0, forgotten: 0 }
     entry[field]++
     perOwner.set(owner, entry)
   }
@@ -694,9 +699,18 @@ export async function knowledgeDryRun($: EngineInterface, options: PluginOptions
     if (empty[row.id] === row.sha256) bump(row.owner, 'empty')
     else bump(row.owner, 'missing')
   }
-  for (const entry of pending) bump(entry.owner, 'pending')
+  // A pending entry whose memory is gone (or is not that owner's) waits for nothing: apply only drops it.
+  const alive = new Map<string, string>()
+  const pendingIds = [...new Set(pending.map(entry => entry.id))]
+  for (let at = 0; at < pendingIds.length; at += GET_BATCH) {
+    for (const row of parseRows(await memoriesCli($, options, ['get', ...pendingIds.slice(at, at + GET_BATCH)]))) alive.set(row.id, row.owner)
+  }
+  for (const entry of pending) bump(entry.owner, alive.get(entry.id) === entry.owner ? 'pending' : 'forgotten')
   if (perOwner.size === 0) return 'Every memory has knowledge, and no pending entry waits. Nothing to do.'
-  const lines = [...perOwner].map(([owner, counts]) => `- ${owner}: ${plural(counts.missing, 'memory', 'memories')} with no knowledge, ${plural(counts.pending, 'pending entry', 'pending entries')}, ${plural(counts.empty, 'memory', 'memories')} already tried (nothing found)`)
+  const lines = [...perOwner].map(
+    ([owner, counts]) =>
+      `- ${owner}: ${plural(counts.missing, 'memory', 'memories')} with no knowledge, ${plural(counts.pending, 'pending entry', 'pending entries')}, ${plural(counts.empty, 'memory', 'memories')} already tried (nothing found)${counts.forgotten > 0 ? `, ${plural(counts.forgotten, 'entry', 'entries')} of forgotten memories (apply drops them)` : ''}`,
+  )
   return [
     'Knowledge extraction dry run: no model call, nothing written.',
     ...lines,
@@ -707,9 +721,11 @@ export async function knowledgeDryRun($: EngineInterface, options: PluginOptions
 /**
  * /mnemosyne-knowledge apply: finishes the pending entries first (each from its
  * current content and current sha256, so a changed memory is redone), then the
- * older memories with no knowledge. Per owner: one engine process per prompt
- * batch and one per store batch; the model calls run in a pool. Never edits or
- * deletes a working_memory row.
+ * older memories with no knowledge. Per owner, in batches of GET_BATCH memories:
+ * one engine process for the prompts, one memories call writing the pending
+ * entries, the model calls in a pool, one engine process for the stores, one
+ * memories call removing the finished entries. Never edits or deletes a
+ * working_memory row.
  */
 export async function knowledgeApply($: EngineInterface, options: PluginOptions, signal: AbortSignal) {
   const model = extractionModelOf(options)
@@ -720,13 +736,13 @@ export async function knowledgeApply($: EngineInterface, options: PluginOptions,
   const counts = { stored: 0, empty: 0, failed: 0, stale: 0, gone: 0, notReached: 0 }
   let items = 0
 
-  // Pending entries first; a gone memory drops its entry.
+  // Pending entries first (a gone memory drops its entry), then the memories with no knowledge.
   const seen = new Set<string>()
-  const targets: { id: string; owner: string }[] = []
+  const targets: { id: string; owner: string; pendingSha?: string }[] = []
   for (const entry of pending) {
     if (seen.has(entry.id)) continue
     seen.add(entry.id)
-    targets.push({ id: entry.id, owner: entry.owner })
+    targets.push({ id: entry.id, owner: entry.owner, pendingSha: entry.sha256 })
   }
   for (const row of rows) {
     if (seen.has(row.id)) continue
@@ -736,20 +752,25 @@ export async function knowledgeApply($: EngineInterface, options: PluginOptions,
   }
   if (targets.length === 0) return 'Nothing to extract: every memory has knowledge, and no pending entry waits.'
 
+  // Per owner, in the order found, GET_BATCH memories to a batch.
+  const byOwner = new Map<string, typeof targets>()
+  for (const target of targets) byOwner.set(target.owner, [...(byOwner.get(target.owner) ?? []), target])
+  const batches: { owner: string; list: typeof targets }[] = []
+  for (const [who, list] of byOwner) for (let at = 0; at < list.length; at += GET_BATCH) batches.push({ owner: who, list: list.slice(at, at + GET_BATCH) })
+
   progress($, `extracting 0/${targets.length}`)
-  await pool(targets, BACKFILL_CONCURRENCY, signal, async target => {
-    if (signal.aborted) {
-      counts.notReached++
-      return
-    }
-    progress($, `extracting ${items}/${targets.length}`)
-    const outcome = await extractOne({
-      id: target.id,
-      owner: target.owner,
+  let called = 0
+  for (const { owner: who, list } of batches) {
+    if (signal.aborted) break
+    const outcomes = await extractMany({
+      items: list.map(({ id, pendingSha }) => ({ id, ...(pendingSha === undefined ? {} : { pendingSha }) })),
+      owner: who,
       root,
       model,
       engine: knowledgeEngine($, options),
       memories: (args, stdin) => memoriesCli($, options, args as string[], stdin),
+      pool: (work, run) => pool(work, BACKFILL_CONCURRENCY, signal, run),
+      onModelDone: () => progress($, `extracting ${++called}/${targets.length}`),
       modelCall: async request => {
         try {
           const reply = await $.model.complete(request, { signal })
@@ -759,31 +780,38 @@ export async function knowledgeApply($: EngineInterface, options: PluginOptions,
         }
       },
     })
-    items++
-    if (outcome.kind === 'empty') {
-      // A memory whose extraction yields nothing is recorded and skipped while its sha is unchanged.
-      const row = rows.find(candidate => candidate.id === target.id)
-      if (row !== undefined) empty[row.id] = row.sha256
-    }
-    if (outcome.kind === 'stored') counts.stored++
-    else if (outcome.kind === 'empty') counts.empty++
-    else if (outcome.kind === 'stale') counts.stale++
-    else if (outcome.kind === 'gone') counts.gone++
-    else counts.failed++
-    const failed = reasonLine(outcome)
-    await record($, options, [
-      {
+    const logged: Activity[] = []
+    outcomes.forEach((outcome, i) => {
+      const target = list[i]!
+      if (outcome.kind === 'notReached') return
+      items++
+      if (outcome.kind === 'empty') {
+        // A memory whose extraction yields nothing is recorded and skipped while its sha is unchanged.
+        const row = rows.find(candidate => candidate.id === target.id)
+        if (row !== undefined) empty[row.id] = row.sha256
+      }
+      if (outcome.kind === 'stored') counts.stored++
+      else if (outcome.kind === 'empty') counts.empty++
+      else if (outcome.kind === 'stale') counts.stale++
+      else if (outcome.kind === 'gone') counts.gone++
+      else counts.failed++
+      const failed = reasonLine(outcome)
+      logged.push({
         action: 'extract',
         origin: 'backfill',
-        owner: target.owner,
+        owner: who,
         client: 'mnemosyne-knowledge',
         ids: [target.id],
         count: storedCount(outcome),
         ok: failed === undefined,
         ...(failed === undefined ? {} : { error: failed }),
-      },
-    ])
-  })
+      })
+    })
+    // One append process for the batch.
+    await record($, options, logged)
+  }
+  // What the run did not reach: the pool stops starting calls once aborted, so this is counted, not tallied as it goes.
+  counts.notReached = targets.length - items
   if (Object.keys(empty).length > 0) await writeEmptyFile($, root, empty).catch(() => undefined)
   progress($, `${counts.stored} extracted`)
   return [
@@ -875,6 +903,8 @@ export async function tagsApply($: EngineInterface, options: PluginOptions, sign
 
 export const register: Register = (on, options) => {
   const isPerProject = options.scope === 'per-project'
+  // Per session, the tail of its extraction chain (one at a time).
+  const extractions = new Map<string, Promise<unknown>>()
 
   const engineArgs = (tool: string, input: Record<string, unknown>) => {
     switch (tool) {
@@ -1038,9 +1068,16 @@ export const register: Register = (on, options) => {
     let provenance: { author_type: 'human'; veracity: 'stated' } | undefined
     if (tool === 'memory_remember' && e.agentId === undefined) {
       const session = await $.session.id().catch(() => undefined)
-      if (session !== undefined && (await read($, pendingTrigger))[session]) {
-        provenance = { author_type: 'human', veracity: 'stated' }
-        await update($, pendingTrigger, ({ [session]: _consumed, ...rest }) => rest)
+      if (session !== undefined) {
+        // Consumed inside the updater, which sees the value as it is when the update lands: of two saves at once only one takes it.
+        let took = false
+        await update($, pendingTrigger, seen => {
+          if (!seen[session]) return seen
+          took = true
+          const { [session]: _consumed, ...rest } = seen
+          return rest
+        })
+        if (took) provenance = { author_type: 'human', veracity: 'stated' }
       }
     }
     const answer = await (async (): Promise<{ result: string; reply: string } | { deny: string }> => {
@@ -1070,12 +1107,34 @@ export const register: Register = (on, options) => {
       await record($, options, [{ action, origin: 'tool', owner: as, text: callText(action, shown), ...outcome, ...(provenance ?? {}) }])
     }
     // A successful save (or a content update) starts extraction after the reply.
-    if (!('deny' in answer) && (tool === 'memory_remember' || tool === 'memory_update')) {
+    // A tags-only or importance-only update changes no text, so it extracts nothing.
+    if (!('deny' in answer) && (tool === 'memory_remember' || (tool === 'memory_update' && typeof input.content === 'string'))) {
       const id = savedId(answer.reply)
       if (id !== undefined) {
-        const extract = extraction($, options, id, as ?? (await owner($, options).catch(() => GLOBAL_OWNER)))
+        const who = as ?? (await owner($, options).catch(() => GLOBAL_OWNER))
+        const session = (await $.session.id().catch(() => undefined)) ?? ''
+        // The prompt and pending-file steps run at once, so every save has its pending file even when the session ends
+        // first. Only the model and store steps wait: one per session at a time, in the order of the saves.
+        const before = extractions.get(session) ?? Promise.resolve()
+        let release!: () => void
+        const turn = new Promise<void>(resolve => (release = resolve))
+        const tail = before.then(() => turn)
+        extractions.set(session, tail)
+        const queue = async <T,>(work: () => Promise<T>) => {
+          await before
+          return work()
+        }
+        // The slot opens when the extraction ends, whatever happened (an early return never reaches the queue).
+        const queued = extraction($, options, id, who, queue)
+          .catch(() => undefined)
+          .finally(() => {
+            release()
+            void tail.then(() => {
+              if (extractions.get(session) === tail) extractions.delete(session)
+            })
+          })
         // KNOWX.2: background by default. The await fallback (KNOWX.0) changes only this line.
-        void extract
+        void queued
       }
     }
     return 'deny' in answer ? { deny: answer.deny } : { result: answer.result }

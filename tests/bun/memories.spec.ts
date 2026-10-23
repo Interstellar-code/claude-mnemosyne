@@ -383,6 +383,42 @@ describe('bin/memories.ts pending and --no-knowledge', () => {
     expect(gone.some(entry => entry.id === OTHER)).toBe(false)
   })
 
+  test('KNOWX R2: pending write takes a list and remove-many drops each entry like remove, in one process', async () => {
+    const A = '1111111111111111'
+    const B = '2222222222222222'
+    const C = '3333333333333333'
+    const written = await memories(['pending', 'write', root], JSON.stringify([A, B, C].map((id, i) => ({ id, owner: i === 2 ? 'other' : 'global', sha256: sha(id) }))))
+    expect(written.exitCode).toBe(0)
+    for (const id of [A, B, C]) if (process.platform !== 'win32') expect(statSync(join(pendingDir, `${id}.json`)).mode & 0o777).toBe(0o600)
+    // A holds its own sha (removed), B is asked with a stale sha (kept), C with no sha (removed whatever it holds).
+    const removed = await memories(['pending', 'remove-many', root], JSON.stringify([{ id: A, sha256: sha(A) }, { id: B, sha256: sha('stale') }, { id: C }]))
+    expect(removed.exitCode).toBe(0)
+    const left = (JSON.parse((await memories(['pending', 'list', root])).stdout) as { id: string }[]).map(entry => entry.id)
+    expect(left).toContain(B)
+    expect(left).not.toContain(A)
+    expect(left).not.toContain(C)
+    await memories(['pending', 'remove-many', root], JSON.stringify([{ id: B }]))
+  })
+
+  test('KNOWX R2: a bad list is refused whole: pending write writes nothing, remove-many removes nothing', async () => {
+    const GOOD = '4444444444444444'
+    const bad = await memories(['pending', 'write', root], JSON.stringify([{ id: GOOD, owner: 'global', sha256: sha('x') }, { id: 'nope', owner: 'global' }]))
+    expect(bad.exitCode).toBe(1)
+    expect(existsSync(join(pendingDir, `${GOOD}.json`))).toBe(false)
+    await memories(['pending', 'write', root], JSON.stringify({ id: GOOD, owner: 'global', sha256: sha('x') }))
+    const refused = await memories(['pending', 'remove-many', root], JSON.stringify([{ id: GOOD }, { id: 7 }]))
+    expect(refused.exitCode).toBe(1)
+    expect(existsSync(join(pendingDir, `${GOOD}.json`))).toBe(true)
+    expect((await memories(['pending', 'remove-many', root], '{"id":"x"}')).exitCode).toBe(1)
+    await memories(['pending', 'remove', root, GOOD])
+  })
+
+  test('KNOWX R2 finding 1: pending refuses --store, which is why the hook must not send one', async () => {
+    const refused = await memories(['--store', store, 'pending', 'list', root])
+    expect(refused.exitCode).toBe(1)
+    expect(refused.stderr).toContain('pending does not take --store')
+  })
+
   test('KNOWX.2.a4: a non-hex id is refused, never joined into a path', async () => {
     for (const id of ['../../etc/passwd', 'ABCDEF', '../x', '']) {
       const wrote = await memories(['pending', 'write', root], JSON.stringify({ id, owner: 'global', sha256: sha('x') }))
