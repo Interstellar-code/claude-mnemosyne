@@ -7,7 +7,7 @@
 // the call's preview (query, fact, tags): secret-shaped strings are replaced by
 // [redacted] first, then it is cut to TEXT_LIMIT characters.
 
-export type ActivityAction = 'recall' | 'remember' | 'update' | 'forget' | 'stats' | 'rearm'
+export type ActivityAction = 'recall' | 'remember' | 'update' | 'forget' | 'stats' | 'rearm' | 'extract'
 export type ActivityOrigin = 'hook' | 'trigger' | 'tool' | 'external' | 'ui' | 'backfill'
 
 export type ActivityEntry = {
@@ -19,6 +19,10 @@ export type ActivityEntry = {
   ids: string[]
   count: number
   ok: boolean
+  client?: string
+  session?: string
+  author_type?: string
+  veracity?: string
   error?: string
 }
 
@@ -30,6 +34,10 @@ export type ActivityFields = {
   ids?: readonly unknown[]
   count?: number
   ok: boolean
+  client?: unknown
+  session?: unknown
+  author_type?: unknown
+  veracity?: unknown
   error?: unknown
   t?: string
 }
@@ -39,6 +47,35 @@ export const TEXT_LIMIT = 200
 export const REDACT_INPUT_LIMIT = 2000
 export const IDS_LIMIT = 50
 export const REDACTED = '[redacted]'
+// The line-format bounds for the new fields (CTX.1): client 60, session 64.
+export const CLIENT_LIMIT = 60
+export const SESSION_LIMIT = 64
+// The engine's veracity labels, and its author_type values (human, agent, system).
+const VERACITY_VALUES = new Set(['true', 'false', 'stated', 'inferred', 'tool', 'imported', 'unknown'])
+const AUTHOR_TYPE_VALUES = new Set(['human', 'agent', 'system'])
+// C0 and C1 control characters and DEL, plus the bidirectional marks (U+061C,
+// U+200E/F, U+202A-E, U+2066-9) and zero-width characters (U+200B-D, U+FEFF), the
+// same set ui/server.ts's GALAXY_CONTROL removes: a client or session name must
+// never make a dashboard row read as something else.
+const CONTROL = /[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g
+const codePointsOf = (text: string, limit: number) => Array.from(text).slice(0, limit).join('')
+
+// A bounded string for the client (60) or session (64) field: control characters
+// removed, the ends trimmed, and the rest cut to `limit` code points.
+const bounded = (value: unknown, limit: number) => {
+  const s = str(value)
+  if (s === undefined) return undefined
+  const clean = s.replace(CONTROL, '').trim()
+  return clean === '' ? undefined : codePointsOf(clean, limit)
+}
+
+// `author_type` and `veracity`: only the engine's values pass through, else dropped.
+const oneOf = (value: unknown, allowed: ReadonlySet<string>) => {
+  const s = str(value)
+  if (s === undefined) return undefined
+  const normalized = s.trim().toLowerCase()
+  return allowed.has(normalized) ? normalized : undefined
+}
 
 // The public tool name of each action the five memory tools stand for.
 export const TOOL_ACTIONS: Readonly<Record<string, ActivityAction>> = {
@@ -118,6 +155,10 @@ export function preview(value: unknown) {
 /** One C3 entry: ids capped at IDS_LIMIT, count the full number. */
 export function activityEntry(fields: ActivityFields): ActivityEntry {
   const all = (fields.ids ?? []).filter(id => id !== undefined && id !== null && id !== '').map(String)
+  const client = bounded(fields.client, CLIENT_LIMIT)
+  const session = bounded(fields.session, SESSION_LIMIT)
+  const author_type = oneOf(fields.author_type, AUTHOR_TYPE_VALUES)
+  const veracity = oneOf(fields.veracity, VERACITY_VALUES)
   return {
     t: fields.t ?? new Date().toISOString(),
     action: fields.action,
@@ -128,6 +169,10 @@ export function activityEntry(fields: ActivityFields): ActivityEntry {
     count: typeof fields.count === 'number' && Number.isFinite(fields.count) ? fields.count : all.length,
     ok: fields.ok,
     ...(fields.ok ? {} : { error: preview(fields.error ?? 'failed') || 'failed' }),
+    ...(client !== undefined ? { client } : {}),
+    ...(session !== undefined ? { session } : {}),
+    ...(author_type !== undefined ? { author_type } : {}),
+    ...(veracity !== undefined ? { veracity } : {}),
   }
 }
 

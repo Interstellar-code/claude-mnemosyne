@@ -491,6 +491,107 @@ function storeOwners(db: Database | null): string[] {
   return rows.map(row => row.owner).filter((owner): owner is string => typeof owner === 'string' && owner !== '')
 }
 
+// ---- Galaxy (GDATA.1): every memory at once, with the knowledge mined from each ----
+
+// At most this many memories in one galaxy reply; `total` and `shown` say how many were cut.
+export const GALAXY_LIMIT = 2000
+// C0 and C1 control characters and DEL, and the bidirectional marks: a label must not
+// reflow or read as something else (the same set ui/escape.ts removes).
+const GALAXY_CONTROL = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g
+
+/** A galaxy label: the first non-empty line, control characters removed, cut to MAP_LABEL_CHARS. */
+export function galaxyLabel(text: unknown): string {
+  const raw = typeof text === 'string' ? text : ''
+  const line = raw
+    .split('\n')
+    .map(part => part.replace(GALAXY_CONTROL, '').trim())
+    .find(part => part !== '') ?? ''
+  const chars = Array.from(line)
+  return chars.length > MAP_LABEL_CHARS ? `${chars.slice(0, MAP_LABEL_CHARS - 1).join('')}…` : line
+}
+
+// The five memoria tables (C6): the rowid column, the display text each row
+// carries, and the columns the query needs beyond `source_memory_id`.
+const KNOWLEDGE_TABLES = [
+  { table: 'memoria_facts', kind: 'fact', id: 'id', text: 'value', needs: ['value'] },
+  { table: 'memoria_preferences', kind: 'preference', id: 'id', text: 'preference', needs: ['preference'] },
+  { table: 'memoria_instructions', kind: 'instruction', id: 'id', text: 'instruction', needs: ['instruction'] },
+  { table: 'memoria_timelines', kind: 'timeline', id: 'event_id', text: 'description', needs: ['description'] },
+  { table: 'memoria_kg', kind: 'relation', id: 'id', text: "trim(coalesce(subject, '') || ' ' || coalesce(predicate, '') || ' ' || coalesce(object, ''))", needs: ['subject', 'predicate', 'object'] },
+] as const
+
+export type GalaxyKnowledge = { id: string; kind: string; text: string; memory: string }
+export type GalaxyMemory = { id: string; owner: string; tags: string[]; recalls: number; lastRecalled: string | null; created: string | null; label: string }
+export type GalaxyProject = { owner: string; label: string; count: number; recalls: number }
+
+/**
+ * The columns a table actually has: a legacy store may predate `source_memory_id`
+ * (and the other memoria columns) even though the table exists (review 2 LOW 1).
+ */
+function tableColumns(db: Database, table: string): Set<string> {
+  return new Set((db.query(`PRAGMA table_info(${table})`).all() as { name: string }[]).map(row => row.name))
+}
+
+/**
+ * GET /api/galaxy: every memory (newest first, at most `limit`), its project and the
+ * knowledge rows mined from it, read-only. A missing store or a missing memoria table
+ * gives empty lists; nothing here writes.
+ */
+export function galaxyLevel(db: Database | null, limit = GALAXY_LIMIT): Answer {
+  if (db === null) return { status: 200, body: { projects: [], memories: [], knowledge: [], meaning: false, total: 0, shown: 0 } }
+  const present = new Set(
+    (db.query("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map(row => row.name),
+  )
+  const where = "session_id IS NOT NULL AND session_id <> ''"
+  const total = (db.query(`SELECT COUNT(*) AS n FROM working_memory WHERE ${where}`).get() as { n: number }).n
+  const projects: GalaxyProject[] = (
+    db
+      .query(`SELECT session_id AS owner, COUNT(*) AS count, SUM(${RECALLS}) AS recalls FROM working_memory WHERE ${where} GROUP BY session_id ORDER BY count DESC, owner`)
+      .all() as { owner: string; count: number; recalls: number | null }[]
+  ).map(row => ({ owner: row.owner, label: projectLabel(row.owner), count: row.count, recalls: row.recalls ?? 0 }))
+
+  const rows = db
+    .query(
+      `SELECT id, session_id AS owner, ${RECALLS} AS recalls, last_recalled AS lastRecalled,
+              timestamp AS created, substr(content, 1, 4000) AS head, metadata_json
+       FROM working_memory WHERE ${where} ORDER BY timestamp DESC, id LIMIT ?`,
+    )
+    .all(limit) as { id: string; owner: string; recalls: number; lastRecalled: string | null; created: string | null; head: string | null; metadata_json: string | null }[]
+  const memories: GalaxyMemory[] = rows.map(row => ({
+    id: row.id,
+    owner: row.owner,
+    tags: tagsOf(parseMetadata(row.metadata_json)),
+    recalls: row.recalls,
+    lastRecalled: row.lastRecalled,
+    created: row.created,
+    label: galaxyLabel(row.head),
+  }))
+
+  const knowledge: GalaxyKnowledge[] = []
+  if (memories.length > 0) {
+    const ids = memories.map(memory => memory.id)
+    const marks = ids.map(() => '?').join(', ')
+    for (const source of KNOWLEDGE_TABLES) {
+      if (!present.has(source.table)) continue
+      // A legacy table can exist without the column the join needs: skip it, never throw.
+      const columns = tableColumns(db, source.table)
+      if (!columns.has(source.id) || !columns.has('source_memory_id') || !source.needs.every(column => columns.has(column))) continue
+      let found: { rowid: number; text: string | null; memory: string }[]
+      try {
+        found = db
+          .query(`SELECT ${source.id} AS rowid, ${source.text} AS text, source_memory_id AS memory FROM ${source.table} WHERE source_memory_id IN (${marks}) ORDER BY ${source.id}`)
+          .all(...ids) as { rowid: number; text: string | null; memory: string }[]
+      } catch {
+        continue
+      }
+      for (const row of found) {
+        knowledge.push({ id: `${source.kind}:${row.rowid}`, kind: source.kind, text: galaxyLabel(row.text), memory: row.memory })
+      }
+    }
+  }
+  return { status: 200, body: { projects, memories, knowledge, meaning: false, total, shown: memories.length } }
+}
+
 // ---- Activity (VIEW.2): the log, read; and its tail, streamed ----
 
 // The JSON object lines of a log file's text; anything else is skipped.
@@ -775,7 +876,7 @@ async function search(views: Views, text: string): Promise<Answer> {
     const failed = runs.find((run): run is Error => run instanceof Error)
     // One owner: that owner. Across owners: the C3 default owner, and `owners` says how many were searched.
     const logged = { action: 'recall', origin: 'ui', owner: (owners.length === 1 ? owners[0] : undefined) ?? 'global', text: query } as const
-    const extra = { owners: owners.length }
+    const extra = { owners: owners.length, client: 'dashboard' }
     if (failed !== undefined) {
       views.log({ ...logged, ok: false, error: failed.message }, extra)
       return { status: 502, body: { error: ENGINE_FAILED } }
@@ -813,13 +914,14 @@ async function forget(views: Views, text: string): Promise<Answer> {
     answer = await forgetOnce()
   }
   const logged = { action: 'forget', origin: 'ui', owner, ids: [id] } as const
+  const extra = { client: 'dashboard' }
   const reply = typeof answer === 'string' ? parseMetadata(answer) : null
   if (reply?.status === 'deleted') {
-    views.log({ ...logged, count: 1, ok: true })
+    views.log({ ...logged, count: 1, ok: true }, extra)
     return { status: 200, body: { status: 'deleted', memory_id: id, owner } }
   }
   if (reply?.status === 'not_found') {
-    views.log({ ...logged, count: 0, ok: false, error: 'not_found' })
+    views.log({ ...logged, count: 0, ok: false, error: 'not_found' }, extra)
     return gone
   }
   const message =
@@ -832,10 +934,10 @@ async function forget(views: Views, text: string): Promise<Answer> {
           : `the engine answered ${String(reply?.status ?? answer.slice(0, 100))}`
   // The engine failed or timed out, maybe after its delete committed: the row says what happened.
   if (ownerOf() == null) {
-    views.log({ ...logged, count: 1, ok: true }, { note: preview(`engine reply lost: ${message}`) })
+    views.log({ ...logged, count: 1, ok: true }, { ...extra, note: preview(`engine reply lost: ${message}`) })
     return { status: 200, body: { status: 'deleted', memory_id: id, owner, note: 'The engine reply was lost, but the memory is gone.' } }
   }
-  views.log({ ...logged, count: 0, ok: false, error: message })
+  views.log({ ...logged, count: 0, ok: false, error: message }, extra)
   return { status: 502, body: { error: `${ENGINE_FAILED} Nothing was deleted.` } }
 }
 
@@ -963,6 +1065,7 @@ export async function startServer(config: Config, options: ServerOptions = {}): 
       })
     }
     if (path === '/api/map') return get(() => mapLevel((store.db ??= openStore(config.store)), url.searchParams))
+    if (path === '/api/galaxy') return get(() => galaxyLevel((store.db ??= openStore(config.store))))
     if (path === '/api/activity') {
       return get(() => {
         const asked = url.searchParams.get('limit')

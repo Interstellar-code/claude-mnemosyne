@@ -20,13 +20,16 @@ const isAppend = (argv: readonly string[]) => (argv[1] ?? '').endsWith('/bin/act
 // appends (`bun bin/activity.ts <log>`, by $.process.spawn or $.process.run) are
 // kept apart, in `runs.appends`, with `via` and the lines as `init.stdin`;
 // `extra.append` makes each append hang forever or throw, `extra.env` sets variables.
-type Extra = { append?: 'ok' | 'hang' | 'throw'; env?: Record<string, string> }
+type Extra = { append?: 'ok' | 'hang' | 'throw'; env?: Record<string, string>; session?: 'ok' | 'throw' }
 function world(on: On, reply: string, isInstalled = true, exitCode = 0, build: string = ENGINE_BUILD, extra: Extra = {}) {
   const runs: Run[] & { appends: Run[] } = Object.assign([] as Run[], { appends: [] as Run[] })
   on('env.get', (_$, e) => ({ value: extra.env?.[(e as { name: string }).name] ?? '/home/u' }))
   on('fs.stat', () => (isInstalled ? { value: { kind: 'file' } } : { deny: 'ENOENT' }) as never)
   on('fs.read', (_$, e) => (e.path === INSTALLED_PACKAGE && isInstalled ? { value: JSON.stringify({ name: '@oh-my-pi/pi-mnemopi', version: build }) } : { deny: 'ENOENT' }) as never)
-  on('session.id', () => ({ value: 's1' }))
+  on('session.id', () => {
+    if (extra.session === 'throw') throw new Error('session store unavailable')
+    return { value: 's1' }
+  })
   on('session.repo', () => ({ value: { root: '/work/My Repo' } }) as never)
   on('process.run', (_$, e) => {
     if (isAppend(e.argv)) {
@@ -597,6 +600,44 @@ test('the first-prompt recall logs action recall, origin hook, its queries and r
   expect(line).toMatchObject({ action: 'recall', origin: 'hook', owner: 'global', text: 'How do I install deps? | Then run the build.', ids: ['m1', 'm2'], count: 2, ok: true })
   expect(line.error).toBeUndefined()
   expect(Number.isNaN(Date.parse(line.t))).toBe(false)
+})
+
+// CTX.3: record() names the app and the session; the backfill names itself; a session-id
+// failure never drops the line.
+
+test('CTX.3.a1: hook, trigger and tool lines carry client claude-code and the session id', async ($, on) => {
+  const runs = world(on, RECALL_REPLY)
+  on('prompt.submit', (_$, e) => ({ text: e.text, context: e.context }))
+  await $.prompt.submit({ text: 'How do I install deps?' } as never)
+  await $.prompt.submit({ text: 'recall: pnpm', origin: { kind: 'composer' } } as never)
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_recall', query: 'pnpm' })
+
+  const got = lines(runs)
+  expect(got.map(l => [l.origin, l.client, l.session])).toEqual([
+    ['hook', 'claude-code', 's1'],
+    ['trigger', 'claude-code', 's1'],
+    ['tool', 'claude-code', 's1'],
+  ])
+})
+
+test('CTX.3.a2: the tags backfill stamps client mnemosyne-tags', async ($, on) => {
+  const state = await dryThenChange(on, $, fakeRows(2, ['global']), () => {})
+  state.appends.length = 0
+  await tagsRun($, 'apply')
+  const logged = state.appends.flatMap(run => (run.init?.stdin ?? '').split('\n').filter(Boolean).map(line => JSON.parse(line)))
+  expect(logged).toHaveLength(1)
+  expect(logged[0]).toMatchObject({ action: 'update', origin: 'backfill', client: 'mnemosyne-tags', session: 's1' })
+})
+
+test('CTX.3.a3: a session-id failure never drops the line; it is written without session', async ($, on) => {
+  const runs = world(on, RECALL_REPLY, true, 0, ENGINE_BUILD, { session: 'throw' })
+  // The tool path reads the session id only inside record(), so a failure there must not drop the line.
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_recall', query: 'pnpm' })
+
+  const got = lines(runs)
+  expect(got).toHaveLength(1)
+  expect(got[0]).toMatchObject({ action: 'recall', origin: 'tool', client: 'claude-code' })
+  expect(got[0].session).toBeUndefined()
 })
 
 test('a recall term and a remember term log origin trigger', async ($, on) => {

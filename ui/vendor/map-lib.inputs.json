@@ -1,12 +1,16 @@
 {
   "bundle": "map-lib.js",
   "built_by": "scripts/vendor-map.ts",
-  "bytes": 816677,
-  "gzip_bytes": 216581,
-  "sha256": "222af7da27d14f15718e022be569c2fa037037a9868a6497e886a702b40d5447",
+  "bytes": 829100,
+  "gzip_bytes": 219482,
+  "sha256": "f126df55ca6195cd0fd869b5850badbc416fe3cd3a761c39c953a76be3d8437d",
   "exports": [
     "ForceGraph3D",
-    "SpriteText"
+    "SpriteText",
+    "EffectComposer",
+    "RenderPass",
+    "UnrealBloomPass",
+    "OutputPass"
   ],
   "packages": [
     {
