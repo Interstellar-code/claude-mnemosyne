@@ -252,7 +252,11 @@ async function recordStartedWith($: EngineInterface, paths: UiPaths, pid: number
   if (paths.extraction === undefined) return
   const code =
     'const fs = require("fs"); const a = process.argv.slice(1); const t = a[0] + ".tmp"; fs.rmSync(t, { force: true }); fs.writeFileSync(t, a[1], { mode: 0o600, flag: "wx" }); fs.chmodSync(t, 0o600); fs.renameSync(t, a[0]);'
-  await $.process.run(['bun', '-e', code, `${paths.root}/${EXTRACTION_STATE}`, `${JSON.stringify({ pid, extraction: paths.extraction })}\n`], { timeoutMs: ALIVE_TIMEOUT_MS }).catch(() => undefined)
+  // run() resolves on a non-zero exit, so the exit code is checked too: a failed write must not pass as done.
+  await $.process
+    .run(['bun', '-e', code, `${paths.root}/${EXTRACTION_STATE}`, `${JSON.stringify({ pid, extraction: paths.extraction })}\n`], { timeoutMs: ALIVE_TIMEOUT_MS })
+    .then(ran => (ran.exitCode === 0 ? undefined : Promise.reject(new Error(ran.stderr))))
+    .catch(() => undefined)
 }
 
 /** The command's answer: reuse the server ui.json names while it answers, else start one for `session`. */

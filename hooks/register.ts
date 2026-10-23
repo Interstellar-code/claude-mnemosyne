@@ -227,8 +227,12 @@ async function owner($: EngineInterface, options: PluginOptions) {
 
 // Folder work runs through Bun, which every install has: mkdir, rm and chmod
 // are not commands on Windows.
-const bunFs = ($: EngineInterface, code: string, ...args: string[]) =>
-  $.process.run(['bun', '-e', `const fs = require('fs'); const a = process.argv.slice(1); ${code}`, ...args])
+const bunFs = async ($: EngineInterface, code: string, ...args: string[]) => {
+  const ran = await $.process.run(['bun', '-e', `const fs = require('fs'); const a = process.argv.slice(1); ${code}`, ...args])
+  // run() resolves on a non-zero exit; a script that failed (a syntax error, a full disk) must not pass as done.
+  if (ran.exitCode !== 0) throw new Error(`bun -e failed (exit ${ran.exitCode}): ${ran.stderr.trim().slice(0, 300)}`)
+  return ran
+}
 
 // Single-quoted for sh: the store path comes from settings and may hold anything.
 const shellQuote = (text: string) => `'${text.replace(/'/g, `'\\''`)}'`
@@ -587,7 +591,7 @@ function knowledgeEngine($: EngineInterface, options: PluginOptions): KnowledgeE
  * every outcome - stored, empty, failed, stale, gone - is one 'extract' activity
  * line, and nothing runs while the engine is stale or extraction is off.
  */
-export async function extraction($: EngineInterface, options: PluginOptions, id: string, as: string) {
+export async function extraction($: EngineInterface, options: PluginOptions, id: string, as: string, queue?: <T>(work: () => Promise<T>) => Promise<T>) {
   const model = extractionModelOf(options)
   if (extractionOff(model)) return
   if (!(await isCurrent($, options))) {
@@ -602,6 +606,7 @@ export async function extraction($: EngineInterface, options: PluginOptions, id:
       owner: as,
       root,
       model,
+      ...(queue === undefined ? {} : { queue }),
       engine: knowledgeEngine($, options),
       memories: (args, stdin) => memoriesCli($, options, args as string[], stdin),
       modelCall: async request => {
@@ -659,7 +664,7 @@ async function writeEmptyFile($: EngineInterface, root: string, empty: Record<st
   // The same atomic 0600 write bunFs gives the other plugin files; fs.chmod is a no-op on Windows.
   await bunFs(
     $,
-    'const fs = require("fs"); const t = a[0] + ".tmp"; fs.rmSync(t, { force: true }); fs.writeFileSync(t, a[1], { mode: 0o600, flag: "wx" }); fs.chmodSync(t, 0o600); fs.renameSync(t, a[0]);',
+    'const t = a[0] + ".tmp"; fs.rmSync(t, { force: true }); fs.writeFileSync(t, a[1], { mode: 0o600, flag: "wx" }); fs.chmodSync(t, 0o600); fs.renameSync(t, a[0]);',
     `${root}/${EMPTY_NAME}`,
     `${JSON.stringify({ empty: list }, null, 2)}\n`,
   )
@@ -1108,12 +1113,26 @@ export const register: Register = (on, options) => {
       if (id !== undefined) {
         const who = as ?? (await owner($, options).catch(() => GLOBAL_OWNER))
         const session = (await $.session.id().catch(() => undefined)) ?? ''
-        // One extraction per session at a time: a later save waits behind the earlier ones.
-        const queued = (extractions.get(session) ?? Promise.resolve()).then(() => extraction($, options, id, who)).catch(() => undefined)
-        extractions.set(session, queued)
-        void queued.then(() => {
-          if (extractions.get(session) === queued) extractions.delete(session)
-        })
+        // The prompt and pending-file steps run at once, so every save has its pending file even when the session ends
+        // first. Only the model and store steps wait: one per session at a time, in the order of the saves.
+        const before = extractions.get(session) ?? Promise.resolve()
+        let release!: () => void
+        const turn = new Promise<void>(resolve => (release = resolve))
+        const tail = before.then(() => turn)
+        extractions.set(session, tail)
+        const queue = async <T,>(work: () => Promise<T>) => {
+          await before
+          return work()
+        }
+        // The slot opens when the extraction ends, whatever happened (an early return never reaches the queue).
+        const queued = extraction($, options, id, who, queue)
+          .catch(() => undefined)
+          .finally(() => {
+            release()
+            void tail.then(() => {
+              if (extractions.get(session) === tail) extractions.delete(session)
+            })
+          })
         // KNOWX.2: background by default. The await fallback (KNOWX.0) changes only this line.
         void queued
       }

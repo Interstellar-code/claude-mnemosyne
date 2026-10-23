@@ -54,6 +54,8 @@ export type ExtractRequest = {
   modelCall: KnowledgeModel
   /** The sha256 the backfill read in the pending entry; removed too once the memory is done. */
   pendingSha?: string
+  /** Runs the model, store and remove steps (default: at once); the prompt and pending write never wait. */
+  queue?: <T>(work: () => Promise<T>) => Promise<T>
 }
 
 /** One owner's memories, extracted together: the same flow as extractOne, with batched processes. */
@@ -69,7 +71,15 @@ export type ExtractBatch = {
   pool?: KnowledgePool
   /** A model call finished (answered or not): for a progress line. */
   onModelDone?: () => void
+  /**
+   * Runs the model, store and remove steps (default: at once). The prompt and the pending-write
+   * steps never go through it, so a queued save has its pending file before it waits.
+   */
+  queue?: <T>(work: () => Promise<T>) => Promise<T>
 }
+
+// The same shape bin/memories.ts accepts for a pending file name (this file imports nothing).
+const MEMORY_FILE_ID = /^[0-9a-f]{1,64}$/
 
 const parse = (text: string): Record<string, unknown> | null => {
   try {
@@ -103,16 +113,25 @@ export async function extractMany(batch: ExtractBatch): Promise<ExtractOutcome[]
   // Entries whose file is removed at the end: [id, sha256 | undefined (any content)].
   const removals: { id: string; sha256?: string }[] = []
 
+  // A row whose id is not a plain hex id fails on its own (it could never be named by a pending file) and stays out of the batch.
+  const usable = everyIndex.filter(i => {
+    const ok = MEMORY_FILE_ID.test(items[i]!.id)
+    if (!ok) outcomes[i] = { kind: 'failed', reason: 'invalid memory id' }
+    return ok
+  })
+  if (usable.length === 0) return outcomes as ExtractOutcome[]
+
   // 1. The engine's prompts and the content hashes; gone means the row is not this owner's or is gone.
   let answers: (string | Error)[]
   try {
-    answers = await engine(items.map(item => ['mnemopi_knowledge_prompt', { memory_id: item.id }] as const), owner)
+    answers = await engine(usable.map(i => ['mnemopi_knowledge_prompt', { memory_id: items[i]!.id }] as const), owner)
   } catch (err) {
-    failAll(reasonText(err), everyIndex)
+    failAll(reasonText(err), usable)
     return outcomes as ExtractOutcome[]
   }
-  items.forEach((item, i) => {
-    const answer = answers[i]
+  usable.forEach((i, at) => {
+    const item = items[i]!
+    const answer = answers[at]
     if (answer instanceof Error || answer === undefined) return void (outcomes[i] = { kind: 'failed', reason: answer === undefined ? 'unparseable' : reasonText(answer) })
     const reply = parse(answer)
     if (reply === null) return void (outcomes[i] = { kind: 'failed', reason: 'unparseable' })
@@ -137,71 +156,75 @@ export async function extractMany(batch: ExtractBatch): Promise<ExtractOutcome[]
     }
   }
 
-  // 3. The model calls, pooled. A rejection (a blocked model) is caught like an unanswered result.
-  const replies = new Map<number, string>()
-  const run: KnowledgePool = batch.pool ?? (async (list, work) => {
-    for (let i = 0; i < list.length; i++) await work(list[i]!, i)
-  })
-  await run(live, async i => {
-    const prompt = prompts.get(i)!
-    let answer: { text?: string; reason?: string } | undefined
-    try {
-      answer = await modelCall({ model, prompt: prompt.text, maxTokens: KNOWLEDGE_MAX_TOKENS, timeoutMs: KNOWLEDGE_TIMEOUT_MS, effort: KNOWLEDGE_EFFORT })
-    } catch (err) {
-      answer = { reason: reasonText(err) }
-    }
-    const text = typeof answer?.text === 'string' ? answer.text : ''
-    if (text.trim() === '') outcomes[i] = { kind: 'failed', reason: reasonOf(answer) }
-    else replies.set(i, text)
-    batch.onModelDone?.()
-  })
-  // A memory the pool never started (the run was stopped) keeps its pending entry for the next run.
-  for (const i of live) if (outcomes[i] === undefined && !replies.has(i)) outcomes[i] = { kind: 'notReached' }
-
-  // 4. The stores, as the same owner: one engine process. Each reply goes in unchanged, with its prompt's sha256.
-  const storing = [...replies.keys()]
-  if (storing.length > 0) {
-    let stored: (string | Error)[] = []
-    let storeError: string | undefined
-    try {
-      stored = await engine(storing.map(i => ['mnemopi_knowledge_store', { memory_id: items[i]!.id, reply: replies.get(i)!, sha256: prompts.get(i)!.sha256 }] as const), owner)
-    } catch (err) {
-      storeError = reasonText(err)
-    }
-    storing.forEach((i, at) => {
-      const answer = stored[at]
-      if (storeError !== undefined) return void (outcomes[i] = { kind: 'failed', reason: storeError })
-      if (answer instanceof Error || answer === undefined) return void (outcomes[i] = { kind: 'failed', reason: answer === undefined ? 'unparseable' : reasonText(answer) })
-      const reply = parse(answer)
-      if (reply === null) return void (outcomes[i] = { kind: 'failed', reason: 'unparseable' })
-      const finished = (sha256: string) => {
-        // The entry is removed only while it still holds this run's sha256 (and the one the backfill read).
-        removals.push({ id: items[i]!.id, sha256 })
-        const read = items[i]!.pendingSha
-        if (read !== undefined && read !== sha256) removals.push({ id: items[i]!.id, sha256: read })
-      }
-      const sha256 = prompts.get(i)!.sha256
-      if (reply.refused === 'gone') {
-        finished(sha256)
-        return void (outcomes[i] = { kind: 'gone' })
-      }
-      if (reply.refused === 'stale') return void (outcomes[i] = { kind: 'stale' })
-      if (reply.refused === 'unparseable' || reply.refused === 'invalid') return void (outcomes[i] = { kind: 'failed', reason: String(reply.refused) })
-      const counts = reply.stored !== null && typeof reply.stored === 'object' && !Array.isArray(reply.stored) ? (reply.stored as Record<string, number>) : {}
-      const total = Object.values(counts).reduce((sum, count) => sum + (typeof count === 'number' ? count : 0), 0)
-      finished(sha256)
-      outcomes[i] = total === 0 ? { kind: 'empty', reason: 'no items' } : { kind: 'stored', counts }
+  // Steps 3-5 wait their turn when the caller queues (a session's live saves run one after another).
+  const gate = batch.queue ?? (<T>(work: () => Promise<T>) => work())
+  await gate(async () => {
+    // 3. The model calls, pooled. A rejection (a blocked model) is caught like an unanswered result.
+    const replies = new Map<number, string>()
+    const run: KnowledgePool = batch.pool ?? (async (list, work) => {
+      for (let i = 0; i < list.length; i++) await work(list[i]!, i)
     })
-  }
+    await run(live, async i => {
+      const prompt = prompts.get(i)!
+      let answer: { text?: string; reason?: string } | undefined
+      try {
+        answer = await modelCall({ model, prompt: prompt.text, maxTokens: KNOWLEDGE_MAX_TOKENS, timeoutMs: KNOWLEDGE_TIMEOUT_MS, effort: KNOWLEDGE_EFFORT })
+      } catch (err) {
+        answer = { reason: reasonText(err) }
+      }
+      const text = typeof answer?.text === 'string' ? answer.text : ''
+      if (text.trim() === '') outcomes[i] = { kind: 'failed', reason: reasonOf(answer) }
+      else replies.set(i, text)
+      batch.onModelDone?.()
+    })
+    // A memory the pool never started (the run was stopped) keeps its pending entry for the next run.
+    for (const i of live) if (outcomes[i] === undefined && !replies.has(i)) outcomes[i] = { kind: 'notReached' }
 
-  // 5. The finished entries go, in one call.
-  if (removals.length > 0) {
-    try {
-      await memories(['pending', 'remove-many', root], JSON.stringify(removals))
-    } catch {
-      // a pending file that cannot be removed is finished again by the backfill
+    // 4. The stores, as the same owner: one engine process. Each reply goes in unchanged, with its prompt's sha256.
+    const storing = [...replies.keys()]
+    if (storing.length > 0) {
+      let stored: (string | Error)[] = []
+      let storeError: string | undefined
+      try {
+        stored = await engine(storing.map(i => ['mnemopi_knowledge_store', { memory_id: items[i]!.id, reply: replies.get(i)!, sha256: prompts.get(i)!.sha256 }] as const), owner)
+      } catch (err) {
+        storeError = reasonText(err)
+      }
+      storing.forEach((i, at) => {
+        const answer = stored[at]
+        if (storeError !== undefined) return void (outcomes[i] = { kind: 'failed', reason: storeError })
+        if (answer instanceof Error || answer === undefined) return void (outcomes[i] = { kind: 'failed', reason: answer === undefined ? 'unparseable' : reasonText(answer) })
+        const reply = parse(answer)
+        if (reply === null) return void (outcomes[i] = { kind: 'failed', reason: 'unparseable' })
+        const finished = (sha256: string) => {
+          // The entry is removed only while it still holds this run's sha256 (and the one the backfill read).
+          removals.push({ id: items[i]!.id, sha256 })
+          const read = items[i]!.pendingSha
+          if (read !== undefined && read !== sha256) removals.push({ id: items[i]!.id, sha256: read })
+        }
+        const sha256 = prompts.get(i)!.sha256
+        if (reply.refused === 'gone') {
+          finished(sha256)
+          return void (outcomes[i] = { kind: 'gone' })
+        }
+        if (reply.refused === 'stale') return void (outcomes[i] = { kind: 'stale' })
+        if (reply.refused === 'unparseable' || reply.refused === 'invalid') return void (outcomes[i] = { kind: 'failed', reason: String(reply.refused) })
+        const counts = reply.stored !== null && typeof reply.stored === 'object' && !Array.isArray(reply.stored) ? (reply.stored as Record<string, number>) : {}
+        const total = Object.values(counts).reduce((sum, count) => sum + (typeof count === 'number' ? count : 0), 0)
+        finished(sha256)
+        outcomes[i] = total === 0 ? { kind: 'empty', reason: 'no items' } : { kind: 'stored', counts }
+      })
     }
-  }
+
+    // 5. The finished entries go, in one call.
+    if (removals.length > 0) {
+      try {
+        await memories(['pending', 'remove-many', root], JSON.stringify(removals))
+      } catch {
+        // a pending file that cannot be removed is finished again by the backfill
+      }
+    }
+  })
   return outcomes.map(outcome => outcome ?? { kind: 'failed', reason: 'no result' })
 }
 
