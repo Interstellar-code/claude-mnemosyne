@@ -178,7 +178,8 @@ describe('VIEWS.1: the Knowledge tab on a real store', () => {
   test('VIEWS.1.a2: rows show item, topic, project, From memory, status, used and last used; facts, timelines and relations show value or description only', async () => {
     const data = await knowledge(started, 'unknown')
     const facts = rowsOf(data, 'fact', now)
-    expect(facts.map((r: { text: string }) => r.text)).toEqual(['Mnemosyne requires Bun', MARKUP])
+    // Newest first (KAPI.1 review fix): the second fact stored comes first.
+    expect(facts.map((r: { text: string }) => r.text)).toEqual([MARKUP, 'Mnemosyne requires Bun'])
     expect(facts[0]).toMatchObject({ topic: 'standards', owner: 'project-alpha-1a2b', memory: ids.m1, status: '', used: 'its memory was recalled 7 times', last: '2 days ago', stale: false })
     // A memory not recalled for 40 days is amber.
     const timeline = rowsOf(data, 'timeline', now)[0]!
@@ -187,12 +188,6 @@ describe('VIEWS.1: the Knowledge tab on a real store', () => {
     expect(relation.text).toBe('Antigravity powers Mnemosyne')
     expect(data.items.fact[0]!.id).toMatch(/^fact:\d+$/)
     expect(data.items.relation[0]!.id).toMatch(/^relation:\d+$/)
-    // Status: an instruction is active or retired and a relation shows its confidence when the reply carries one; blank otherwise.
-    expect(statusOf(data.items.instruction[0]!)).toBe('')
-    expect(statusOf({ ...data.items.instruction[0]!, active: true })).toBe('active')
-    expect(statusOf({ ...data.items.instruction[0]!, active: false })).toBe('retired')
-    expect(statusOf({ ...data.items.relation[0]!, confidence: 0.7 })).toBe('confidence 0.7')
-    expect(statusOf({ ...data.items.fact[0]!, active: false, confidence: 0.2 })).toBe('')
     expect(usedText(0)).toBe('its memory was recalled 0 times')
     expect(itemHead('timeline')).toBe('Event')
     // The table: seven cells a row, Show on map hands the source memory to the map.
@@ -213,6 +208,34 @@ describe('VIEWS.1: the Knowledge tab on a real store', () => {
       const orphan = { ...data, items: { ...data.items, fact: [{ ...data.items.fact[0]!, memory: '' }] } }
       expect((tableRows(orphan, 'fact', host()) as unknown as FakeNode[])[0]!.all().find(n => n.tagName === 'button')!.disabled).toBe(true)
     })
+  })
+
+  test('VIEWS.1.a2 (cross): the Status cell of the real /api/knowledge reply reads active for an instruction and confidence 0.7 for a relation', async () => {
+    // No hand-made rows: the engine stored them (instructions active, kg at 0.7 by C6), the real server sent them.
+    const raw = (await get(started, '/api/knowledge')) as { instructions: Record<string, unknown>[]; relations: Record<string, unknown>[] }
+    expect(raw.instructions[0]!.active).toBe(true)
+    expect(raw.relations[0]!.confidence).toBe(0.7)
+    const data = parseKnowledge(raw)!
+    expect(rowsOf(data, 'instruction', now).map((r: { status: string }) => r.status)).toEqual(['active'])
+    expect(rowsOf(data, 'relation', now).map((r: { status: string }) => r.status)).toEqual(['confidence 0.7'])
+    for (const kind of ['fact', 'preference', 'timeline']) expect(rowsOf(data, kind, now).every((r: { status: string }) => r.status === '')).toBe(true)
+    // The fifth cell of the drawn row is the status.
+    await withDocument(() => {
+      expect(((tableRows(data, 'instruction', host()) as unknown as FakeNode[])[0]!.children[4] as FakeNode).textContent).toBe('active')
+      expect(((tableRows(data, 'relation', host()) as unknown as FakeNode[])[0]!.children[4] as FakeNode).textContent).toBe('confidence 0.7')
+    })
+  })
+
+  test('statusOf (pure unit, hand-made items): active or retired, confidence, blank when absent or for other kinds', async () => {
+    const data = await knowledge(started)
+    expect(statusOf({ ...data.items.instruction[0]!, active: null })).toBe('')
+    expect(statusOf({ ...data.items.instruction[0]!, active: false })).toBe('retired')
+    expect(statusOf({ ...data.items.relation[0]!, confidence: null })).toBe('')
+    expect(statusOf({ ...data.items.fact[0]!, active: false, confidence: 0.2 })).toBe('')
+    // The parse reads a stored 0/1 as a boolean and drops a non-number confidence.
+    const parsed = parseKnowledge({ instructions: [{ id: 'instruction:1', active: 0 }], relations: [{ id: 'relation:1', confidence: 'high' }] })!
+    expect(parsed.items.instruction[0]!.active).toBe(false)
+    expect(parsed.items.relation[0]!.confidence).toBeNull()
   })
 
   test('VIEWS.1.a3: extraction as a model id, off and unknown each get a status line; off and an empty store get a notice', async () => {
@@ -264,7 +287,7 @@ describe('VIEWS.1: the Knowledge tab on a real store', () => {
     await withDocument(() => {
       const rows = tableRows(data, 'fact', host()) as unknown as FakeNode[]
       const nodes = rows.flatMap(row => row.all())
-      expect(rows[1]!.texts()).toContain(MARKUP)
+      expect(rows[0]!.texts()).toContain(MARKUP)
       expect(nodes.map(n => n.tagName).filter(tag => !['tr', 'td', 'button', 'span'].includes(tag))).toEqual([])
       expect(nodes.some(n => [...n.attributes.keys()].some(name => /^on/i.test(name)))).toBe(false)
     })

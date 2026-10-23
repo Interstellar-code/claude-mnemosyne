@@ -766,6 +766,10 @@ export type KnowledgeItem = {
   // The source memory's all-time recall_count and last_recalled: "times its source memory was recalled".
   recalls: number
   lastRecalled: string | null
+  // Instructions only: memoria_instructions.active (null when a legacy table lacks the column).
+  active?: boolean | null
+  // Relations only: memoria_kg.confidence (null when a legacy table lacks the column).
+  confidence?: number | null
 }
 
 type KnowledgeList = 'facts' | 'preferences' | 'instructions' | 'timelines' | 'relations'
@@ -776,6 +780,8 @@ const KNOWLEDGE_LISTS: Readonly<Record<string, KnowledgeList>> = {
   timeline: 'timelines',
   relation: 'relations',
 }
+// The one extra state column a kind carries: an instruction's `active`, a relation's `confidence`.
+const KNOWLEDGE_STATE: Readonly<Partial<Record<KnowledgeList, 'active' | 'confidence'>>> = { instructions: 'active', relations: 'confidence' }
 
 // A knowledge item's text is cut here: the engine stores items of at most 500 characters (KSTORE.1).
 export const KNOWLEDGE_TEXT_CHARS = 500
@@ -827,20 +833,25 @@ export function knowledgeList(db: Database | null, limit = GALAXY_LIMIT): Answer
     } catch {
       continue
     }
+    const state = KNOWLEDGE_STATE[list]
     // The newest `limit` rows first, then their source memories; the inner query keeps the text's bare column names unambiguous.
-    const query = `SELECT t.rid AS rid, t.text AS text, t.owner AS owner, t.source_memory_id AS source_memory_id,
+    const query = `SELECT t.rid AS rid, t.text AS text, t.owner AS owner, t.source_memory_id AS source_memory_id, t.state AS state,
                           ${recallsSql} AS recalls, ${wm('last_recalled')} AS lastRecalled, ${wm('metadata_json')} AS metadata_json
-                   FROM (SELECT ${source.id} AS rid, ${source.text} AS text, ${columns.has('session_id') ? 'session_id' : 'NULL'} AS owner, source_memory_id
+                   FROM (SELECT ${source.id} AS rid, ${source.text} AS text, ${columns.has('session_id') ? 'session_id' : 'NULL'} AS owner, source_memory_id,
+                                ${state && columns.has(state) ? state : 'NULL'} AS state
                          FROM ${source.table} ORDER BY ${source.id} DESC LIMIT ?) t
                    ${joined ? 'LEFT JOIN working_memory wm ON wm.id = t.source_memory_id' : ''}
                    ORDER BY t.rid DESC`
-    let rows: { rid: number; text: string | null; owner: string | null; source_memory_id: string | null; recalls: number | null; lastRecalled: string | null; metadata_json: string | null }[]
+    let rows: { rid: number; text: string | null; owner: string | null; source_memory_id: string | null; state: unknown; recalls: number | null; lastRecalled: string | null; metadata_json: string | null }[]
     try {
       rows = db.query(query).all(limit) as typeof rows
     } catch {
       continue
     }
     for (const r of rows) {
+      // A legacy table without the column reads NULL here; a stored value that is no number reads null too.
+      const value = r.state === null || r.state === '' ? null : Number(r.state)
+      const known = value !== null && Number.isFinite(value) ? value : null
       result[list].push({
         id: `${source.kind}:${r.rid}`,
         kind: source.kind,
@@ -850,6 +861,8 @@ export function knowledgeList(db: Database | null, limit = GALAXY_LIMIT): Answer
         topic: tagsOf(parseMetadata(r.metadata_json)).map(tag => tag.trim()).find(tag => tag !== '') ?? null,
         recalls: r.recalls ?? 0,
         lastRecalled: r.lastRecalled ?? null,
+        ...(state === 'active' ? { active: known === null ? null : known !== 0 } : {}),
+        ...(state === 'confidence' ? { confidence: known } : {}),
       })
     }
     shown[list] = result[list].length

@@ -21,6 +21,8 @@ type KnowledgeItem = {
   topic: string | null
   recalls: number
   lastRecalled: string | null
+  active?: boolean | null
+  confidence?: number | null
 }
 
 type Lists = 'facts' | 'preferences' | 'instructions' | 'timelines' | 'relations'
@@ -290,6 +292,31 @@ describe('KAPI.1: GET /api/knowledge on a real store', () => {
     expect(rel.source_memory_id).toBe(ids.m2)
   })
 
+  test('KAPI.1.a1: an instruction carries active and a relation its confidence, as the real engine stored them', async () => {
+    const data = (await (await get(url, '/api/knowledge', started.token)).json()) as KnowledgeReply
+    const db = open()
+    let stored: { active: number; confidence: number }
+    try {
+      stored = {
+        active: (db.query('SELECT active FROM memoria_instructions').get() as { active: number }).active,
+        confidence: (db.query('SELECT confidence FROM memoria_kg').get() as { confidence: number }).confidence,
+      }
+    } finally {
+      db.close()
+    }
+    // mnemopi_knowledge_store writes instructions active and kg rows at confidence 0.7 (C6).
+    expect(stored).toEqual({ active: 1, confidence: 0.7 })
+    expect(data.instructions.map(item => item.active)).toEqual([true])
+    expect(data.relations.map(item => item.confidence)).toEqual([0.7])
+    // Only the kind that has the column carries the field.
+    expect(Object.keys(data.instructions[0]!)).not.toContain('confidence')
+    expect(Object.keys(data.relations[0]!)).not.toContain('active')
+    for (const item of [...data.facts, ...data.preferences, ...data.timelines]) {
+      expect(Object.keys(item)).not.toContain('active')
+      expect(Object.keys(item)).not.toContain('confidence')
+    }
+  })
+
   test('KAPI.1.a2: usage per item reflects source memory recall_count and last_recalled', async () => {
     const res = await get(url, '/api/knowledge', started.token)
     expect(res.status).toBe(200)
@@ -413,6 +440,35 @@ describe('KAPI.1: GET /api/knowledge on a real store', () => {
       expect(data.facts.map(fact => [fact.id, fact.text, fact.owner, fact.recalls])).toEqual([['fact:1', 'fact one', '', 4]])
     } finally {
       server.stop()
+    }
+  })
+
+  test('KAPI.1: legacy instruction and kg tables without active or confidence give null, never 500; a retired instruction reads false', async () => {
+    const server = await handStore('legacy-state-knowledge', db => {
+      db.run('CREATE TABLE working_memory (id TEXT PRIMARY KEY, session_id TEXT, content TEXT, timestamp TEXT, recall_count INTEGER)')
+      db.run("INSERT INTO working_memory VALUES ('m1', 'p1', 'x', '2026-10-01', 0)")
+      db.run('CREATE TABLE memoria_instructions (id INTEGER PRIMARY KEY, session_id TEXT, instruction TEXT, source_memory_id TEXT)')
+      db.run("INSERT INTO memoria_instructions (session_id, instruction, source_memory_id) VALUES ('p1', 'old rule', 'm1')")
+      db.run('CREATE TABLE memoria_kg (id INTEGER PRIMARY KEY, session_id TEXT, subject TEXT, predicate TEXT, object TEXT, source_memory_id TEXT)')
+      db.run("INSERT INTO memoria_kg (session_id, subject, predicate, object, source_memory_id) VALUES ('p1', 'a', 'b', 'c', 'm1')")
+    })
+    try {
+      const data = await server.knowledge()
+      expect(data.instructions.map(item => [item.text, item.active])).toEqual([['old rule', null]])
+      expect(data.relations.map(item => [item.text, item.confidence])).toEqual([['a b c', null]])
+    } finally {
+      server.stop()
+    }
+    const retired = await handStore('retired-knowledge', db => {
+      db.run('CREATE TABLE working_memory (id TEXT PRIMARY KEY, session_id TEXT, content TEXT, timestamp TEXT, recall_count INTEGER)')
+      db.run('CREATE TABLE memoria_instructions (id INTEGER PRIMARY KEY, session_id TEXT, instruction TEXT, active INTEGER, source_memory_id TEXT)')
+      db.run("INSERT INTO memoria_instructions (session_id, instruction, active, source_memory_id) VALUES ('p1', 'retired', 0, 'm1'), ('p1', 'unset', NULL, 'm1')")
+    })
+    try {
+      const data = await retired.knowledge()
+      expect(data.instructions.map(item => [item.text, item.active])).toEqual([['unset', null], ['retired', false]])
+    } finally {
+      retired.stop()
     }
   })
 
