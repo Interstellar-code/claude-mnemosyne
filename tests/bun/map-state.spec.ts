@@ -90,6 +90,7 @@ import {
   pathBar,
   parseGalaxy,
   pickNearest,
+  PICK_RADIUS,
   projectColour,
   projectRows,
   readLayout,
@@ -151,6 +152,11 @@ import {
   blendPlace,
   coreScale,
   galaxyOnlyFade,
+  linkFadeAt,
+  LINK_FADE_SPAN,
+  separateLabels,
+  LABEL_GAP,
+  CLAUDE_TOOLTIP,
   GRID_COLOUR,
   GRID_OPACITY,
   gridLine,
@@ -1990,9 +1996,20 @@ describe('MOON: moons on a clicked star and the knowledge filter', () => {
       expect(node('map-know-note').textContent).toBe('Pick a kind to light up only the memories it was mined from.')
       node('map-know').groups[1]!.fire('click')
       expect(chips.map(chip => chip.attributes.get('aria-pressed'))).toEqual(['false', 'true', 'false', 'false', 'false'])
-      expect(node('map-know-note').textContent).toBe('Showing only memories with the chosen knowledge; the rest are dimmed.')
-      node('map-know').groups[1]!.fire('click')
+      expect(node('map-know-note').textContent).toBe('Showing only memories with the chosen knowledge; the rest are dimmed. Clear')
+      // QAMAP R2: the note carries its own Clear button, made by the map; it clears the chips.
+      const clearButton = () => node('map-know-note').all().find(n => n.tagName === 'button' && n.textContent === 'Clear')
+      expect(clearButton()).toBeDefined()
+      clearButton()!.fire('click')
       expect(chips.map(chip => chip.attributes.get('aria-pressed'))).toEqual(['false', 'false', 'false', 'false', 'false'])
+      expect(node('map-know-note').textContent).toBe('Pick a kind to light up only the memories it was mined from.')
+      expect(clearButton()).toBeUndefined()
+      // Reset view clears the chips too.
+      node('map-know').groups[1]!.fire('click')
+      expect(chips.map(chip => chip.attributes.get('aria-pressed'))).toEqual(['false', 'true', 'false', 'false', 'false'])
+      node('map-reset').fire('click')
+      expect(chips.map(chip => chip.attributes.get('aria-pressed'))).toEqual(['false', 'false', 'false', 'false', 'false'])
+      expect(node('map-know-note').textContent).toBe('Pick a kind to light up only the memories it was mined from.')
       // A star with knowledge: the list has one button per row, text as plain text.
       view.show(ids.markup!)
       expect(items().length).toBe(1)
@@ -2912,5 +2929,78 @@ describe('QAMAP: timeline ticks, lane labels, moons, drag and strings, with the 
     expect(clearKinds(facts).kinds.size).toBe(0)
     expect(dimNote(clearKinds(facts))).toBeNull()
     expect(clearKinds(none)).toBe(none)
+  })
+
+  // QAMAP R2: the second browser QA's polish items.
+  test('QAMAP.R2.1: the Claude core has a tooltip in plain words and no click hint', () => {
+    const none = tooltip(null as unknown as Galaxy, { kind: 'claude', id: '', sx: 702, sy: 425 })
+    expect(none).toEqual(CLAUDE_TOOLTIP)
+    expect(none!.title).toBe('Claude')
+    expect(none!.sub).toBe('Recalls start here — gold sparks fly from this core to the memories a recall finds')
+    expect(none!.sub).not.toContain('Click')
+    // At the 22 px core pick radius: the cursor on the Claude core at (702, 425) picks it.
+    const hit = pickNearest([{ kind: 'claude', id: '', sx: 702, sy: 425, radius: PICK_RADIUS.claude, alpha: 1 }], 710, 430)
+    expect(hit?.kind).toBe('claude')
+  })
+
+  test('QAMAP.R2.2: the Claude label and a project label at the same spot end up apart; labels that do not touch stay', () => {
+    // The QA at 1440x900: the Claude label (about 46x18 px) and the borealis label (about 62x18 px) printed on each other.
+    const claude = { x: 677, y: 399, w: 46, h: 18, rank: 3 }
+    const borealis = { x: 690, y: 397, w: 62, h: 18, rank: 2 }
+    const [c, b] = separateLabels([borealis, claude]).reverse() as [typeof claude, typeof borealis]
+    // The Claude label keeps its place; the project label (its middle 2 px above Claude's) moves up, clear of it with the 2 px gap.
+    expect(c).toEqual(claude)
+    expect(b.x).toBe(borealis.x)
+    expect(b.y).toBe(claude.y - borealis.h - LABEL_GAP)
+    // Its middle below Claude's: it moves down instead.
+    expect(separateLabels([claude, { ...borealis, y: 403 }])[1]!.y).toBe(claude.y + claude.h + LABEL_GAP)
+    const clear = b.y >= c.y + c.h || c.y >= b.y + b.h
+    expect(clear).toBe(true)
+    // A topic label under a project label under Claude: all three apart, in rank order, the same every time.
+    const topic = { x: 680, y: 405, w: 50, h: 18, rank: 1 }
+    const three = separateLabels([topic, borealis, claude])
+    const again = separateLabels([topic, borealis, claude])
+    expect(three).toEqual(again)
+    for (const [i, j] of [[0, 1], [0, 2], [1, 2]] as const) {
+      const a = three[i]!
+      const z = three[j]!
+      expect(a.x < z.x + z.w && z.x < a.x + a.w && a.y < z.y + z.h && z.y < a.y + a.h).toBe(false)
+    }
+    // Labels far apart do not move, and nothing in the input is changed.
+    const far = [{ x: 100, y: 100, w: 40, h: 18, rank: 1 }, { x: 500, y: 300, w: 40, h: 18, rank: 2 }, { x: 100, y: 130, w: 40, h: 18, rank: 1 }]
+    expect(separateLabels(far)).toEqual(far)
+    expect(borealis.y).toBe(397)
+  })
+
+  test('QAMAP.R2.3: Reset view clears the Knowledge chips along with focus and Find, and Clear leaves the rest alone', () => {
+    const base = initialState({ reducedMotion: false })
+    const picked = toggleKind(toggleKind(base, 'fact'), 'preference')
+    const reset = resetView({ ...picked, query: 'tabs' })
+    expect(reset.kinds.size).toBe(0)
+    expect(reset.query).toBe('')
+    expect(dimNote(reset)).toBeNull()
+    // Nothing chosen: the very same kinds set, no needless change.
+    expect(resetView(base).kinds).toBe(base.kinds)
+    // The All crumb is Reset view too.
+    expect(goTo(picked, 'all').kinds.size).toBe(0)
+    // Clear keeps the layout and range.
+    const timeline = { ...picked, layout: 'timeline' as const }
+    expect(clearKinds(timeline).layout).toBe('timeline')
+    expect(clearKinds(timeline).kinds.size).toBe(0)
+  })
+
+  test('QAMAP.R2.4: the links are gone in the first 30% of the glide, so no streaks trail the stars', () => {
+    expect(LINK_FADE_SPAN).toBe(0.3)
+    expect(linkFadeAt(0)).toBe(1)
+    expect(linkFadeAt(0.15)).toBeCloseTo(0.5, 5)
+    expect(linkFadeAt(LINK_FADE_SPAN)).toBe(0)
+    expect(linkFadeAt(1)).toBe(0)
+    // On the real glide curve the fade never rises while the morph advances, and is out before it ends.
+    const along = [0, 0.1, 0.2, 0.3, 0.5, 0.8, 1].map(weight => linkFadeAt(morphBlend(weight)))
+    for (let i = 1; i < along.length; i++) expect(along[i]!).toBeLessThanOrEqual(along[i - 1]!)
+    expect(along[along.length - 1]).toBe(0)
+    expect(linkFadeAt(morphBlend(0.5))).toBe(0)
+    // Faster than the old fade, which tracked the positions.
+    for (const blend of [0.1, 0.2, 0.25]) expect(linkFadeAt(blend)).toBeLessThan(galaxyOnlyFade(blend))
   })
 })
