@@ -23,7 +23,7 @@ import {
   addMemory,
   announcement,
   BACKGROUND,
-  BLOOM,
+  bloomFor,
   BRIDGE_COLOUR,
   BRIDGE_OPACITY,
   BRIDGE_PARTICLES,
@@ -34,6 +34,11 @@ import {
   coreSize,
   coreTarget,
   DEMO_EVERY_MS,
+  GLOW_LEVELS,
+  glowLevel,
+  type GlowLevel,
+  readGlow,
+  saveGlow,
   demoKind,
   demoTimerOn,
   enqueueSparks,
@@ -357,6 +362,17 @@ export function createMap(host: MapHost): MapView {
   let three: Three | null = null
   let shown = true
   let failed = false
+  // Glow: the bloom strength level (off, soft, full), remembered; the pass is made when the map starts.
+  let glow: GlowLevel = glowLevel(readGlow(storage))
+  let bloomPass: Any = null
+  const applyGlow = () => {
+    if (bloomPass === null) return
+    const settings = bloomFor(glow)
+    bloomPass.enabled = settings.enabled
+    bloomPass.strength = settings.strength
+    bloomPass.radius = settings.radius
+    bloomPass.threshold = settings.threshold
+  }
   let pending: string | null = null
   let visuals: Visual[] = []
   const starVisual = new Map<string, Visual>()
@@ -1724,6 +1740,39 @@ export function createMap(host: MapHost): MapView {
   for (const button of byId('map-colour').querySelectorAll<HTMLButtonElement>('button[data-colour]')) {
     button.addEventListener('click', () => dispatch(setColourBy(state, button.dataset.colour as MapState['colourBy'])))
   }
+  // Glow control: three buttons built here (index.html has no Glow card), placed after the Colour card.
+  {
+    const card = el('section', undefined, 'rail-card')
+    card.setAttribute('aria-labelledby', 'map-glow-title')
+    const title = el('h2', 'Glow', 'rail-title')
+    title.id = 'map-glow-title'
+    const group = el('div', undefined, 'segmented')
+    group.id = 'map-glow'
+    group.setAttribute('role', 'group')
+    group.setAttribute('aria-label', 'Glow')
+    const names: Record<GlowLevel, string> = { off: 'Off', soft: 'Soft', full: 'Full' }
+    const buttons = GLOW_LEVELS.map(level => {
+      const button = el('button', names[level], 'seg-btn')
+      button.type = 'button'
+      button.dataset.glow = level
+      group.append(button)
+      return button
+    })
+    const sync = () => {
+      for (const button of buttons) button.setAttribute('aria-pressed', String(button.dataset.glow === glow))
+    }
+    for (const button of buttons) {
+      button.addEventListener('click', () => {
+        glow = glowLevel(button.dataset.glow)
+        saveGlow(storage, glow)
+        applyGlow()
+        sync()
+      })
+    }
+    sync()
+    card.append(title, group)
+    byId('map-colour').closest?.('section')?.after?.(card)
+  }
   byId('map-spokes').addEventListener('change', () => dispatch(toggleSpokes(state)))
   byId('map-bridges').addEventListener('change', () => dispatch(toggleBridges(state)))
   byId('map-moons').addEventListener('change', () => dispatch(toggleMoons(state)))
@@ -1869,13 +1918,16 @@ export function createMap(host: MapHost): MapView {
     try {
       const composer = l.postProcessingComposer?.() as Any
       if (!composer) throw new Error('the library has no post-processing composer')
-      bloom = new lib.UnrealBloomPass({ x: 512, y: 512 }, BLOOM.strength, BLOOM.radius, BLOOM.threshold)
+      const settings = bloomFor(glow)
+      bloom = new lib.UnrealBloomPass({ x: 512, y: 512 }, settings.strength, settings.radius, settings.threshold)
+      bloom.enabled = settings.enabled
       composer.addPass(bloom)
       composer.addPass(new lib.OutputPass())
     } catch (err) {
       bloom = null
       host.status(`The glow effect could not start (${err instanceof Error ? err.message : String(err)}); the map is drawn without it.`, 'error')
     }
+    bloomPass = bloom
     if (bloom?.basic && typeof bloom.basic.constructor === 'function') bloomPassBasic = bloom.basic.constructor
     const opening = state.layout === 'timeline' ? TIMELINE_POSE : { position: HOME, target: [0, 0, 0] as Vec3 }
     graph.cameraPosition({ x: opening.position[0], y: opening.position[1], z: opening.position[2] }, { x: opening.target[0], y: opening.target[1], z: opening.target[2] }, 0)

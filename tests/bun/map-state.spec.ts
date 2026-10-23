@@ -22,7 +22,13 @@ import {
   ageColour,
   announcement,
   BLOOM,
+  BLOOM_SOFT,
+  bloomFor,
   BRIDGE_PARTICLES,
+  GLOW_KEY,
+  glowLevel,
+  readGlow,
+  saveGlow,
   buildGalaxy,
   type Candidate,
   coreSize,
@@ -3002,5 +3008,82 @@ describe('QAMAP: timeline ticks, lane labels, moons, drag and strings, with the 
     expect(linkFadeAt(morphBlend(0.5))).toBe(0)
     // Faster than the old fade, which tracked the positions.
     for (const blend of [0.1, 0.2, 0.25]) expect(linkFadeAt(blend)).toBeLessThan(galaxyOnlyFade(blend))
+  })
+})
+
+
+// ---- GLOW: a softer bloom, and a Glow control (Off, Soft, Full) ----
+
+describe('GLOW: the bloom levels and the Glow control', () => {
+  test('soft is the default, glows less than full, and only the brightest things bloom', () => {
+    const soft = bloomFor('soft')
+    const full = bloomFor('full')
+    expect(glowLevel(null)).toBe('soft')
+    expect(glowLevel(undefined)).toBe('soft')
+    expect(glowLevel('garbage')).toBe('soft')
+    expect(glowLevel('')).toBe('soft')
+    expect(glowLevel('off')).toBe('off')
+    expect(glowLevel('full')).toBe('full')
+    expect(soft.enabled).toBe(true)
+    expect(soft.strength).toBeLessThan(full.strength)
+    expect(soft.radius).toBeLessThan(full.radius)
+    // A higher threshold means fewer pixels bloom: ordinary stars no longer glow.
+    expect(soft.threshold).toBeGreaterThan(full.threshold)
+    expect(soft).toEqual({ enabled: true, ...BLOOM_SOFT })
+  })
+
+  test('full is exactly the 0.6.0 glow, and off switches the pass off', () => {
+    expect(bloomFor('full')).toEqual({ enabled: true, strength: 0.95, radius: 0.55, threshold: 0.12 })
+    expect(bloomFor('off').enabled).toBe(false)
+  })
+
+  test('the level is read and saved through storage, and a throwing storage is ignored', () => {
+    const data = new Map<string, string>()
+    const storage = { getItem: (key: string) => data.get(key) ?? null, setItem: (key: string, value: string) => void data.set(key, value) }
+    expect(readGlow(storage)).toBeNull()
+    saveGlow(storage, 'off')
+    expect(data.get(GLOW_KEY)).toBe('off')
+    expect(glowLevel(readGlow(storage))).toBe('off')
+    const throwing = { getItem: () => { throw new Error('blocked') }, setItem: () => { throw new Error('blocked') } }
+    expect(readGlow(throwing)).toBeNull()
+    expect(() => saveGlow(throwing, 'full')).not.toThrow()
+    expect(readGlow(undefined)).toBeNull()
+  })
+
+  test('createMap builds the Glow control after the Colour card: soft is pressed, a click saves the level and moves the pressed button', async () => {
+    const html = readFileSync(join(ROOT, 'ui', 'index.html'), 'utf8')
+    const fake = fakeDom(html)
+    const g = globalThis as Record<string, unknown>
+    const saved = { document: g.document, CSS: g.CSS, HTMLElement: g.HTMLElement, localStorage: g.localStorage }
+    const data = new Map<string, string>()
+    g.document = fake.document
+    g.HTMLElement = FakeBase
+    g.localStorage = { getItem: (key: string) => data.get(key) ?? null, setItem: (key: string, value: string) => void data.set(key, value) }
+    ;(globalThis as Record<string, unknown>).CSS = { escape: (v: string) => v }
+    const added: FakeNode[] = []
+    const section = new FakeNode('section')
+    ;(section as unknown as { after: (node: FakeNode) => void }).after = node => void added.push(node)
+    ;(fake.nodes.get('map-colour') as unknown as { closest: () => FakeNode }).closest = () => section
+    try {
+      const { createMap } = (await import(join(ROOT, 'ui', 'map.ts'))) as { createMap: (host: unknown) => unknown }
+      createMap({ api: async () => new Response(JSON.stringify({ projects: [], memories: [], knowledge: [], meaning: false, total: 0, shown: 0 }), { status: 200 }), openMemory: () => {}, status: () => {} })
+      await Bun.sleep(30)
+      expect(added.length).toBe(1)
+      const buttons = added[0]!.all().filter(n => n.tagName === 'button')
+      expect(buttons.map(b => b.textContent)).toEqual(['Off', 'Soft', 'Full'])
+      const pressed = () => buttons.filter(b => b.attributes.get('aria-pressed') === 'true').map(b => b.dataset.glow)
+      expect(pressed()).toEqual(['soft'])
+      buttons[0]!.fire('click')
+      expect(data.get(GLOW_KEY)).toBe('off')
+      expect(pressed()).toEqual(['off'])
+      buttons[2]!.fire('click')
+      expect(data.get(GLOW_KEY)).toBe('full')
+      expect(pressed()).toEqual(['full'])
+    } finally {
+      g.document = saved.document
+      g.CSS = saved.CSS
+      g.HTMLElement = saved.HTMLElement
+      g.localStorage = saved.localStorage
+    }
   })
 })

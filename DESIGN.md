@@ -612,6 +612,25 @@ deliberately injected `<style>` in the same page was logged as refused (a
 control that the logging works). That run is evidence for that build only; the
 v0.6.0 map has the manual check in §3.7.
 
+### Dark mode (after v0.6.0)
+
+The dashboard has three themes: Auto (follows the system), Light and Dark, chosen
+with the Theme button in the header and remembered in `localStorage`
+(`mnemosyne.theme`). Every colour in `ui/style.css` is a variable. The themed
+ones are written once as `light-dark(light, dark)` pairs inside an
+`@supports (color: light-dark(#000, #000))` block and picked by `color-scheme`:
+Auto uses `light dark`, and the button sets `data-theme="light"` or `"dark"` on
+`<html>` (Auto removes it). Doing it in CSS keeps it inside the page's
+Content-Security-Policy (no inline style or script) and needs no JavaScript for
+Auto. A plain light copy of the palette stays outside the block as the fallback
+for browsers without `light-dark()`. The map canvas, the data colours (projects,
+knowledge kinds, sparks) and the legend dots are the same in both themes.
+`tests/bun/ui-views.spec.ts` checks that every pair's light half equals the
+fallback, that no literal colour is left outside the token blocks, and that every
+text colour reaches 4.5:1 on its surface in both themes. With an explicit choice
+that differs from the system setting, the page can show one frame in the other
+theme before the script runs.
+
 ### 3.6 Release check (MAP.6)
 
 `claude plugin validate .` does not apply the plugin directory's own code
@@ -674,10 +693,14 @@ section records the code.
   the 0.7.0 SEMX phase).
 - C3, the bloom passes: `ui/vendor/map-lib.js` exports `EffectComposer`,
   `RenderPass`, `UnrealBloomPass` and `OutputPass` besides `ForceGraph3D` and
-  `SpriteText` (§3.5). `ui/map.ts` adds an `UnrealBloomPass` (strength 0.95,
-  radius 0.55, threshold 0.12) and then an `OutputPass` to the library's own
-  composer (`postProcessingComposer()`); if the library has no composer, the
-  map draws without bloom and says so in the status line.
+  `SpriteText` (§3.5). `ui/map.ts` adds an `UnrealBloomPass` and then an
+  `OutputPass` to the library's own composer (`postProcessingComposer()`); if
+  the library has no composer, the map draws without bloom and says so in the
+  status line. The glow has three levels, set by the Glow control and remembered
+  in `localStorage` (`mnemosyne.map.glow`): Soft (the default: strength 0.35,
+  radius 0.3, threshold 0.35, so only the brightest cores bloom), Full (the
+  0.6.0 values: strength 0.95, radius 0.55, threshold 0.12) and Off (the pass is
+  switched off).
 - C4, `ui/map-layout.ts`: pure, seeded math with no imports and no three.js.
   `galaxyLayout(data)` returns cores (one per project, on a golden-angle
   sphere), hubs (one per topic, on a ring around its core), stars and bridges;

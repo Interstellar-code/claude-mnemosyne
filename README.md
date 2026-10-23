@@ -87,6 +87,8 @@ Starts a small local web page for your memories and opens it in your default bro
 - **Knowledge:** the facts, preferences, instructions, dated events and relations that extraction pulled out of your memories (see [The Knowledge and Health tabs](#the-knowledge-and-health-tabs)).
 - **Health:** how much of your memory is used, how much has never been recalled, and which features are switched on.
 
+The Theme button in the header switches the whole dashboard between Auto (follows your system), Light and Dark, and remembers your choice.
+
 One dashboard runs at a time: running `/mnemosyne-ui` again, in this session or another, hands over the same link. It stops when the session that started it ends; `/clear` in that session counts as an end. Run `/mnemosyne-ui` again for a fresh one.
 
 **Security.** The server binds `127.0.0.1` only, so nothing outside your machine can reach it. It makes a new random token each time it starts; the link carries it after `#`, which a browser never sends, and the page sends it only in a request header. Without it, every data route answers 401. The page loads no outside files, and a strict content security policy blocks inline script and style. The server reads the database read-only: a forget or a search goes through the engine, as Claude's would. Anyone who can run programs as your user can read the token from `~/.claude/mnemosyne/ui.json`, as they could read the database itself.
@@ -106,7 +108,7 @@ The Map tab draws every memory as a star in a glowing galaxy (the newest 2000; p
 7. Live. Recalls and saves from the activity log light the map as they happen: a gold spark flies from the Claude core to each recalled star, a teal one to a saved or updated star, a red one to a forgotten star. A memory saved while the page is open is added to the map as a new star. The Recall and Write layer switches turn each kind off, the Live pill pauses the whole stream (it starts paused under reduced motion), and the live strip under the map lists the last few events.
 8. Simulate. "Simulate a recall" and "Simulate a write" play demo sparks on the map so you can see the live view on a quiet day. They are demo only: they make no request, never touch the store and never write a line to the activity log. After the first press the demo repeats every few seconds while Live is on.
 
-The map needs WebGL; without it the map area says so, and the other tabs still work. Its 3D library (three.js, `3d-force-graph` and the bloom passes, about 830 KB) loads only when you first open the Map tab.
+The Glow control in the rail sets how strongly stars glow: Soft (the default), Full (the 0.6.0 look) or Off; your choice is remembered. The map needs WebGL; without it the map area says so, and the other tabs still work. Its 3D library (three.js, `3d-force-graph` and the bloom passes, about 830 KB) loads only when you first open the Map tab.
 
 ### The Knowledge and Health tabs
 

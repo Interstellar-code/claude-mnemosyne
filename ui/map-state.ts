@@ -155,7 +155,46 @@ export const labelScale = (distance: number) => Math.min(1, Math.max(0.2, distan
 /** The selected star's pulse. */
 export const selectedPulse = (seconds: number) => 0.22 + 0.14 * Math.sin(seconds * 4)
 
+/** The original, strong glow (0.6.0 shipped with it as the only setting). Now the "full" level. */
 export const BLOOM = { strength: 0.95, radius: 0.55, threshold: 0.12 } as const
+
+// ---- Glow: how strong the bloom is (off, soft, full) ----
+
+export type GlowLevel = 'off' | 'soft' | 'full'
+export const GLOW_LEVELS: readonly GlowLevel[] = ['off', 'soft', 'full']
+export const GLOW_KEY = 'mnemosyne.map.glow'
+/** Soft is the default: a higher threshold so ordinary stars do not bloom at all, only the brightest cores, and a gentler strength. */
+export const BLOOM_SOFT = { strength: 0.35, radius: 0.3, threshold: 0.35 } as const
+
+/** The bloom pass settings for a level. Off keeps the soft numbers but the pass is switched off. */
+export function bloomFor(level: GlowLevel): { enabled: boolean; strength: number; radius: number; threshold: number } {
+  if (level === 'full') return { enabled: true, ...BLOOM }
+  if (level === 'off') return { enabled: false, ...BLOOM_SOFT }
+  return { enabled: true, ...BLOOM_SOFT }
+}
+
+/** A stored glow value as a valid level: anything unknown (or no value) is the soft default. */
+export function glowLevel(stored: string | null | undefined): GlowLevel {
+  return GLOW_LEVELS.find(level => level === stored) ?? 'soft'
+}
+
+/** The stored glow level, or null when there is none or storage throws (private windows, blocked storage). */
+export function readGlow(storage: Pick<Storage, 'getItem'> | undefined): string | null {
+  try {
+    return storage?.getItem(GLOW_KEY) ?? null
+  } catch {
+    return null
+  }
+}
+
+/** Remembers the glow level picked; failure is ignored. */
+export function saveGlow(storage: Pick<Storage, 'setItem'> | undefined, level: GlowLevel): void {
+  try {
+    storage?.setItem(GLOW_KEY, level)
+  } catch {
+    // storage is a convenience only
+  }
+}
 const THREAD_OPACITY = 0.16
 const THREAD_OPACITY_FOCUSED = 0.3
 export const BRIDGE_OPACITY = 0.55

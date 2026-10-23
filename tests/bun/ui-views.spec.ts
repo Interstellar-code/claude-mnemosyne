@@ -1251,7 +1251,14 @@ describe('QAPAGE R1: the page, read as a tree and a stylesheet', () => {
   })
 
   test('item 4: the dot classes paint the Map palette: .c0 to .c7 are PALETTE in order and .c-global is the Map grey', () => {
-    const colour = (cls: string) => rules.find(rule => rule.selector === `.${cls}`)?.decls.background?.toUpperCase()
+    // The dot rules use variables now (dark mode): resolve a var(--x) through the plain fallback palette in :root.
+    const sheet = readFileSync(join(ROOT, 'ui', 'style.css'), 'utf8')
+    const tokens = new Map([...sheet.slice(0, sheet.indexOf('@supports')).matchAll(/--([\w-]+):\s*([^;]+);/g)].map(m => [m[1]!, m[2]!.trim()] as const))
+    const colour = (cls: string) => {
+      const value = rules.find(rule => rule.selector === `.${cls}`)?.decls.background
+      const variable = /^var\(--([\w-]+)\)$/.exec(value ?? '')
+      return (variable ? tokens.get(variable[1]!) : value)?.toUpperCase()
+    }
     expect(PALETTE).toHaveLength(8)
     expect(PALETTE[0]).toBe('#4C8DDB')
     expect(PALETTE.map((_, i) => colour(`c${i}`))).toEqual(PALETTE.map(hex => hex.toUpperCase()))
@@ -1318,5 +1325,143 @@ describe('QAPAGE R1: the page, read as a tree and a stylesheet', () => {
     expect(html).toContain('<div class="tile-label">Claude recalls today</div>')
     expect(html).toContain('Claude recalls per day, last 14 days')
     expect(html).toContain('Searching here does not count as a recall.')
+  })
+})
+
+// ---- DARK: the colour tokens, the contrast of both themes, and the theme switch ----
+
+describe('DARK: ui/style.css tokens and contrast', () => {
+  const css = readFileSync(join(ROOT, 'ui', 'style.css'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '')
+  const fallbackBlock = /:root \{([\s\S]*?)\n\}/.exec(css)![1]!
+  const supportsBlock = css.slice(css.indexOf('@supports'))
+  const norm = (value: string) => value.replace(/\s+/g, '').toLowerCase()
+  const fallback = new Map([...fallbackBlock.matchAll(/--([\w-]+):\s*([^;]+);/g)].map(m => [m[1]!, m[2]!.trim()] as const))
+  const pairs = new Map(
+    [...supportsBlock.matchAll(/--([\w-]+):\s*light-dark\(\s*(#[0-9A-Fa-f]{6}|rgba?\([^)]*\))\s*,\s*(#[0-9A-Fa-f]{6}|rgba?\([^)]*\))\s*\);/g)].map(m => [m[1]!, { light: m[2]!, dark: m[3]! }] as const),
+  )
+
+  test('the dark palette has one light-dark() pair per themed token, and its light half equals the plain fallback', () => {
+    expect(pairs.size).toBeGreaterThanOrEqual(30)
+    for (const [name, pair] of pairs) {
+      expect(fallback.has(name)).toBe(true)
+      expect(norm(fallback.get(name)!)).toBe(norm(pair.light))
+    }
+    expect(css).toContain('color-scheme: light dark')
+    expect(css).toContain(':root[data-theme="light"] { color-scheme: light; }')
+    expect(css).toContain(':root[data-theme="dark"] { color-scheme: dark; }')
+  })
+
+  test('every var(--x) in the stylesheet is defined, and no literal colour is left outside the token blocks', () => {
+    const defined = new Set([...fallback.keys()])
+    const used = new Set([...css.matchAll(/var\(--([\w-]+)/g)].map(m => m[1]!))
+    expect([...used].filter(name => !defined.has(name))).toEqual([])
+    const rest = css.slice(css.indexOf('@supports'))
+    const afterTokens = rest.slice(rest.indexOf(':root[data-theme="dark"]'))
+    const outside = afterTokens.slice(afterTokens.indexOf('}\n') + 2)
+    expect(outside.match(/#[0-9A-Fa-f]{3,8}\b|rgba?\([^)]*\)/g) ?? []).toEqual([])
+  })
+
+  const hex = (colour: string) => [1, 3, 5].map(i => parseInt(colour.slice(i, i + 2), 16))
+  const luminance = (colour: string) => {
+    const [r, g, b] = hex(colour).map(v => {
+      const s = v / 255
+      return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4
+    }) as [number, number, number]
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+  }
+  const ratio = (a: string, b: string) => {
+    const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x) as [number, number]
+    return (hi + 0.05) / (lo + 0.05)
+  }
+  // text token on the surface it is drawn on
+  const TEXT_ON: [string, string][] = [
+    ['text', 'bg'], ['text', 'surface'], ['muted', 'bg'], ['muted', 'surface'], ['accent', 'surface'], ['accent', 'bg'],
+    ['accent', 'accent-soft'], ['blue-ink', 'blue-soft'], ['violet-ink', 'violet-soft'], ['amber-ink', 'amber-soft'],
+    ['amber-ink', 'surface'], ['danger-ink', 'danger-soft'], ['danger-ink', 'surface'], ['notice-ink', 'notice-bg'],
+    ['on-accent', 'accent'], ['on-danger', 'danger'], ['text', 'fill'], ['text', 'hover'], ['muted', 'fill'], ['text', 'mark'],
+    ['accent', 'hover'], ['text', 'surface-2'], ['text', 'surface-3'],
+  ]
+  for (const theme of ['light', 'dark'] as const) {
+    test(`${theme}: every text colour reaches 4.5:1 on the surface it is drawn on`, () => {
+      const low = TEXT_ON.map(([fg, bg]) => {
+        const get = (name: string) => (pairs.get(name)?.[theme] ?? fallback.get(name)!)
+        return { fg, bg, ratio: ratio(get(fg), get(bg)) }
+      }).filter(row => row.ratio < 4.5)
+      expect(low.map(row => `${row.fg} on ${row.bg}: ${row.ratio.toFixed(2)}`)).toEqual([])
+    })
+  }
+})
+
+describe('DARK: the theme switch', () => {
+  const root = () => {
+    const attributes = new Map<string, string>()
+    return { attributes, setAttribute: (name: string, value: string) => void attributes.set(name, value), removeAttribute: (name: string) => void attributes.delete(name) }
+  }
+  const button = () => {
+    const attributes = new Map<string, string>()
+    let click: () => void = () => {}
+    return { textContent: '' as string | null, attributes, setAttribute: (name: string, value: string) => void attributes.set(name, value), addEventListener: (_type: 'click', listener: () => void) => void (click = listener), press: () => click() }
+  }
+
+  test('modes: garbage and no value are Auto; a press cycles Auto, Light, Dark; the label says what a press does', async () => {
+    const { themeMode, nextTheme, themeButtonLabel, themeButtonText } = await import('../../ui/theme')
+    expect(themeMode(null)).toBe('auto')
+    expect(themeMode('purple')).toBe('auto')
+    expect(themeMode('dark')).toBe('dark')
+    expect(nextTheme('auto')).toBe('light')
+    expect(nextTheme('light')).toBe('dark')
+    expect(nextTheme('dark')).toBe('auto')
+    expect(themeButtonLabel('auto')).toBe('Theme: Auto. Press for Light.')
+    expect(themeButtonLabel('dark')).toBe('Theme: Dark. Press for Auto.')
+    expect(themeButtonText('light')).toBe('Theme: Light')
+  })
+
+  test('startTheme applies the stored mode, sets and clears data-theme on each press, and saves the choice', async () => {
+    const { startTheme, THEME_KEY } = await import('../../ui/theme')
+    const data = new Map<string, string>([[THEME_KEY, 'dark']])
+    const storage = { getItem: (key: string) => data.get(key) ?? null, setItem: (key: string, value: string) => void data.set(key, value) }
+    const r = root()
+    const b = button()
+    const mode = startTheme(b, r, storage)
+    expect(mode()).toBe('dark')
+    expect(r.attributes.get('data-theme')).toBe('dark')
+    expect(b.textContent).toBe('Theme: Dark')
+    expect(b.attributes.get('aria-label')).toBe('Theme: Dark. Press for Auto.')
+    b.press()
+    expect(mode()).toBe('auto')
+    expect(r.attributes.has('data-theme')).toBe(false)
+    expect(data.get(THEME_KEY)).toBe('auto')
+    b.press()
+    expect(r.attributes.get('data-theme')).toBe('light')
+    expect(data.get(THEME_KEY)).toBe('light')
+  })
+
+  test('a garbage stored value falls back to Auto, and a throwing or missing storage does not break the switch', async () => {
+    const { startTheme, THEME_KEY } = await import('../../ui/theme')
+    const garbage = { getItem: () => 'purple', setItem: () => {} }
+    const r1 = root()
+    expect(startTheme(button(), r1, garbage)()).toBe('auto')
+    expect(r1.attributes.has('data-theme')).toBe(false)
+    const throwing = { getItem: () => { throw new Error('blocked') }, setItem: () => { throw new Error('blocked') } }
+    const r2 = root()
+    const b = button()
+    const mode = startTheme(b, r2, throwing)
+    expect(mode()).toBe('auto')
+    b.press()
+    expect(mode()).toBe('light')
+    expect(r2.attributes.get('data-theme')).toBe('light')
+    const r3 = root()
+    const b3 = button()
+    const m3 = startTheme(b3, r3, undefined)
+    b3.press()
+    expect(m3()).toBe('light')
+    expect(THEME_KEY).toBe('mnemosyne.theme')
+  })
+
+  test('the page has the theme button in the header, and the script that starts it is the module the page loads', () => {
+    const html = readFileSync(join(ROOT, 'ui', 'index.html'), 'utf8')
+    const header = html.slice(html.indexOf('<header class="top">'), html.indexOf('</header>'))
+    expect(header).toContain('<button id="theme" type="button" class="theme-btn">')
+    expect(readFileSync(join(ROOT, 'ui', 'tsconfig.json'), 'utf8')).toContain('"theme.ts"')
   })
 })

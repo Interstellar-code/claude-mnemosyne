@@ -18,6 +18,7 @@ import { createMap, type MapView } from './map'
 import { extractionState, itemHead, kindTabs, kpiTiles as knowledgeKpiTiles, notice as knowledgeNotice, dotClass, ownerColour, ownerColours, parseKnowledge, tableRows, type KnowledgeData, type KnowledgeHost, type KnowledgeKind } from './knowledge'
 import { chartBars, chartText, coverageRows, dayBars, hotRows, kpiTiles as healthKpiTiles, neverRow, neverText, parseHealth, projectRows as healthProjectRows, storageList, type HealthData, type HealthHost } from './health'
 import { isClaudeRecall } from './recalls'
+import { startTheme } from './theme'
 import { createStream, type StreamApi, type StreamHandle, type StreamListener, type StreamStatus } from './stream'
 
 const TOKEN_KEY = 'mnemosyne.token'
@@ -1216,6 +1217,14 @@ async function runSearch() {
 // ---- Start ----
 
 async function main() {
+  // The theme first, so the page is not drawn in the wrong colours while it loads.
+  startTheme(byId('theme'), document.documentElement, (() => {
+    try {
+      return typeof localStorage === 'undefined' ? undefined : localStorage
+    } catch {
+      return undefined
+    }
+  })())
   drawTabs()
   const found = takeToken()
   if (found === undefined) {
