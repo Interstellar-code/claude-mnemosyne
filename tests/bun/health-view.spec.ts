@@ -165,6 +165,7 @@ describe('VIEWS.2: the Health tab on a real store', () => {
       ['Memories', '5'],
       ['Never recalled', '2'],
       ['Claude recalls in the log', '6'],
+      ["Other apps' recalls", '0'],
       ['Store size', bytes(data.storeSize + data.logSize)],
     ])
     expect(kpis(data)[0]!.note).toBe('2 projects, 1 global')
@@ -291,9 +292,21 @@ describe('VIEWS.2: the Health tab on a real store', () => {
     expect(rowsOfStorage[2]!.name).toBe('working_memory')
   })
 
+  test("QAPAGE R2 item 1: other apps' recalls are their own KPI line, never added to Claude's", () => {
+    const days = [{ date: '2026-10-23', count: 9 }]
+    const other = [{ date: '2026-10-23', count: 2 }, { date: 'bad', count: 5 }]
+    const mixed = parseHealth({ recallsPerDay: days, otherRecallsPerDay: other, daysCovered: 1 })
+    expect(kpis(mixed).filter((k: { label: string }) => k.label.includes('recalls')).map((k: { label: string; value: string }) => [k.label, k.value])).toEqual([
+      ['Claude recalls in the log', '9'],
+      ["Other apps' recalls", '2'],
+    ])
+    // A reply without the field (an older server) reads 0, not an error.
+    expect(kpis(parseHealth({ recallsPerDay: days }))[3]).toMatchObject({ label: "Other apps' recalls", value: '0' })
+  })
+
   test('VIEWS.2: an empty store reads as zeros, with no never-recalled list', () => {
     expect(emptyData.total).toBe(0)
-    expect(kpis(emptyData).map((k: { value: string }) => k.value)).toEqual(['0', '0', '0', '0 B'])
+    expect(kpis(emptyData).map((k: { value: string }) => k.value)).toEqual(['0', '0', '0', '0', '0 B'])
     expect(neverText(emptyData)).toBe('Every memory has come back in a recall at least once.')
     expect(coverageBars(emptyData).every((b: { pct: number }) => b.pct === 0)).toBe(true)
     expect(coverageBars(emptyData)[4]!.note).toBe('Nothing is stored yet.')

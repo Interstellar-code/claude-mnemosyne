@@ -33,6 +33,7 @@ type HealthReport = {
   mostRecalled: (HealthMemory & { recalls: number })[]
   recallsPerDay: { date: string; count: number }[]
   recallsByDay: Record<string, number>
+  otherRecallsPerDay: { date: string; count: number }[]
   daysCovered: number
   sizes: { store: number; log: number }
   tables: Record<string, number>
@@ -86,6 +87,21 @@ async function reportOf(name: string, setup: (db: Database) => void): Promise<He
     started.stop()
     temp.dispose()
   }
+}
+
+/** The QA's log mix, today: 9 Claude Code recalls (hook, tool, trigger), 2 codex-mcp-client recalls, 4 dashboard searches, 1 failed hook recall. The Activity spec (ui-views) feeds the same lines. */
+function recallMix(): Record<string, unknown>[] {
+  const t = new Date().toISOString()
+  const recall = (origin: string, extra: Record<string, unknown> = {}) => ({ t, action: 'recall', origin, owner: 'global', text: 'q', ids: [], count: 0, ok: true, ...extra })
+  return [
+    ...[1, 2, 3, 4].map(() => recall('hook', { client: 'claude-code' })),
+    ...[1, 2, 3].map(() => recall('tool', { client: 'claude-code' })),
+    ...[1, 2].map(() => recall('trigger', { client: 'claude-code' })),
+    recall('external', { client: 'codex-mcp-client' }),
+    recall('external', { client: 'codex-mcp-client' }),
+    ...[1, 2, 3, 4].map(() => recall('ui', { client: 'dashboard' })),
+    recall('hook', { client: 'claude-code', ok: false }),
+  ]
 }
 
 describe('KAPI.2: GET /api/health and /api/health-report', () => {
@@ -264,6 +280,27 @@ describe('KAPI.2: GET /api/health and /api/health-report', () => {
     expect(report.coverage.vectors).toBe(1)
     // Memories with author_type set: a1 ('human'), b1 ('agent') -> 2
     expect(report.coverage.provenance).toBe(2)
+  })
+
+  test('QAPAGE R2 item 1: the QA mix (9 Claude Code recalls, 2 other-app recalls, some dashboard searches) gives 9, with the 2 counted apart', async () => {
+    const mixTemp = tempDir('recall-mix')
+    const mixStore = join(mixTemp.dir, 'store')
+    mkdirSync(mixStore, { recursive: true })
+    const mixLog = join(mixTemp.dir, 'activity.jsonl')
+    const lines = recallMix().map(line => JSON.stringify(line))
+    writeFileSync(mixLog, `${lines.join('\n')}\n`)
+    const mixStarted = await startServer({ root: join(mixTemp.dir, 'root'), store: mixStore, cli: CLI, activityLog: mixLog, pluginRoot: ROOT })
+    try {
+      const res = await get(`http://127.0.0.1:${mixStarted.port}`, '/api/health-report', mixStarted.token)
+      const report = (await res.json()) as HealthReport
+      const sum = (days: { count: number }[]) => days.reduce((total, day) => total + day.count, 0)
+      expect(sum(report.recallsPerDay)).toBe(9)
+      expect(sum(report.otherRecallsPerDay)).toBe(2)
+      expect(Object.values(report.recallsByDay).reduce((total, n) => total + n, 0)).toBe(9)
+    } finally {
+      mixStarted.stop()
+      mixTemp.dispose()
+    }
   })
 
   test('KAPI.2: Empty store or missing database returns empty report without throwing', async () => {
