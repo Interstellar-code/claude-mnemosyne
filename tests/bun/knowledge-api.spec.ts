@@ -3,9 +3,10 @@
 // (mnemopi_remember, mnemopi_knowledge_prompt, mnemopi_knowledge_store).
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { Database } from 'bun:sqlite'
-import { mkdirSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { startServer } from '../../ui/server'
+import { GALAXY_LIMIT, startServer } from '../../ui/server'
 import type { Started } from '../../ui/server'
 import { body, engineCall, ROOT, tempDir, toolCall } from './helpers'
 
@@ -15,14 +16,14 @@ type KnowledgeItem = {
   id: string
   kind: string
   text: string
-  item?: string
   owner: string
   source_memory_id: string
   topic: string | null
   recalls: number
   lastRecalled: string | null
-  usage?: { recalls: number; lastRecalled: string | null }
 }
+
+type Lists = 'facts' | 'preferences' | 'instructions' | 'timelines' | 'relations'
 
 type KnowledgeReply = {
   extraction: string
@@ -32,10 +33,47 @@ type KnowledgeReply = {
   timelines: KnowledgeItem[]
   relations: KnowledgeItem[]
   kg?: KnowledgeItem[]
+  total: Record<Lists, number>
+  shown: Record<Lists, number>
 }
 
 const get = (url: string, path: string, token: string, auth = true) =>
   fetch(`${url}${path}`, { headers: auth ? { Authorization: `Bearer ${token}` } : {} })
+
+/** The sha256 of the store's database file and its WAL: unchanged bytes prove nothing was written. */
+function storeHash(store: string): string {
+  const hash = createHash('sha256')
+  for (const file of ['mnemopi.db', 'mnemopi.db-wal']) {
+    const path = join(store, file)
+    hash.update(file).update(existsSync(path) ? readFileSync(path) : Buffer.alloc(0))
+  }
+  return hash.digest('hex')
+}
+
+/** A real server over a hand-built store (a legacy or oversized shape the engine no longer writes). */
+async function handStore(name: string, setup: (db: Database) => void) {
+  const temp = tempDir(name)
+  const store = join(temp.dir, 'store')
+  mkdirSync(store, { recursive: true })
+  const db = new Database(join(store, 'mnemopi.db'))
+  try {
+    setup(db)
+  } finally {
+    db.close()
+  }
+  const started = await startServer({ root: join(temp.dir, 'root'), store, cli: CLI, activityLog: '', pluginRoot: ROOT })
+  return {
+    knowledge: async () => {
+      const res = await get(`http://127.0.0.1:${started.port}`, '/api/knowledge', started.token)
+      expect(res.status).toBe(200)
+      return (await res.json()) as KnowledgeReply
+    },
+    stop: () => {
+      started.stop()
+      temp.dispose()
+    },
+  }
+}
 
 describe('KAPI.1: GET /api/knowledge on a real store', () => {
   const temp = tempDir('knowledge-api')
@@ -150,18 +188,49 @@ describe('KAPI.1: GET /api/knowledge on a real store', () => {
     const unauth = await get(url, '/api/knowledge', started.token, false)
     expect(unauth.status).toBe(401)
 
-    // DB row counts stay identical before and after
+    // The file bytes and SQLite's data_version (seen from one held connection) stay the same.
+    const watcher = open()
+    try {
+      const version = () => (watcher.query('PRAGMA data_version').get() as { data_version: number }).data_version
+      const beforeVersion = version()
+      const beforeHash = storeHash(store)
+      const res = await get(url, '/api/knowledge', started.token)
+      expect(res.status).toBe(200)
+      await res.json()
+      expect(storeHash(store)).toBe(beforeHash)
+      expect(version()).toBe(beforeVersion)
+    } finally {
+      watcher.close()
+    }
+  })
+
+  test('KAPI.1.a1: every id is <kind>:<rowid> of the real row, and items carry one name per field', async () => {
+    const data = (await (await get(url, '/api/knowledge', started.token)).json()) as KnowledgeReply
     const db = open()
-    const beforeCount = (db.query('SELECT COUNT(*) AS n FROM working_memory').get() as { n: number }).n
-    db.close()
-
-    const res = await get(url, '/api/knowledge', started.token)
-    expect(res.status).toBe(200)
-
-    const db2 = open()
-    const afterCount = (db2.query('SELECT COUNT(*) AS n FROM working_memory').get() as { n: number }).n
-    db2.close()
-    expect(afterCount).toBe(beforeCount)
+    let expected: string[]
+    try {
+      expected = (
+        db
+          .query(
+            `SELECT 'fact:' || id AS id FROM memoria_facts UNION ALL SELECT 'preference:' || id FROM memoria_preferences
+             UNION ALL SELECT 'instruction:' || id FROM memoria_instructions UNION ALL SELECT 'timeline:' || event_id FROM memoria_timelines
+             UNION ALL SELECT 'relation:' || id FROM memoria_kg`,
+          )
+          .all() as { id: string }[]
+      ).map(row => row.id)
+      // Each item's text is the row its id names.
+      for (const fact of data.facts) {
+        const row = db.query('SELECT value FROM memoria_facts WHERE id = ?').get(Number(fact.id.split(':')[1])) as { value: string }
+        expect(fact.text).toBe(row.value.replace(/[\u0000-\u001f]/g, ''))
+      }
+    } finally {
+      db.close()
+    }
+    const got = [...data.facts, ...data.preferences, ...data.instructions, ...data.timelines, ...data.relations].map(item => item.id)
+    expect(got.sort()).toEqual(expected.sort())
+    for (const item of data.facts) {
+      expect(Object.keys(item).sort()).toEqual(['id', 'kind', 'lastRecalled', 'owner', 'recalls', 'source_memory_id', 'text', 'topic'])
+    }
   })
 
   test('KAPI.1.a1: returns per-kind rows with mapped fields, id shape, owner, topic and cleaned text', async () => {
@@ -246,24 +315,24 @@ describe('KAPI.1: GET /api/knowledge on a real store', () => {
   })
 
   test('KAPI.1.a3: extraction reflects MNEMOSYNE_EXTRACTION environment setting', async () => {
-    // When unset / empty -> 'unknown'
-    delete process.env.MNEMOSYNE_EXTRACTION
-    const resUnknown = await get(url, '/api/knowledge', started.token)
-    expect(resUnknown.status).toBe(200)
-    expect(((await resUnknown.json()) as KnowledgeReply).extraction).toBe('unknown')
-
-    // When set to 'off'
-    process.env.MNEMOSYNE_EXTRACTION = 'off'
-    const resOff = await get(url, '/api/knowledge', started.token)
-    expect(resOff.status).toBe(200)
-    expect(((await resOff.json()) as KnowledgeReply).extraction).toBe('off')
-
-    // When set to a model id
-    process.env.MNEMOSYNE_EXTRACTION = 'claude-3-5-haiku-20241022'
-    const resModel = await get(url, '/api/knowledge', started.token)
-    expect(resModel.status).toBe(200)
-    expect(((await resModel.json()) as KnowledgeReply).extraction).toBe('claude-3-5-haiku-20241022')
-    delete process.env.MNEMOSYNE_EXTRACTION
+    const saved = process.env.MNEMOSYNE_EXTRACTION
+    const extraction = async () => {
+      const res = await get(url, '/api/knowledge', started.token)
+      expect(res.status).toBe(200)
+      return ((await res.json()) as KnowledgeReply).extraction
+    }
+    try {
+      // Unset -> 'unknown'
+      delete process.env.MNEMOSYNE_EXTRACTION
+      expect(await extraction()).toBe('unknown')
+      process.env.MNEMOSYNE_EXTRACTION = 'off'
+      expect(await extraction()).toBe('off')
+      process.env.MNEMOSYNE_EXTRACTION = 'claude-3-5-haiku-20241022'
+      expect(await extraction()).toBe('claude-3-5-haiku-20241022')
+    } finally {
+      if (saved === undefined) delete process.env.MNEMOSYNE_EXTRACTION
+      else process.env.MNEMOSYNE_EXTRACTION = saved
+    }
   })
 
   test('KAPI.1: Empty store returns empty lists without error', async () => {
@@ -323,6 +392,74 @@ describe('KAPI.1: GET /api/knowledge on a real store', () => {
     } finally {
       legacyStarted.stop()
       legacyTemp.dispose()
+    }
+  })
+
+  test('KAPI.1: a legacy working_memory without metadata_json and last_recalled still lists its items', async () => {
+    const server = await handStore('legacy-wm-knowledge', db => {
+      db.run('CREATE TABLE working_memory (id TEXT PRIMARY KEY, session_id TEXT, content TEXT, timestamp TEXT, recall_count INTEGER DEFAULT 0)')
+      db.run("INSERT INTO working_memory VALUES ('m1', 'project-old-1a2b', 'hello', '2026-10-01', 4)")
+      db.run('CREATE TABLE memoria_preferences (id INTEGER PRIMARY KEY, session_id TEXT, preference TEXT, source_memory_id TEXT)')
+      db.run("INSERT INTO memoria_preferences (session_id, preference, source_memory_id) VALUES ('project-old-1a2b', 'tabs', 'm1')")
+      // A fact table older still: no session_id either.
+      db.run('CREATE TABLE memoria_facts (id INTEGER PRIMARY KEY, value TEXT, source_memory_id TEXT)')
+      db.run("INSERT INTO memoria_facts (value, source_memory_id) VALUES ('fact one', 'm1')")
+    })
+    try {
+      const data = await server.knowledge()
+      expect(data.preferences).toEqual([
+        { id: 'preference:1', kind: 'preference', text: 'tabs', owner: 'project-old-1a2b', source_memory_id: 'm1', topic: null, recalls: 4, lastRecalled: null },
+      ])
+      expect(data.facts.map(fact => [fact.id, fact.text, fact.owner, fact.recalls])).toEqual([['fact:1', 'fact one', '', 4]])
+    } finally {
+      server.stop()
+    }
+  })
+
+  test('KAPI.1: each kind is capped at GALAXY_LIMIT, newest first, with total and shown', async () => {
+    const server = await handStore('big-knowledge', db => {
+      db.run('CREATE TABLE working_memory (id TEXT PRIMARY KEY, session_id TEXT, content TEXT, timestamp TEXT, recall_count INTEGER, last_recalled TEXT, metadata_json TEXT)')
+      db.run("INSERT INTO working_memory VALUES ('m1', 'p1', 'x', '2026-10-01', 0, NULL, NULL)")
+      db.run('CREATE TABLE memoria_facts (id INTEGER PRIMARY KEY, session_id TEXT, value TEXT, source_memory_id TEXT)')
+      const insert = db.prepare("INSERT INTO memoria_facts (session_id, value, source_memory_id) VALUES ('p1', ?, 'm1')")
+      db.transaction(() => {
+        for (let i = 1; i <= GALAXY_LIMIT + 5; i++) insert.run(`fact ${i}`)
+      })()
+    })
+    try {
+      const data = await server.knowledge()
+      expect(data.facts).toHaveLength(GALAXY_LIMIT)
+      expect(data.total.facts).toBe(GALAXY_LIMIT + 5)
+      expect(data.shown.facts).toBe(GALAXY_LIMIT)
+      expect(data.facts[0]!.id).toBe(`fact:${GALAXY_LIMIT + 5}`)
+      expect(data.facts.at(-1)!.id).toBe('fact:6')
+      expect(data.total.preferences).toBe(0)
+    } finally {
+      server.stop()
+    }
+  })
+
+  test('KAPI.1: item text keeps up to 500 characters on one line; a blank first tag is not the topic', async () => {
+    const long = `${'a'.repeat(300)}\nsecond line\u200b ${'b'.repeat(300)}`
+    const kept = `kept whole ${'k'.repeat(400)}`
+    const server = await handStore('text-knowledge', db => {
+      db.run('CREATE TABLE working_memory (id TEXT PRIMARY KEY, session_id TEXT, content TEXT, timestamp TEXT, recall_count INTEGER, last_recalled TEXT, metadata_json TEXT)')
+      db.run(`INSERT INTO working_memory VALUES ('m1', 'p1', 'x', '2026-10-01', 0, NULL, '{"tags":["  ", " veg "]}')`)
+      db.run('CREATE TABLE memoria_facts (id INTEGER PRIMARY KEY, session_id TEXT, value TEXT, source_memory_id TEXT)')
+      db.run("INSERT INTO memoria_facts (session_id, value, source_memory_id) VALUES ('p1', ?, 'm1')", [long])
+      db.run("INSERT INTO memoria_facts (session_id, value, source_memory_id) VALUES ('p1', ?, 'm1')", [kept])
+    })
+    try {
+      const data = await server.knowledge()
+      const [second, first] = data.facts
+      expect(second!.text).toBe(kept)
+      expect(Array.from(first!.text)).toHaveLength(500)
+      expect(first!.text).toStartWith(`${'a'.repeat(300)} second line ${'b'}`)
+      expect(first!.text).toEndWith('…')
+      expect(first!.text).not.toMatch(/[\n\u200b]/)
+      expect(first!.topic).toBe('veg')
+    } finally {
+      server.stop()
     }
   })
 })
