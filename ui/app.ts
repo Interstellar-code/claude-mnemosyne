@@ -561,12 +561,21 @@ function showOnMap(id: string) {
 }
 
 const knowledgeView = { kind: 'fact' as KnowledgeKind, data: null as KnowledgeData | null }
+
+/** A tab's own status line (Knowledge and Health): the text, as an error or not, and its Try again button. */
+function tabStatus(name: 'know' | 'health', text: string, error = false) {
+  const line = byId(`${name}-status`)
+  line.textContent = text
+  line.className = error ? 'notice-line small is-error' : 'notice-line small muted'
+  line.hidden = text === ''
+  byId(`${name}-retry`).hidden = !error
+}
 const knowledgeHost: KnowledgeHost = { project: owner => project(owner, 'project'), showOnMap, now: () => Date.now() }
 
 export function drawKnowledge() {
   const data = knowledgeView.data
   if (data === null) return
-  byId('know-status').textContent = extractionState(data.extraction).status
+  tabStatus('know', extractionState(data.extraction).status)
   const note = knowledgeNotice(data)
   const box = byId('know-notice')
   box.hidden = note === null
@@ -583,7 +592,8 @@ export function drawKnowledge() {
   byId('know-body').hidden = false
 }
 
-async function loadKnowledge() {
+export async function loadKnowledge() {
+  if (knowledgeView.data === null) tabStatus('know', 'Loading…')
   try {
     const response = await api('/api/knowledge')
     if (!response.ok) throw new Error(`the server answered ${response.status}`)
@@ -592,37 +602,44 @@ async function loadKnowledge() {
     knowledgeView.data = data
     drawKnowledge()
   } catch (err) {
-    if (!(err instanceof Expired)) setStatus(`Could not load the knowledge: ${failure(err)}`, 'error')
+    if (!(err instanceof Expired)) tabStatus('know', `Could not load the knowledge: ${failure(err)}`, true)
   }
 }
 
-/** The guarded forget by id, for the Health tab (the Memories tab's own button uses forgetMemory). */
-function forgetById(id: string, done: (error?: string) => void) {
+/**
+ * The guarded forget, the one /api/forget call of the page: the Memories tab's button
+ * (forgetMemory) and the Health tab's never-recalled list both go through it. `done()`
+ * on success or when the memory was already gone, `done(error)` on failure.
+ */
+export function forgetById(id: string, done: (error?: string) => void) {
   void (async () => {
     try {
       const response = await api('/api/forget', { method: 'POST', body: { memory_id: id } })
       const body = await readJson<{ status?: string; error?: string; note?: string }>(response)
-      if (response.ok && body.status === 'deleted') {
-        memories.rows = memories.rows.filter(row => row.id !== id)
-        setStatus(`Forgot memory ${id}.${body.note ? ` ${body.note}` : ''}`, 'ok')
-        void loadHealth().catch(() => undefined)
-        if (opened.has('memories')) void loadMemories()
-        done()
+      const deleted = response.ok && body.status === 'deleted'
+      if (!deleted && response.status !== 404) {
+        done(`Forget failed: ${body.error ?? `the server answered ${response.status}`}`)
         return
       }
-      if (response.status === 404) {
-        setStatus(`Memory ${id} is already gone; nothing was deleted.`, 'error')
-        done()
-        return
+      memories.rows = memories.rows.filter(row => row.id !== id)
+      if (memories.selected === id) {
+        memories.selected = ''
+        emptyDetail(deleted ? undefined : 'That memory is already gone.')
       }
-      done(`Forget failed: ${body.error ?? `the server answered ${response.status}`}`)
+      drawRows()
+      if (deleted) setStatus(`Forgot memory ${id}.${body.note ? ` ${body.note}` : ''}`, 'ok')
+      else setStatus(`Memory ${id} is already gone; nothing was deleted.`, 'error')
+      if (deleted) void loadHealth().catch(() => undefined)
+      if (opened.has('memories')) void loadMemories()
+      done()
     } catch (err) {
       if (!(err instanceof Expired)) done(`Forget failed: ${failure(err)}`)
     }
   })()
 }
 
-const healthView = { data: null as HealthData | null }
+// After a Health forget, the row index whose successor gets the focus once the list is redrawn.
+const healthView = { data: null as HealthData | null, refocus: null as number | null }
 const healthHost: HealthHost = { project: owner => project(owner, 'project'), review: id => openInMemories(id), forget: forgetById, now: () => Date.now() }
 
 export function drawHealth() {
@@ -639,21 +656,30 @@ export function drawHealth() {
   byId('health-chart-text').textContent = words.summary
   byId('health-projects').replaceChildren(...healthProjectRows(data, healthHost))
   byId('health-never-text').textContent = neverText(data)
-  byId('health-never').replaceChildren(
-    ...data.neverList.map(memory =>
-      neverRow(memory, healthHost, () => {
-        void loadHealthReport()
-      }),
-    ),
+  const rows = data.neverList.map((memory, index) =>
+    neverRow(memory, healthHost, () => {
+      healthView.refocus = index
+      void loadHealthReport()
+    }),
   )
+  byId('health-never').replaceChildren(...rows)
   byId('health-never-box').hidden = data.neverList.length === 0
   byId('health-hot').replaceChildren(...hotRows(data, healthHost))
   byId('health-hot-box').hidden = data.mostRecalled.length === 0
   byId('health-storage').replaceChildren(...storageList(data))
+  tabStatus('health', '')
   byId('health-body').hidden = false
+  // The redrawn list lost the focused button: the next row's Review (the new last row's when the
+  // last was forgotten), else the tab's heading when the list is now empty.
+  if (healthView.refocus !== null) {
+    const row = rows[Math.min(healthView.refocus, rows.length - 1)]
+    healthView.refocus = null
+    ;(row?.querySelector<HTMLButtonElement>('button') ?? byId('health-title')).focus()
+  }
 }
 
-async function loadHealthReport() {
+export async function loadHealthReport() {
+  if (healthView.data === null) tabStatus('health', 'Loading…')
   try {
     const response = await api('/api/health-report')
     if (!response.ok) throw new Error(`the server answered ${response.status}`)
@@ -662,8 +688,19 @@ async function loadHealthReport() {
     healthView.data = data
     drawHealth()
   } catch (err) {
-    if (!(err instanceof Expired)) setStatus(`Could not load the health report: ${failure(err)}`, 'error')
+    if (err instanceof Expired) return
+    tabStatus('health', `Could not load the health report: ${failure(err)}`, true)
+    if (healthView.refocus !== null) {
+      healthView.refocus = null
+      byId('health-retry').focus()
+    }
   }
+}
+
+/** The Try again buttons of the Knowledge and Health status lines. */
+export function wireKnowledgeHealth() {
+  byId('know-retry').addEventListener('click', () => void loadKnowledge())
+  byId('health-retry').addEventListener('click', () => void loadHealthReport())
 }
 
 // ---- Header and footer ----
@@ -771,33 +808,8 @@ async function openMemory(id: string) {
   }
 }
 
-function forgetMemory(memory: Memory, done: (error?: string) => void) {
-  void (async () => {
-    try {
-      const response = await api('/api/forget', { method: 'POST', body: { memory_id: memory.id } })
-      const body = await readJson<{ status?: string; error?: string; note?: string }>(response)
-      if (response.ok && body.status === 'deleted') {
-        memories.rows = memories.rows.filter(row => row.id !== memory.id)
-        memories.selected = ''
-        drawRows()
-        emptyDetail()
-        setStatus(`Forgot memory ${memory.id}.${body.note ? ` ${body.note}` : ''}`, 'ok')
-        void loadHealth().catch(() => undefined)
-        void loadMemories()
-        return
-      }
-      if (response.status === 404) {
-        emptyDetail('That memory is already gone.')
-        setStatus(`Memory ${memory.id} is already gone; nothing was deleted.`, 'error')
-        void loadMemories()
-        return
-      }
-      done(`Forget failed: ${body.error ?? `the server answered ${response.status}`}`)
-    } catch (err) {
-      if (!(err instanceof Expired)) done(`Forget failed: ${failure(err)}`)
-    }
-  })()
-}
+/** The memory panel's Forget: the shared guarded forget. */
+export const forgetMemory = (memory: Memory, done: (error?: string) => void) => forgetById(memory.id, done)
 
 function wireMemories() {
   byId('mem-owner').addEventListener('change', () => void loadMemories())
@@ -1195,6 +1207,7 @@ async function main() {
   wireMemories()
   wireActivity()
   wireSearch()
+  wireKnowledgeHealth()
   show(current)
 }
 

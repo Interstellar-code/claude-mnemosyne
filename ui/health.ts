@@ -134,7 +134,7 @@ export function coverageBars(data: HealthData): Coverage[] {
       value: of(provenance),
       pct: percent(provenance, total),
       good: total > 0 && provenance > 0,
-      note: provenance === 0 ? 'Author and certainty are not recorded on save yet.' : `${plural(provenance, 'memory records', 'memories record')} who wrote ${provenance === 1 ? 'it' : 'them'}.`,
+      note: provenance === 0 ? 'Author and certainty are not recorded on save yet. To turn it on, update the plugin and run /mnemosyne-setup: saves made after that record who wrote them.' : `${plural(provenance, 'memory records', 'memories record')} who wrote ${provenance === 1 ? 'it' : 'them'}.`,
     },
     {
       label: 'Recalled at least once',

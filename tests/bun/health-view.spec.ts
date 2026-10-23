@@ -187,6 +187,11 @@ describe('VIEWS.2: the Health tab on a real store', () => {
     expect(bars[1]!.note).toContain('/mnemosyne-knowledge')
     expect(bars[2]).toMatchObject({ pct: 0, note: 'Embeddings arrive in a later version' })
     expect(bars[3]!.note).toContain('1 memory records who wrote it')
+    // With no provenance yet the note says how to turn it on (VIEWS.2.a1: every bar).
+    const none = coverageBars({ ...data, coverage: { ...data.coverage, provenance: 0 } })[3]!.note
+    expect(none).toStartWith('Author and certainty are not recorded on save yet.')
+    expect(none).toContain('To turn it on')
+    expect(none).toContain('/mnemosyne-setup')
     expect(bars[4]).toMatchObject({ pct: 60, good: true, note: 'Healthy: most memories are being used.' })
     expect(bars[0]!.pct).toBe(60)
     expect(EMBEDDINGS_ARRIVED).toBe(false)

@@ -252,10 +252,13 @@
       <h1>Knowledge</h1>
       <span class="muted small">Facts, preferences and instructions the engine mined from your memories, and whether they are used and kept up to date.</span>
     </div>
-    <p id="know-status" class="notice-line small muted" role="status">Loading…</p>
+    <div class="status-row">
+      <p id="know-status" class="notice-line small muted" role="status">Loading…</p>
+      <button id="know-retry" class="btn" type="button" hidden>Try again</button>
+    </div>
     <div id="know-notice" class="notice" role="status" hidden></div>
     <div id="know-body" hidden>
-      <div id="know-tabs" class="chips" role="tablist" aria-label="Knowledge kind"></div>
+      <div id="know-tabs" class="chips" role="group" aria-label="Knowledge kind"></div>
       <div id="know-kpis" class="tiles"></div>
       <div class="table-wrap">
         <table class="table">
@@ -271,8 +274,12 @@
 
   <main id="view-health" class="main view column wide" hidden>
     <div class="titlebar">
-      <h1>Memory health</h1>
+      <h1 id="health-title" tabindex="-1">Memory health</h1>
       <span class="muted small">How much of your memory is used, how much is going stale, and which engine features are switched on.</span>
+    </div>
+    <div class="status-row">
+      <p id="health-status" class="notice-line small muted" role="status">Loading…</p>
+      <button id="health-retry" class="btn" type="button" hidden>Try again</button>
     </div>
     <div id="health-body" hidden>
       <div id="health-kpis" class="tiles"></div>

@@ -6,12 +6,12 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { Database } from 'bun:sqlite'
 import { mkdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { startServer } from '../../ui/server'
+import { GALAXY_LIMIT, startServer } from '../../ui/server'
 import type { Started } from '../../ui/server'
 import { body, engineCall, ROOT, tempDir, toolCall } from './helpers'
 
 // ui/knowledge.ts is DOM code (checked by ui/tsconfig.json): loaded by a path tsc does not follow.
-const { agoText, daysAgo, extractionState, itemHead, KINDS, kindTabs, kpis, kpiTiles, notice, parseKnowledge, rowsOf, statusOf, tableRows, total, usedText } = (await import(join(ROOT, 'ui', 'knowledge.ts'))) as Record<string, any>
+const { agoText, countText, daysAgo, extractionState, itemHead, KINDS, kindTabs, kpis, kpiTiles, notice, parseKnowledge, rowsOf, statusOf, tableRows, total, usedText } = (await import(join(ROOT, 'ui', 'knowledge.ts'))) as Record<string, any>
 type KnowledgeHost = { project: (owner: string) => unknown; showOnMap: (id: string) => void; now: () => number }
 type KnowledgeData = any
 
@@ -165,7 +165,10 @@ describe('VIEWS.1: the Knowledge tab on a real store', () => {
     await withDocument(() => {
       const tabs = kindTabs(data, 'fact', () => {}) as unknown as FakeNode[]
       expect(tabs.map(tab => tab.texts().join(' '))).toEqual(['Facts 2', 'Preferences 1', 'Instructions 1', 'Timeline 1', 'Relations 1'])
-      expect(tabs.map(tab => tab.attributes.get('aria-selected'))).toEqual(['true', 'false', 'false', 'false', 'false'])
+      // Plain toggle buttons (VIEWS R2 item 6): aria-pressed, no tab role pretending to be ARIA tabs.
+      expect(tabs.map(tab => tab.attributes.get('aria-pressed'))).toEqual(['true', 'false', 'false', 'false', 'false'])
+      expect(tabs.map(tab => tab.tagName)).toEqual(['button', 'button', 'button', 'button', 'button'])
+      expect(tabs.some(tab => tab.attributes.has('role') || tab.attributes.has('aria-selected'))).toBe(false)
       const picked: string[] = []
       const again = kindTabs(data, 'fact', (kind: string) => picked.push(kind)) as unknown as FakeNode[]
       again[3]!.fire('click')
@@ -251,7 +254,7 @@ describe('VIEWS.1: the Knowledge tab on a real store', () => {
     expect(offState.mode).toBe('off')
     expect(offState.status).toContain('extractionModel')
     expect(offState.status).toContain('restart the dashboard')
-    expect(notice(off)).toMatchObject({ title: 'Extraction is off today.' })
+    expect(notice(off)).toMatchObject({ title: 'Extraction is off.' })
     expect(notice(off)!.body).toContain('extractionModel')
     expect(notice(off)!.body).toContain('/mnemosyne-knowledge')
     expect(notice(off)!.body).toContain('restart the dashboard')
@@ -278,7 +281,7 @@ describe('VIEWS.1: the Knowledge tab on a real store', () => {
         expect(rows[0]!.texts()).toEqual(['Nothing of this kind yet.'])
       })
     }
-    expect(notice(await knowledge(emptyStarted, 'off'))!.title).toBe('Extraction is off today.')
+    expect(notice(await knowledge(emptyStarted, 'off'))!.title).toBe('Extraction is off.')
     expect(notice(await knowledge(emptyStarted))!.title).toBe('No knowledge items yet.')
   })
 
@@ -305,6 +308,42 @@ describe('VIEWS.1: the Knowledge tab on a real store', () => {
     expect(parseKnowledge({})!.extraction).toBe('unknown')
   })
 
+  test('item 4: past the server cap the kind tab and the Items KPI say showing N of M (real server, more rows than the cap)', async () => {
+    const big = join(temp.dir, 'big')
+    mkdirSync(big, { recursive: true })
+    const db = new Database(join(big, 'mnemopi.db'))
+    try {
+      db.run('CREATE TABLE working_memory (id TEXT PRIMARY KEY, session_id TEXT, content TEXT, timestamp TEXT, recall_count INTEGER, last_recalled TEXT, metadata_json TEXT)')
+      db.run("INSERT INTO working_memory VALUES ('m1', 'p1', 'x', '2026-10-01', 0, NULL, NULL)")
+      db.run('CREATE TABLE memoria_facts (id INTEGER PRIMARY KEY, session_id TEXT, value TEXT, source_memory_id TEXT)')
+      db.run('CREATE TABLE memoria_preferences (id INTEGER PRIMARY KEY, session_id TEXT, preference TEXT, source_memory_id TEXT)')
+      const insert = db.prepare("INSERT INTO memoria_facts (session_id, value, source_memory_id) VALUES ('p1', ?, 'm1')")
+      db.transaction(() => {
+        for (let i = 1; i <= GALAXY_LIMIT + 5; i++) insert.run(`fact ${i}`)
+      })()
+      db.run("INSERT INTO memoria_preferences (session_id, preference, source_memory_id) VALUES ('p1', 'tabs', 'm1')")
+    } finally {
+      db.close()
+    }
+    const bigStarted = await startServer({ root: join(temp.dir, 'root3'), store: big, cli: CLI, activityLog: '', pluginRoot: ROOT })
+    try {
+      const data = await knowledge(bigStarted)
+      expect(data.items.fact).toHaveLength(GALAXY_LIMIT)
+      expect(data.totals).toEqual({ fact: GALAXY_LIMIT + 5, preference: 1, instruction: 0, timeline: 0, relation: 0 })
+      expect(kpis(data, now)[0]).toEqual({ label: 'Items', value: `showing ${GALAXY_LIMIT + 1} of ${GALAXY_LIMIT + 6}` })
+      await withDocument(() => {
+        const tabs = kindTabs(data, 'fact', () => {}) as unknown as FakeNode[]
+        expect(tabs.map(tab => tab.texts().join(' '))).toEqual([`Facts showing ${GALAXY_LIMIT} of ${GALAXY_LIMIT + 5}`, 'Preferences 1', 'Instructions 0', 'Timeline 0', 'Relations 0'])
+      })
+    } finally {
+      bigStarted.stop()
+    }
+    // Under the cap the plain count stays; a reply without total counts what arrived.
+    expect(countText(3, 3)).toBe('3')
+    expect(parseKnowledge({ facts: [{ id: 'fact:1' }] })!.totals.fact).toBe(1)
+    expect(parseKnowledge({ facts: [{ id: 'fact:1' }], total: { facts: 'lots' } })!.totals.fact).toBe(1)
+  })
+
   test('days: whole days ago, today and yesterday', () => {
     expect(daysAgo(iso(now - 3 * DAY - 5000), now)).toBe(3)
     expect(daysAgo(null, now)).toBeNull()
@@ -320,7 +359,10 @@ describe('VIEWS.1: the Knowledge tab on a real store', () => {
     const html = readFileSync(join(ROOT, 'ui', 'index.html'), 'utf8')
     expect(app).toMatch(/const VIEWS = \['map', 'memories', 'activity', 'search', 'knowledge', 'health'\] as const/)
     expect(app).toMatch(/knowledge: 'Knowledge', health: 'Health'/)
-    for (const id of ['view-knowledge', 'view-health', 'know-status', 'know-notice', 'know-tabs', 'know-kpis', 'know-rows', 'know-item-head', 'know-body']) expect(html).toContain(`id="${id}"`)
+    for (const id of ['view-knowledge', 'view-health', 'know-status', 'know-notice', 'know-tabs', 'know-kpis', 'know-rows', 'know-item-head', 'know-body', 'know-retry', 'health-status', 'health-retry', 'health-title']) expect(html).toContain(`id="${id}"`)
+    // Plain toggle buttons in a labelled group: no tablist without tabpanels and arrow keys.
+    expect(html).toContain('<div id="know-tabs" class="chips" role="group" aria-label="Knowledge kind">')
+    expect(html).not.toMatch(/role="tab(list)?"/)
     // Every id the Knowledge and Health code looks up is in the markup.
     const wanted = [...app.matchAll(/byId(?:<[^>]*>)?\('((?:know|health)-[^']+)'\)/g)].map(m => m[1]!)
     expect(wanted.length).toBeGreaterThan(15)
