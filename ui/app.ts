@@ -15,12 +15,14 @@
 // Styles live in style.css: the CSP refuses inline ones.
 
 import { createMap, type MapView } from './map'
+import { extractionState, itemHead, kindTabs, kpiTiles as knowledgeKpiTiles, notice as knowledgeNotice, parseKnowledge, tableRows, type KnowledgeData, type KnowledgeHost, type KnowledgeKind } from './knowledge'
+import { chartBars, chartText, coverageRows, dayBars, hotRows, kpiTiles as healthKpiTiles, neverRow, neverText, parseHealth, projectRows as healthProjectRows, storageList, type HealthData, type HealthHost } from './health'
 import { createStream, type StreamApi, type StreamHandle, type StreamListener, type StreamStatus } from './stream'
 
 const TOKEN_KEY = 'mnemosyne.token'
-const VIEWS = ['map', 'memories', 'activity', 'search'] as const
+const VIEWS = ['map', 'memories', 'activity', 'search', 'knowledge', 'health'] as const
 type View = (typeof VIEWS)[number]
-const VIEW_NAMES: Record<View, string> = { map: 'Map', memories: 'Memories', activity: 'Activity', search: 'Search' }
+const VIEW_NAMES: Record<View, string> = { map: 'Map', memories: 'Memories', activity: 'Activity', search: 'Search', knowledge: 'Knowledge', health: 'Health' }
 const FEED_KEEP = 1000
 const FEED_SHOW = 300
 const OWNER_COLOURS = 8
@@ -72,6 +74,9 @@ export type ActivityLine = {
   // The calling app's clientInfo name, and the Claude Code session (written from v0.6; older lines have neither).
   client?: string
   session?: string
+  // Who wrote a saved memory (from v0.6: 'human', 'agent' or 'system') and how sure the engine is of it.
+  author_type?: string
+  veracity?: string
 }
 
 // ---- Pure helpers (exported for tests/bun/inert.spec.ts) ----
@@ -152,6 +157,17 @@ export function appOf(line: ActivityLine): string {
   if (client) return knownApp(client) ?? firstLine(client, 40)
   // Hook, tool and trigger lines are Claude Code's; a backfill line names its own client or none.
   return line.origin === 'hook' || line.origin === 'tool' || line.origin === 'trigger' ? 'Claude Code' : ''
+}
+
+/** The badge on a saved memory's row: 'you said' (a human, by a trigger phrase), 'Claude' (an agent in Claude Code), 'Codex' or the outside app's own name (an agent), 'system'; none for a row without author_type or one that is not a save. */
+export function provenanceBadge(line: ActivityLine): string {
+  if (line.action !== 'remember') return ''
+  const author = textOf(line.author_type)
+  if (author === 'human') return 'you said'
+  if (author === 'system') return 'system'
+  if (author !== 'agent') return ''
+  const app = appOf(line)
+  return app === 'Claude Code' ? 'Claude' : app || 'agent'
 }
 
 /** What the App filter compares: an outside client's raw name is namespaced, so "Dashboard" from an MCP client is never the dashboard. */
@@ -381,12 +397,16 @@ export function activityItem(line: ActivityLine, pickSession: (session: string) 
     raw.append(button)
   }
   source.append(el('span', originLabel(line), 'muted origin'), raw)
+  const badge = provenanceBadge(line)
+  const whatCell = el('span', undefined, 'what')
+  if (badge !== '') whatCell.append(el('span', badge, line.author_type === 'human' ? 'prov prov-human' : 'prov prov-agent'))
+  whatCell.append(document.createTextNode(what))
   item.append(
     el('span', clock(line.t), 'mono muted time'),
     el('span', actionLabel(action), `badge a-${/^[a-z]+$/.test(action) ? action : 'other'}`),
     source,
     project(line.owner, 'project owner-col', typeof line.owners === 'number' && line.owners > 1 ? `all projects (${line.owners})` : undefined),
-    el('span', what, 'what'),
+    whatCell,
     result,
   )
   return item
@@ -516,6 +536,9 @@ function show(view: View) {
     feedDirty = false
     drawFeed()
   }
+  // Knowledge and Health read fresh numbers every time they are opened.
+  if (view === 'knowledge') void loadKnowledge()
+  if (view === 'health') void loadHealthReport()
   map?.visible(view === 'map')
 }
 
@@ -527,6 +550,157 @@ let map: MapView | null = null
 function openInMemories(id: string) {
   show('memories')
   void openMemory(id)
+}
+
+// ---- Knowledge and Health ----
+
+/** Show on map: the Map tab, with that memory's star selected. */
+function showOnMap(id: string) {
+  show('map')
+  map?.show(id)
+}
+
+const knowledgeView = { kind: 'fact' as KnowledgeKind, data: null as KnowledgeData | null }
+
+/** A tab's own status line (Knowledge and Health): the text, as an error or not, and its Try again button. */
+function tabStatus(name: 'know' | 'health', text: string, error = false) {
+  const line = byId(`${name}-status`)
+  line.textContent = text
+  line.className = error ? 'notice-line small is-error' : 'notice-line small muted'
+  line.hidden = text === ''
+  byId(`${name}-retry`).hidden = !error
+}
+const knowledgeHost: KnowledgeHost = { project: owner => project(owner, 'project'), showOnMap, now: () => Date.now() }
+
+export function drawKnowledge() {
+  const data = knowledgeView.data
+  if (data === null) return
+  tabStatus('know', extractionState(data.extraction).status)
+  const note = knowledgeNotice(data)
+  const box = byId('know-notice')
+  box.hidden = note === null
+  box.replaceChildren(...(note === null ? [] : [el('strong', note.title), el('span', note.body)]))
+  byId('know-tabs').replaceChildren(
+    ...kindTabs(data, knowledgeView.kind, kind => {
+      knowledgeView.kind = kind
+      drawKnowledge()
+    }),
+  )
+  byId('know-kpis').replaceChildren(...knowledgeKpiTiles(data, Date.now()))
+  byId('know-item-head').textContent = itemHead(knowledgeView.kind)
+  byId('know-rows').replaceChildren(...tableRows(data, knowledgeView.kind, knowledgeHost))
+  byId('know-body').hidden = false
+}
+
+export async function loadKnowledge() {
+  if (knowledgeView.data === null) tabStatus('know', 'Loading…')
+  try {
+    const response = await api('/api/knowledge')
+    if (!response.ok) throw new Error(`the server answered ${response.status}`)
+    const data = parseKnowledge(await readJson<unknown>(response))
+    if (data === null) throw new Error('the reply was not a knowledge list')
+    knowledgeView.data = data
+    drawKnowledge()
+  } catch (err) {
+    if (!(err instanceof Expired)) tabStatus('know', `Could not load the knowledge: ${failure(err)}`, true)
+  }
+}
+
+/**
+ * The guarded forget, the one /api/forget call of the page: the Memories tab's button
+ * (forgetMemory) and the Health tab's never-recalled list both go through it. `done()`
+ * on success or when the memory was already gone, `done(error)` on failure.
+ */
+export function forgetById(id: string, done: (error?: string) => void) {
+  void (async () => {
+    try {
+      const response = await api('/api/forget', { method: 'POST', body: { memory_id: id } })
+      const body = await readJson<{ status?: string; error?: string; note?: string }>(response)
+      const deleted = response.ok && body.status === 'deleted'
+      if (!deleted && response.status !== 404) {
+        done(`Forget failed: ${body.error ?? `the server answered ${response.status}`}`)
+        return
+      }
+      memories.rows = memories.rows.filter(row => row.id !== id)
+      if (memories.selected === id) {
+        memories.selected = ''
+        emptyDetail(deleted ? undefined : 'That memory is already gone.')
+      }
+      drawRows()
+      if (deleted) setStatus(`Forgot memory ${id}.${body.note ? ` ${body.note}` : ''}`, 'ok')
+      else setStatus(`Memory ${id} is already gone; nothing was deleted.`, 'error')
+      if (deleted) void loadHealth().catch(() => undefined)
+      if (opened.has('memories')) void loadMemories()
+      done()
+    } catch (err) {
+      if (!(err instanceof Expired)) done(`Forget failed: ${failure(err)}`)
+    }
+  })()
+}
+
+// After a Health forget, the row index whose successor gets the focus once the list is redrawn.
+const healthView = { data: null as HealthData | null, refocus: null as number | null }
+const healthHost: HealthHost = { project: owner => project(owner, 'project'), review: id => openInMemories(id), forget: forgetById, now: () => Date.now() }
+
+export function drawHealth() {
+  const data = healthView.data
+  if (data === null) return
+  const now = Date.now()
+  byId('health-kpis').replaceChildren(...healthKpiTiles(data))
+  byId('health-coverage').replaceChildren(...coverageRows(data))
+  const days = dayBars(data, now)
+  const words = chartText(days, data)
+  const chart = byId('health-chart')
+  chart.setAttribute('aria-label', words.label)
+  chart.replaceChildren(...chartBars(days))
+  byId('health-chart-text').textContent = words.summary
+  byId('health-projects').replaceChildren(...healthProjectRows(data, healthHost))
+  byId('health-never-text').textContent = neverText(data)
+  const rows = data.neverList.map((memory, index) =>
+    neverRow(memory, healthHost, () => {
+      healthView.refocus = index
+      void loadHealthReport()
+    }),
+  )
+  byId('health-never').replaceChildren(...rows)
+  byId('health-never-box').hidden = data.neverList.length === 0
+  byId('health-hot').replaceChildren(...hotRows(data, healthHost))
+  byId('health-hot-box').hidden = data.mostRecalled.length === 0
+  byId('health-storage').replaceChildren(...storageList(data))
+  tabStatus('health', '')
+  byId('health-body').hidden = false
+  // The redrawn list lost the focused button: the next row's Review (the new last row's when the
+  // last was forgotten), else the tab's heading when the list is now empty.
+  if (healthView.refocus !== null) {
+    const row = rows[Math.min(healthView.refocus, rows.length - 1)]
+    healthView.refocus = null
+    ;(row?.querySelector<HTMLButtonElement>('button') ?? byId('health-title')).focus()
+  }
+}
+
+export async function loadHealthReport() {
+  if (healthView.data === null) tabStatus('health', 'Loading…')
+  try {
+    const response = await api('/api/health-report')
+    if (!response.ok) throw new Error(`the server answered ${response.status}`)
+    const data = parseHealth(await readJson<unknown>(response))
+    if (data === null) throw new Error('the reply was not a health report')
+    healthView.data = data
+    drawHealth()
+  } catch (err) {
+    if (err instanceof Expired) return
+    tabStatus('health', `Could not load the health report: ${failure(err)}`, true)
+    if (healthView.refocus !== null) {
+      healthView.refocus = null
+      byId('health-retry').focus()
+    }
+  }
+}
+
+/** The Try again buttons of the Knowledge and Health status lines. */
+export function wireKnowledgeHealth() {
+  byId('know-retry').addEventListener('click', () => void loadKnowledge())
+  byId('health-retry').addEventListener('click', () => void loadHealthReport())
 }
 
 // ---- Header and footer ----
@@ -634,33 +808,8 @@ async function openMemory(id: string) {
   }
 }
 
-function forgetMemory(memory: Memory, done: (error?: string) => void) {
-  void (async () => {
-    try {
-      const response = await api('/api/forget', { method: 'POST', body: { memory_id: memory.id } })
-      const body = await readJson<{ status?: string; error?: string; note?: string }>(response)
-      if (response.ok && body.status === 'deleted') {
-        memories.rows = memories.rows.filter(row => row.id !== memory.id)
-        memories.selected = ''
-        drawRows()
-        emptyDetail()
-        setStatus(`Forgot memory ${memory.id}.${body.note ? ` ${body.note}` : ''}`, 'ok')
-        void loadHealth().catch(() => undefined)
-        void loadMemories()
-        return
-      }
-      if (response.status === 404) {
-        emptyDetail('That memory is already gone.')
-        setStatus(`Memory ${memory.id} is already gone; nothing was deleted.`, 'error')
-        void loadMemories()
-        return
-      }
-      done(`Forget failed: ${body.error ?? `the server answered ${response.status}`}`)
-    } catch (err) {
-      if (!(err instanceof Expired)) done(`Forget failed: ${failure(err)}`)
-    }
-  })()
-}
+/** The memory panel's Forget: the shared guarded forget. */
+export const forgetMemory = (memory: Memory, done: (error?: string) => void) => forgetById(memory.id, done)
 
 function wireMemories() {
   byId('mem-owner').addEventListener('change', () => void loadMemories())
@@ -1058,6 +1207,7 @@ async function main() {
   wireMemories()
   wireActivity()
   wireSearch()
+  wireKnowledgeHealth()
   show(current)
 }
 

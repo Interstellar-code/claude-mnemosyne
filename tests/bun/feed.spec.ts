@@ -500,7 +500,13 @@ describe('LIVE.4: one shared stream for the Activity tab and the Map tab', () =>
 
   test('LIVE.4.a1: after a reconnect the repeated lines are dropped and the new ones come through once', async () => {
     const fake = fakeStreamApi()
-    const shared = app.shareStream(fake.api, async () => '7:100')
+    // The reconnect first re-reads /api/activity (newest first) for the lines it missed and a fresh cursor.
+    const api = async (path: string) => {
+      if (!path.startsWith('/api/activity?')) return fake.api(path)
+      fake.calls.push(path)
+      return Response.json({ off: false, lines: [extractLine, rememberLine, recallLine], cursor: '7:200' })
+    }
+    const shared = app.shareStream(api, async () => '7:100')
     const seen: string[] = []
     const statuses: string[] = []
     shared.onStatus((status: string) => statuses.push(status))
@@ -510,12 +516,13 @@ describe('LIVE.4: one shared stream for the Activity tab and the Map tab', () =>
     fake.push(recallLine, rememberLine)
     await tick()
     fake.end()
-    // The reader waits 1 s and reconnects from the same cursor: the server repeats both lines, then sends a new one.
+    // The reader waits 1 s, catches up the missed line, and follows the fresh cursor: nothing arrives twice.
     await new Promise(resolve => setTimeout(resolve, 1100))
-    expect(fake.calls).toHaveLength(2)
-    fake.push(recallLine, rememberLine, extractLine)
-    await tick()
+    expect(fake.calls).toEqual(['/api/activity/stream?cursor=7%3A100', '/api/activity?limit=1000', '/api/activity/stream?cursor=7%3A200'])
     expect(seen).toEqual([recallLine.t, rememberLine.t, extractLine.t])
+    fake.push(failedLine)
+    await tick()
+    expect(seen).toEqual([recallLine.t, rememberLine.t, extractLine.t, failedLine.t])
     expect(statuses).toContain('reconnecting')
     shared.reader().close()
   })

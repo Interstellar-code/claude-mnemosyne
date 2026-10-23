@@ -350,7 +350,7 @@ describe('the dashboard views on a real store', () => {
     // The header sits above the rows inside one box, and the key under it.
     expect(view.indexOf('class="feed-head"')).toBeLessThan(view.indexOf('id="act-list"'))
     expect(view.indexOf('id="act-list"')).toBeLessThan(view.indexOf('id="act-key"'))
-    const key = view.slice(view.indexOf('id="act-key"'))
+    const key = view.slice(view.indexOf('id="act-key"'), view.indexOf('</dl>', view.indexOf('id="act-key"')))
     // The mockup's words (design/Activity.dc.html), term by term.
     expect([...key.matchAll(/<dt class="mono">([^<]*)<\/dt><dd>([^<]*)<\/dd>/g)].map(m => [m[1], m[2]])).toEqual([
       ['hook', 'automatic recall on a first prompt or after a compaction'],
@@ -562,3 +562,366 @@ function readLines(response: Response) {
     },
   }
 }
+
+// ---- VIEWS.3: the Activity tab shows who wrote each memory ----
+
+describe('VIEWS.3: provenance badges on saved memories in the Activity tab', () => {
+  let app: Record<string, any>
+  let saved: unknown
+
+  class Node {
+    children: (Node | { data: string; textContent: string })[] = []
+    attributes = new Map<string, string>()
+    className = ''
+    hidden = false
+    title = ''
+    type = ''
+    constructor(public tagName: string) {}
+    get textContent(): string {
+      return this.children.map(child => child.textContent).join('')
+    }
+    set textContent(value: string) {
+      this.children = value === '' ? [] : [{ data: String(value), textContent: String(value) }]
+    }
+    append(...nodes: (Node | string)[]) {
+      for (const node of nodes) this.children.push(typeof node === 'string' ? { data: node, textContent: node } : node)
+    }
+    setAttribute(name: string, value: string) {
+      this.attributes.set(name, value)
+    }
+    addEventListener() {}
+    all(): Node[] {
+      return [this, ...this.children.flatMap(child => (child instanceof Node ? child.all() : []))]
+    }
+    style = {}
+  }
+
+  beforeAll(async () => {
+    // A path tsc does not follow: ui/app.ts is DOM code, checked by ui/tsconfig.json.
+    app = await import(join(ROOT, 'ui', 'app.ts'))
+    saved = (globalThis as Record<string, unknown>).document
+    ;(globalThis as Record<string, unknown>).document = { createElement: (tag: string) => new Node(tag), createTextNode: (data: string) => ({ data, textContent: data }) }
+  })
+  afterAll(() => {
+    ;(globalThis as Record<string, unknown>).document = saved
+  })
+
+  // Real-shaped save lines of the CTX format with the KNOWX.1 fields.
+  const save = { t: '2026-10-23T10:00:00.000Z', action: 'remember', origin: 'trigger', owner: 'project-x-1a2b', text: 'always use bun', ids: ['m1'], count: 1, ok: true, client: 'claude-code', session: 'a1b2c3d4-0000-4000-8000-aaaaaaaaaaaa', veracity: 'stated' }
+
+  test('VIEWS.3.a1: you said (human), Claude (agent in Claude Code), Codex or the outside app\'s name (agent), nothing without author_type', () => {
+    expect(app.provenanceBadge({ ...save, author_type: 'human' })).toBe('you said')
+    expect(app.provenanceBadge({ ...save, origin: 'tool', author_type: 'agent' })).toBe('Claude')
+    expect(app.provenanceBadge({ ...save, origin: 'external', client: 'codex-mcp-client', author_type: 'agent' })).toBe('Codex')
+    expect(app.provenanceBadge({ ...save, origin: 'external', client: 'cursor-vscode', author_type: 'agent' })).toBe('Cursor')
+    expect(app.provenanceBadge({ ...save, origin: 'external', client: 'zed', author_type: 'agent' })).toBe('zed')
+    expect(app.provenanceBadge({ ...save, origin: 'external', client: undefined, author_type: 'agent' })).toBe('agent')
+    expect(app.provenanceBadge({ ...save, author_type: 'system' })).toBe('system')
+    // No author_type, or a value the engine does not use: no badge.
+    expect(app.provenanceBadge(save)).toBe('')
+    expect(app.provenanceBadge({ ...save, author_type: 'robot' })).toBe('')
+    // Only a save has an author.
+    expect(app.provenanceBadge({ ...save, action: 'recall', author_type: 'human' })).toBe('')
+    expect(app.provenanceBadge({ ...save, action: 'update', author_type: 'agent' })).toBe('')
+  })
+
+  test('VIEWS.3.a1: a save row shows the badge before its text, the other rows show none, and the row keeps its six cells', () => {
+    const row = (line: unknown) => app.activityItem(line, () => {}) as Node
+    const human = row({ ...save, author_type: 'human' })
+    expect(human.children).toHaveLength(6)
+    const what = human.children[4] as Node
+    expect(what.className).toBe('what')
+    expect((what.children[0] as Node).textContent).toBe('you said')
+    expect((what.children[0] as Node).className).toContain('prov-human')
+    expect(what.textContent).toBe('you saidalways use bun')
+    const agent = row({ ...save, origin: 'tool', author_type: 'agent' })
+    expect(((agent.children[4] as Node).children[0] as Node).className).toContain('prov-agent')
+    // An old save and a recall have no badge, and the text is alone in the cell.
+    for (const line of [save, { ...save, action: 'recall', author_type: 'human' }]) {
+      const plain = row(line)
+      expect(plain.children).toHaveLength(6)
+      expect((plain.children[4] as Node).textContent).toBe('always use bun')
+      expect((plain.children[4] as Node).all().filter(n => n.className.includes('prov'))).toEqual([])
+    }
+  })
+
+  test('VIEWS.3.a1: an outside app\'s name in the badge is text, never markup', () => {
+    const MARKUP = '<img src=x onerror=alert(1)>'
+    const line = { ...save, origin: 'external', client: MARKUP, author_type: 'agent' }
+    expect(app.provenanceBadge(line)).toBe(MARKUP)
+    const what = (app.activityItem(line, () => {}) as Node).children[4] as Node
+    expect(what.all().map(n => n.tagName).filter(tag => tag !== 'span')).toEqual([])
+    expect((what.children[0] as Node).textContent).toBe(MARKUP)
+    expect(what.all().some(n => [...n.attributes.keys()].some(name => /^on/i.test(name)))).toBe(false)
+  })
+
+  test('VIEWS.3.a2: the key under the list explains the badges, and the original key is still there', () => {
+    const html = readFileSync(join(ROOT, 'ui', 'index.html'), 'utf8')
+    const view = html.slice(html.indexOf('id="view-activity"'), html.indexOf('id="view-search"'))
+    const prov = view.slice(view.indexOf('id="act-prov-key"'), view.indexOf('</dl>', view.indexOf('id="act-prov-key"')))
+    expect(prov).toContain('you said')
+    expect(prov).toContain('Claude')
+    expect(prov).toContain('Codex')
+    expect(prov).toContain('no badge')
+    expect(view.indexOf('id="act-key"')).toBeLessThan(view.indexOf('id="act-prov-key"'))
+    expect(view.indexOf('id="act-list"')).toBeLessThan(view.indexOf('id="act-prov-key"'))
+    expect(readFileSync(join(ROOT, 'ui', 'style.css'), 'utf8')).toMatch(/\.prov-human \{/)
+  })
+})
+
+// VIEWS R2: the app.ts glue of the Knowledge and Health tabs (loadKnowledge, loadHealthReport,
+// drawKnowledge, drawHealth, forgetById), run without a browser: a stand-in document whose
+// elements are the ids of the real index.html, and fetch routed to a real server over a real
+// engine store. Only the network edge (the token and Origin the page would send) and the DOM are faked.
+describe('VIEWS R2: the Knowledge and Health glue in app.ts', () => {
+  const temp = tempDir('ui-views-glue')
+  const store = join(temp.dir, 'store')
+  const ids: string[] = []
+  let server: Started
+  let app: Record<string, any>
+  let saved: unknown
+  const realFetch = globalThis.fetch
+  let mode: 'real' | 'fail500' | 'throw' = 'real'
+  const calls: { path: string; method: string; body: string }[] = []
+  const focused: AppNode[] = []
+
+  class AppText {
+    constructor(public data: string) {}
+    get textContent() {
+      return this.data
+    }
+  }
+  class AppNode {
+    children: (AppNode | AppText)[] = []
+    attributes = new Map<string, string>()
+    dataset: Record<string, string> = {}
+    style: Record<string, string> = {}
+    className = ''
+    hidden = false
+    disabled = false
+    type = ''
+    title = ''
+    colSpan = 1
+    listeners = new Map<string, ((event: unknown) => void)[]>()
+    constructor(public tagName: string) {}
+    get textContent(): string {
+      return this.children.map(child => child.textContent).join('')
+    }
+    set textContent(value: string) {
+      this.children = value === '' ? [] : [new AppText(String(value))]
+    }
+    append(...nodes: (AppNode | AppText | string)[]) {
+      for (const node of nodes) this.children.push(typeof node === 'string' ? new AppText(node) : node)
+    }
+    replaceChildren(...nodes: (AppNode | AppText | string)[]) {
+      this.children = []
+      this.append(...nodes)
+    }
+    setAttribute(name: string, value: string) {
+      this.attributes.set(name, String(value))
+    }
+    removeAttribute(name: string) {
+      this.attributes.delete(name)
+    }
+    addEventListener(type: string, listener: (event: unknown) => void) {
+      this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener])
+    }
+    fire(type: string) {
+      for (const listener of this.listeners.get(type) ?? []) listener({})
+    }
+    // The focus spy.
+    focus() {
+      focused.push(this)
+    }
+    querySelector(selector: string) {
+      return this.all().find(node => node !== this && node.tagName === selector) ?? null
+    }
+    querySelectorAll() {
+      return []
+    }
+    all(): AppNode[] {
+      return [this, ...this.children.flatMap(child => (child instanceof AppNode ? child.all() : []))]
+    }
+    buttons() {
+      return this.all().filter(node => node.tagName === 'button')
+    }
+  }
+
+  // One node per id of the real page, hidden as the markup has it.
+  const page = new Map<string, AppNode>()
+  const html = readFileSync(join(ROOT, 'ui', 'index.html'), 'utf8')
+  for (const tag of html.matchAll(/<(\w+)\b[^>]*\bid="([^"]+)"[^>]*>/g)) {
+    const node = new AppNode(tag[1]!)
+    node.hidden = /\shidden[\s>]/.test(tag[0])
+    page.set(tag[2]!, node)
+  }
+  const byId = (id: string) => page.get(id)!
+
+  /** Waits until `check` holds (the page's forget and reload run in the background). */
+  async function until(check: () => boolean, what: string) {
+    for (let i = 0; i < 200 && !check(); i++) await Bun.sleep(10)
+    if (!check()) throw new Error(`timed out waiting for ${what}`)
+  }
+
+  beforeAll(async () => {
+    mkdirSync(store, { recursive: true })
+    for (const [i, content] of ['first never recalled note', 'second never recalled note', 'third never recalled note', 'fourth note, forgotten from Memories'].entries()) {
+      const reply = body((await engineCall(CLI, store, 'project-glue-1a2b', [toolCall(1, 'mnemopi_remember', { content })])).get(1)) as { memory_id: string }
+      ids[i] = reply.memory_id
+      await Bun.sleep(15)
+    }
+    const prompt = body((await engineCall(CLI, store, 'project-glue-1a2b', [toolCall(2, 'mnemopi_knowledge_prompt', { memory_id: ids[3] })])).get(2)) as { sha256: string }
+    const reply = JSON.stringify({ facts: ['Glue fact'], preferences: [], instructions: ['Always glue'], timelines: [], kg: [{ subject: 'glue', predicate: 'holds', object: 'tabs' }] })
+    await engineCall(CLI, store, 'project-glue-1a2b', [toolCall(3, 'mnemopi_knowledge_store', { memory_id: ids[3], reply, sha256: prompt.sha256 })])
+    server = await startServer({ root: join(temp.dir, 'root'), store, cli: CLI, activityLog: '', pluginRoot: ROOT })
+    app = await import(join(ROOT, 'ui', 'app.ts'))
+    const g = globalThis as Record<string, unknown>
+    saved = g.document
+    g.document = { createElement: (tag: string) => new AppNode(tag.toLowerCase()), createTextNode: (data: string) => new AppText(data), getElementById: (id: string) => page.get(id) ?? null }
+    g.fetch = async (path: string, init: RequestInit = {}) => {
+      calls.push({ path, method: init.method ?? 'GET', body: typeof init.body === 'string' ? init.body : '' })
+      if (mode === 'fail500') return new Response(JSON.stringify({ error: 'boom' }), { status: 500 })
+      if (mode === 'throw') throw new TypeError('network down')
+      const headers = { ...(init.headers as Record<string, string>), Authorization: `Bearer ${server.token}`, Origin: `http://127.0.0.1:${server.port}` }
+      return realFetch(`http://127.0.0.1:${server.port}${path}`, { ...init, headers })
+    }
+  }, 180_000)
+
+  afterAll(() => {
+    const g = globalThis as Record<string, unknown>
+    g.document = saved
+    g.fetch = realFetch
+    server?.stop()
+    temp.dispose()
+  })
+
+  test('item 3: a failed load writes the error in the tab\'s own status line with Try again; the body stays hidden; Try again loads it', async () => {
+    const globalStatus = byId('status').textContent
+    mode = 'fail500'
+    await app.loadKnowledge()
+    expect(byId('know-status').textContent).toBe('Could not load the knowledge: the server answered 500')
+    expect(byId('know-status').className).toContain('is-error')
+    expect(byId('know-status').hidden).toBe(false)
+    expect(byId('know-retry').hidden).toBe(false)
+    expect(byId('know-body').hidden).toBe(true)
+    mode = 'throw'
+    await app.loadHealthReport()
+    expect(byId('health-status').textContent).toBe('Could not load the health report: network down')
+    expect(byId('health-status').className).toContain('is-error')
+    expect(byId('health-status').hidden).toBe(false)
+    expect(byId('health-retry').hidden).toBe(false)
+    expect(byId('health-body').hidden).toBe(true)
+    // The page's global status line is left alone.
+    expect(byId('status').textContent).toBe(globalStatus)
+
+    mode = 'real'
+    app.wireKnowledgeHealth()
+    byId('know-retry').fire('click')
+    byId('health-retry').fire('click')
+    await until(() => !byId('know-body').hidden && !byId('health-body').hidden, 'both tabs to load')
+    expect(byId('know-retry').hidden).toBe(true)
+    expect(byId('know-status').className).not.toContain('is-error')
+    expect(byId('know-status').textContent).toContain('cannot say whether extraction is on')
+    expect(byId('health-retry').hidden).toBe(true)
+    expect(byId('health-status').hidden).toBe(true)
+  })
+
+  test('drawKnowledge: the real reply drawn, the kind buttons are aria-pressed toggles, picking Instructions shows its status', async () => {
+    await app.loadKnowledge()
+    const tabs = byId('know-tabs').children as AppNode[]
+    expect(tabs.map(tab => tab.attributes.get('aria-pressed'))).toEqual(['true', 'false', 'false', 'false', 'false'])
+    expect(tabs.map(tab => tab.textContent)).toEqual(['Facts1', 'Preferences0', 'Instructions1', 'Timeline0', 'Relations1'])
+    expect((byId('know-rows').children[0] as AppNode).textContent).toContain('Glue fact')
+    tabs[2]!.fire('click')
+    expect(byId('know-item-head').textContent).toBe('Instruction')
+    const row = byId('know-rows').children[0] as AppNode
+    expect((row.children[4] as AppNode).textContent).toBe('active')
+    expect((byId('know-tabs').children as AppNode[]).map(tab => tab.attributes.get('aria-pressed'))).toEqual(['false', 'false', 'true', 'false', 'false'])
+  })
+
+  test('items 6 and 7: a Health forget goes through the shared forget; the focus moves to the next row, the new last row, then the heading', async () => {
+    await app.loadHealthReport()
+    const rows = () => byId('health-never').children as AppNode[]
+    const label = (row: AppNode) => (row.children[0] as AppNode).textContent
+    const lastFocus = () => focused.at(-1)
+    // Three memories never recalled; the fourth too (its knowledge does not count as a recall).
+    expect(rows().map(label)).toEqual(['fourth note, forgotten from Memories', 'third never recalled note', 'second never recalled note', 'first never recalled note'])
+    const forget = async (index: number) => {
+      const before = rows().length
+      const target = rows()[index]!
+      const [, ask, yes] = target.buttons()
+      ask!.fire('click')
+      yes!.fire('click')
+      await until(() => rows().length === before - 1 && !rows().includes(target), 'the list to redraw')
+    }
+    const forgets = () => calls.filter(call => call.path === '/api/forget' && call.method === 'POST')
+
+    // The second row: focus goes to the row that took its place.
+    await forget(1)
+    expect(rows().map(label)).toEqual(['fourth note, forgotten from Memories', 'second never recalled note', 'first never recalled note'])
+    expect(lastFocus()).toBe(rows()[1]!.buttons()[0]!)
+    expect(lastFocus()!.textContent).toBe('Review')
+    expect(JSON.parse(forgets().at(-1)!.body)).toEqual({ memory_id: ids[2] })
+
+    // The last row: focus goes to the new last row.
+    await forget(2)
+    expect(lastFocus()).toBe(rows()[1]!.buttons()[0]!)
+
+    // The Memories tab's Forget goes through the same function and the same call.
+    const before = forgets().length
+    let result: string | undefined = 'pending'
+    app.forgetMemory({ id: ids[3] }, (error?: string) => {
+      result = error
+    })
+    await until(() => result !== 'pending', 'the Memories forget')
+    expect(result).toBeUndefined()
+    expect(forgets()).toHaveLength(before + 1)
+    expect(JSON.parse(forgets().at(-1)!.body)).toEqual({ memory_id: ids[3] })
+    expect((await realFetch(`http://127.0.0.1:${server.port}/api/memories/${ids[3]}`, { headers: { Authorization: `Bearer ${server.token}` } })).status).toBe(404)
+    await app.loadHealthReport()
+    expect(rows().map(label)).toEqual(['second never recalled note'])
+
+    // The only row: the list is empty, so the heading takes the focus.
+    await forget(0)
+    expect(byId('health-never-box').hidden).toBe(true)
+    expect(lastFocus()).toBe(byId('health-title'))
+    // The page has one /api/forget call, and both tabs' forgets are it.
+    const source = readFileSync(join(ROOT, 'ui', 'app.ts'), 'utf8')
+    expect(source.match(/'\/api\/forget'/g)).toHaveLength(1)
+    expect(source).toMatch(/forgetMemory = \(memory: Memory, done: \(error\?: string\) => void\) => forgetById\(memory\.id, done\)/)
+    expect(source).toMatch(/const healthHost: HealthHost = \{[^}]*forget: forgetById/)
+    expect(html).toMatch(/<h1 id="health-title" tabindex="-1">/)
+  })
+
+  test('item 3: a forget whose reload fails puts the focus on Try again, not the body', async () => {
+    // A failed forget keeps the row and says why; nothing is redrawn.
+    const fresh = body((await engineCall(CLI, store, 'project-glue-1a2b', [toolCall(1, 'mnemopi_remember', { content: 'fifth note' })])).get(1)) as { memory_id: string }
+    await app.loadHealthReport()
+    const row = byId('health-never').children[0] as AppNode
+    const [, ask, yes] = row.buttons()
+    ask!.fire('click')
+    mode = 'fail500'
+    yes!.fire('click')
+    await until(() => row.all().some(node => node.textContent === 'Forget failed: boom'), 'the failure text')
+    mode = 'real'
+    // A forget that succeeds but whose reload fails: the focus goes to Try again.
+    const calledBefore = calls.length
+    const original = globalThis.fetch
+    ;(globalThis as Record<string, unknown>).fetch = async (path: string, init: RequestInit = {}) => {
+      if (path === '/api/health-report') {
+        calls.push({ path, method: 'GET', body: '' })
+        return new Response('{}', { status: 503 })
+      }
+      return original(path, init)
+    }
+    try {
+      yes!.fire('click')
+      await until(() => byId('health-status').textContent === 'Could not load the health report: the server answered 503', 'the reload failure')
+      expect(focused.at(-1)).toBe(byId('health-retry'))
+      expect(calls.length).toBeGreaterThan(calledBefore)
+    } finally {
+      ;(globalThis as Record<string, unknown>).fetch = original
+    }
+    expect((await realFetch(`http://127.0.0.1:${server.port}/api/memories/${fresh.memory_id}`, { headers: { Authorization: `Bearer ${server.token}` } })).status).toBe(404)
+  })
+})

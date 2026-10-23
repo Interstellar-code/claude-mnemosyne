@@ -113,12 +113,13 @@ export function pickProject(projects: readonly GalaxyProjectLike[], random: () =
  * when the galaxy holds nothing to draw on.
  */
 export function simulate(kind: 'recall' | 'write', galaxy: GalaxyLike, random: () => number = Math.random): MapEvent | undefined {
-  const projects = (galaxy.projects ?? []).filter(project => (project.count ?? 0) > 0)
   const memories = galaxy.memories ?? []
+  // Only projects with memories in the list: another owner's ids never get this project's label.
+  const listed = new Set(memories.map(memory => memory.owner))
+  const projects = (galaxy.projects ?? []).filter(project => (project.count ?? 0) > 0 && listed.has(project.owner))
   const project = pickProject(projects, random)
   if (project === undefined) return undefined
-  const owned = memories.filter(memory => memory.owner === project.owner)
-  const pool = owned.length > 0 ? owned : memories
+  const pool = memories.filter(memory => memory.owner === project.owner)
   if (pool.length === 0) return undefined
   const t = new Date().toISOString()
   let action: MapEventKind = kind === 'recall' ? 'recall' : 'save'
@@ -128,7 +129,9 @@ export function simulate(kind: 'recall' | 'write', galaxy: GalaxyLike, random: (
   }
   const topic = topicOf(pool[Math.floor(random() * pool.length)] ?? pool[0]!)
   if (action === 'recall' || action === 'save') {
-    const shuffled = [...pool]
+    // The topic constrains the picks; the pool always holds the memory it came from.
+    const sameTopic = pool.filter(memory => topicOf(memory) === topic)
+    const shuffled = [...(sameTopic.length > 0 ? sameTopic : pool)]
     for (let i = shuffled.length - 1; i > 0; i--) {
       const j = Math.floor(random() * (i + 1))
       const a = shuffled[i]!
