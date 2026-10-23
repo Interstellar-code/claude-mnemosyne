@@ -276,6 +276,124 @@ gives it as `activity`, `<root>/activity.jsonl`). The dashboard reads it.
   hooks read it on each call, and the wrapper is rewritten at session start,
   so the proxy follows from the next session.
 
+### 3.3 The dashboard server: /mnemosyne-ui (v0.5.0)
+
+`/mnemosyne-ui` starts one local web server for the dashboard, or reuses the
+one running, and hands its link over without writing the token into the
+transcript. It is the plan's main exposure (a network port), so each guard
+below has a Bun test in `tests/bun/ui-server.spec.ts` against the real server
+and a temporary WAL store made by the real engine.
+
+- Files: `ui/server.ts` (the server, Bun), `ui/index.html`, `ui/style.css` and
+  `ui/app.ts` (the page; `app.ts` is built by `Bun.build` into memory at server
+  start and served as `/app.js`), `hooks/ui-launch.ts` (the command's start,
+  reuse, hand-over and stop), `hooks/engine.ts` (the engine call, shared).
+- One engine-call module: `hooks/engine.ts` exports `buildRequests`,
+  `engineEnv(store, owner)` and `parseReplies` and imports nothing (no
+  `claude-code`, no Bun API), so the hooks run it through `$.process.run` and
+  the server through `Bun.spawn` with its own environment and `engineEnv` laid
+  over it. `engineEnv` is the one place the seven engine variables live
+  (`MNEMOPI_DATA_DIR`, `SESSION_ID`, `CHANNEL_ID`, `NO_EMBEDDINGS` and the
+  blanked `MCP_BANK`, `LLM_BASE_URL`, `HOST_LLM_ENABLED`). `paths()` stays in
+  `register.ts`: the hook resolves root, store and cli and passes them to the
+  server as `MNEMOSYNE_ROOT`, `MNEMOSYNE_STORE`, `MNEMOSYNE_CLI`,
+  `MNEMOSYNE_ACTIVITY_LOG` (empty when the log is off) and
+  `MNEMOSYNE_PLUGIN_ROOT`.
+- Guards: it binds `127.0.0.1` only, on a port the OS picks. It makes a
+  32-byte random token at each start. Every `/api` route wants
+  `Authorization: Bearer <token>` (compared in constant time); no token, a
+  wrong one, or the token only in the query string gets 401 and no data. A
+  `Host` header other than `127.0.0.1:<port>` gets 403 on every route (DNS
+  rebinding). Every reply, errors included, carries
+  `Content-Security-Policy: default-src 'none'; script-src 'self'; style-src
+  'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none';
+  form-action 'none'; frame-ancestors 'none'`, `Referrer-Policy: no-referrer`
+  and `X-Content-Type-Options: nosniff`; the policy never gets an `unsafe-`
+  keyword. No reply carries an `Access-Control-Allow-*` header, and OPTIONS
+  gets 405. SQLite (`<store>/mnemopi.db`) is opened read-only with
+  `query_only` on; every change goes through the engine. `/favicon.ico` is 204
+  with no body. `/vendor/<name>` serves one plain file name from `ui/vendor/`
+  (`.js` as `text/javascript`), so `/vendor/../server.ts` and
+  `/vendor/..%2fserver.ts` are 404; it serves only a regular file (never a
+  link or a folder) whose real path is inside `ui/vendor/`. The page shell, script and style load
+  without the token and hold no data. `ui/index.html` has no inline script or
+  style and loads only same-origin files.
+- Token flow: the server writes `<root>/ui.json` (`port`, `token`, `pid`) to a
+  fresh 0600 file renamed into place, and prints one ready line with port and
+  pid only. The hook reads the token from `ui.json` with `$.fs.read`, so the
+  token never passes through spawn output. The link is
+  `http://127.0.0.1:<port>/#token=<token>`: the fragment is never sent in a
+  request. It goes to the clipboard with `$.ui.copy`; the toast says it was
+  copied and shows the bare address; only when the clipboard did not take it
+  does a toast (60 s) show the full link. The reply text and `$.ui.log` never
+  hold the token. The page takes the token from the fragment, removes it from
+  the address bar with `history.replaceState`, keeps it in the tab's
+  `sessionStorage` for reloads, and sends it only as the Authorization header.
+  What other code of the same user can see, within the same-user boundary:
+  other plugins' hooks in the same session see the copied link (`ui.copy`),
+  the ping's stdin (`process.run`) and `ui.json` (`fs.read`), and any process
+  of this user can read `ui.json`. The browser keeps the first URL it opened,
+  fragment and token included, in its history, even though the page removes
+  it from the address bar; the token is worthless once that server stops.
+- One shared server: a later call, in this session or another, reads
+  `ui.json` and pings it with `bun ui/server.ts --ping <port> <pid>`
+  (`$.process.run`, 3 s timeout, token on stdin, never on the command line).
+  The ping never uses a proxy: the hook runs it with `NO_PROXY`/`no_proxy`
+  set to `127.0.0.1` and every `HTTP(S)_PROXY`/`ALL_PROXY` variable blanked,
+  and the ping drops them itself too (Bun's fetch otherwise sends even a
+  127.0.0.1 request, token included, to `HTTP_PROXY`). It follows no redirect
+  and counts only a 200 whose `pid` is the one `ui.json` names. If it answers
+  (asked twice), the same link is handed over and nothing starts. If not, and
+  the server is this session's own and its process still runs (`kill -0`), the
+  same link is handed over with a note; nothing is killed for a missed ping.
+  Otherwise a new server starts and replaces `ui.json`. If, once the new
+  server is ready, `ui.json` names another server that answers (two starts at
+  once), that one is handed over and the new one is stopped.
+- Lifecycle. The host's `$.process.spawn` closes a child's stdin from the
+  start (or after its `input`), so the server cannot be spawned directly with
+  stdin as a pipe. The hook spawns `bun ui/server.ts --hold` instead: a small
+  holder that starts the server with stdin as a pipe it keeps open and passes
+  the server's output through. The spawn loop is the holder's life: the hook's
+  `session.end` handler ends the loop of the session that started the server
+  (any reason, `/clear` included), which kills the holder and so closes the
+  server's stdin. Then, in case the host has not killed the holder, it also
+  runs `kill <pid>` on the server (the ready line's pid; the holder exits with
+  it). Waiting for the loop takes at most 0.6 s and the kill at most 0.5 s,
+  inside the 1.5 s bound. Another session's
+  end leaves it running; that session runs `/mnemosyne-ui` again after the
+  starter ends to get a fresh one. Backstops, each with a Bun test: the server
+  exits when its stdin closes, and both the holder and the server exit when
+  their parent is gone (checked every 10 s; `MNEMOSYNE_UI_PARENT_CHECK_MS`
+  sets it for tests, held to 100 ms - 10 s). On exit the server removes `ui.json` only while it
+  still names its own pid. There is no stop command and no stop route.
+- Before it starts anything the command checks Bun, an installed engine and a
+  current one (`isCurrent`), and otherwise says to install Bun or run
+  `/mnemosyne-setup`.
+
+Manual check (plan SRV.4), in a real terminal session and in the desktop app:
+
+1. Run `/mnemosyne-ui`. The reply and the toast show only
+   `http://127.0.0.1:<port>/`. Paste the clipboard into a browser: the page
+   shows the header, the owners with counts, the store path and "Connected to
+   the local Mnemosyne server." Open the browser console: no error and no CSP
+   violation.
+2. After the page loads, the address bar shows no `#token=`. Reload: the page
+   still works (the tab's sessionStorage). Open `http://127.0.0.1:<port>/`
+   (no fragment) in a new tab: it says to open the link from /mnemosyne-ui and
+   shows no data.
+3. Search the transcript for the token (it is in `~/.claude/mnemosyne/ui.json`):
+   `grep -c "$(bun -e "console.log(require(process.env.HOME + '/.claude/mnemosyne/ui.json').token)")" <transcript .jsonl>`
+   finds 0.
+4. Run `/mnemosyne-ui` again: the same address, nothing new starts
+   (`lsof -nP -iTCP:<port> -sTCP:LISTEN` shows one `bun`).
+5. `/clear` in the starting session: `lsof -nP -iTCP:<port> -sTCP:LISTEN`
+   shows nothing and `~/.claude/mnemosyne/ui.json` is gone.
+6. Run `/mnemosyne-ui` again, then exit the session: the same two checks show
+   nothing.
+7. Desktop app, two sessions A and B: start the server in A, run
+   `/mnemosyne-ui` in B (same address). Close B: the port still listens. Close
+   A: the port is gone and `ui.json` is gone.
+
 ## 4. Why a plugin, and why mod tools rather than an MCP server
 
 A skill cannot do this. A skill loads when invoked or when the model decides it

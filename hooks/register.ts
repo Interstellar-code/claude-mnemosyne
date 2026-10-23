@@ -5,7 +5,8 @@
 // /mnemosyne-setup) and the store defaults to ~/.claude/mnemosyne/store. See
 // DESIGN.md.
 //
-// Every call is one `bun cli.ts mcp` process answering one bare `tools/call`.
+// Every call is one `bun cli.ts mcp` process answering bare `tools/call`
+// requests, built and read by hooks/engine.ts (shared with the dashboard server).
 // The owner id (global, or the repo's) rides on MNEMOPI_SESSION_ID: recall
 // reads that owner's rows plus every `scope: 'global'` row, and forget deletes
 // only the owner's. MNEMOPI_NO_EMBEDDINGS=1 because a spawned bun panics on
@@ -16,9 +17,12 @@ import type { EngineInterface, PluginOptions, Register } from 'claude-code'
 import type { Recalled } from '../types'
 import { activityLine, callOutcome, callText, TOOL_ACTIONS } from './activity-log'
 import type { ActivityFields } from './activity-log'
+import { buildRequests, engineEnv, parseReplies } from './engine'
+import type { EngineRequest } from './engine'
 import { ENGINE_BUILD, SETUP_TIMEOUT_MS } from './engine-build'
 import { mnemosyneStats } from './surface'
 import { cleanTags } from './tags'
+import { openDashboard, stopDashboard } from './ui-launch'
 
 export { ENGINE_BUILD } from './engine-build'
 // The upstream base version; the plugin's own build of it is ENGINE_BUILD (engine/UPSTREAM.md).
@@ -304,43 +308,12 @@ function updateArgs(input: Record<string, unknown>): Record<string, unknown> | s
 async function runAll(
   $: EngineInterface,
   options: PluginOptions,
-  requests: readonly (readonly [string, Record<string, unknown>])[],
+  requests: readonly EngineRequest[],
   as?: string,
 ) {
   const [id, { cli, store }] = await Promise.all([as ?? owner($, options), paths($, options)])
-  const ran = await $.process.run(['bun', cli, 'mcp'], {
-    stdin: requests
-      .map(([name, args], i) => `${JSON.stringify({ jsonrpc: '2.0', id: i + 1, method: 'tools/call', params: { name, arguments: args } })}\n`)
-      .join(''),
-    env: {
-      MNEMOPI_DATA_DIR: store,
-      MNEMOPI_SESSION_ID: id,
-      MNEMOPI_CHANNEL_ID: id,
-      MNEMOPI_NO_EMBEDDINGS: '1',
-      // Inherited from the shell this would move writes to <store>/banks/<x>; empty falls back to `default`.
-      MNEMOPI_MCP_BANK: '',
-      // The env is layered over the host's: an exported LLM URL would let the engine call out.
-      MNEMOPI_LLM_BASE_URL: '',
-      MNEMOPI_HOST_LLM_ENABLED: '',
-    },
-    timeoutMs: 20_000,
-  })
-  const replies = new Map<unknown, { error?: { message: string }; result?: { content?: { text?: string }[]; isError?: boolean } }>()
-  for (const line of ran.stdout.split('\n')) {
-    try {
-      const message = JSON.parse(line)
-      if (message?.id !== undefined) replies.set(message.id, message)
-    } catch {
-      // not a reply: engine chatter
-    }
-  }
-  return requests.map((_, i) => {
-    const reply = replies.get(i + 1)
-    if (reply === undefined) return new Error(`engine exited ${ran.exitCode}: ${ran.stderr.trim().slice(-300)}`)
-    if (reply.error) return new Error(reply.error.message)
-    const text = reply.result?.content?.[0]?.text ?? ''
-    return reply.result?.isError ? new Error(text) : text
-  })
+  const ran = await $.process.run(['bun', cli, 'mcp'], { stdin: buildRequests(requests), env: engineEnv(store, id), timeoutMs: 20_000 })
+  return parseReplies(requests.length, ran.stdout, ran.exitCode, ran.stderr)
 }
 
 // One engine call; resolves the tool's text, rejects with the engine's message.
@@ -482,6 +455,10 @@ export const register: Register = (on, options) => {
       name: 'mnemosyne-setup',
       description: `Install the Mnemosyne Memory engine (${ENGINE_PACKAGE} ${ENGINE_BUILD}, the plugin's own copy) into ~/.claude/mnemosyne`,
     })
+    await $.command.register({
+      name: 'mnemosyne-ui',
+      description: 'Open the Mnemosyne dashboard: a local page on 127.0.0.1; its link goes to the clipboard',
+    })
     for (const tool of TOOLS) await $.tool.register({ ...tool, isDeferred: false })
     if (!(await isInstalled($, options))) $.ui.toast('Mnemosyne Memory engine not installed. Run /mnemosyne-setup.')
     else {
@@ -523,6 +500,28 @@ export const register: Register = (on, options) => {
       return { text: `Mnemosyne setup failed: ${(err as Error).message}` }
     }
   })
+
+  // The dashboard: one shared server on 127.0.0.1 (hooks/ui-launch.ts, ui/server.ts).
+  on('command.run', { command: 'mnemosyne-ui' }, async $ => {
+    const bun = await $.process.run(['bun', '--version']).catch(() => null)
+    if (bun?.exitCode !== 0) return { text: 'The Mnemosyne dashboard needs Bun on PATH: https://bun.sh' }
+    try {
+      if (!(await isInstalled($, options))) return { text: 'The Mnemosyne dashboard needs the engine: run /mnemosyne-setup first.' }
+      if (!(await isCurrent($, options))) return { text: 'The Mnemosyne engine is out of date: run /mnemosyne-setup, then /mnemosyne-ui again.' }
+      const { root, store, cli, activity: log } = await paths($, options)
+      const activityLog = options.activityLog === 'off' ? '' : log
+      const session = await $.session.id()
+      return await openDashboard($, { plugin: slashes($.plugin.root), root, store, cli, activity: activityLog }, session)
+    } catch (err) {
+      return { text: `Mnemosyne dashboard failed: ${(err as Error).message}` }
+    }
+  })
+
+  // The session that started the dashboard ends (exit, /clear, resume...): its server stops.
+  on('session.end', async ($, e, next) => {
+    await stopDashboard($, e.sessionId).catch(() => undefined)
+    return next(e)
+  }).catch((_$, e, next) => next(e))
 
   on('tool.call', { tool: /^mcp__mnemosyne__memory_/ }, async ($, e) => {
     const tool = e.tool.replace('mcp__mnemosyne__', '')

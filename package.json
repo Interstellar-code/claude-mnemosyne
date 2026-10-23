@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "typecheck": "tsc -p . && tsc -p tsconfig.bun.json",
+    "typecheck": "tsc -p . && tsc -p tsconfig.bun.json && tsc -p ui/tsconfig.json",
     "test:bun": "bun install --frozen-lockfile && bun install --cwd engine --frozen-lockfile --production --omit=peer && bun test ./tests/bun ./engine/test"
   },
   "devDependencies": {

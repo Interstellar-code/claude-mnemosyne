@@ -3,6 +3,7 @@
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { engineEnv } from '../../hooks/engine'
 
 export const ROOT = join(import.meta.dir, '..', '..')
 export const INSTALLER = join(ROOT, 'bin', 'install-engine.ts')
@@ -22,17 +23,8 @@ export async function runInstaller(engineDir: string, storeDir: string, env: Rec
   return { stdout, stderr, exitCode }
 }
 
-export function engineEnv(store: string, owner: string): Record<string, string> {
-  return {
-    MNEMOPI_DATA_DIR: store,
-    MNEMOPI_SESSION_ID: owner,
-    MNEMOPI_CHANNEL_ID: owner,
-    MNEMOPI_NO_EMBEDDINGS: '1',
-    MNEMOPI_MCP_BANK: '',
-    MNEMOPI_LLM_BASE_URL: '',
-    MNEMOPI_HOST_LLM_ENABLED: '',
-  }
-}
+// The engine variables, from the one place the hooks and the server take them (SRV.1).
+export { engineEnv } from '../../hooks/engine'
 
 /** One engine process answering raw JSON-RPC messages; the parsed replies by id. */
 export async function engineCall(cli: string, store: string, owner: string, messages: readonly object[]) {
