@@ -190,9 +190,12 @@ export type Galaxy = {
   meaning: boolean
   total: number
   shown: number
-  /** Days since each star was saved, by star index. */
+  /** Days since each star was saved, by star index. Ages are rolling from the load time (or a memory's last update): they are not advanced while the page stays open. */
   ages: number[]
+  /** The age of the oldest memory still on the map; kept current by touchMemory and forgetMemory. */
   oldestAge: number
+  /** Ids of memories with no usable save date: drawn in Galaxy, left off the Timeline axis. */
+  undated: Set<string>
   maxRecalls: number
   /** Project colour by owner. */
   colours: Map<string, string>
@@ -210,9 +213,16 @@ const DAY_MS = 86_400_000
 export function buildGalaxy(reply: GalaxyReply, now = Date.now()): Galaxy {
   const input: GalaxyInputMemory[] = reply.memories
   const layout = galaxyLayout({ projects: reply.projects, memories: input })
+  const undated = new Set<string>()
   const ages = layout.stars.map(star => {
     const saved = star.created ? Date.parse(star.created) : Number.NaN
-    return Number.isFinite(saved) ? Math.max(0, Math.floor((now - saved) / DAY_MS)) : 0
+    if (!Number.isFinite(saved)) {
+      // No usable date: age 0 keeps its Galaxy brightness and colour, but the Timeline leaves it off the axis.
+      undated.add(star.id)
+      return 0
+    }
+    // A date in the future counts as today.
+    return Math.max(0, Math.floor((now - saved) / DAY_MS))
   })
   const colours = new Map<string, string>()
   layout.cores.forEach((core, i) => {
@@ -225,6 +235,7 @@ export function buildGalaxy(reply: GalaxyReply, now = Date.now()): Galaxy {
     shown: reply.shown,
     ages,
     oldestAge: ages.reduce((a, b) => Math.max(a, b), 0),
+    undated,
     maxRecalls: layout.stars.reduce((a, star) => Math.max(a, star.recalls), 0),
     colours,
     gone: new Set(),
@@ -478,13 +489,13 @@ const DIM_NO_MATCH = 0.08
 /** A memory without any of the picked kinds keeps a tenth of its brightness (MOON.2). */
 export const DIM_NO_KNOWLEDGE = 0.1
 
-/** The opacity a star settles at: brightness by age, 0 hidden, 0 older than the Timeline range, 0.14 outside the focused project, 0.4 in its other topics, 0.08 off a Find, a tenth without a picked kind of knowledge, 1 when selected. */
+/** The opacity a star settles at: brightness by age, 0 hidden, 0 older than the Timeline range or without a save date, 0.14 outside the focused project, 0.4 in its other topics, 0.08 off a Find, a tenth without a picked kind of knowledge, 1 when selected. */
 export function starTarget(galaxy: Galaxy, index: number, state: MapState, found: Found | null): number {
   const star = galaxy.layout.stars[index]
   if (star === undefined) return 0
   if (state.hidden.has(star.owner) || galaxy.gone.has(star.id)) return 0
   if (state.selected === star.id) return 1
-  if (state.layout === 'timeline' && !inTimelineRange(galaxy.ages[index] ?? 0, timelineDays(galaxy, state.range))) return 0
+  if (state.layout === 'timeline' && !onTimelineAxis(galaxy, index, timelineDays(galaxy, state.range))) return 0
   let a = starBrightness(galaxy.ages[index] ?? 0, galaxy.oldestAge)
   if (!passesKnowledgeFilter(galaxy, star.id, state)) a *= DIM_NO_KNOWLEDGE
   if (state.project !== null && star.owner !== state.project) a *= DIM_OTHER_PROJECT
@@ -778,11 +789,18 @@ export function stepDays(shown: number, target: number, dt: number, reducedMotio
 export const timelineDays = (galaxy: Galaxy, range: TimelineRange) => rangeDays(range, galaxy.oldestAge)
 /** A star older than the range fades out. */
 export const inTimelineRange = (age: number, days: number) => age <= days
+/** The left edge of the axis: where the oldest age the range shows sits (x = 280 - 560 = -280). */
+export const TIMELINE_LEFT_X = TIMELINE_TODAY_X - TIMELINE_DAYS_X
+/** Whether a star is on the Timeline axis for `days`: it has a save date and is no older than the range. */
+export const onTimelineAxis = (galaxy: Galaxy, index: number, days: number): boolean => {
+  const star = galaxy.layout.stars[index]
+  return star !== undefined && !galaxy.undated.has(star.id) && inTimelineRange(galaxy.ages[index] ?? 0, days)
+}
 
 /** Where every drawn thing sits in Timeline, in the layout's own order. */
 export type TimelinePlaces = { claude: Vec3; cores: Vec3[]; hubs: Vec3[]; stars: Vec3[] }
 
-/** Timeline places for `days` of axis: cores head their lanes, a topic sits at its memories' average age, a star at its age with a seeded jitter and its topic's depth. */
+/** Timeline places for `days` of axis: cores head their lanes, a topic sits at its memories' average age, a star at its age with a seeded jitter and its topic's depth (never left of the axis). */
 export function timelinePlaces(galaxy: Galaxy, days: number): TimelinePlaces {
   const { cores, hubs, stars } = galaxy.layout
   const lanes = cores.length
@@ -798,7 +816,7 @@ export function timelinePlaces(galaxy: Galaxy, days: number): TimelinePlaces {
   const counts = hubs.map(() => 0)
   stars.forEach((star, i) => {
     const h = slotOf(galaxy.layout.hubByKey, star.topic)
-    if (h < 0) return
+    if (h < 0 || galaxy.undated.has(star.id)) return
     sums[h] = sums[h]! + (galaxy.ages[i] ?? 0)
     counts[h] = counts[h]! + 1
   })
@@ -809,7 +827,9 @@ export function timelinePlaces(galaxy: Galaxy, days: number): TimelinePlaces {
     stars: stars.map((star, i) => {
       const h = slotOf(galaxy.layout.hubByKey, star.topic)
       const depth = (h < 0 ? 0 : depthOf[h]!) + gauss(randomOf(seedOf(`${star.id}:depth`))) * 3
-      return timelinePosition({ kind: 'memory', id: star.id, lane: laneOf(star.owner), lanes, age: galaxy.ages[i] ?? 0, depth }, days)
+      const at = timelinePosition({ kind: 'memory', id: star.id, lane: laneOf(star.owner), lanes, age: galaxy.ages[i] ?? 0, depth }, days)
+      // A star past the range, or with no save date, is held at the left edge of the axis: only a selected one is lit there, and it must stay on screen.
+      return [galaxy.undated.has(star.id) ? TIMELINE_LEFT_X : Math.max(at[0], TIMELINE_LEFT_X), at[1], at[2]] as Vec3
     }),
   }
 }
@@ -846,6 +866,115 @@ export function laneLines(galaxy: Galaxy): { owner: string; colour: string; from
     const y = timelinePosition({ kind: 'project', lane, lanes }, 1)[1]
     return { owner: core.owner, colour: projectColour(galaxy, core.owner), from: [LANE_X[0], y, LANE_Z], to: [LANE_X[1], y, LANE_Z] }
   })
+}
+
+// ---- Timeline: the per-frame decisions (TIME R2) ----
+//
+// ui/map.ts only carries these out; every choice of what to do this frame is a pure function here, tested with real values.
+
+type VisualKind = 'core' | 'hub' | 'star' | 'claude'
+
+/** Where a visual goes in Timeline: its slot in the places lists (the Claude core has none). */
+export function awayPlace(places: TimelinePlaces, kind: VisualKind, slot: number): Vec3 | undefined {
+  return kind === 'star' ? places.stars[slot] : kind === 'hub' ? places.hubs[slot] : kind === 'core' ? places.cores[slot] : places.claude
+}
+
+/** A visual's place at a blend: its home when there is no Timeline place or no blend. */
+export const visualPlace = (home: Vec3, away: Vec3 | null | undefined, blend: number): Vec3 => (away == null ? [...home] : blendPlace(home, away, blend))
+
+export const samePlace = (a: Vec3, b: Vec3): boolean => a[0] === b[0] && a[1] === b[1] && a[2] === b[2]
+
+/** The Timeline places kept from one frame to the next: the same galaxy and days give the same places, until `stale` (a move, a new star, an update). */
+export type PlacesCache = { galaxy: Galaxy; days: number; places: TimelinePlaces } | null
+export function placesFor(cache: PlacesCache, galaxy: Galaxy, days: number, stale: boolean): { cache: NonNullable<PlacesCache>; places: TimelinePlaces } {
+  if (cache !== null && !stale && cache.galaxy === galaxy && cache.days === days) return { cache, places: cache.places }
+  const made = { galaxy, days, places: timelinePlaces(galaxy, days) }
+  return { cache: made, places: made.places }
+}
+
+/** One frame of the layout: the morph and the shown days move toward the state; `place` says whether any visual has to be written again. Days only matter once some Timeline is blended in. */
+type LayoutStep = { morph: number; days: number; place: boolean }
+export function layoutStep(morph: number, days: number, layout: LayoutName, targetDays: number, dt: number, reducedMotion: boolean, dirty: boolean): LayoutStep {
+  const next = stepMorph(morph, morphTarget(layout), dt, morphSeconds(reducedMotion))
+  const shown = stepDays(days, targetDays, dt, reducedMotion)
+  return { morph: next, days: shown, place: dirty || next !== morph || (shown !== days && morphBlend(next) > 0) }
+}
+
+/** The middle of the on-axis, still living stars among `ids`, at their Timeline places; null when none is on the axis. */
+export function timelineCentre(galaxy: Galaxy, places: TimelinePlaces, ids: Iterable<string>, days: number): Vec3 | null {
+  const sum: Vec3 = [0, 0, 0]
+  let n = 0
+  for (const id of ids) {
+    const slot = slotOf(galaxy.layout.starById, id)
+    const at = places.stars[slot]
+    if (at === undefined || galaxy.gone.has(id) || !onTimelineAxis(galaxy, slot, days)) continue
+    n++
+    for (let i = 0; i < 3; i++) sum[i] = sum[i]! + at[i]!
+  }
+  return n === 0 ? null : [sum[0] / n, sum[1] / n, sum[2] / n]
+}
+
+/** The middle of the lane (the baseline's middle): where a topic flight lands when the topic has no star on the axis. */
+export const LANE_CENTRE_X = (LANE_X[0] + LANE_X[1]) / 2
+
+/** What a flight aims at in Timeline. A topic hub is invisible there, so a topic flight aims at its project's lane and the average x of its on-axis stars (the lane centre when it has none). */
+export function timelineAim(galaxy: Galaxy, places: TimelinePlaces, kind: 'core' | 'hub' | 'star', id: string, days: number): Vec3 | null {
+  if (kind === 'core') return places.cores[slotOf(galaxy.layout.coreByOwner, id)] ?? null
+  if (kind === 'star') return places.stars[slotOf(galaxy.layout.starById, id)] ?? null
+  const hub = galaxy.layout.hubs[slotOf(galaxy.layout.hubByKey, id)]
+  const lane = hub === undefined ? undefined : places.cores[slotOf(galaxy.layout.coreByOwner, hub.project)]
+  if (lane === undefined) return null
+  const middle = timelineCentre(galaxy, places, galaxy.layout.stars.filter(star => star.topic === id).map(star => star.id), days)
+  return [middle === null ? LANE_CENTRE_X : middle[0], lane[1], 0]
+}
+
+/** The fade to write to the links this frame, or null when nothing changed: fully visible links need nothing, and the same fade needs nothing unless the links were rebuilt (`dirty`). */
+export function linkFadeToApply(fade: number, applied: number, dirty: boolean): number | null {
+  if (fade >= 1 && applied >= 1) return null
+  if (fade === applied && !dirty) return null
+  return fade
+}
+
+/** Where a spark starts: the Claude core's place now (it sits above today in Timeline), the origin before it is drawn. */
+export const sparkOrigin = (claude: Vec3 | null | undefined): Vec3 => claude ?? [0, 0, 0]
+
+/** The camera move a layout switch asks for: the straight-on view when Timeline is entered, the Galaxy view when it is left, none otherwise. */
+export const layoutFlight = (before: LayoutName, after: LayoutName): 'timeline' | 'galaxy' | null => (before === after ? null : after === 'timeline' ? 'timeline' : before === 'timeline' ? 'galaxy' : null)
+
+/** What the hubs' (and their labels') own fade is: only hubs leave in Timeline. */
+export const visualFade = (kind: VisualKind, galaxyFade: number): number => (kind === 'hub' ? galaxyFade : 1)
+
+/** A visual's drawn size: cores and the Claude core shrink with the blend; every one grows with its pulse. */
+export const visualScale = (kind: VisualKind, size: number, blend: number, pulse: number): number => size * (kind === 'core' || kind === 'claude' ? coreScale(blend) : 1) * (1 + pulse * 1.6)
+
+/** An opacity this close to its target snaps onto it, so a faded-out thing really reaches 0 and the furniture can go idle. */
+export const FURNITURE_EPSILON = 0.003
+export const easeToward = (value: number, target: number, follow: number): number => (Math.abs(target - value) <= FURNITURE_EPSILON ? target : value + (target - value) * follow)
+
+/** The ticks the axis wants at a blend: none while no Timeline is blended in. The list of the last range and days asked is kept, so a frame makes none. */
+const NO_TICKS: Tick[] = []
+let lastTicks: { range: TimelineRange; days: number; list: Tick[] } | null = null
+export function wantedTicks(range: TimelineRange, days: number, blend: number): Tick[] {
+  if (!(blend > 0)) return NO_TICKS
+  if (lastTicks === null || lastTicks.range !== range || lastTicks.days !== days) lastTicks = { range, days, list: rangeTicks(range, days) }
+  return lastTicks.list
+}
+/** Whether a tick of `days` is among the wanted ones. */
+export const tickWanted = (list: readonly Tick[], days: number): boolean => list.some(tick => tick.days === days)
+/** A tick label's opacity target, and its lane baseline's: they come in with the blend. */
+export const tickTarget = (wanted: boolean, blend: number): number => (wanted ? blend * TICK_LABEL_OPACITY : 0)
+export const laneTarget = (blend: number, hidden: boolean): number => (blend > 0 && !hidden ? blend * LANE_OPACITY : 0)
+/** A gridline's opacity follows its label's. */
+export const gridOpacity = (labelAlpha: number): number => (labelAlpha / TICK_LABEL_OPACITY) * GRID_OPACITY
+/** A gridline is made only once its tick is visible. */
+export const needsGridLine = (hasLine: boolean, labelAlpha: number): boolean => !hasLine && labelAlpha > FURNITURE_EPSILON
+/** A tick no longer wanted is let go once it has faded out. */
+export const tickReleased = (wanted: boolean, labelAlpha: number): boolean => !wanted && labelAlpha <= FURNITURE_EPSILON
+/** Nothing of the axis to draw or fade this frame: no Timeline blended in, no tick left, every lane baseline at 0. */
+export function furnitureIdle(blend: number, tickCount: number, lanes: Iterable<{ alpha: number }>): boolean {
+  if (blend > 0 || tickCount > 0) return false
+  for (const lane of lanes) if (lane.alpha > 0) return false
+  return true
 }
 
 // ---- The rail ----
@@ -1042,11 +1171,23 @@ export function recallMemory(galaxy: Galaxy, id: string): boolean {
   return true
 }
 
-/** An update makes the memory new again: age 0. */
+/** The age of the oldest memory still on the map (not forgotten). */
+export function liveOldestAge(galaxy: Galaxy): number {
+  let oldest = 0
+  galaxy.layout.stars.forEach((star, i) => {
+    if (!galaxy.gone.has(star.id)) oldest = Math.max(oldest, galaxy.ages[i] ?? 0)
+  })
+  return oldest
+}
+
+/** An update makes the memory new again: age 0, with a save date from now on. */
 export function touchMemory(galaxy: Galaxy, id: string): boolean {
   const index = slotOf(galaxy.layout.starById, id)
   if (index < 0 || galaxy.gone.has(id)) return false
   galaxy.ages[index] = 0
+  galaxy.undated.delete(id)
+  // The range All is the oldest memory plus two days: it narrows when the oldest memory is updated.
+  galaxy.oldestAge = liveOldestAge(galaxy)
   return true
 }
 
@@ -1061,6 +1202,7 @@ export function forgetMemory(galaxy: Galaxy, id: string): boolean {
   if (core) core.count = Math.max(0, core.count - 1)
   galaxy.total = Math.max(0, galaxy.total - 1)
   galaxy.shown = Math.max(0, galaxy.shown - 1)
+  galaxy.oldestAge = liveOldestAge(galaxy)
   return true
 }
 

@@ -10,7 +10,7 @@ import { mkdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { Database } from 'bun:sqlite'
 import { plainLabel } from '../../ui/escape'
-import { CLAUDE_CORE, galaxyLayout, LANE_SPAN, PROJECT_CORE_X, ticks, TIMELINE_DAYS_X, TIMELINE_TODAY_X } from '../../ui/map-layout'
+import { CLAUDE_CORE, galaxyLayout, LANE_SPAN, PROJECT_CORE_X, ticks, TIMELINE_DAYS_X, TIMELINE_TODAY_X, type Vec3 } from '../../ui/map-layout'
 import { simulate, toMapEvent, type MapEvent } from '../../ui/map-live'
 import {
   FIND_FLY_DELAY_MS,
@@ -179,6 +179,33 @@ import {
   GRID_Z,
   LANE_X,
   LANE_Z,
+  awayPlace,
+  easeToward,
+  FURNITURE_EPSILON,
+  furnitureIdle,
+  gridOpacity,
+  LANE_CENTRE_X,
+  laneTarget,
+  layoutFlight,
+  layoutStep,
+  linkFadeToApply,
+  liveOldestAge,
+  needsGridLine,
+  onTimelineAxis,
+  placesFor,
+  samePlace,
+  sparkOrigin,
+  tickReleased,
+  tickTarget,
+  tickWanted,
+  TIMELINE_LEFT_X,
+  timelineAim,
+  timelineCentre,
+  visualFade,
+  visualPlace,
+  visualScale,
+  wantedTicks,
+  type PlacesCache,
 } from '../../ui/map-state'
 import { startServer } from '../../ui/server'
 import type { Started } from '../../ui/server'
@@ -2381,27 +2408,22 @@ describe('TIME: the Timeline layout', () => {
     const to = timelinePlaces(galaxy, 42).stars[slot('a0')]!
     expect(sparkAt(claude, to, 0, 0)).toEqual(claude)
     expect(sparkAt(claude, to, 0, 1)).toEqual(to)
-    // The scene starts every spark at the Claude visual's place, not at the origin.
-    const map = readFileSync(join(ROOT, 'ui', 'map.ts'), 'utf8')
-    expect(map).toContain('sparkAt(claudeVisual?.position ?? [0, 0, 0], to.position,')
-    expect(map).not.toContain('sparkAt([0, 0, 0],')
+    // Every spark starts at the Claude visual's place (not at the origin) once it is drawn.
+    expect(sparkOrigin(claude)).toEqual(claude)
+    expect(sparkOrigin(visualPlace([0, 0, 0], claude, 0.5))).toEqual([claude[0] / 2, claude[1] / 2, claude[2] / 2])
+    expect(sparkOrigin(undefined)).toEqual([0, 0, 0])
+    expect(sparkOrigin(null)).toEqual([0, 0, 0])
   })
 
-  test('the scene file moves every visual by the state functions, and never makes markup from a label', () => {
+  test('GUARD (source text, not behaviour): the frame calls each helper that decides its work, and the scene never makes markup from a label', () => {
+    // The behaviour of every helper below is tested with real values elsewhere in this file; this only guards that the scene file still calls them.
     const map = readFileSync(join(ROOT, 'ui', 'map.ts'), 'utf8')
-    const timelinePart = map.slice(map.indexOf('// ---- Timeline: places, links, furniture ----'), map.indexOf('// ---- Per frame ----'))
-    for (const call of ['timelinePlaces(g, shownDays)', 'blendPlace(v.home, away, blend)', 'stepMorph(morph, morphTarget(state.layout), dt, morphSeconds(state.reducedMotion))', 'stepDays(shownDays', 'rangeTicks(state.range', 'laneLines(g)', 'gridLine(x)', 'tickX(days, shownDays)']) expect(timelinePart).toContain(call)
-    // The library copies node places only while its engine counts as running: every move re-arms it, and writes to the visual's own node (the probe node sits between the Claude core and grown stars).
-    expect(timelinePart).toContain('d3ReheatSimulation')
+    const timelinePart = map.slice(map.indexOf('function flyToPose('), map.indexOf('// ---- Live: events become sparks'))
+    for (const call of ['layoutStep(', 'placesFor(', 'visualPlace(', 'awayPlace(', 'samePlace(', 'linkFadeToApply(', 'furnitureIdle(', 'wantedTicks(', 'easeToward(', 'tickTarget(', 'laneTarget(', 'gridOpacity(', 'needsGridLine(', 'tickReleased(', 'visualFade(', 'visualScale(', 'sparkOrigin(', 'layoutFlight(', 'timelineAim(', 'timelineCentre(', 'disposeTicks()']) expect(timelinePart).toContain(call)
+    // The node a visual writes to is its own; an update event moves its star to today.
     expect(timelinePart).toContain('const node = v.node as Any')
-    expect(timelinePart).not.toContain('graphNodes[v.index]')
-    // An update event moves its star to today.
     expect(map).toMatch(/touchMemory\(g, id\)\) return\s*\n\s*\/\/ In Timeline an updated memory jumps to today\.\s*\n\s*placeDirty = true/)
-    expect(map).toContain('flyToPose(TIMELINE_POSE)')
-    expect(map).toContain("fly(flightTo(galaxy, 'reset'))")
     expect(map).not.toMatch(/innerHTML|insertAdjacentHTML|outerHTML/)
-    // Tick text is drawn on a canvas by the label maker.
-    expect(timelinePart).toContain('makeLabel(tick.label')
   })
 
   test('the Timeline code keeps GAL’s and MOON’s fixes: no Object-key collisions, one primary button, disposal of old visuals', () => {
@@ -2415,5 +2437,314 @@ describe('TIME: the Timeline layout', () => {
     expect(places.cores.length).toBe(2)
     expect(places.stars.length).toBe(2)
     expect(new Set(places.stars.map(s => s[1] > 0)).size).toBe(2)
+  })
+
+  // ---- R2: the fixes the review asked for ----
+
+  const fresh = () => buildGalaxy(parseGalaxy(rawBody)!, now)
+  /** The real reply with some memories' save dates replaced. */
+  const withDates = (dates: Record<string, string | null>) => {
+    const raw = structuredClone(rawBody) as { memories: { id: string; created: string | null }[] }
+    for (const m of raw.memories) for (const [key, value] of Object.entries(dates)) if (m.id === ids[key]) m.created = value
+    return buildGalaxy(parseGalaxy(raw)!, now)
+  }
+  const laneY = (owner: string, g = galaxy) => timelinePlaces(g, 30).cores[g.layout.coreByOwner[owner]!]![1]
+
+  test('R2.1: a selected star older than the range stays lit and is held at the left edge of the axis, with its moons', () => {
+    expect(TIMELINE_LEFT_X).toBe(-280)
+    const seven = { ...timeline(7), selected: ids.b40! }
+    expect(target('b40', seven)).toBe(1)
+    const places = timelinePlaces(galaxy, 7)
+    // Unclamped it would be at 280 - 40 * 560 / 7 = -2920.
+    expect(places.stars[slot('b40')]![0]).toBe(-280)
+    expect(places.stars[slot('a10')]![0]).toBe(-280)
+    // A star inside the range is where its age puts it, and one at exactly the range's age is on the edge.
+    expect(places.stars[slot('b6')]![0]).toBeCloseTo(TIMELINE_TODAY_X - (6 * TIMELINE_DAYS_X) / 7)
+    expect(places.stars[slot('a0')]![0]).toBe(TIMELINE_TODAY_X)
+    // At every range no star is left of the axis.
+    for (const range of [7, 30, 'all'] as const) for (const at of timelinePlaces(galaxy, timelineDays(galaxy, range)).stars) expect(at[0]).toBeGreaterThanOrEqual(-280)
+    // Its moons orbit the held place, so they stay on screen too.
+    const held = places.stars[slot('b40')]!
+    for (let i = 0; i < 3; i++) expect(moonPosition(held, i, 3, 0, true)[0]).toBeGreaterThan(-280 - 2 * MOON_RADIUS)
+    // The flight a rail or Find click starts aims at the held place.
+    expect(timelineAim(galaxy, places, 'star', ids.b40!, 7)).toEqual(held)
+    // Not selected, it is faded out as before.
+    expect(target('b40', timeline(7))).toBe(0)
+  })
+
+  test('R2.2: a topic flight in Timeline aims at its project lane and the average x of its stars on the axis', () => {
+    const days = 7
+    const places = timelinePlaces(galaxy, days)
+    const aim = (key: string) => timelineAim(galaxy, places, 'hub', key, days)!
+    // beta/fruit holds b6 (in range): its x, on beta's lane.
+    expect(aim(`${beta}/fruit`)).toEqual([places.stars[slot('b6')]![0], laneY(beta), 0])
+    // alpha/fruit holds a0 and a3: the average of their x.
+    expect(aim(`${alpha}/fruit`)[0]).toBeCloseTo((places.stars[slot('a0')]![0] + places.stars[slot('a3')]![0]) / 2)
+    expect(aim(`${alpha}/fruit`)[1]).toBe(laneY(alpha))
+    // alpha/veg holds only a10, past the 7 days: no star on the axis, so the lane centre.
+    expect(aim(`${alpha}/veg`)).toEqual([LANE_CENTRE_X, laneY(alpha), 0])
+    expect(LANE_CENTRE_X).toBe(-5)
+    // The hub itself is where the old flight went: past the left edge of a lane's baseline for a topic of old memories.
+    const hub = places.hubs[galaxy.layout.hubByKey[`${alpha}/veg`]!]!
+    expect(hub[0]).toBeLessThan(aim(`${alpha}/veg`)[0])
+    // With All every star counts; the middle is the average of the topic's stars.
+    const all = timelinePlaces(galaxy, 42)
+    expect(timelineAim(galaxy, all, 'hub', `${beta}/veg`, 42)![0]).toBeCloseTo(all.stars[slot('b40')]![0])
+    // A forgotten star no longer pulls it; unknown topics have no aim; cores aim at their place.
+    const g = fresh()
+    forgetMemory(g, ids.b6!)
+    expect(timelineAim(g, timelinePlaces(g, 7), 'hub', `${beta}/fruit`, 7)![0]).toBe(LANE_CENTRE_X)
+    expect(timelineAim(galaxy, places, 'hub', 'nobody/none', days)).toBeNull()
+    expect(timelineAim(galaxy, places, 'core', beta, days)).toEqual(places.cores[galaxy.layout.coreByOwner[beta]!]!)
+  })
+
+  test('R2.2: Find in Timeline centres on the stars on the axis only', () => {
+    const places = timelinePlaces(galaxy, 7)
+    expect(timelineCentre(galaxy, places, [ids.a0!, ids.b40!], 7)).toEqual(places.stars[slot('a0')]!)
+    expect(timelineCentre(galaxy, places, [ids.b40!, ids.a10!], 7)).toBeNull()
+    expect(timelineCentre(galaxy, places, [], 7)).toBeNull()
+    expect(timelineCentre(galaxy, places, ['no-such-id'], 7)).toBeNull()
+  })
+
+  test('R2.4: a memory with no usable save date is left off the Timeline axis, and a future date counts as today', () => {
+    const g = withDates({ a0: null, a3: 'not a date', a10: new Date(now + 5 * DAY).toISOString() })
+    expect(g.undated.has(ids.a0!)).toBe(true)
+    expect(g.undated.has(ids.a3!)).toBe(true)
+    expect(g.undated.has(ids.a10!)).toBe(false)
+    expect(g.undated.size).toBe(2)
+    expect(g.ages[g.layout.starById[ids.a10!]!]).toBe(0)
+    const at = (key: string, state: MapState) => starTarget(g, g.layout.starById[ids[key]!]!, state, null)
+    // Timeline: no alpha for the undated ones at any range; the future one is lit like a memory from today.
+    for (const range of [7, 30, 'all'] as const) {
+      expect(at('a0', timeline(range))).toBe(0)
+      expect(at('a3', timeline(range))).toBe(0)
+      expect(at('a10', timeline(range))).toBeGreaterThan(0)
+    }
+    // Galaxy and Meaning still draw them.
+    for (const layout of ['galaxy', 'meaning'] as const) expect(at('a0', { ...base(), layout })).toBeGreaterThan(0)
+    // Their Timeline place is the left edge (never "today"); the future one sits on today.
+    const places = timelinePlaces(g, 30)
+    expect(places.stars[g.layout.starById[ids.a0!]!]![0]).toBe(-280)
+    expect(places.stars[g.layout.starById[ids.a3!]!]![0]).toBe(-280)
+    expect(places.stars[g.layout.starById[ids.a10!]!]![0]).toBe(TIMELINE_TODAY_X)
+    expect(onTimelineAxis(g, g.layout.starById[ids.a0!]!, 30)).toBe(false)
+    expect(onTimelineAxis(g, g.layout.starById[ids.a10!]!, 30)).toBe(true)
+    // A selected one stays lit (and held at the edge); an update makes it dated, today.
+    expect(at('a0', { ...timeline(30), selected: ids.a0! })).toBe(1)
+    expect(touchMemory(g, ids.a0!)).toBe(true)
+    expect(g.undated.has(ids.a0!)).toBe(false)
+    expect(at('a0', timeline(30))).toBeGreaterThan(0)
+    expect(timelinePlaces(g, 30).stars[g.layout.starById[ids.a0!]!]![0]).toBe(TIMELINE_TODAY_X)
+    // The topic average and the centre ignore an undated star.
+    expect(timelineCentre(g, timelinePlaces(g, 30), [ids.a3!], 30)).toBeNull()
+  })
+
+  test('R2.9: the oldest age follows updates and forgets, so All is no wider than needed', () => {
+    const g = fresh()
+    expect(g.oldestAge).toBe(40)
+    expect(timelineDays(g, 'all')).toBe(42)
+    expect(forgetMemory(g, ids.b40!)).toBe(true)
+    expect(g.oldestAge).toBe(40)
+    expect(forgetMemory(g, ids.o40!)).toBe(true)
+    expect(g.oldestAge).toBe(10)
+    expect(timelineDays(g, 'all')).toBe(12)
+    expect(touchMemory(g, ids.a10!)).toBe(true)
+    expect(g.oldestAge).toBe(6)
+    expect(timelineDays(g, 'all')).toBe(8)
+    expect(liveOldestAge(g)).toBe(6)
+    // Everything forgotten or updated: the range is the 2-day minimum.
+    for (const key of ['a0', 'a3', 'b6']) forgetMemory(g, ids[key]!)
+    expect(g.oldestAge).toBe(0)
+    expect(timelineDays(g, 'all')).toBe(2)
+  })
+
+  test('R2.5/R2.7: the layout step places only when something moves, and not for a range change in Galaxy', () => {
+    // Galaxy at rest: a range change moves the shown days but never asks for a placement (the old code placed every frame for about a second).
+    let days = 30
+    let places = 0
+    for (let i = 0; i < 150; i++) {
+      const step = layoutStep(0, days, 'galaxy', 7, 1 / 60, false, false)
+      expect(step.morph).toBe(0)
+      days = step.days
+      if (step.place) places++
+    }
+    expect(places).toBe(0)
+    expect(days).toBe(7)
+    // Timeline settled: nothing moves, nothing is placed.
+    expect(layoutStep(1, 7, 'timeline', 7, 1 / 60, false, false)).toEqual({ morph: 1, days: 7, place: false })
+    // Timeline: a range change places every frame until it arrives.
+    expect(layoutStep(1, 30, 'timeline', 7, 1 / 60, false, false).place).toBe(true)
+    // A morph places, a dirty flag places once, reduced motion lands at once.
+    expect(layoutStep(0, 30, 'timeline', 30, 1 / 60, false, false)).toMatchObject({ place: true })
+    expect(layoutStep(0, 30, 'galaxy', 30, 1 / 60, false, true).place).toBe(true)
+    expect(layoutStep(0, 30, 'timeline', 7, 0.016, true, false)).toEqual({ morph: 1, days: 7, place: true })
+    // The way back ends exactly on Galaxy and places on the way.
+    let morph = 1
+    let count = 0
+    for (let i = 0; i < 100; i++) {
+      const step = layoutStep(morph, 30, 'galaxy', 30, 1 / 60, false, false)
+      if (step.place) count++
+      morph = step.morph
+    }
+    expect(morph).toBe(0)
+    // About 1.4 s of frames at 60 per second, then nothing more.
+    expect(count).toBeGreaterThanOrEqual(84)
+    expect(count).toBeLessThanOrEqual(85)
+  })
+
+  test('R2.7: the Timeline places are kept for the same galaxy and days, and made again when stale', () => {
+    let cache: PlacesCache = null
+    const first = placesFor(cache, galaxy, 30, false)
+    cache = first.cache
+    expect(first.places).toEqual(timelinePlaces(galaxy, 30))
+    const again = placesFor(cache, galaxy, 30, false)
+    expect(again.places).toBe(first.places)
+    expect(placesFor(cache, galaxy, 29.5, false).places).not.toBe(first.places)
+    expect(placesFor(cache, galaxy, 30, true).places).not.toBe(first.places)
+    expect(placesFor(cache, fresh(), 30, false).places).not.toBe(first.places)
+  })
+
+  test('R2.5: a visual is at its home at blend 0, at the Timeline place at 1, and its moons follow it in between', () => {
+    const places = timelinePlaces(galaxy, 30)
+    const star = galaxy.layout.stars[slot('a3')]!
+    const away = awayPlace(places, 'star', slot('a3'))!
+    expect(away).toBe(places.stars[slot('a3')]!)
+    expect(awayPlace(places, 'hub', 0)).toBe(places.hubs[0]!)
+    expect(awayPlace(places, 'core', 1)).toBe(places.cores[1]!)
+    expect(awayPlace(places, 'claude', 0)).toBe(places.claude)
+    expect(awayPlace(places, 'star', 999)).toBeUndefined()
+    // Home at 0 (a copy, not the layout's own array), no away place: home.
+    const home = visualPlace(star.position, away, 0)
+    expect(home).toEqual(star.position)
+    expect(home).not.toBe(star.position)
+    expect(visualPlace(star.position, undefined, 0.5)).toEqual(star.position)
+    expect(visualPlace(star.position, away, 1)).toEqual(away)
+    // Halfway through the ease the moons orbit the point between, not the Galaxy place.
+    const mid = visualPlace(star.position, away, morphBlend(0.5))
+    for (let i = 0; i < 3; i++) {
+      const moon = moonPosition(mid, i, 3, 0, true)
+      expect(Math.hypot(moon[0] - mid[0], moon[2] - mid[2])).toBeCloseTo(MOON_RADIUS)
+    }
+    expect(samePlace(mid, [...mid] as Vec3)).toBe(true)
+    expect(samePlace(mid, away)).toBe(false)
+    // At rest in Galaxy a second write moves nothing (so no reheat of the engine).
+    expect(samePlace(visualPlace(star.position, away, 0), visualPlace(star.position, away, 0))).toBe(true)
+  })
+
+  test('R2.5/R2.6: the links are written when the fade changes or the links were rebuilt, and never while fully visible', () => {
+    // Fully visible stays untouched, even when the links were rebuilt (fresh links are at full opacity).
+    expect(linkFadeToApply(1, 1, false)).toBeNull()
+    expect(linkFadeToApply(1, 1, true)).toBeNull()
+    // A fade that moved is written; the same fade is not, unless the links were rebuilt.
+    expect(linkFadeToApply(0.6, 1, false)).toBe(0.6)
+    expect(linkFadeToApply(0, 0.2, false)).toBe(0)
+    expect(linkFadeToApply(0, 0, false)).toBeNull()
+    expect(linkFadeToApply(0, 0, true)).toBe(0)
+    // Coming back to Galaxy: the last step to 1 is written once.
+    expect(linkFadeToApply(1, 0.9, false)).toBe(1)
+    // A Timeline held for 600 frames writes the links once.
+    let applied = 1
+    let dirty = true
+    let writes = 0
+    for (let frame = 0; frame < 600; frame++) {
+      const fade = galaxyOnlyFade(morphBlend(Math.min(1, frame / 84)))
+      const to = linkFadeToApply(fade, applied, dirty)
+      if (to !== null) {
+        applied = to
+        dirty = false
+        writes++
+      }
+    }
+    expect(applied).toBe(0)
+    expect(writes).toBeLessThanOrEqual(85)
+    const before = writes
+    for (let frame = 0; frame < 300; frame++) if (linkFadeToApply(0, applied, dirty) !== null) writes++
+    expect(writes).toBe(before)
+  })
+
+  test('R2.5: what is drawn each frame: hubs alone fade, cores and the Claude core shrink, every thing grows with its pulse', () => {
+    expect(visualFade('hub', 0.25)).toBe(0.25)
+    for (const kind of ['star', 'core', 'claude'] as const) expect(visualFade(kind, 0.25)).toBe(1)
+    expect(visualScale('core', 10, 1, 0)).toBe(5)
+    expect(visualScale('claude', 10, 1, 0)).toBe(5)
+    expect(visualScale('core', 10, 0.5, 0)).toBeCloseTo(7.5)
+    expect(visualScale('star', 10, 1, 0)).toBe(10)
+    expect(visualScale('hub', 10, 1, 0)).toBe(10)
+    expect(visualScale('star', 10, 0, 0.5)).toBeCloseTo(18)
+    expect(visualScale('core', 10, 0, 0)).toBe(10)
+  })
+
+  test('R2.5: layout switches ask for the straight-on view into Timeline and the Galaxy view out of it', () => {
+    expect(layoutFlight('galaxy', 'timeline')).toBe('timeline')
+    expect(layoutFlight('meaning', 'timeline')).toBe('timeline')
+    expect(layoutFlight('timeline', 'galaxy')).toBe('galaxy')
+    expect(layoutFlight('timeline', 'meaning')).toBe('galaxy')
+    expect(layoutFlight('galaxy', 'meaning')).toBeNull()
+    expect(layoutFlight('timeline', 'timeline')).toBeNull()
+  })
+
+  test('R2.5: the ticks the axis wants for a range, one gridline each, and their fade', () => {
+    // None while no Timeline is blended in; LAYOUT.2's ticks otherwise, the same list on every frame.
+    expect(wantedTicks(7, 7, 0)).toEqual([])
+    expect(wantedTicks(7, 7, 0.01).map(t => t.days)).toEqual([0, 1, 2, 3, 4, 5, 6, 7])
+    expect(wantedTicks(30, 30, 1).map(t => t.days)).toEqual([0, 7, 14, 21, 28])
+    const all = wantedTicks('all', 42, 1)
+    expect(all.map(t => t.days)).toEqual([0, 14, 28, 42])
+    expect(wantedTicks('all', 42, 0.5)).toBe(all)
+    // A tick of the old range that the new one does not have is not wanted (and gets released once faded); one both have stays.
+    const seven = wantedTicks(7, 7, 1)
+    expect(tickWanted(seven, 0)).toBe(true)
+    expect(tickWanted(seven, 14)).toBe(false)
+    expect(tickWanted(wantedTicks(30, 30, 1), 14)).toBe(true)
+    expect(tickWanted([], 0)).toBe(false)
+    // Opacity: labels come in with the blend, lanes too, and a hidden project's lane stays out.
+    expect(tickTarget(true, 1)).toBe(TICK_LABEL_OPACITY)
+    expect(tickTarget(true, 0.5)).toBeCloseTo(TICK_LABEL_OPACITY / 2)
+    expect(tickTarget(false, 1)).toBe(0)
+    expect(laneTarget(1, false)).toBe(LANE_OPACITY)
+    expect(laneTarget(0, false)).toBe(0)
+    expect(laneTarget(1, true)).toBe(0)
+    // A gridline follows its label: at the label's full opacity it is GRID_OPACITY, made only once the label shows.
+    expect(gridOpacity(TICK_LABEL_OPACITY)).toBeCloseTo(GRID_OPACITY)
+    expect(gridOpacity(0)).toBe(0)
+    expect(needsGridLine(false, 0)).toBe(false)
+    expect(needsGridLine(false, FURNITURE_EPSILON)).toBe(false)
+    expect(needsGridLine(false, 0.2)).toBe(true)
+    expect(needsGridLine(true, 0.9)).toBe(false)
+    // Released only when no longer wanted and faded out.
+    expect(tickReleased(false, 0)).toBe(true)
+    expect(tickReleased(false, 0.4)).toBe(false)
+    expect(tickReleased(true, 0)).toBe(false)
+  })
+
+  test('R2.3: the furniture goes idle once faded out in Galaxy, so a frame there does no work', () => {
+    // An opacity within the epsilon snaps onto its target, so a fade-out really reaches 0.
+    expect(easeToward(0.002, 0, 0.1)).toBe(0)
+    expect(easeToward(0.5, 0, 0.5)).toBeCloseTo(0.25)
+    expect(easeToward(0, 0.4, 1)).toBeCloseTo(0.4)
+    let alpha = TICK_LABEL_OPACITY
+    let frames = 0
+    while (alpha !== 0 && frames < 1000) {
+      alpha = easeToward(alpha, 0, 0.1)
+      frames++
+    }
+    expect(alpha).toBe(0)
+    expect(frames).toBeLessThan(100)
+    // Idle only with no blend, no tick left and every lane at 0.
+    expect(furnitureIdle(0, 0, [{ alpha: 0 }, { alpha: 0 }])).toBe(true)
+    expect(furnitureIdle(0, 0, [])).toBe(true)
+    expect(furnitureIdle(0.001, 0, [{ alpha: 0 }])).toBe(false)
+    expect(furnitureIdle(0, 1, [{ alpha: 0 }])).toBe(false)
+    expect(furnitureIdle(0, 0, [{ alpha: 0 }, { alpha: 0.2 }])).toBe(false)
+  })
+
+  test('R2.8: nothing of the Timeline drawing is left behind: disposal exists beside the lanes and runs on every redraw', () => {
+    // A source-text check (the drawing needs a browser): drawGalaxy disposes the lanes AND the ticks; the orchestrator's QA covers the scene.
+    const map = readFileSync(join(ROOT, 'ui', 'map.ts'), 'utf8')
+    const draw = map.slice(map.indexOf('function drawGalaxy('), map.indexOf('function growGalaxy('))
+    expect(draw).toContain('disposeLanes()')
+    expect(draw).toContain('disposeTicks()')
+    const dispose = map.slice(map.indexOf('function disposeTicks()'), map.indexOf('function updateFurniture('))
+    expect(dispose).toContain('tickItems.clear()')
   })
 })

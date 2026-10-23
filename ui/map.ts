@@ -31,7 +31,6 @@ import {
   CLAUDE_COLOUR,
   CLAUDE_SIZE,
   type Candidate,
-  coreScale,
   coreSize,
   coreTarget,
   DEMO_EVERY_MS,
@@ -42,9 +41,7 @@ import {
   forgetMemory,
   galaxyOnlyFade,
   GRID_COLOUR,
-  GRID_OPACITY,
   gridLine,
-  LANE_OPACITY,
   laneLines,
   layerOf,
   layerOn,
@@ -55,25 +52,40 @@ import {
   recallMemory,
   simulationInput,
   FIND_FLY_DELAY_MS,
-  inTimelineRange,
   isPrimary,
   liveLabel,
   morphBlend,
-  morphSeconds,
   morphTarget,
-  rangeTicks,
-  stepDays,
-  stepMorph,
   TICK_LABEL_COLOUR,
   TICK_LABEL_HEIGHT,
-  TICK_LABEL_OPACITY,
   TICK_LABEL_Y,
   tickX,
   TIMELINE_POSE,
   timelineDays,
   timelinePlaces,
   type TimelinePlaces,
-  blendPlace,
+  awayPlace,
+  easeToward,
+  furnitureIdle,
+  gridOpacity,
+  layoutFlight,
+  layoutStep,
+  linkFadeToApply,
+  needsGridLine,
+  placesFor,
+  type PlacesCache,
+  samePlace,
+  sparkOrigin,
+  tickReleased,
+  tickTarget,
+  tickWanted,
+  timelineAim,
+  timelineCentre,
+  laneTarget,
+  visualFade,
+  visualPlace,
+  visualScale,
+  wantedTicks,
   shouldFlyToFound,
   slotOf,
   SPARK_COLOURS,
@@ -344,6 +356,10 @@ export function createMap(host: MapHost): MapView {
   let shownDays = 0
   let placeDirty = true
   let linkFade = 1
+  // The links were rebuilt or restyled since the fade was last written.
+  let linksDirty = true
+  let placesCache: PlacesCache = null
+  let lanesCache: ReturnType<typeof laneLines> | null = null
   let claudeVisual: Visual | null = null
   const tickItems = new Map<number, { label: Any | null; line: Any | null; alpha: number }>()
   let laneItems = new Map<string, { line: Any; alpha: number }>()
@@ -447,13 +463,12 @@ export function createMap(host: MapHost): MapView {
     if (seconds <= 0) stepFlight(0)
   }
 
-  /** The Timeline place of a core, hub or star for the range showing, which a flight or Find aims at while Timeline is on. */
+  /** Where a flight or Find aims in Timeline for the range showing: a core's or star's place, and for a topic (its hub is invisible there) its lane and the average x of its stars. */
   function timelineAt(kind: 'core' | 'hub' | 'star', id: string): Vec3 | null {
     const g = galaxy
     if (g === null) return null
-    const places = timelinePlaces(g, timelineDays(g, state.range))
-    const at = kind === 'core' ? places.cores[slotOf(g.layout.coreByOwner, id)] : kind === 'hub' ? places.hubs[slotOf(g.layout.hubByKey, id)] : places.stars[slotOf(g.layout.starById, id)]
-    return at ?? null
+    const days = timelineDays(g, state.range)
+    return timelineAim(g, timelinePlaces(g, days), kind, id, days)
   }
 
   /** A flight to a core, hub or star, or Reset view: to where it is in the layout now (Reset view in Timeline is its straight-on view). */
@@ -494,19 +509,9 @@ export function createMap(host: MapHost): MapView {
   function foundCentre(hit: Found): Vec3 {
     const g = galaxy
     if (g === null || state.layout !== 'timeline' || hit.ids.size === 0) return hit.centre ?? [0, 0, 0]
-    const places = timelinePlaces(g, timelineDays(g, state.range))
-    const sum: Vec3 = [0, 0, 0]
-    // Only the stars inside the range: the others are faded out, and the camera should not fly to an empty place.
     const days = timelineDays(g, state.range)
-    let n = 0
-    for (const id of hit.ids) {
-      const slot = slotOf(g.layout.starById, id)
-      const at = places.stars[slot]
-      if (!at || !inTimelineRange(g.ages[slot] ?? 0, days)) continue
-      n++
-      for (let i = 0; i < 3; i++) sum[i] = sum[i]! + at[i]!
-    }
-    return n === 0 ? (hit.centre ?? [0, 0, 0]) : (sum.map(v => v / n) as Vec3)
+    // Only the stars on the axis count: the others are faded out, and the camera should not fly to an empty place.
+    return timelineCentre(g, timelinePlaces(g, days), hit.ids, days) ?? hit.centre ?? [0, 0, 0]
   }
   function search(value: string) {
     if (galaxy === null) return
@@ -801,6 +806,10 @@ export function createMap(host: MapHost): MapView {
     if (graph === null || lib === null || three === null) return
     disposeVisuals()
     disposeLanes()
+    disposeTicks()
+    placesCache = null
+    // Fresh links are fully visible.
+    linkFade = 1
     visuals = []
     graphNodes = []
     graphLinks = []
@@ -853,6 +862,8 @@ export function createMap(host: MapHost): MapView {
     })
     // Lanes are spaced by the project count: a new project moves every lane.
     placeDirty = true
+    lanesCache = null
+    linksDirty = true
     const star = layout.stars[index]
     if (star) addStar(g, star, index)
     placeVisuals()
@@ -865,6 +876,7 @@ export function createMap(host: MapHost): MapView {
   // The links' look depends on the state: a fresh accessor makes the library read it again.
   function setLinkStyle() {
     if (graph === null) return
+    linksDirty = true
     const g = galaxy
     const hidden = (owner: string) => state.hidden.has(owner)
     const ends = (link: Any) => {
@@ -901,6 +913,8 @@ export function createMap(host: MapHost): MapView {
     if (graph === null) return
     const scene = (graph as unknown as Loose).scene?.() as Any
     if (!scene) return
+    // The library has made its link lines by now: the fade is written to them again.
+    linksDirty = true
     let mesh: Any = null
     scene.traverse((object: Any) => {
       if (object.isLine && object.material) {
@@ -1002,8 +1016,9 @@ export function createMap(host: MapHost): MapView {
     retarget()
     if (before !== null && before.layout !== state.layout) {
       // Timeline: a straight-on view of the axis (auto-rotate was paused by the state change). Leaving it: the Galaxy view.
-      if (state.layout === 'timeline') flyToPose(TIMELINE_POSE)
-      else if (before.layout === 'timeline') fly(flightTo(galaxy, 'reset'))
+      const flightKind = layoutFlight(before.layout, state.layout)
+      if (flightKind === 'timeline') flyToPose(TIMELINE_POSE)
+      else if (flightKind === 'galaxy') fly(flightTo(galaxy, 'reset'))
     }
     const controls = graph?.controls()
     if (controls) controls.autoRotate = state.rotating && shown
@@ -1011,39 +1026,46 @@ export function createMap(host: MapHost): MapView {
 
   // ---- Timeline: places, links, furniture ----
 
-  /** Every visual at its place for the morph and the days showing: its Galaxy place blended toward its Timeline place. */
+  /** Every visual at its place for the morph and the days showing: its Galaxy place blended toward its Timeline place. The library is re-armed only when something moved. */
   function placeVisuals() {
     const g = galaxy
     if (g === null) return
     const blend = morphBlend(morph)
-    const places: TimelinePlaces | null = blend > 0 ? timelinePlaces(g, shownDays) : null
+    let places: TimelinePlaces | null = null
+    if (blend > 0) {
+      const made = placesFor(placesCache, g, shownDays, placeDirty)
+      placesCache = made.cache
+      places = made.places
+    }
+    let moved = false
     for (const v of visuals) {
-      const away = places === null ? null : v.kind === 'star' ? places.stars[v.slot] : v.kind === 'hub' ? places.hubs[v.slot] : v.kind === 'core' ? places.cores[v.slot] : places.claude
-      v.position = away === null || away === undefined ? v.home : blendPlace(v.home, away, blend)
+      const next = visualPlace(v.home, places === null ? null : awayPlace(places, v.kind, v.slot), blend)
+      if (!samePlace(next, v.position)) moved = true
+      v.position = next
       const node = v.node as Any
-      node.x = node.fx = v.position[0]
-      node.y = node.fy = v.position[1]
-      node.z = node.fz = v.position[2]
+      node.x = node.fx = next[0]
+      node.y = node.fy = next[1]
+      node.z = node.fz = next[2]
     }
     placeDirty = false
     // The library copies node places to its objects and links only while its engine counts as running (cooldownTicks is 0): this arms one pass, with no d3 tick, so the move shows.
-    loose().d3ReheatSimulation?.()
+    if (moved) loose().d3ReheatSimulation?.()
   }
 
-  /** Per frame: the morph and the range move toward where the state points, and the visuals follow. */
+  /** Per frame: the morph and the range move toward where the state points, and the visuals follow when they have to. */
   function stepLayout(dt: number, g: Galaxy) {
-    const weight = stepMorph(morph, morphTarget(state.layout), dt, morphSeconds(state.reducedMotion))
-    const days = stepDays(shownDays, timelineDays(g, state.range), dt, state.reducedMotion)
-    if (weight === morph && days === shownDays && !placeDirty) return
-    morph = weight
-    shownDays = days
-    placeVisuals()
+    const step = layoutStep(morph, shownDays, state.layout, timelineDays(g, state.range), dt, state.reducedMotion, placeDirty)
+    morph = step.morph
+    shownDays = step.days
+    if (step.place) placeVisuals()
   }
 
   /** Threads, bridges and their particles fade with the topic hubs: each link's own line material (cloned once) carries the fade. */
-  function fadeLinks(fade: number) {
-    if (fade >= 1 && linkFade >= 1) return
+  function fadeLinks(wanted: number) {
+    const fade = linkFadeToApply(wanted, linkFade, linksDirty)
+    if (fade === null) return
     linkFade = fade
+    linksDirty = false
     for (const link of graphLinks as Any[]) {
       const line = link.__lineObj
       if (line?.material) {
@@ -1086,34 +1108,45 @@ export function createMap(host: MapHost): MapView {
     line.visible = opacity > 0.003
   }
 
-  function disposeLanes() {
-    for (const { line } of laneItems.values()) {
-      line.parent?.remove(line)
-      line.geometry?.dispose?.()
-      line.material?.dispose?.()
+  /** Takes furniture parts out of the scene and frees what they hold. */
+  function releaseParts(...parts: (Any | null)[]) {
+    for (const part of parts) {
+      part?.parent?.remove(part)
+      part?.material?.map?.dispose?.()
+      part?.geometry?.dispose?.()
+      part?.material?.dispose?.()
     }
-    laneItems = new Map()
   }
 
-  /** The axis: a tick label with a faint gridline each (ticks() of the range), and a faint baseline per lane in its project colour; all fade in with the morph. */
+  function disposeLanes() {
+    for (const { line } of laneItems.values()) releaseParts(line)
+    laneItems = new Map()
+    lanesCache = null
+  }
+
+  function disposeTicks() {
+    for (const { label, line } of tickItems.values()) releaseParts(label, line)
+    tickItems.clear()
+  }
+
+  /** The axis: a tick label with a faint gridline each (ticks() of the range), and a faint baseline per lane in its project colour; all fade in with the morph. At blend 0, with everything faded, a frame does nothing. */
   function updateFurniture(blend: number, follow: number, g: Galaxy) {
+    if (furnitureIdle(blend, tickItems.size, laneItems.values())) return
     const scene = (graph as unknown as Loose | null)?.scene?.() as Any
     if (!scene || three === null) return
-    const wanted = new Set<number>()
-    if (blend > 0) {
-      for (const tick of rangeTicks(state.range, timelineDays(g, state.range))) {
-        wanted.add(tick.days)
-        if (!tickItems.has(tick.days)) {
-          // Tick text is made by ticks() from numbers; it is drawn on a canvas, never as markup.
-          const label = makeLabel(tick.label, TICK_LABEL_HEIGHT, TICK_LABEL_COLOUR)
-          if (label !== null) scene.add(label)
-          tickItems.set(tick.days, { label, line: null, alpha: 0 })
-        }
+    const wanted = wantedTicks(state.range, timelineDays(g, state.range), blend)
+    for (const tick of wanted) {
+      if (!tickItems.has(tick.days)) {
+        // Tick text is made by ticks() from numbers; it is drawn on a canvas, never as markup.
+        const label = makeLabel(tick.label, TICK_LABEL_HEIGHT, TICK_LABEL_COLOUR)
+        if (label !== null) scene.add(label)
+        tickItems.set(tick.days, { label, line: null, alpha: 0 })
       }
     }
     for (const [days, item] of tickItems) {
-      item.alpha += ((wanted.has(days) ? blend * TICK_LABEL_OPACITY : 0) - item.alpha) * follow
-      if (item.line === null && item.alpha > 0.003) item.line = makeFurnitureLine(GRID_COLOUR)
+      const isWanted = tickWanted(wanted, days)
+      item.alpha = easeToward(item.alpha, tickTarget(isWanted, blend), follow)
+      if (needsGridLine(item.line !== null, item.alpha)) item.line = makeFurnitureLine(GRID_COLOUR)
       const x = tickX(days, shownDays)
       if (item.label) {
         item.label.position.set(x, TICK_LABEL_Y, 0)
@@ -1122,20 +1155,16 @@ export function createMap(host: MapHost): MapView {
       }
       if (item.line) {
         const [a, b] = gridLine(x)
-        setLine(item.line, a, b, (item.alpha / TICK_LABEL_OPACITY) * GRID_OPACITY)
+        setLine(item.line, a, b, gridOpacity(item.alpha))
       }
       // A tick of a range no longer showing is let go once it has faded out.
-      if (!wanted.has(days) && item.alpha <= 0.003) {
-        for (const part of [item.label, item.line]) {
-          part?.parent?.remove(part)
-          part?.material?.map?.dispose?.()
-          part?.geometry?.dispose?.()
-          part?.material?.dispose?.()
-        }
+      if (tickReleased(isWanted, item.alpha)) {
+        releaseParts(item.label, item.line)
         tickItems.delete(days)
       }
     }
-    for (const lane of laneLines(g)) {
+    lanesCache ??= laneLines(g)
+    for (const lane of lanesCache) {
       let item = laneItems.get(lane.owner)
       if (item === undefined && blend > 0) {
         const line = makeFurnitureLine(lane.colour)
@@ -1144,7 +1173,7 @@ export function createMap(host: MapHost): MapView {
         laneItems.set(lane.owner, item)
       }
       if (item === undefined) continue
-      item.alpha += ((blend > 0 && !state.hidden.has(lane.owner) ? blend * LANE_OPACITY : 0) - item.alpha) * follow
+      item.alpha = easeToward(item.alpha, laneTarget(blend, state.hidden.has(lane.owner)), follow)
       setLine(item.line, lane.from, lane.to, item.alpha)
     }
   }
@@ -1172,12 +1201,12 @@ export function createMap(host: MapHost): MapView {
     for (const spark of stepSparks(sparkPool, dt)) arrive(spark)
     updateMoons(follow)
     for (const v of visuals) {
-      v.fade = v.kind === 'hub' ? galaxyFade : 1
+      v.fade = visualFade(v.kind, galaxyFade)
       v.alpha += (v.target - v.alpha) * follow
       v.labelAlpha += (v.labelTarget - v.labelAlpha) * follow
       v.pulse = v.kind === 'star' && v.key === selectedKey ? selectedPulse(clock) : v.kind === 'core' || v.kind === 'claude' ? 0.1 + 0.07 * Math.sin(clock * 1.5 + v.index) : v.pulse * Math.exp(-dt * 2.2)
       if (v.sprite) {
-        const scale = v.size * (v.kind === 'core' || v.kind === 'claude' ? coreScale(blend) : 1) * (1 + v.pulse * 1.6)
+        const scale = visualScale(v.kind, v.size, blend, v.pulse)
         v.sprite.scale.set(scale, scale, 1)
         v.sprite.material.opacity = Math.min(1, v.alpha) * v.fade
       }
@@ -1195,7 +1224,7 @@ export function createMap(host: MapHost): MapView {
         sprite.material.opacity = 0
         return
       }
-      const at = sparkAt(claudeVisual?.position ?? [0, 0, 0], to.position, spark.curve, sparkProgress(spark))
+      const at = sparkAt(sparkOrigin(claudeVisual?.position), to.position, spark.curve, sparkProgress(spark))
       const [r, g, b] = SPARK_COLOURS[spark.kind]
       sprite.position.set(at[0], at[1], at[2])
       sprite.material.color.setRGB(r, g, b)
