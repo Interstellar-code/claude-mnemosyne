@@ -220,6 +220,11 @@
       <dt class="mono">ui</dt><dd>this dashboard (search or forget)</dd>
       <dt class="mono">backfill</dt><dd>the one-time tagging run, /mnemosyne-tags</dd>
     </dl>
+    <dl id="act-prov-key" class="key" aria-label="Who wrote a saved memory">
+      <dt class="prov prov-human">you said</dt><dd>a human wrote it, with a trigger phrase such as “remember that”</dd>
+      <dt class="prov prov-agent">Claude</dt><dd>Claude saved it in Claude Code; Codex or another app's name means an agent in that app saved it</dd>
+      <dt class="mono">no badge</dt><dd>an older save, or one that does not say who wrote it</dd>
+    </dl>
     <p class="muted small">From the activity log on this machine. Text previews are cut short and secrets are masked.</p>
   </main>
 
@@ -240,6 +245,71 @@
     </p>
     <p id="search-note" class="muted small" hidden></p>
     <ol id="search-results" class="hits"></ol>
+  </main>
+
+  <main id="view-knowledge" class="main view column wide" hidden>
+    <div class="titlebar">
+      <h1>Knowledge</h1>
+      <span class="muted small">Facts, preferences and instructions the engine mined from your memories, and whether they are used and kept up to date.</span>
+    </div>
+    <p id="know-status" class="notice-line small muted" role="status">Loading…</p>
+    <div id="know-notice" class="notice" role="status" hidden></div>
+    <div id="know-body" hidden>
+      <div id="know-tabs" class="chips" role="tablist" aria-label="Knowledge kind"></div>
+      <div id="know-kpis" class="tiles"></div>
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr><th id="know-item-head">Fact</th><th>Topic</th><th>Project</th><th>From memory</th><th>Status</th><th>Used</th><th>Last used</th></tr>
+          </thead>
+          <tbody id="know-rows"></tbody>
+        </table>
+      </div>
+      <p class="muted small">Used: how many times the memory an item came from was recalled (all time); the engine keeps no usage count of its own for these items. Status: an instruction is active or retired, a relation shows its confidence. Last used turns amber after 30 days. Show on map opens the source star.</p>
+    </div>
+  </main>
+
+  <main id="view-health" class="main view column wide" hidden>
+    <div class="titlebar">
+      <h1>Memory health</h1>
+      <span class="muted small">How much of your memory is used, how much is going stale, and which engine features are switched on.</span>
+    </div>
+    <div id="health-body" hidden>
+      <div id="health-kpis" class="tiles"></div>
+      <div class="health-grid">
+        <section class="card" aria-labelledby="health-cov-title">
+          <h2 id="health-cov-title" class="card-title">Engine features in use</h2>
+          <div id="health-coverage" class="cov"></div>
+        </section>
+        <section class="card" aria-labelledby="health-days-title">
+          <h2 id="health-days-title" class="card-title">Recalls per day, last 14 days</h2>
+          <div id="health-chart" class="days" role="img" aria-label="Bar chart of recalls per day"></div>
+          <p id="health-chart-text" class="muted small"></p>
+          <h2 class="card-title">Projects</h2>
+          <div id="health-projects" class="list"></div>
+        </section>
+      </div>
+      <div class="health-grid">
+        <section id="health-never-box" class="card" aria-labelledby="health-never-title">
+          <h2 id="health-never-title" class="card-title">Never recalled</h2>
+          <p id="health-never-text" class="muted small"></p>
+          <div class="table-wrap">
+            <table class="table">
+              <thead><tr><th>Memory</th><th>Project</th><th>Saved</th><th>Actions</th></tr></thead>
+              <tbody id="health-never"></tbody>
+            </table>
+          </div>
+        </section>
+        <section class="card" aria-labelledby="health-store-title">
+          <div id="health-hot-box">
+            <h2 id="health-hot-title" class="card-title">Most recalled</h2>
+            <div id="health-hot" class="list"></div>
+          </div>
+          <h2 id="health-store-title" class="card-title">Storage</h2>
+          <div id="health-storage" class="list"></div>
+        </section>
+      </div>
+    </div>
   </main>
 
   <footer id="foot" class="foot" hidden>

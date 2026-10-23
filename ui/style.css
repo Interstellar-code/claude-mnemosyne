@@ -632,6 +632,49 @@ button.toggle-name:focus-visible { outline: 2px solid var(--accent); outline-off
   .stage-hint { display: none; }
 }
 
+/* Knowledge and Health (design/Knowledge.dc.html, design/Health.dc.html). */
+.notice-line { margin: 0; }
+.notice { display: flex; flex-direction: column; gap: 4px; padding: 12px 16px; border: 1px solid #E8D5A8; border-radius: 12px; background: #FFF8E6; color: #5C4300; font-size: 13px; line-height: 1.5; }
+.know-tab { display: inline-flex; align-items: center; gap: 8px; }
+.know-tab .lg-dot { width: 8px; height: 8px; }
+.know-text { overflow-wrap: anywhere; min-width: 200px; }
+.is-stale { color: #8A5A00; font-weight: 600; }
+.tile-note { margin-top: 4px; }
+.card { display: flex; flex-direction: column; gap: 12px; padding: 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); min-width: 0; }
+.card-title { margin: 0; font-size: 14px; font-weight: 600; }
+.health-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; align-items: start; }
+.cov { display: flex; flex-direction: column; gap: 14px; }
+.cov-row { display: flex; flex-direction: column; gap: 6px; }
+.cov-head { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; }
+.cov-bar { width: 100%; height: 8px; border-radius: 4px; }
+.cov-note { color: #8A5A00; line-height: 1.4; }
+.cov-note.is-good { color: var(--accent); }
+.days { display: flex; align-items: flex-end; gap: 4px; height: 140px; padding-top: 8px; }
+.day { flex: 1 1 0; min-width: 0; height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; gap: 4px; }
+.day-bar { width: 100%; max-width: 28px; min-height: 2px; border-radius: 3px 3px 0 0; background: var(--accent); }
+.day-count { font-size: 10px; color: var(--muted); }
+.day-label { font-size: 10px; }
+.h0 { height: 0%; } .h1 { height: 4%; } .h2 { height: 9%; } .h3 { height: 14%; } .h4 { height: 19%; }
+.h5 { height: 24%; } .h6 { height: 29%; } .h7 { height: 34%; } .h8 { height: 39%; } .h9 { height: 44%; }
+.h10 { height: 49%; } .h11 { height: 54%; } .h12 { height: 59%; } .h13 { height: 64%; } .h14 { height: 69%; }
+.h15 { height: 74%; } .h16 { height: 79%; } .h17 { height: 84%; } .h18 { height: 89%; } .h19 { height: 94%; }
+.h20 { height: 100%; }
+.list { display: flex; flex-direction: column; gap: 6px; }
+.list-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 4px 0; border-bottom: 1px solid #EEEFEC; }
+.hot-row { display: flex; align-items: baseline; gap: 12px; padding: 4px 0; border-bottom: 1px solid #EEEFEC; }
+.hot-count { min-width: 32px; font-weight: 600; }
+.hot-text { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; font-size: 13px; }
+.row-actions { white-space: nowrap; }
+.row-actions .link + .link { margin-left: 12px; }
+.confirm-inline { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.danger-link { color: var(--danger); }
+.prov { display: inline-block; margin-right: 8px; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; vertical-align: baseline; }
+.prov-human { background: #E6F2F1; color: #0B6665; }
+.prov-agent { background: #EAF1FA; color: #1F5592; }
+@media (max-width: 760px) {
+  .health-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
 /* From ui/vendor/map-lib.js: the CSS its bundled helpers used to inject as a
    <style> element, which the CSP refuses. scripts/vendor-map.ts removes the
    injection (patches no-style-*, DESIGN.md "The 3D memory map") and this is

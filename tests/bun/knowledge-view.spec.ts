@@ -1,0 +1,318 @@
+// VIEWS.1: the Knowledge tab, on the real /api/knowledge of the real server over a
+// temporary store whose rows were written by the real engine tool
+// (mnemopi_knowledge_store, as tests/bun/knowledge-api.spec.ts does). Only the DOM is
+// stood in for; nothing else is faked.
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
+import { Database } from 'bun:sqlite'
+import { mkdirSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { startServer } from '../../ui/server'
+import type { Started } from '../../ui/server'
+import { body, engineCall, ROOT, tempDir, toolCall } from './helpers'
+
+// ui/knowledge.ts is DOM code (checked by ui/tsconfig.json): loaded by a path tsc does not follow.
+const { agoText, daysAgo, extractionState, itemHead, KINDS, kindTabs, kpis, kpiTiles, notice, parseKnowledge, rowsOf, statusOf, tableRows, total, usedText } = (await import(join(ROOT, 'ui', 'knowledge.ts'))) as Record<string, any>
+type KnowledgeHost = { project: (owner: string) => unknown; showOnMap: (id: string) => void; now: () => number }
+type KnowledgeData = any
+
+const CLI = join(ROOT, 'engine', 'src', 'cli.ts')
+const MARKUP = '<img src=x onerror=alert(1)>'
+const DAY = 86_400_000
+
+// ---- A DOM-free stand-in document (only the network edge and the DOM are faked) ----
+
+class FakeText {
+  constructor(public data: string) {}
+  get textContent() {
+    return this.data
+  }
+}
+
+class FakeNode {
+  children: (FakeNode | FakeText)[] = []
+  attributes = new Map<string, string>()
+  dataset: Record<string, string> = {}
+  style: Record<string, string> = {}
+  className = ''
+  hidden = false
+  disabled = false
+  colSpan = 1
+  type = ''
+  title = ''
+  listeners = new Map<string, ((event: unknown) => void)[]>()
+  constructor(public tagName: string) {}
+  get textContent(): string {
+    return this.children.map(child => child.textContent).join('')
+  }
+  set textContent(value: string) {
+    this.children = value === '' ? [] : [new FakeText(String(value))]
+  }
+  append(...nodes: (FakeNode | FakeText | string)[]) {
+    for (const node of nodes) this.children.push(typeof node === 'string' ? new FakeText(node) : node)
+  }
+  replaceChildren(...nodes: (FakeNode | FakeText | string)[]) {
+    this.children = []
+    this.append(...nodes)
+  }
+  setAttribute(name: string, value: string) {
+    this.attributes.set(name, String(value))
+  }
+  addEventListener(type: string, listener: (event: unknown) => void) {
+    this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener])
+  }
+  fire(type: string, event: unknown = {}) {
+    for (const listener of this.listeners.get(type) ?? []) listener(event)
+  }
+  focus() {}
+  all(): FakeNode[] {
+    return [this, ...this.children.flatMap(child => (child instanceof FakeNode ? child.all() : []))]
+  }
+  texts(): string[] {
+    return this.children.flatMap(child => (child instanceof FakeNode ? child.texts() : [child.data]))
+  }
+}
+
+const fakeDocument = {
+  createElement: (tag: string) => new FakeNode(tag.toLowerCase()),
+  createTextNode: (data: string) => new FakeText(data),
+}
+
+/** Runs `body` with the stand-in document installed. */
+async function withDocument<T>(body: () => Promise<T> | T): Promise<T> {
+  const g = globalThis as Record<string, unknown>
+  const saved = g.document
+  g.document = fakeDocument
+  try {
+    return await body()
+  } finally {
+    g.document = saved
+  }
+}
+
+const iso = (ms: number) => new Date(ms).toISOString()
+
+describe('VIEWS.1: the Knowledge tab on a real store', () => {
+  const temp = tempDir('knowledge-view')
+  const store = join(temp.dir, 'store')
+  const emptyStore = join(temp.dir, 'empty')
+  const ids = {} as Record<'m1' | 'm2' | 'm3', string>
+  let started: Started
+  let emptyStarted: Started
+  let now = 0
+
+  const get = async (server: Started, path: string) => (await fetch(`http://127.0.0.1:${server.port}${path}`, { headers: { Authorization: `Bearer ${server.token}` } })).json()
+  const knowledge = async (server = started, extraction?: string) => {
+    if (extraction === undefined) delete process.env.MNEMOSYNE_EXTRACTION
+    else process.env.MNEMOSYNE_EXTRACTION = extraction
+    return parseKnowledge(await get(server, '/api/knowledge'))!
+  }
+
+  async function remember(owner: string, call: number, content: string, tags?: string[]) {
+    const reply = body((await engineCall(CLI, store, owner, [toolCall(call, 'mnemopi_remember', { content, ...(tags ? { metadata: { tags } } : {}) })])).get(call)) as { memory_id: string }
+    return reply.memory_id
+  }
+  async function mine(owner: string, id: string, call: number, items: Record<string, unknown>) {
+    const prompt = body((await engineCall(CLI, store, owner, [toolCall(call, 'mnemopi_knowledge_prompt', { memory_id: id })])).get(call)) as { sha256: string }
+    await engineCall(CLI, store, owner, [toolCall(call + 1, 'mnemopi_knowledge_store', { memory_id: id, reply: JSON.stringify(items), sha256: prompt.sha256 })])
+  }
+
+  beforeAll(async () => {
+    now = Date.now()
+    mkdirSync(store, { recursive: true })
+    mkdirSync(emptyStore, { recursive: true })
+    ids.m1 = await remember('project-alpha-1a2b', 1, 'Alpha code standards.\nAlways run typecheck.', ['standards'])
+    ids.m2 = await remember('project-beta-9z8y', 2, 'Beta release note.\nMilestone v1.', ['milestone'])
+    ids.m3 = await remember('project-alpha-1a2b', 3, 'Untagged note.')
+    await mine('project-alpha-1a2b', ids.m1, 10, { facts: ['Mnemosyne requires Bun', MARKUP], preferences: ['User prefers tabs'], instructions: ['Always run typecheck before commit'], timelines: [], kg: [] })
+    await mine('project-beta-9z8y', ids.m2, 20, { facts: [], preferences: [], instructions: [], timelines: ['Milestone v1 on 2026-11-01'], kg: [{ subject: 'Antigravity', predicate: 'powers', object: 'Mnemosyne' }] })
+    const db = new Database(join(store, 'mnemopi.db'))
+    try {
+      db.run('UPDATE working_memory SET recall_count = 7, last_recalled = ? WHERE id = ?', [iso(now - 2 * DAY), ids.m1])
+      db.run('UPDATE working_memory SET recall_count = 1, last_recalled = ? WHERE id = ?', [iso(now - 40 * DAY), ids.m2])
+    } finally {
+      db.close()
+    }
+    started = await startServer({ root: join(temp.dir, 'root'), store, cli: CLI, activityLog: '', pluginRoot: ROOT })
+    emptyStarted = await startServer({ root: join(temp.dir, 'root2'), store: emptyStore, cli: CLI, activityLog: '', pluginRoot: ROOT })
+  }, 180_000)
+
+  afterAll(() => {
+    delete process.env.MNEMOSYNE_EXTRACTION
+    started?.stop()
+    emptyStarted?.stop()
+    temp.dispose()
+  })
+
+  const host = (shown: string[] = []): KnowledgeHost => ({
+    project: owner => {
+      const span = fakeDocument.createElement('span')
+      span.textContent = owner
+      return span
+    },
+    showOnMap: id => void shown.push(id),
+    now: () => now,
+  })
+
+  test('VIEWS.1.a1: five kinds with counts; KPIs are items, memory recalled in the last 7 days, memory never recalled', async () => {
+    const data = await knowledge(started, 'claude-haiku-5-5')
+    expect(KINDS.map((k: { label: string; kind: string }) => [k.label, data.items[k.kind].length])).toEqual([['Facts', 2], ['Preferences', 1], ['Instructions', 1], ['Timeline', 1], ['Relations', 1]])
+    expect(total(data)).toBe(6)
+    expect(kpis(data, now).map((k: { label: string; value: string }) => [k.label, k.value])).toEqual([
+      ['Items', '6'],
+      ['Memory recalled in the last 7 days', '4'],
+      ['Memory never recalled', '0'],
+    ])
+    await withDocument(() => {
+      const tabs = kindTabs(data, 'fact', () => {}) as unknown as FakeNode[]
+      expect(tabs.map(tab => tab.texts().join(' '))).toEqual(['Facts 2', 'Preferences 1', 'Instructions 1', 'Timeline 1', 'Relations 1'])
+      expect(tabs.map(tab => tab.attributes.get('aria-selected'))).toEqual(['true', 'false', 'false', 'false', 'false'])
+      const picked: string[] = []
+      const again = kindTabs(data, 'fact', (kind: string) => picked.push(kind)) as unknown as FakeNode[]
+      again[3]!.fire('click')
+      expect(picked).toEqual(['timeline'])
+      const tiles = kpiTiles(data, now) as unknown as FakeNode[]
+      expect(tiles.map(tile => tile.texts())).toEqual([['Items', '6'], ['Memory recalled in the last 7 days', '4'], ['Memory never recalled', '0']])
+    })
+  })
+
+  test('VIEWS.1.a2: rows show item, topic, project, From memory, status, used and last used; facts, timelines and relations show value or description only', async () => {
+    const data = await knowledge(started, 'unknown')
+    const facts = rowsOf(data, 'fact', now)
+    expect(facts.map((r: { text: string }) => r.text)).toEqual(['Mnemosyne requires Bun', MARKUP])
+    expect(facts[0]).toMatchObject({ topic: 'standards', owner: 'project-alpha-1a2b', memory: ids.m1, status: '', used: 'its memory was recalled 7 times', last: '2 days ago', stale: false })
+    // A memory not recalled for 40 days is amber.
+    const timeline = rowsOf(data, 'timeline', now)[0]!
+    expect(timeline).toMatchObject({ text: 'Milestone v1 on 2026-11-01', memory: ids.m2, used: 'its memory was recalled 1 time', last: '40 days ago', stale: true })
+    const relation = rowsOf(data, 'relation', now)[0]!
+    expect(relation.text).toBe('Antigravity powers Mnemosyne')
+    expect(data.items.fact[0]!.id).toMatch(/^fact:\d+$/)
+    expect(data.items.relation[0]!.id).toMatch(/^relation:\d+$/)
+    // Status: an instruction is active or retired and a relation shows its confidence when the reply carries one; blank otherwise.
+    expect(statusOf(data.items.instruction[0]!)).toBe('')
+    expect(statusOf({ ...data.items.instruction[0]!, active: true })).toBe('active')
+    expect(statusOf({ ...data.items.instruction[0]!, active: false })).toBe('retired')
+    expect(statusOf({ ...data.items.relation[0]!, confidence: 0.7 })).toBe('confidence 0.7')
+    expect(statusOf({ ...data.items.fact[0]!, active: false, confidence: 0.2 })).toBe('')
+    expect(usedText(0)).toBe('its memory was recalled 0 times')
+    expect(itemHead('timeline')).toBe('Event')
+    // The table: seven cells a row, Show on map hands the source memory to the map.
+    await withDocument(() => {
+      const shown: string[] = []
+      const rows = tableRows(data, 'fact', host(shown)) as unknown as FakeNode[]
+      expect(rows).toHaveLength(2)
+      expect(rows[0]!.children).toHaveLength(7)
+      const button = rows[0]!.all().find(n => n.tagName === 'button')!
+      expect(button.textContent).toBe('Show on map')
+      button.fire('click')
+      expect(shown).toEqual([ids.m1])
+      expect(rows[0]!.texts().join('|')).toContain('its memory was recalled 7 times')
+      const old = (tableRows(data, 'timeline', host()) as unknown as FakeNode[])[0]!
+      expect((old.children[6] as FakeNode).className).toContain('is-stale')
+      expect((rows[0]!.children[6] as FakeNode).className).not.toContain('is-stale')
+      // An item with no source memory has nothing to show.
+      const orphan = { ...data, items: { ...data.items, fact: [{ ...data.items.fact[0]!, memory: '' }] } }
+      expect((tableRows(orphan, 'fact', host()) as unknown as FakeNode[])[0]!.all().find(n => n.tagName === 'button')!.disabled).toBe(true)
+    })
+  })
+
+  test('VIEWS.1.a3: extraction as a model id, off and unknown each get a status line; off and an empty store get a notice', async () => {
+    const model = await knowledge(started, 'claude-haiku-5-5')
+    expect(model.extraction).toBe('claude-haiku-5-5')
+    expect(extractionState(model.extraction)).toMatchObject({ mode: 'on' })
+    expect(extractionState(model.extraction).status).toContain('claude-haiku-5-5')
+    expect(notice(model)).toBeNull()
+
+    const off = await knowledge(started, 'off')
+    expect(off.extraction).toBe('off')
+    const offState = extractionState('off')
+    expect(offState.mode).toBe('off')
+    expect(offState.status).toContain('extractionModel')
+    expect(offState.status).toContain('restart the dashboard')
+    expect(notice(off)).toMatchObject({ title: 'Extraction is off today.' })
+    expect(notice(off)!.body).toContain('extractionModel')
+    expect(notice(off)!.body).toContain('/mnemosyne-knowledge')
+    expect(notice(off)!.body).toContain('restart the dashboard')
+
+    const unknown = await knowledge(started)
+    expect(unknown.extraction).toBe('unknown')
+    expect(extractionState('unknown').mode).toBe('unknown')
+    expect(extractionState('unknown').status).toContain('extractionModel')
+    // Unknown is treated as on: with items there is no off notice.
+    expect(notice(unknown)).toBeNull()
+
+    // An empty store: the notice says so, for each state of extraction, and says how to fill it.
+    for (const extraction of ['claude-haiku-5-5', 'off', undefined]) {
+      const empty = await knowledge(emptyStarted, extraction)
+      expect(total(empty)).toBe(0)
+      const note = notice(empty)!
+      expect(note).not.toBeNull()
+      expect(note.body).toContain('/mnemosyne-knowledge')
+      expect(note.body).toContain('extractionModel')
+      expect(kpis(empty, now).map((k: { value: string }) => k.value)).toEqual(['0', '0', '0'])
+      await withDocument(() => {
+        const rows = tableRows(empty, 'fact', host()) as unknown as FakeNode[]
+        expect(rows).toHaveLength(1)
+        expect(rows[0]!.texts()).toEqual(['Nothing of this kind yet.'])
+      })
+    }
+    expect(notice(await knowledge(emptyStarted, 'off'))!.title).toBe('Extraction is off today.')
+    expect(notice(await knowledge(emptyStarted))!.title).toBe('No knowledge items yet.')
+  })
+
+  test('VIEWS.1.a4: a hostile string in a knowledge row stays text, in the row and on the tabs', async () => {
+    const data = await knowledge(started)
+    await withDocument(() => {
+      const rows = tableRows(data, 'fact', host()) as unknown as FakeNode[]
+      const nodes = rows.flatMap(row => row.all())
+      expect(rows[1]!.texts()).toContain(MARKUP)
+      expect(nodes.map(n => n.tagName).filter(tag => !['tr', 'td', 'button', 'span'].includes(tag))).toEqual([])
+      expect(nodes.some(n => [...n.attributes.keys()].some(name => /^on/i.test(name)))).toBe(false)
+    })
+    // A reply with hostile project and topic names and a row of the wrong shape.
+    const odd = parseKnowledge({
+      extraction: MARKUP,
+      facts: [{ id: 'fact:1', text: MARKUP, owner: MARKUP, source_memory_id: 'x', topic: MARKUP, recalls: 'many', usage: { recalls: 4 } }, { nope: 1 }, 'junk', null],
+      preferences: 'not a list',
+    })!
+    expect(odd.items.fact).toHaveLength(1)
+    expect(odd.items.fact[0]).toMatchObject({ text: MARKUP, topic: MARKUP, recalls: 4 })
+    expect(extractionState(odd.extraction).status).toContain(MARKUP)
+    expect(parseKnowledge(null)).toBeNull()
+    expect(parseKnowledge([])).toBeNull()
+    expect(parseKnowledge({})!.extraction).toBe('unknown')
+  })
+
+  test('days: whole days ago, today and yesterday', () => {
+    expect(daysAgo(iso(now - 3 * DAY - 5000), now)).toBe(3)
+    expect(daysAgo(null, now)).toBeNull()
+    expect(daysAgo('not a date', now)).toBeNull()
+    expect(agoText(iso(now - 1000), now)).toBe('today')
+    expect(agoText(iso(now - DAY - 1000), now)).toBe('yesterday')
+    expect(agoText(iso(now - 12 * DAY), now)).toBe('12 days ago')
+    expect(agoText(null, now)).toBe('')
+  })
+
+  test('VIEWS.1.a4: the page has the Knowledge tab, its markup, and tsc covers the new files', () => {
+    const app = readFileSync(join(ROOT, 'ui', 'app.ts'), 'utf8')
+    const html = readFileSync(join(ROOT, 'ui', 'index.html'), 'utf8')
+    expect(app).toMatch(/const VIEWS = \['map', 'memories', 'activity', 'search', 'knowledge', 'health'\] as const/)
+    expect(app).toMatch(/knowledge: 'Knowledge', health: 'Health'/)
+    for (const id of ['view-knowledge', 'view-health', 'know-status', 'know-notice', 'know-tabs', 'know-kpis', 'know-rows', 'know-item-head', 'know-body']) expect(html).toContain(`id="${id}"`)
+    // Every id the Knowledge and Health code looks up is in the markup.
+    const wanted = [...app.matchAll(/byId(?:<[^>]*>)?\('((?:know|health)-[^']+)'\)/g)].map(m => m[1]!)
+    expect(wanted.length).toBeGreaterThan(15)
+    const have = new Set([...html.matchAll(/\bid="([^"]+)"/g)].map(m => m[1]!))
+    expect(wanted.filter(id => !have.has(id))).toEqual([])
+    // Phone width: the table scrolls in its box; no inline style or script.
+    expect(html).toMatch(/<div class="table-wrap">\s*<table class="table">\s*<thead>\s*<tr><th id="know-item-head">/)
+    expect(html.slice(html.indexOf('id="view-knowledge"'), html.indexOf('<footer'))).not.toMatch(/\sstyle=|<script|\son\w+=/)
+    const tsconfig = JSON.parse(readFileSync(join(ROOT, 'ui', 'tsconfig.json'), 'utf8')) as { include: string[] }
+    expect(tsconfig.include).toEqual(expect.arrayContaining(['knowledge.ts', 'health.ts']))
+    // The tabs are built in this order, like the others.
+    expect(app.indexOf("'search', 'knowledge', 'health'")).toBeGreaterThan(0)
+    // The data comes only from the two endpoints, through the page's api().
+    expect(app).toContain("api('/api/knowledge')")
+    expect(app).toContain("api('/api/health-report')")
+  })
+})
+
