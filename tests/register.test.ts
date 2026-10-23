@@ -24,10 +24,6 @@ type Extra = {
   append?: 'ok' | 'hang' | 'throw'
   env?: Record<string, string>
   session?: 'ok' | 'throw'
-  /** For the knowledge tools: (tool, args) -> the tool's text (JSON). */
-  knowledge?: (name: string, args: Record<string, unknown>) => Record<string, unknown>
-  /** Records each bin/memories.ts run's stdin (the pending entry) and answers ''. */
-  memories?: (argv: readonly string[], stdin?: string) => void
 }
 function world(on: On, reply: string, isInstalled = true, exitCode = 0, build: string = ENGINE_BUILD, extra: Extra = {}) {
   const runs: Run[] & { appends: Run[] } = Object.assign([] as Run[], { appends: [] as Run[] })
@@ -46,22 +42,13 @@ function world(on: On, reply: string, isInstalled = true, exitCode = 0, build: s
       if (extra.append === 'throw') throw new Error('append failed')
       return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
     }
-    if (extra.memories !== undefined && isMemoriesScript(e.argv)) {
-      extra.memories(e.argv, e.init?.stdin)
-      return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
-    }
     runs.push(e)
     const ids = (e.init?.stdin ?? '').split('\n').filter(Boolean).map(line => JSON.parse(line).id)
     const stdout =
       exitCode !== 0
         ? ''
         : ids
-            .map(id => {
-              const call = JSON.parse((e.init?.stdin ?? '').split('\n')[id - 1] ?? '{}')
-              const name = call.params?.name as string
-              const text = extra.knowledge !== undefined && name.startsWith('mnemopi_knowledge_') ? JSON.stringify(extra.knowledge(name, call.params?.arguments ?? {})) : reply
-              return `${JSON.stringify({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text }] } })}\n`
-            })
+            .map(id => `${JSON.stringify({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: reply }] } })}\n`)
             .join('')
     return { value: { exitCode, stdout, stderr: '' } } as never
   })

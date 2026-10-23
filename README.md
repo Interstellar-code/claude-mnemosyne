@@ -129,11 +129,18 @@ That is a dry run: it counts, per project, the memories with no knowledge and th
 /mnemosyne-knowledge apply
 ```
 
-`apply` finishes the pending entries first (each from its current text and hash, so a memory you edited is redone, never stored stale), then extracts the older memories with no knowledge. It makes one model call per memory, batched per project, and never edits or deletes a memory. A memory whose extraction found nothing is noted in `~/.claude/mnemosyne/knowledge-empty.json` and skipped while its text is unchanged.
+`apply` finishes the pending entries first (each from its current text and hash, so a memory you edited is redone, never stored stale), then extracts the older memories with no knowledge. It makes one model call per memory (a few at a time), batches the engine work per project, 40 memories at a time, and never edits or deletes a memory. A memory whose extraction found nothing is noted in `~/.claude/mnemosyne/knowledge-empty.json` and skipped while its text is unchanged.
 
 Outside agents' saves (through the MCP proxy) get no extraction: the proxy has no model channel. Run `/mnemosyne-knowledge apply` to cover them.
 
 Try `apply` on a copy of the store first.
+
+Three things to know when you change or update this:
+
+- The dashboard keeps the `extractionModel` it started with. After you change the setting, `/mnemosyne-ui` on the running dashboard says it must be restarted: end the session that started it, then run `/mnemosyne-ui` again.
+- Moons for a new save show on the map after you reload the dashboard page; they are not pushed live.
+- This update needs the plugin's newer engine build (the knowledge tools): run `/mnemosyne-setup` once after updating. Until then extraction stays off and says so in the activity log (`engine out of date`).
+
 
 ### Who wrote a memory
 

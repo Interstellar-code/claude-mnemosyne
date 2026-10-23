@@ -153,6 +153,9 @@ void (async () => {
       message.params.arguments = args
       if (name === 'memory_stats') statsIds.add(message.id)
       if (name === 'memory_remember') {
+        // An outside client never sets how far its save is trusted: no veracity, no trust tier (the plugin's own trigger save is the only 'stated').
+        delete args.veracity
+        delete args.trust_tier
         message.params.arguments = {
           ...args,
           source: 'imported',

@@ -20,7 +20,7 @@ export function extractionModelOf(options: { extractionModel?: unknown }): strin
 }
 
 /** True when extraction is off: no model call, no pending file, no extract line. */
-export const extractionOff = (model: string) => model === 'off'
+export const extractionOff = (model: string) => model.trim().toLowerCase() === 'off'
 
 // How much of a memory's text the model is shown (code points).
 export const BACKFILL_TEXT_LIMIT = 4000

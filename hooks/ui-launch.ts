@@ -11,6 +11,9 @@
 import type { EngineInterface } from 'claude-code'
 
 export const UI_STATE = 'ui.json'
+// What the running dashboard started with. ui.json is the server's own file ({port, token, pid}),
+// so the hook keeps the extraction setting beside it: { pid, extraction } for the server it started.
+export const EXTRACTION_STATE = 'ui-extraction.json'
 export const PING_TIMEOUT_MS = 3_000
 export const READY_TIMEOUT_MS = 20_000
 // session.end has 1.5 s in all: ending the loop waits at most STOP_WAIT_MS,
@@ -224,16 +227,44 @@ async function stopEntry($: EngineInterface, session: string, entry: Entry) {
   forget(session, entry)
 }
 
+/** The extractionModel the server `pid` was started with, or undefined when none is recorded for it. */
+async function startedWith($: EngineInterface, root: string, pid: number) {
+  try {
+    const recorded = JSON.parse(await $.fs.read(`${root}/${EXTRACTION_STATE}`)) as { pid?: unknown; extraction?: unknown }
+    return recorded?.pid === pid && typeof recorded.extraction === 'string' ? recorded.extraction : undefined
+  } catch {
+    return undefined
+  }
+}
+
+// A reused dashboard keeps the extraction setting it started with (C11, KNOWX.2.a9): when the setting
+// differs now, the reply says the dashboard must be restarted. A server with no record predates the setting.
+async function restartNote($: EngineInterface, paths: UiPaths, state: State) {
+  if (paths.extraction === undefined) return ''
+  const was = await startedWith($, paths.root, state.pid)
+  if (was === paths.extraction) return ''
+  const before = was === undefined ? 'no extraction setting' : `extractionModel "${was}"`
+  return ` (this dashboard started with ${before}, and extractionModel is "${paths.extraction}" now. A running dashboard keeps what it started with: end the session that started it, then run /mnemosyne-ui again to restart it)`
+}
+
+// Records, mode 0600 and renamed into place, which setting the server `pid` started with.
+async function recordStartedWith($: EngineInterface, paths: UiPaths, pid: number) {
+  if (paths.extraction === undefined) return
+  const code =
+    'const fs = require("fs"); const a = process.argv.slice(1); const t = a[0] + ".tmp"; fs.rmSync(t, { force: true }); fs.writeFileSync(t, a[1], { mode: 0o600, flag: "wx" }); fs.chmodSync(t, 0o600); fs.renameSync(t, a[0]);'
+  await $.process.run(['bun', '-e', code, `${paths.root}/${EXTRACTION_STATE}`, `${JSON.stringify({ pid, extraction: paths.extraction })}\n`], { timeoutMs: ALIVE_TIMEOUT_MS }).catch(() => undefined)
+}
+
 /** The command's answer: reuse the server ui.json names while it answers, else start one for `session`. */
 export async function openDashboard($: EngineInterface, paths: UiPaths, session: string) {
   const known = await readState($, paths.root)
   if (known !== undefined) {
     // Asked twice: one slow answer does not replace a working server.
-    if ((await answers($, paths.plugin, known)) || (await answers($, paths.plugin, known))) return handOver($, known, 'running')
+    if ((await answers($, paths.plugin, known)) || (await answers($, paths.plugin, known))) return handOver($, known, 'running', await restartNote($, paths, known))
     // This session's own server, still running, is never killed for a missed ping.
     const own = [...(running.get(session) ?? [])].find(entry => entry.pid === known.pid)
     if (own !== undefined && (await isAlive($, known.pid))) {
-      return handOver($, known, 'running', ' (it did not answer a health check just now; if the page does not load, run /mnemosyne-ui again)')
+      return handOver($, known, 'running', `${await restartNote($, paths, known)} (it did not answer a health check just now; if the page does not load, run /mnemosyne-ui again)`)
     }
   }
   // This session's servers whose process is gone make way for the new one (one
@@ -249,11 +280,14 @@ export async function openDashboard($: EngineInterface, paths: UiPaths, session:
     return { text: `Mnemosyne dashboard did not start: ${up.message}` }
   }
   const state = await readState($, paths.root)
-  if (state !== undefined && state.pid === up.pid && state.port === up.port) return handOver($, state, 'started')
+  if (state !== undefined && state.pid === up.pid && state.port === up.port) {
+    await recordStartedWith($, paths, up.pid)
+    return handOver($, state, 'started')
+  }
   // Another start won ui.json in the meantime: hand its server over and stop ours.
   if (state !== undefined && state.pid !== up.pid && (await answers($, paths.plugin, state))) {
     await stopEntry($, session, entry)
-    return handOver($, state, 'running')
+    return handOver($, state, 'running', await restartNote($, paths, state))
   }
   await stopEntry($, session, entry)
   return { text: `Mnemosyne dashboard did not start: ${paths.root}/${UI_STATE} does not name the new server.` }
