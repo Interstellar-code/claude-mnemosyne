@@ -1,6 +1,14 @@
 import { createHash } from "node:crypto";
 import { toUtcIso } from "../../util/datetime";
-import { buildExtractionPrompt, stripFence } from "../extraction";
+import {
+	buildExtractionPrompt,
+	FACT_TEXT_FIELD_KEYS,
+	INSTRUCTION_TEXT_FIELD_KEYS,
+	parseExtractedFactCategories,
+	PREFERENCE_TEXT_FIELD_KEYS,
+	stripFence,
+	TIMELINE_TEXT_FIELD_KEYS,
+} from "../extraction";
 import { clipToWindow, DEFAULT_INPUT_CHARS } from "../text-window";
 import { immediateTransaction } from "./store";
 import type { BeamMemoryState } from "./types";
@@ -12,6 +20,8 @@ export const KNOWLEDGE_LIMITS = {
 	perKind: 20,
 	total: 60,
 	chars: 500,
+	/** Largest reply, in utf-8 bytes, that is parsed at all. */
+	replyBytes: 256 * 1024,
 } as const;
 
 export type KnowledgeCounts = {
@@ -48,7 +58,9 @@ export function contentSha256(content: string): string {
 
 function cleanText(text: string): string {
 	return text
-		.replace(/[\x00-\x1F\x7F]/g, "")
+		.replace(/[\u200B-\u200F\u202A-\u202E]/g, "")
+		.replace(/[\x00-\x1F\x7F]+/g, " ")
+		.replace(/\s+/g, " ")
 		.trim()
 		.replace(/[.!?]+$/, "");
 }
@@ -57,23 +69,27 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-const FACT_FIELD_KEYS = ["fact", "text", "content", "value", "statement", "instruction", "rule", "preference", "description", "event", "timeline", "date"] as const;
+const FIELD_KEYS: Record<"facts" | "preferences" | "instructions" | "timelines", readonly string[]> = {
+	facts: FACT_TEXT_FIELD_KEYS,
+	preferences: PREFERENCE_TEXT_FIELD_KEYS,
+	instructions: INSTRUCTION_TEXT_FIELD_KEYS,
+	timelines: TIMELINE_TEXT_FIELD_KEYS,
+};
 
-function extractStringItem(item: unknown): string | null {
-	if (typeof item === "string") return item;
-	if (isRecord(item)) {
-		for (const key of FACT_FIELD_KEYS) {
-			const val = item[key];
-			if (typeof val === "string" && val.trim().length > 0) {
-				return val;
-			}
-		}
-	}
-	return null;
+/** True for a string item, or an object carrying at least one non-empty text field the parser reads for this kind. */
+function isAcceptableItem(item: unknown, keys: readonly string[]): boolean {
+	if (typeof item === "string") return true;
+	if (!isRecord(item)) return false;
+	return keys.some(key => {
+		const val = Object.hasOwn(item, key) ? item[key] : undefined;
+		return typeof val === "string" && val.trim().length > 0;
+	});
 }
 
 /**
  * Validates extraction reply before acquiring any write lock.
+ * Strict pre-checks first (size, JSON object, known kinds, counts, item shapes),
+ * then the accepted reply is normalised by the engine's own parser.
  * Fails ('unparseable' | 'invalid') without touching the store.
  */
 export function validateKnowledgeReply(
@@ -81,6 +97,9 @@ export function validateKnowledgeReply(
 ): { ok: true; data: CleanedKnowledge } | { ok: false; refusal: "unparseable" | "invalid" } {
 	if (typeof reply !== "string") {
 		return { ok: false, refusal: "unparseable" };
+	}
+	if (Buffer.byteLength(reply, "utf8") > KNOWLEDGE_LIMITS.replyBytes) {
+		return { ok: false, refusal: "invalid" };
 	}
 	const trimmed = reply.trim();
 	if (trimmed.toUpperCase() === "NO_FACTS") {
@@ -106,14 +125,14 @@ export function validateKnowledgeReply(
 		return { ok: false, refusal: "unparseable" };
 	}
 
-	// Validate top-level keys: only known kinds allowed
+	// Only known kinds are allowed (an own "__proto__" key from JSON.parse is refused here too).
 	for (const key of Object.keys(parsed)) {
 		if (!KNOWLEDGE_KINDS.includes(key as KnowledgeKind)) {
 			return { ok: false, refusal: "invalid" };
 		}
 	}
 
-	// Validate kinds: must be arrays, <= 20 per kind, <= 60 total
+	// Kinds must be arrays, <= 20 per kind, <= 60 total.
 	let totalItems = 0;
 	for (const kind of KNOWLEDGE_KINDS) {
 		const items = parsed[kind];
@@ -131,6 +150,30 @@ export function validateKnowledgeReply(
 		return { ok: false, refusal: "invalid" };
 	}
 
+	// Item shapes: a string, or an object with a text field the parser reads for that kind.
+	for (const kind of ["facts", "preferences", "instructions", "timelines"] as const) {
+		const rawItems = parsed[kind];
+		if (!Array.isArray(rawItems)) continue;
+		for (const raw of rawItems) {
+			if (!isAcceptableItem(raw, FIELD_KEYS[kind])) {
+				return { ok: false, refusal: "invalid" };
+			}
+		}
+	}
+	if (Array.isArray(parsed.kg)) {
+		for (const item of parsed.kg) {
+			const parts = isRecord(item) ? [item.subject, item.predicate, item.object] : Array.isArray(item) && item.length >= 3 ? item.slice(0, 3) : null;
+			if (parts === null) {
+				return { ok: false, refusal: "invalid" };
+			}
+			if (parts.some(part => typeof part !== "string" || cleanText(part).length === 0)) {
+				return { ok: false, refusal: "invalid" };
+			}
+		}
+	}
+
+	const extracted = parseExtractedFactCategories(cleaned, { categoryLimit: KNOWLEDGE_LIMITS.perKind });
+
 	const result: CleanedKnowledge = {
 		facts: [],
 		preferences: [],
@@ -139,73 +182,35 @@ export function validateKnowledgeReply(
 		kg: [],
 	};
 
-	// Clean and validate string categories
 	for (const kind of ["facts", "preferences", "instructions", "timelines"] as const) {
-		const rawItems = parsed[kind];
-		if (!Array.isArray(rawItems)) continue;
-
-		for (const raw of rawItems) {
-			const str = extractStringItem(raw);
-			if (str === null) {
-				return { ok: false, refusal: "invalid" };
-			}
-			const cleanedStr = cleanText(str);
+		for (const item of extracted[kind]) {
+			const cleanedStr = cleanText(item);
 			if (cleanedStr.length > KNOWLEDGE_LIMITS.chars) {
 				return { ok: false, refusal: "invalid" };
 			}
-			if (cleanedStr.length === 0) {
-				// Empty item: dropped
-				continue;
-			}
-			// Within-kind dedupe
+			if (cleanedStr.length === 0) continue;
 			if (!result[kind].includes(cleanedStr)) {
 				result[kind].push(cleanedStr);
 			}
 		}
 	}
 
-	// Clean and validate KG items
-	const rawKg = parsed.kg;
-	if (Array.isArray(rawKg)) {
-		for (const item of rawKg) {
-			let subject = "";
-			let predicate = "";
-			let object = "";
-
-			if (isRecord(item)) {
-				if (typeof item.subject === "string") subject = item.subject;
-				if (typeof item.predicate === "string") predicate = item.predicate;
-				if (typeof item.object === "string") object = item.object;
-			} else if (Array.isArray(item) && item.length >= 3) {
-				if (typeof item[0] === "string") subject = item[0];
-				if (typeof item[1] === "string") predicate = item[1];
-				if (typeof item[2] === "string") object = item[2];
-			} else {
-				return { ok: false, refusal: "invalid" };
-			}
-
-			const cleanSubj = cleanText(subject);
-			const cleanPred = cleanText(predicate);
-			const cleanObj = cleanText(object);
-
-			if (cleanSubj.length === 0 || cleanPred.length === 0 || cleanObj.length === 0) {
-				return { ok: false, refusal: "invalid" };
-			}
-			if (
-				cleanSubj.length > KNOWLEDGE_LIMITS.chars ||
-				cleanPred.length > KNOWLEDGE_LIMITS.chars ||
-				cleanObj.length > KNOWLEDGE_LIMITS.chars
-			) {
-				return { ok: false, refusal: "invalid" };
-			}
-
-			// Within-kind dedupe
-			const exists = result.kg.some(
-				t => t.subject === cleanSubj && t.predicate === cleanPred && t.object === cleanObj,
-			);
-			if (!exists) {
-				result.kg.push({ subject: cleanSubj, predicate: cleanPred, object: cleanObj });
-			}
+	for (const triple of extracted.kg) {
+		const subject = cleanText(triple.subject);
+		const predicate = cleanText(triple.predicate);
+		const object = cleanText(triple.object);
+		if (subject.length === 0 || predicate.length === 0 || object.length === 0) {
+			return { ok: false, refusal: "invalid" };
+		}
+		if (
+			subject.length > KNOWLEDGE_LIMITS.chars ||
+			predicate.length > KNOWLEDGE_LIMITS.chars ||
+			object.length > KNOWLEDGE_LIMITS.chars
+		) {
+			return { ok: false, refusal: "invalid" };
+		}
+		if (!result.kg.some(t => t.subject === subject && t.predicate === predicate && t.object === object)) {
+			result.kg.push({ subject, predicate, object });
 		}
 	}
 
@@ -217,17 +222,15 @@ export function validateKnowledgeReply(
  * Returns { refused: "gone" } if the memory does not exist or belongs to another owner.
  */
 export function knowledgePrompt(beam: BeamMemoryState, memoryId: string): KnowledgePromptResult {
-	return immediateTransaction(beam.db, () => {
-		using stmt = beam.db.prepare("SELECT content FROM working_memory WHERE id = ? AND session_id = ?");
-		const row = stmt.get(memoryId, beam.sessionId) as { content: string } | null;
-		if (!row) {
-			return { refused: "gone" };
-		}
-		const sha = contentSha256(row.content);
-		const clipped = clipToWindow(row.content, DEFAULT_INPUT_CHARS);
-		const prompt = buildExtractionPrompt(clipped);
-		return { prompt, sha256: sha };
-	});
+	using stmt = beam.db.prepare("SELECT content FROM working_memory WHERE id = ? AND session_id = ?");
+	const row = stmt.get(memoryId, beam.sessionId) as { content: string } | null;
+	if (!row) {
+		return { refused: "gone" };
+	}
+	const sha = contentSha256(row.content);
+	const clipped = clipToWindow(row.content, DEFAULT_INPUT_CHARS);
+	const prompt = buildExtractionPrompt(clipped);
+	return { prompt, sha256: sha };
 }
 
 function parseTimelineDate(description: string): string | null {
@@ -270,7 +273,7 @@ export function storeKnowledge(
 			"memoria_timelines",
 			"memoria_kg",
 		] as const) {
-			beam.db.run(`DELETE FROM ${table} WHERE source_memory_id = ?`, [memoryId]);
+			beam.db.run(`DELETE FROM ${table} WHERE source_memory_id = ? AND session_id = ?`, [memoryId, beam.sessionId]);
 		}
 
 		const timestamp = toUtcIso();

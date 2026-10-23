@@ -87,10 +87,10 @@ export function stripFence(raw: string): string {
 const FLAT_FACT_LIMIT = 5;
 const STRUCTURED_CATEGORY_LIMIT = 5;
 const STRING_CATEGORY_KEYS = ["facts", "instructions", "preferences", "timelines"] as const;
-const FACT_TEXT_FIELD_KEYS = ["fact", "text", "content", "value", "statement"] as const;
-const INSTRUCTION_TEXT_FIELD_KEYS = ["instruction", "rule", ...FACT_TEXT_FIELD_KEYS] as const;
-const PREFERENCE_TEXT_FIELD_KEYS = ["preference", ...FACT_TEXT_FIELD_KEYS] as const;
-const TIMELINE_TEXT_FIELD_KEYS = ["description", "event", "timeline", "date", ...FACT_TEXT_FIELD_KEYS] as const;
+export const FACT_TEXT_FIELD_KEYS = ["fact", "text", "content", "value", "statement"] as const;
+export const INSTRUCTION_TEXT_FIELD_KEYS = ["instruction", "rule", ...FACT_TEXT_FIELD_KEYS] as const;
+export const PREFERENCE_TEXT_FIELD_KEYS = ["preference", ...FACT_TEXT_FIELD_KEYS] as const;
+export const TIMELINE_TEXT_FIELD_KEYS = ["description", "event", "timeline", "date", ...FACT_TEXT_FIELD_KEYS] as const;
 
 /** Parsed knowledge-graph edge emitted by the extractor LLM. */
 export interface ExtractedKgTriple {

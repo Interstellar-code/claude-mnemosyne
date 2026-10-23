@@ -156,7 +156,7 @@ of the plugin:
   `metadata` object in one `BEGIN IMMEDIATE` transaction (a key set to `null`
   is removed; a row whose `metadata_json` is not an object is refused and left
   unchanged); change 2, `mnemopi_recall` takes `update_recall_counts`
-  (default true); change 3, the build number (`18.12.3-mnemosyne.2`) in
+  (default true); change 3, the build number (`18.12.3-mnemosyne.4`) in
   `engine/package.json`.
 - `bun scripts/engine-diff.ts` downloads the tarball, checks its integrity, and
   fails unless every file that differs from `engine/` is listed in a change and
