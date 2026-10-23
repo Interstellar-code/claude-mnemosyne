@@ -538,8 +538,20 @@ export function knowledgeOf(galaxy: Galaxy, id: string): KnowledgeRow[] {
   return galaxy.gone.has(id) ? [] : (galaxy.knowledge.get(id) ?? [])
 }
 
-/** Whether the page holds any knowledge at all: the controls stay disabled until it does. */
-export const hasKnowledge = (galaxy: Galaxy) => galaxy.knowledgeById.size > 0
+/** Whether the page holds any knowledge of a live memory: the controls stay disabled until it does (a forgotten memory's rows do not count). */
+export function hasKnowledge(galaxy: Galaxy): boolean {
+  for (const row of galaxy.knowledgeById.values()) if (!galaxy.gone.has(row.memory)) return true
+  return false
+}
+
+/** How many looks at the library's scene (afterData runs) are enough to say it drew no line to copy. */
+export const LINE_CHECKS = 2
+
+/** The plain-words status when the moons cannot get their lines: no Line class was found after the library had been looked at. Null otherwise. */
+export function moonLinesProblem(lineClassFound: boolean, checks: number, moonsShown: boolean): string | null {
+  if (lineClassFound || checks < LINE_CHECKS || !moonsShown) return null
+  return 'The knowledge moons are drawn without their thin lines to the star: the map library has not drawn any line to copy yet.'
+}
 
 /** The rows that orbit the selected memory: at most 8, and none while Knowledge moons is off or nothing is selected. */
 export function moonRows(galaxy: Galaxy, state: MapState): KnowledgeRow[] {
@@ -561,7 +573,12 @@ export function selectMoon(state: MapState, galaxy: Galaxy, id: string): MapStat
 
 export const toggleMoons = (state: MapState): MapState => ({ ...state, moons: !state.moons })
 
-/** Where moon i of n is: on a circle of radius 18 around the star, flattened to 0.45 in height, turning at 0.45 rad/s (still when reduced). */
+/**
+ * Where moon i of n is: on a circle of radius 18 around the star, flattened to 0.45 in height, turning at 0.45 rad/s.
+ * Under reduced motion the moons STAND STILL (speed 0): orchestrator decision, matching the mockup
+ * (MapGalaxy.dc.html: `this.reduced ? 0 : 0.45`) and accessibility. The plan's words "(still under reduced motion)"
+ * meant this; they are corrected in REL.
+ */
 export function moonPosition(centre: Vec3, i: number, n: number, seconds: number, reducedMotion: boolean): Vec3 {
   const angle = seconds * (reducedMotion ? 0 : MOON_SPEED) + (i * Math.PI * 2) / Math.max(1, n)
   return [centre[0] + Math.cos(angle) * MOON_RADIUS, centre[1] + Math.sin(angle) * MOON_RADIUS * 0.45, centre[2] + Math.sin(angle) * MOON_RADIUS]
@@ -884,6 +901,7 @@ function knowledgeSection(galaxy: Galaxy, state: MapState, star: GalaxyStar, now
   const rows = knowledgeOf(galaxy, star.id)
   if (rows.length === 0) return { note: NO_KNOWLEDGE_NOTE, items: [] }
   const picked = selectedMoon(galaxy, state)
+  // The galaxy memory's own recall fields: the same numbers KAPI's usage counts give for this memory, so no second source.
   const usage = usageText(star.recalls, star.lastRecalled, now)
   const more = rows.length > MOON_LIMIT ? ` Only the first ${MOON_LIMIT} orbit the star.` : ''
   return {

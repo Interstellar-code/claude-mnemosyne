@@ -117,6 +117,7 @@ import {
   type GalaxyReply,
   DIM_NO_KNOWLEDGE,
   hasKnowledge,
+  LINE_CHECKS,
   KIND_LABELS,
   CHIP_LABELS,
   KNOWLEDGE_KINDS,
@@ -134,6 +135,7 @@ import {
   MOON_SIZE_SELECTED,
   MOON_SPEED,
   moonColour,
+  moonLinesProblem,
   moonPosition,
   moonPulse,
   moonRows,
@@ -1664,6 +1666,8 @@ describe('MOON: moons on a clicked star and the knowledge filter', () => {
     expect(angle(moonPosition(centre, 1, 8, 0, false)) - angle(moonPosition(centre, 0, 8, 0, false))).toBeCloseTo(Math.PI / 4, 9)
     // 0.45 rad/s: after 2 s the first moon has turned 0.9 rad.
     expect(angle(moonPosition(centre, 0, 8, 2, false)) - angle(moonPosition(centre, 0, 8, 0, false))).toBeCloseTo(0.9, 9)
+    // Reduced motion: the moons STAND STILL (orchestrator decision: the mockup's `this.reduced ? 0 : 0.45`, and accessibility;
+    // the plan's words "(still under reduced motion)" meant this and are corrected in REL).
     // Reduced motion: the same place at any time.
     for (const t of [0.5, 3, 100]) expect(moonPosition(centre, 2, 5, t, true)).toEqual(moonPosition(centre, 2, 5, 0, true))
     // The mockup's flattening: height swing is 0.45 of the radius.
@@ -1735,16 +1739,131 @@ describe('MOON: moons on a clicked star and the knowledge filter', () => {
     expect(hasKnowledge(empty)).toBe(false)
   })
 
-  test('MOON.1.a5: an extract activity line changes nothing on the map (knowledge extracted after the page loaded shows after a reload)', () => {
-    const line = { t: '2026-10-23T12:00:00.000Z', action: 'extract', origin: 'hook', owner: alpha, ids: [ids.bare!], count: 3, ok: true, client: 'claude-code' }
-    const before = JSON.stringify([knowledgeCounts(galaxy), moonRows(galaxy, select('bare')), inspector(galaxy, select('bare'), now), [...galaxy.knowledge.keys()]])
+  /** Runs the real createMap on the page markup with a real /api/galaxy reply and an `events` host; restores the globals after. */
+  async function onPage(run: (page: { asked: string[]; push: (line: Record<string, unknown>) => void; node: (id: string) => FakeNode; show: (id: string) => void }) => Promise<void>) {
+    const html = readFileSync(join(ROOT, 'ui', 'index.html'), 'utf8')
+    const fake = fakeDom(html)
+    const g = globalThis as Record<string, unknown>
+    const saved = { document: g.document, CSS: g.CSS, HTMLElement: g.HTMLElement }
+    g.document = fake.document
+    g.CSS = { escape: (v: string) => v }
+    g.HTMLElement = FakeBase
+    try {
+      const { createMap } = (await import(join(ROOT, 'ui', 'map.ts'))) as { createMap: (host: unknown) => { show: (id: string) => void } }
+      const asked: string[] = []
+      let push: (line: Record<string, unknown>) => void = () => {
+        throw new Error('the page never subscribed to the activity lines')
+      }
+      const view = createMap({
+        api: async (path: string) => {
+          asked.push(path)
+          return path === '/api/galaxy' ? new Response(JSON.stringify(rawBody), { status: 200 }) : new Response('{"error":"not found"}', { status: 404 })
+        },
+        openMemory: () => {},
+        status: () => {},
+        events: (listener: (line: Record<string, unknown>) => void) => {
+          push = listener
+          return () => {}
+        },
+      })
+      await Bun.sleep(40)
+      await run({
+        asked,
+        push: line => {
+          push(line)
+        },
+        node: id => fake.nodes.get(id)!,
+        show: id => view.show(id),
+      })
+    } finally {
+      g.document = saved.document
+      g.CSS = saved.CSS
+      g.HTMLElement = saved.HTMLElement
+    }
+  }
+
+  const activity = (action: string, owner: string, memories: string[]) => ({ t: new Date().toISOString(), action, origin: 'hook', owner, text: 'x', ids: memories, count: memories.length, ok: true, client: 'claude-code', session: 'a1b2c3d4-0000-4000-8000-aaaaaaaaaaaa' })
+
+  test('MOON.1.a5: an extract activity line through the page does not refetch the galaxy, and the chips, moons and inspector do not change (knowledge extracted after the page loaded shows after a reload)', async () => {
+    // The pure edge: an extract line is not a map event at all; a save is.
+    const line = activity('extract', beta, [ids.bare!])
     expect(toMapEvent(line)).toBeNull()
-    // The page enqueues an event only when toMapEvent gives one; so the galaxy it holds is the same afterwards.
-    const after = JSON.stringify([knowledgeCounts(galaxy), moonRows(galaxy, select('bare')), inspector(galaxy, select('bare'), now), [...galaxy.knowledge.keys()]])
-    expect(after).toBe(before)
-    expect(knowledgeOf(galaxy, ids.bare!)).toEqual([])
-    // A save, by contrast, is an event; its new memory has no knowledge until a reload either.
     expect(toMapEvent({ ...line, action: 'remember' })).not.toBeNull()
+    await onPage(async ({ asked, push, node, show }) => {
+      show(ids.bare!)
+      const chips = node('map-know').groups
+      const picture = () =>
+        JSON.stringify({
+          chips: chips.map(chip => [chip.textContent, chip.attributes.get('aria-disabled') ?? null, chip.attributes.get('aria-pressed') ?? null]),
+          moons: [node('map-moons').disabled, node('map-moons').checked],
+          note: node('map-know-note').textContent,
+          inspector: node('map-inspector').texts(),
+        })
+      const feed = () => (node('map-feed').children as FakeNode[]).map(row => row.texts().join(' | '))
+      const before = picture()
+      expect(asked).toEqual(['/api/galaxy'])
+      expect(chips.map(chip => chip.textContent)).toEqual(['4', '1', '1', '1', '2'])
+      expect(node('map-inspector').texts().join(' ')).toContain(NO_KNOWLEDGE_NOTE)
+      // The extract line arrives (the hook mined three items for this very memory).
+      push(line)
+      await Bun.sleep(40)
+      expect(asked).toEqual(['/api/galaxy'])
+      expect(picture()).toBe(before)
+      expect(feed()).toEqual(['No activity yet.'])
+      // Control: the page IS listening, and a recall line from the same stream does reach it.
+      push(activity('recall', beta, [ids.mixed!]))
+      await Bun.sleep(40)
+      expect(feed()[0]).toContain('Recalled 1')
+      expect(asked).toEqual(['/api/galaxy'])
+    })
+  })
+
+  test('a forgotten memory takes its knowledge out of the controls: forget the only memory with knowledge and the chips and the moons toggle go disabled, counts 0', async () => {
+    // Pure: a page holding one memory with knowledge and one without.
+    const one = () => buildGalaxy(parseGalaxy({ memories: [{ id: 'm1', owner: 'global' }, { id: 'm2', owner: 'global' }], knowledge: [{ id: 'fact:1', kind: 'fact', text: 'a fact', memory: 'm1' }] })!, now)
+    const g = one()
+    expect(hasKnowledge(g)).toBe(true)
+    expect(forgetMemory(g, 'm2')).toBe(true)
+    expect(hasKnowledge(g)).toBe(true)
+    expect(forgetMemory(g, 'm1')).toBe(true)
+    expect(hasKnowledge(g)).toBe(false)
+    expect(knowledgeCounts(g)).toEqual({ fact: 0, preference: 0, instruction: 0, timeline: 0, relation: 0 })
+    // On the real reply: forgetting every memory that has knowledge leaves none.
+    const all = buildGalaxy(parseGalaxy(rawBody)!, now)
+    for (const key of ['few', 'many', 'mixed']) forgetMemory(all, ids[key]!)
+    expect(hasKnowledge(all)).toBe(true)
+    forgetMemory(all, ids.markup!)
+    expect(hasKnowledge(all)).toBe(false)
+    // Through the page: the forget lines arrive, and the controls follow.
+    await onPage(async ({ push, node }) => {
+      const chips = node('map-know').groups
+      expect(node('map-moons').disabled).toBe(false)
+      for (const [key, owner] of [['few', alpha], ['many', alpha], ['mixed', beta], ['markup', 'global']] as const) {
+        push(activity('forget', owner, [ids[key]!]))
+        await Bun.sleep(30)
+      }
+      expect(node('map-moons').disabled).toBe(true)
+      expect(chips.map(chip => chip.attributes.get('aria-disabled'))).toEqual(['true', 'true', 'true', 'true', 'true'])
+      expect(chips.map(chip => chip.textContent)).toEqual(['0', '0', '0', '0', '0'])
+      expect(node('map-know-note').textContent).toContain('No knowledge extracted yet')
+    })
+  })
+
+  test('the moons say so once in plain words when the library has drawn no line to copy for their thin lines', () => {
+    // Nothing to say while a line class exists, while the library has not been looked at enough, or while no moons are shown.
+    expect(moonLinesProblem(true, LINE_CHECKS, true)).toBeNull()
+    expect(moonLinesProblem(false, LINE_CHECKS - 1, true)).toBeNull()
+    expect(moonLinesProblem(false, LINE_CHECKS, false)).toBeNull()
+    const problem = moonLinesProblem(false, LINE_CHECKS, true)!
+    expect(problem).toContain('without their thin lines')
+    expect(problem).not.toMatch(/undefined|null|Error/)
+    // The page says it through the status line, and only once.
+    const map = readFileSync(join(ROOT, 'ui', 'map.ts'), 'utf8')
+    const lines = map.slice(map.indexOf('function makeMoonLines'), map.indexOf('/** The look of the label of a kind'))
+    expect(lines).toContain('moonLinesProblem(false, sceneChecks, shown)')
+    expect(lines).toContain("host.status(problem, 'error')")
+    expect(lines).toContain('!moonLinesTold')
+    expect(lines).toContain('moonLinesTold = true')
   })
 
   test('MOON.2.a1: the chips count the memories that have each kind', () => {
@@ -1860,8 +1979,21 @@ describe('MOON: moons on a clicked star and the knowledge filter', () => {
     expect(moons).toContain('moonPosition(star.position, i, rows.length, clock, state.reducedMotion)')
     expect(moons).toContain('moonSize(chosen)')
     expect(moons).toContain('moonPulse(chosen, clock)')
-    expect(moons).toContain('makeLabel(row.kind')
+    expect(moons).toContain('makeLabel(kind')
     expect(moons).toContain('array.set(star.position, 0)')
+    // Per frame work: updateMoons only reads the cached plan and sets numbers; the rows, the joined key, the colours and the label textures are made when the galaxy or the selection changes.
+    const frameWork = map.slice(map.indexOf('function updateMoons'), map.indexOf('/** A spark lands'))
+    expect(frameWork).toContain('moonPlanFor(g)')
+    expect(frameWork).not.toMatch(/rgb01\(|makeLabel\(|\.join\(|moonRows\(|new T\./)
+    const plan = map.slice(map.indexOf('function moonPlanFor'), map.indexOf('/** Per frame: the moons'))
+    expect(plan).toContain('moonRows(g, state)')
+    expect(plan).toContain('p.galaxy === g')
+    // One label look per kind, made once and shared: the render loop never makes a texture.
+    const labels = map.slice(map.indexOf('function moonLabelLook'), map.indexOf('/** The moons\' data'))
+    expect(labels).toContain('moonLabelStyle.get(kind)')
+    expect(labels).toContain('moonLabelStyle.set(kind, look)')
+    expect(labels).not.toContain('makeLabel(row')
+    expect(map).toContain('const moonLabelStyle = new Map<KnowledgeKind')
     // Picking and clicking go through the state: a moon click selects its row, never flies.
     expect(map).toContain("kind: 'moon'")
     expect(map).toContain('selectMoon(state, galaxy, hit.id)')

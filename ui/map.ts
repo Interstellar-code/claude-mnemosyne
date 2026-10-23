@@ -122,6 +122,7 @@ import {
   MOON_LINE_COLOUR,
   MOON_LINE_OPACITY,
   moonColour,
+  moonLinesProblem,
   moonPosition,
   moonPulse,
   moonRows,
@@ -372,6 +373,13 @@ export function createMap(host: MapHost): MapView {
   let moonLines: Any[] = []
   let moonLabels: Any[] = []
   let moonKey = ''
+  // What the moons need only when the galaxy or the selection changes (not every frame): rows, colours, the picked row.
+  let moonPlan: { galaxy: Galaxy | null; selected: string | null; moons: boolean; moon: string | null; gone: number; key: string; rows: ReturnType<typeof moonRows>; colours: Vec3[]; picked: string | null } | null = null
+  // One label look (texture and size) per kind, made once and shared by every moon of that kind.
+  const moonLabelStyle = new Map<KnowledgeKind, { map: Any; scale: [number, number] }>()
+  // Looks at the library's scene so far (afterData runs), and whether the missing-line status was said.
+  let sceneChecks = 0
+  let moonLinesTold = false
   let moonSpots: { id: string; position: Vec3; sprite: Any }[] = []
   let lineClasses: { Line: new (geometry: Any, material: Any) => Any; Material: new (params: Record<string, unknown>) => Any } | null = null
 
@@ -903,6 +911,7 @@ export function createMap(host: MapHost): MapView {
       }
       if (mesh === null && object.isMesh && object.geometry && object.material) mesh = object
     })
+    sceneChecks++
     if (!starfieldMade && mesh !== null) addStarfield(scene, mesh)
   }
 
@@ -1219,10 +1228,11 @@ export function createMap(host: MapHost): MapView {
 
   // ---- Knowledge moons: the selected star's knowledge rows, orbiting it ----
 
-  /** Eight glow sprites in the library's scene, one per possible moon; each frame shows as many as the selected star has. */
+  /** Eight glow sprites and eight label sprites in the library's scene, one per possible moon; each frame shows as many as the selected star has. */
   function makeMoonSprites() {
     const scene = (graph as unknown as Loose | null)?.scene?.() as Any
-    if (!scene || three === null) return
+    const T = three
+    if (!scene || T === null) return
     moonSprites = Array.from({ length: MOON_LIMIT }, () => {
       const sprite = makeSprite('glow', '#FFFFFF')
       if (sprite === null) return null
@@ -1230,13 +1240,27 @@ export function createMap(host: MapHost): MapView {
       scene.add(sprite)
       return sprite
     })
+    // The labels get their texture from the per-kind cache (setMoonLabels); until then they are invisible.
+    moonLabels = Array.from({ length: MOON_LIMIT }, () => {
+      const label = new T.Sprite(new T.SpriteMaterial({ transparent: true, depthWrite: false, opacity: 0 }))
+      scene.add(label)
+      return label
+    })
   }
 
-  /** The thin lines, once the library has drawn its own (their classes are where ours come from). */
-  function makeMoonLines() {
+  /** The thin lines, once the library has drawn its own (their classes are where ours come from); says so once when it never does. */
+  function makeMoonLines(shown: boolean) {
     const scene = (graph as unknown as Loose | null)?.scene?.() as Any
     const T = three
-    if (!scene || T === null || lineClasses === null || moonLines.length > 0) return
+    if (!scene || T === null || moonLines.length > 0) return
+    if (lineClasses === null) {
+      const problem = moonLinesProblem(false, sceneChecks, shown)
+      if (problem !== null && !moonLinesTold) {
+        moonLinesTold = true
+        host.status(problem, 'error')
+      }
+      return
+    }
     const { Line, Material } = lineClasses
     moonLines = Array.from({ length: MOON_LIMIT }, () => {
       const geometry = new T.BufferGeometry()
@@ -1249,34 +1273,60 @@ export function createMap(host: MapHost): MapView {
     })
   }
 
-  /** New labels (the kind of each moon) when the selected star or its moons change; the old ones are let go. */
-  function setMoonLabels(rows: readonly { kind: KnowledgeKind }[], key: string) {
-    const scene = (graph as unknown as Loose | null)?.scene?.() as Any
-    for (const label of moonLabels) {
-      label.parent?.remove(label)
-      label.material?.map?.dispose?.()
-      label.material?.dispose?.()
+  /** The look of the label of a kind: its texture and size, made once (five kinds in all) and shared by every moon of that kind. */
+  function moonLabelLook(kind: KnowledgeKind) {
+    let look = moonLabelStyle.get(kind)
+    if (look === undefined) {
+      const source = makeLabel(kind, 4.4, moonColour(kind))
+      if (source === null) return null
+      look = { map: source.material.map, scale: [source.scale.x, source.scale.y] }
+      moonLabelStyle.set(kind, look)
     }
-    moonLabels = []
+    return look
+  }
+
+  /** When the selected star or its moons change: each label sprite takes the cached look of its moon's kind (no new texture). */
+  function setMoonLabels(rows: readonly { kind: KnowledgeKind }[], key: string) {
     moonKey = key
-    if (!scene) return
-    moonLabels = rows.flatMap(row => {
-      const label = makeLabel(row.kind, 4.4, moonColour(row.kind))
-      if (label === null) return []
-      scene.add(label)
-      return [label]
+    rows.forEach((row, i) => {
+      const label = moonLabels[i]
+      const look = label ? moonLabelLook(row.kind) : null
+      if (!label || look === null) return
+      label.material.map = look.map
+      label.material.needsUpdate = true
+      label.scale.set(look.scale[0], look.scale[1], 1)
     })
+  }
+
+  /** The moons' data, recomputed only when the galaxy, the selection, the moons switch, the picked moon or the forgotten set changes. */
+  function moonPlanFor(g: Galaxy | null) {
+    const gone = g === null ? 0 : g.gone.size
+    const p = moonPlan
+    if (p !== null && p.galaxy === g && p.selected === state.selected && p.moons === state.moons && p.moon === state.moon && p.gone === gone) return p
+    const rows = g === null ? [] : moonRows(g, state)
+    moonPlan = {
+      galaxy: g,
+      selected: state.selected,
+      moons: state.moons,
+      moon: state.moon,
+      gone,
+      key: `${state.selected}|${rows.map(row => row.id).join(',')}`,
+      rows,
+      colours: rows.map(row => rgb01(moonColour(row.kind))),
+      picked: g === null ? null : selectedMoon(g, state),
+    }
+    return moonPlan
   }
 
   /** Per frame: the moons of the selected star at their orbit places, the lines to the star, the labels and the selected moon's pulse. */
   function updateMoons(follow: number) {
     const g = galaxy
-    const rows = g === null ? [] : moonRows(g, state)
+    const plan = moonPlanFor(g)
+    const rows = plan.rows
     const star = state.selected === null ? undefined : starVisual.get(state.selected)
-    const key = star === undefined ? '' : `${state.selected}|${rows.map(row => row.id).join(',')}`
+    const key = star === undefined ? '' : plan.key
     if (key !== moonKey) setMoonLabels(star === undefined ? [] : rows, key)
-    if (moonLines.length === 0) makeMoonLines()
-    const picked = g === null ? null : selectedMoon(g, state)
+    if (moonLines.length === 0) makeMoonLines(star !== undefined && rows.length > 0)
     moonSpots = []
     moonSprites.forEach((sprite, i) => {
       if (!sprite) return
@@ -1290,8 +1340,8 @@ export function createMap(host: MapHost): MapView {
         return
       }
       const at = moonPosition(star.position, i, rows.length, clock, state.reducedMotion)
-      const chosen = row.id === picked
-      const [r, gr, b] = rgb01(moonColour(row.kind))
+      const chosen = row.id === plan.picked
+      const [r, gr, b] = plan.colours[i]!
       sprite.position.set(at[0], at[1], at[2])
       sprite.material.color.setRGB(r, gr, b)
       const size = moonSize(chosen) * (1 + moonPulse(chosen, clock) * 1.6)
