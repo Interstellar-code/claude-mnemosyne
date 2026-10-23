@@ -41,6 +41,8 @@ export type UiPaths = {
   cli: string
   /** The activity log, or '' when activityLog is off. */
   activity: string
+  /** The extractionModel setting, or 'off' (C11). */
+  extraction?: string
 }
 
 type State = { port: number; token: string; pid: number }
@@ -150,6 +152,8 @@ function start($: EngineInterface, paths: UiPaths, session: string) {
         MNEMOSYNE_STORE: paths.store,
         MNEMOSYNE_CLI: paths.cli,
         MNEMOSYNE_ACTIVITY_LOG: paths.activity,
+        // C11: the dashboard shows the extraction setting it started with.
+        MNEMOSYNE_EXTRACTION: paths.extraction ?? 'unknown',
       },
     })
     const pieces = stream[Symbol.asyncIterator]()

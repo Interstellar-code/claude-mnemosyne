@@ -285,6 +285,10 @@ for await (const chunk of Bun.stdin.stream()) {
       process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { protocolVersion: '2024-11-05', capabilities: {}, serverInfo: { name: 'mnemopi', version: 'x' } } }) + '\\n')
     } else if (message.method === 'tools/call') {
       process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: '{"results":[]}' }] } }) + '\\n')
+    } else if (message.method === 'tools/list') {
+      const tool = (name: string) => ({ name: 'mnemopi_' + name, description: 'Mnemopi ' + name, inputSchema: { type: 'object', properties: { content: { type: 'string' } } } })
+      const tools = ['remember', 'recall', 'update', 'forget', 'stats', 'get', 'knowledge_prompt', 'knowledge_store'].map(tool)
+      process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { tools } }) + '\\n')
     }
   }
 }
@@ -293,7 +297,7 @@ for await (const chunk of Bun.stdin.stream()) {
 
   const readLog = (path: string) => (existsSync(path) ? readFileSync(path, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line)) : [])
 
-  /** The real proxy over raw stdin bytes; returns its forwarded lines and the activity lines it wrote. */
+  /** The real proxy over raw stdin bytes; returns its forwarded lines, its replies to the client, and the activity lines it wrote. */
   async function rawProxy(stdin: string, log: string) {
     writeFileSync(capture, '')
     const child = Bun.spawn([process.execPath, PROXY], {
@@ -310,8 +314,17 @@ for await (const chunk of Bun.stdin.stream()) {
     })
     child.stdin.write(stdin)
     child.stdin.end()
-    await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
-    return { forwarded: readFileSync(capture, 'utf8'), log: readLog(log) }
+    const [stdout] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
+    const replies = new Map<unknown, any>()
+    for (const line of stdout.split('\n')) {
+      try {
+        const message = JSON.parse(line)
+        if (message?.id !== undefined) replies.set(message.id, message)
+      } catch {
+        // not JSON
+      }
+    }
+    return { forwarded: readFileSync(capture, 'utf8'), replies, log: readLog(log) }
   }
 
   const initialize = (clientInfo?: object) =>
@@ -345,5 +358,48 @@ for await (const chunk of Bun.stdin.stream()) {
     const named = join(temp.dir, 'logs-named', 'activity.jsonl')
     const { log: namedLines } = await rawProxy(`${initialize({ name: 'codex-mcp-client', version: '9.9.9' })}\n${recall()}\n`, named)
     expect(namedLines[0]).toMatchObject({ client: 'codex-mcp-client' })
+  })
+
+  // KNOWX.2.a8: the proxy offers only the five memory_* tools, so an external agent can never
+  // reach the engine's own knowledge extraction, and a remember it forwards is authored by the
+  // client that named itself at initialize.
+  const remember = (id = 2) =>
+    JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'memory_remember', arguments: { content: 'a heron waded here' } } })
+  /** The params.arguments the engine actually received for the tools/call with `id`. */
+  const forwardedCall = (forwarded: string, id: number) =>
+    forwarded
+      .split('\n')
+      .filter(Boolean)
+      .map(line => JSON.parse(line))
+      .find(message => message?.method === 'tools/call' && message?.id === id)?.params?.arguments
+
+  test('KNOWX.2.a8: tools/list through the proxy shows only the five memory_* tools, never the engine knowledge tools', async () => {
+    const { replies, forwarded } = await rawProxy(
+      `${initialize({ name: 'codex-mcp-client', version: '1.0.0' })}\n${JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' })}\n`,
+      join(temp.dir, 'logs-a8-list', 'activity.jsonl'),
+    )
+    const tools = replies.get(2).result.tools as { name: string }[]
+    const names = tools.map(tool => tool.name).sort()
+    expect(names).toEqual(['memory_forget', 'memory_recall', 'memory_remember', 'memory_stats', 'memory_update'])
+    expect(names).not.toContain('mnemopi_knowledge_prompt')
+    expect(names).not.toContain('mnemopi_knowledge_store')
+    // The list the client saw came from the fake engine's eight tools, knowledge ones included.
+    const listed = forwarded
+      .split('\n')
+      .filter(Boolean)
+      .map(line => JSON.parse(line))
+      .find(message => message?.method === 'tools/list')
+    expect(listed).toMatchObject({ jsonrpc: '2.0', id: 2, method: 'tools/list' })
+  })
+
+  test('KNOWX.2.a8: a forwarded remember is authored by the client, or unknown without clientInfo', async () => {
+    const named = await rawProxy(
+      `${initialize({ name: 'codex-mcp-client', version: '1.0.0' })}\n${remember()}\n`,
+      join(temp.dir, 'logs-a8-author', 'activity.jsonl'),
+    )
+    expect(forwardedCall(named.forwarded, 2)).toMatchObject({ author_type: 'agent', author_id: 'codex-mcp-client' })
+
+    const anonymous = await rawProxy(`${initialize()}\n${remember()}\n`, join(temp.dir, 'logs-a8-unknown', 'activity.jsonl'))
+    expect(forwardedCall(anonymous.forwarded, 2)).toMatchObject({ author_type: 'agent', author_id: 'unknown' })
   })
 })
