@@ -31,6 +31,10 @@ const NODE_MODULES = join(ROOT, 'node_modules')
 // What the page imports from the bundle: nothing else is exported.
 const ENTRY = `export { default as ForceGraph3D } from '3d-force-graph'
 export { default as SpriteText } from 'three-spritetext'
+export { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js'
+export { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js'
+export { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js'
+export { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js'
 `
 
 export type Patch = {
@@ -220,6 +224,58 @@ export declare class SpriteText implements Object3DLike {
   fontFace: string
   position: { x: number; y: number; z: number; set(x: number, y: number, z: number): unknown }
 }
+// The three.js postprocessing passes (GDATA.2): the surface ui/map.ts adds to the scene.
+export interface WebGLRendererLike {
+  domElement: HTMLCanvasElement
+  setSize(width: number, height: number): void
+  setPixelRatio(ratio: number): void
+  dispose(): void
+  [key: string]: unknown
+}
+export interface RenderTargetLike {
+  [key: string]: unknown
+}
+export interface PassLike {
+  enabled: boolean
+  render(renderer: WebGLRendererLike, writeBuffer: RenderTargetLike, readBuffer: RenderTargetLike, deltaTime?: number, maskActive?: boolean): void
+  setSize(width: number, height: number): void
+  dispose(): void
+}
+export declare class EffectComposer {
+  constructor(renderer: WebGLRendererLike, renderTarget?: RenderTargetLike)
+  renderToScreen: boolean
+  addPass(pass: PassLike): void
+  removePass(pass: PassLike): void
+  insertPass(pass: PassLike, index: number): void
+  setSize(width: number, height: number): void
+  setPixelRatio(ratio: number): void
+  render(deltaTime?: number): void
+  dispose(): void
+}
+export declare class RenderPass implements PassLike {
+  constructor(scene: unknown, camera: unknown, overrideMaterial?: unknown, clearColor?: unknown, clearAlpha?: unknown)
+  enabled: boolean
+  render(renderer: WebGLRendererLike, writeBuffer: RenderTargetLike, readBuffer: RenderTargetLike, deltaTime?: number, maskActive?: boolean): void
+  setSize(width: number, height: number): void
+  dispose(): void
+}
+export declare class UnrealBloomPass implements PassLike {
+  constructor(resolution: { x: number; y: number }, strength?: number, radius?: number, threshold?: number)
+  enabled: boolean
+  strength: number
+  radius: number
+  threshold: number
+  render(renderer: WebGLRendererLike, writeBuffer: RenderTargetLike, readBuffer: RenderTargetLike, deltaTime?: number, maskActive?: boolean): void
+  setSize(width: number, height: number): void
+  dispose(): void
+}
+export declare class OutputPass implements PassLike {
+  constructor()
+  enabled: boolean
+  render(renderer: WebGLRendererLike, writeBuffer: RenderTargetLike, readBuffer: RenderTargetLike, deltaTime?: number, maskActive?: boolean): void
+  setSize(width: number, height: number): void
+  dispose(): void
+}
 `
 
 const sha256 = (data: string | Uint8Array) => createHash('sha256').update(data).digest('hex')
@@ -320,7 +376,7 @@ export async function buildMapLib(): Promise<Built> {
     bytes,
     gzip_bytes: gzipBytes,
     sha256: sha256(bundle),
-    exports: ['ForceGraph3D', 'SpriteText'],
+    exports: ['ForceGraph3D', 'SpriteText', 'EffectComposer', 'RenderPass', 'UnrealBloomPass', 'OutputPass'],
     packages,
     patches: PATCHES.map(({ id, package: pkg, file, what, find, replace, count }) => ({
       id,
