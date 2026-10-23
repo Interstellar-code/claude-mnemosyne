@@ -1,17 +1,21 @@
-// The 3D map's library, bundled at dev time (plan MAP.2; DESIGN.md, "The 3D
-// memory map").
+// The two libraries the dashboard bundles at dev time (plan MAP.2 and SEMX.1;
+// DESIGN.md, "The 3D memory map").
 //
-//   bun scripts/vendor-map.ts          writes ui/vendor/map-lib.js and its companions
+//   bun scripts/vendor-map.ts          writes ui/vendor/*.js and their companions
 //   bun scripts/vendor-map.ts --check  builds in memory; exit 1 when a committed file differs
 //
-// One Bun.build of the pinned devDependencies 3d-force-graph and
-// three-spritetext (with one copy of three) into a single minified ESM file,
-// ui/vendor/map-lib.js, that the page loads with import() the first time the
-// Map tab opens. Beside it:
-//   map-lib.d.ts              the types of the surface ui/map.ts uses
-//   map-lib.inputs.json       every package in the bundle with its version and licence,
+// Two Bun.builds, each one minified ESM file under ui/vendor/:
+//   map-lib.js        the pinned devDependencies 3d-force-graph and
+//                     three-spritetext (with one copy of three), which the page
+//                     loads with import() the first time the Map tab opens
+//   semantic-lib.js   the pinned dependency umap-js, which ui/semantic-worker.ts
+//                     loads to lay the memories out by meaning
+// Beside each bundle:
+//   <name>.d.ts               the types of the surface the importing file uses
+//   <name>.inputs.json        every package in the bundle with its version and licence,
 //                             the patches applied, the size and a sha256 of the bundle
-//   THIRD-PARTY-NOTICES.txt   the licence text of every package in the bundle
+// and once for both:
+//   THIRD-PARTY-NOTICES.txt   the licence text of every package in either bundle
 //
 // The build plugin applies PATCHES to the library sources as they load and
 // fails the build when any patch does not match exactly as often as it says.
@@ -26,6 +30,7 @@ import type { BunPlugin } from 'bun'
 export const ROOT = join(import.meta.dir, '..')
 export const VENDOR = join(ROOT, 'ui', 'vendor')
 export const BUNDLE = 'map-lib.js'
+export const SEMANTIC_BUNDLE = 'semantic-lib.js'
 const NODE_MODULES = join(ROOT, 'node_modules')
 
 // What the page imports from the bundle: nothing else is exported.
@@ -283,8 +288,74 @@ const sha256 = (data: string | Uint8Array) => createHash('sha256').update(data).
 export type Built = {
   files: Record<string, string>
   packages: BundledPackage[]
+  dirs: Map<string, Set<string>>
   bytes: number
   gzipBytes: number
+}
+
+/** The package each bundled input came from, one folder per package, and each package's version and licence. */
+function bundledPackages(result: { metafile?: { inputs?: Record<string, unknown> } }): { dirs: Map<string, Set<string>>; packages: BundledPackage[] } {
+  const dirs = new Map<string, Set<string>>()
+  for (const input of Object.keys(result.metafile?.inputs ?? {})) {
+    const at = packageOf(input)
+    if (at === undefined) continue
+    dirs.set(at.name, (dirs.get(at.name) ?? new Set()).add(at.dir))
+  }
+  const doubled = [...dirs].filter(([, found]) => found.size !== 1).map(([name]) => name)
+  if (doubled.length > 0) throw new Error(`more than one copy of: ${doubled.join(', ')}`)
+  const packages: BundledPackage[] = [...dirs]
+    .map(([name, found]) => {
+      const dir = join(ROOT, [...found][0] ?? '')
+      const json = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as { version: string; license?: string }
+      return { name, version: json.version, license: json.license ?? 'see licence text' }
+    })
+    .sort((a, b) => a.name.localeCompare(b.name))
+  return { dirs, packages }
+}
+
+/**
+ * The licence a package's shipped text actually is, when that is unambiguous: two
+ * packages declare one licence and ship another (umap-js declares MIT and ships
+ * Apache-2.0), and a notices heading must say what the text below it is.
+ */
+export function licenceId(text: string, declared: string): string {
+  if (/Apache License\s*\n?\s*Version 2\.0/i.test(text)) return 'Apache-2.0'
+  if (/MIT License|Permission is hereby granted, free of charge/i.test(text)) return 'MIT'
+  return declared
+}
+
+/** One notices document for every package of every bundle: the shared file both builds compare against. */
+export function noticesFile(bundles: readonly { name: string; packages: BundledPackage[]; dirs: Map<string, Set<string>> }[]): string {
+  const named = bundles.map(bundle => ({
+    bundle: bundle.name,
+    packages: bundle.packages.map(pkg => {
+      const dir = join(ROOT, [...(bundle.dirs.get(pkg.name) ?? [])][0] ?? '')
+      const text = licenceFile(dir)
+      return { name: pkg.name, version: pkg.version, license: licenceId(text, pkg.license), text }
+    }),
+  }))
+  const all = named.flatMap(entry => entry.packages)
+  const seen = new Set<string>()
+  return [
+    'Third-party notices for the vendored libraries of the Mnemosyne dashboard',
+    '',
+    ...named.flatMap(entry => [
+      `ui/vendor/${entry.bundle} bundles: ${entry.packages.map(pkg => `${pkg.name} ${pkg.version}`).join(', ')}`,
+      '',
+    ]),
+    'The packages below are bundled unmodified, except for the patches listed in',
+    'each bundle\'s .inputs.json and DESIGN.md. Each licence text follows its package',
+    'name and version. A package in both bundles is listed once.',
+    '',
+    ...all
+      .filter(pkg => {
+        const key = `${pkg.name} ${pkg.version}`
+        if (seen.has(key)) return false
+        seen.add(key)
+        return true
+      })
+      .flatMap(pkg => [`==== ${pkg.name} ${pkg.version} (${pkg.license}) ====`, '', pkg.text.trim(), '']),
+  ].join('\n')
 }
 
 /** Builds the bundle and its companions in memory. Throws when a patch misses, three is not single, or a licence is missing. */
@@ -332,42 +403,16 @@ export async function buildMapLib(): Promise<Built> {
 
   // Every input's package, from the folder it was read from: one folder per package.
   const inputs = Object.keys(result.metafile?.inputs ?? {})
-  const dirs = new Map<string, Set<string>>()
-  for (const input of inputs) {
-    const at = packageOf(input)
-    if (at === undefined) continue
-    dirs.set(at.name, (dirs.get(at.name) ?? new Set()).add(at.dir))
-  }
-  const doubled = [...dirs].filter(([, found]) => found.size !== 1).map(([name]) => name)
-  if (doubled.length > 0) throw new Error(`more than one copy of: ${doubled.join(', ')}`)
+  const { dirs, packages } = bundledPackages(result)
   // One copy of three: its ESM build only (three.core.js once), never its CommonJS or WebGPU builds.
   const threeFiles = inputs.filter(input => packageOf(input)?.name === 'three').map(input => input.split(/[\\/]/).slice(-2).join('/'))
   if (threeFiles.filter(file => file === 'build/three.core.js').length !== 1 || threeFiles.some(file => /three\.(cjs|webgpu|tsl)/.test(file))) {
     throw new Error(`three is not bundled once: ${threeFiles.join(', ')}`)
   }
-  const packages: BundledPackage[] = [...dirs]
-    .map(([name, found]) => {
-      const dir = join(ROOT, [...found][0] ?? '')
-      const json = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as { version: string; license?: string }
-      return { name, version: json.version, license: json.license ?? 'see licence text' }
-    })
-    .sort((a, b) => a.name.localeCompare(b.name))
 
   const js = await output.text()
   const header = '/* ui/vendor/map-lib.js: 3d-force-graph and three-spritetext with three, built by scripts/vendor-map.ts. Do not edit; see map-lib.inputs.json and THIRD-PARTY-NOTICES.txt. */\n'
   const bundle = header + js
-  const notices = [
-    'Third-party notices for ui/vendor/map-lib.js',
-    '',
-    'The 3D map bundles the packages below, unmodified except for the patches',
-    'listed in map-lib.inputs.json and DESIGN.md. Each licence text follows its',
-    'package name and version.',
-    '',
-    ...packages.flatMap(pkg => {
-      const dir = join(ROOT, [...(dirs.get(pkg.name) ?? [])][0] ?? '')
-      return [`==== ${pkg.name} ${pkg.version} (${pkg.license}) ====`, '', licenceFile(dir), '']
-    }),
-  ].join('\n')
   const bytes = Buffer.byteLength(bundle)
   const gzipBytes = Bun.gzipSync(new TextEncoder().encode(bundle)).byteLength
   const meta = {
@@ -394,9 +439,89 @@ export async function buildMapLib(): Promise<Built> {
       [BUNDLE]: bundle,
       'map-lib.d.ts': DTS,
       'map-lib.inputs.json': `${JSON.stringify(meta, null, 2)}\n`,
-      'THIRD-PARTY-NOTICES.txt': notices,
     },
     packages,
+    dirs,
+    bytes,
+    gzipBytes,
+  }
+}
+
+const SEMANTIC_ENTRY = `export { UMAP } from 'umap-js'
+`
+
+// Types for ui/vendor/semantic-lib.js: only the surface ui/semantic-worker.ts uses
+// (umap-js's own dist/index.d.ts, plus the cosine distance function).
+const SEMANTIC_DTS = `// Types for ui/vendor/semantic-lib.js: only the surface ui/semantic-worker.ts uses.
+// Written by scripts/vendor-map.ts from a fixed text; do not edit by hand.
+export type Vector = number[]
+export type Vectors = Vector[]
+export type RandomFn = () => number
+export type DistanceFn = (x: Vector, y: Vector) => number
+export interface UMAPParameters {
+  distanceFn?: DistanceFn
+  learningRate?: number
+  localConnectivity?: number
+  minDist?: number
+  nComponents?: number
+  nEpochs?: number
+  nNeighbors?: number
+  negativeSampleRate?: number
+  repulsionStrength?: number
+  random?: RandomFn
+  setOpMixRatio?: number
+  spread?: number
+  transformQueueSize?: number
+}
+export declare class UMAP {
+  constructor(params?: UMAPParameters)
+  fit(X: Vectors): number[][]
+  fitAsync(X: Vectors, callback?: (epochNumber: number) => void | boolean): Promise<number[][]>
+  initializeFit(X: Vectors): number
+  step(): number
+  getEmbedding(): number[][]
+}
+`
+
+/** Builds ui/vendor/semantic-lib.js and its companions in memory: umap-js, unpatched. */
+export async function buildSemanticLib(): Promise<Built> {
+  const entry = join(ROOT, 'scripts', 'semantic-lib-entry.ts')
+  const result = await Bun.build({
+    entrypoints: [entry],
+    files: { [entry]: SEMANTIC_ENTRY },
+    target: 'browser',
+    format: 'esm',
+    minify: true,
+    metafile: true,
+  })
+  const output = result.outputs[0]
+  if (!result.success || output === undefined || result.outputs.length !== 1) {
+    throw new Error(`the semantic library did not build: ${result.logs.map(log => String(log)).join('\n')}`)
+  }
+  const { dirs, packages } = bundledPackages(result)
+  const js = await output.text()
+  const header = '/* ui/vendor/semantic-lib.js: umap-js, built by scripts/vendor-map.ts. Do not edit; see semantic-lib.inputs.json and THIRD-PARTY-NOTICES.txt. */\n'
+  const bundle = header + js
+  const bytes = Buffer.byteLength(bundle)
+  const gzipBytes = Bun.gzipSync(new TextEncoder().encode(bundle)).byteLength
+  const meta = {
+    bundle: SEMANTIC_BUNDLE,
+    built_by: 'scripts/vendor-map.ts',
+    bytes,
+    gzip_bytes: gzipBytes,
+    sha256: sha256(bundle),
+    exports: ['UMAP'],
+    packages,
+    patches: [],
+  }
+  return {
+    files: {
+      [SEMANTIC_BUNDLE]: bundle,
+      'semantic-lib.d.ts': SEMANTIC_DTS,
+      'semantic-lib.inputs.json': `${JSON.stringify(meta, null, 2)}\n`,
+    },
+    packages,
+    dirs,
     bytes,
     gzipBytes,
   }
@@ -405,7 +530,23 @@ export async function buildMapLib(): Promise<Built> {
 async function main() {
   const check = process.argv.includes('--check')
   if (!existsSync(join(NODE_MODULES, '3d-force-graph'))) throw new Error('run bun install first: 3d-force-graph is a devDependency')
-  const built = await buildMapLib()
+  if (!existsSync(join(NODE_MODULES, 'umap-js'))) throw new Error('run bun install first: umap-js is a dependency')
+  const map = await buildMapLib()
+  const semantic = await buildSemanticLib()
+  const built: Built = {
+    files: {
+      ...map.files,
+      ...semantic.files,
+      'THIRD-PARTY-NOTICES.txt': noticesFile([
+        { name: BUNDLE, packages: map.packages, dirs: map.dirs },
+        { name: SEMANTIC_BUNDLE, packages: semantic.packages, dirs: semantic.dirs },
+      ]),
+    },
+    packages: [...map.packages],
+    dirs: new Map([...map.dirs, ...semantic.dirs]),
+    bytes: map.bytes + semantic.bytes,
+    gzipBytes: map.gzipBytes + semantic.gzipBytes,
+  }
   if (check) {
     const stale = Object.entries(built.files)
       .filter(([name, text]) => !existsSync(join(VENDOR, name)) || readFileSync(join(VENDOR, name), 'utf8') !== text)
@@ -414,17 +555,21 @@ async function main() {
       process.stderr.write(`ui/vendor/ differs from a fresh build: ${stale.join(', ')}\n`)
       process.exit(1)
     }
-    process.stdout.write(`ui/vendor/ matches a fresh build (${built.bytes} bytes, ${built.packages.length} packages)\n`)
+    process.stdout.write(
+      `ui/vendor/ matches a fresh build (${map.bytes} + ${semantic.bytes} bytes, ${map.packages.length} + ${semantic.packages.length} packages)\n`,
+    )
     return
   }
   mkdirSync(VENDOR, { recursive: true })
   for (const [name, text] of Object.entries(built.files)) writeFileSync(join(VENDOR, name), text)
-  process.stdout.write(
-    `${relative(ROOT, join(VENDOR, BUNDLE))}: ${built.bytes} bytes (${(built.bytes / 1024).toFixed(1)} KB), ${built.gzipBytes} gzipped; ${built.packages.length} packages\n`,
-  )
-  for (const pkg of built.packages) process.stdout.write(`  ${pkg.name} ${pkg.version} ${pkg.license}\n`)
-  const hits = scan(built.files[BUNDLE] ?? '')
-  process.stdout.write(`scan: ${JSON.stringify(hits, null, 2)}\n`)
+  for (const one of [map, semantic]) {
+    process.stdout.write(
+      `${relative(ROOT, join(VENDOR, one === map ? BUNDLE : SEMANTIC_BUNDLE))}: ${one.bytes} bytes (${(one.bytes / 1024).toFixed(1)} KB), ${one.gzipBytes} gzipped; ${one.packages.length} packages\n`,
+    )
+    for (const pkg of one.packages) process.stdout.write(`  ${pkg.name} ${pkg.version} ${pkg.license}\n`)
+    const name = one === map ? BUNDLE : SEMANTIC_BUNDLE
+    process.stdout.write(`scan ${name}: ${JSON.stringify(scan(one.files[name] ?? ''), null, 2)}\n`)
+  }
 }
 
 if (import.meta.main) {

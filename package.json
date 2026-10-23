@@ -6,6 +6,9 @@
     "typecheck": "tsc -p . && tsc -p tsconfig.bun.json && tsc -p ui/tsconfig.json",
     "test:bun": "bun install --frozen-lockfile && bun install --cwd engine --frozen-lockfile --production --omit=peer && bun test ./tests/bun ./engine/test && bun scripts/vendor-map.ts --check"
   },
+  "dependencies": {
+    "umap-js": "1.4.0"
+  },
   "devDependencies": {
     "3d-force-graph": "1.80.1",
     "@types/bun": "1.4.3",

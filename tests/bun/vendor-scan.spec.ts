@@ -24,6 +24,7 @@ type Inputs = {
 
 const vendorJs = () => readdirSync(VENDOR).filter(name => name.endsWith('.js'))
 const inputs = () => JSON.parse(read('map-lib.inputs.json')) as Inputs
+const semanticInputs = () => JSON.parse(read('semantic-lib.inputs.json')) as Inputs
 
 /** Each file's scan hits that differ from the allowlist: a hit not listed, a listed hit not found, or a count that moved. */
 export function scanDiff(files: Record<string, string>, allow: Allow): string[] {
@@ -129,13 +130,16 @@ describe('MAP.2.a3: notices cover every bundled package', () => {
 })
 
 describe('MAP.2.a1 and a2: pins, one copy of three, the patches and their CSS', () => {
-  test('package.json pins 3d-force-graph, three and three-spritetext exactly, as devDependencies', () => {
-    const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')) as { dependencies?: object; devDependencies: Record<string, string> }
-    expect(pkg.dependencies).toBeUndefined()
+  test('package.json pins 3d-force-graph, three and three-spritetext exactly, as devDependencies, and umap-js as a dependency', () => {
+    const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')) as { dependencies?: Record<string, string>; devDependencies: Record<string, string> }
+    // SEMX.1: the one runtime dependency is the meaning layout's library, pinned exactly.
+    expect(pkg.dependencies).toEqual({ 'umap-js': '1.4.0' })
+    expect(pkg.dependencies?.['umap-js']).toMatch(/^\d+\.\d+\.\d+$/)
     for (const name of ['3d-force-graph', 'three', 'three-spritetext']) expect(pkg.devDependencies[name]).toMatch(/^\d+\.\d+\.\d+$/)
     // The bundle was built from exactly those versions.
     const { packages } = inputs()
     for (const name of ['3d-force-graph', 'three', 'three-spritetext']) expect(packages.find(p => p.name === name)?.version).toBe(pkg.devDependencies[name]!)
+    expect(semanticInputs().packages.find(p => p.name === 'umap-js')?.version).toBe(pkg.dependencies?.['umap-js'])
   })
 
   test('map-lib.js is one ESM file with one copy of three, and its sha256 and size are recorded', () => {
@@ -198,6 +202,48 @@ describe('MAP.2.a1 and a2: pins, one copy of three, the patches and their CSS', 
   })
 })
 
+describe('SEMX.1.a3: the second bundle, semantic-lib.js', () => {
+  test('the scan finds nothing in it, and the allowlist records it explicitly', () => {
+    // The one vendored file with no hits at all: umap-js and its three dependencies are plain arithmetic.
+    expect(scan(read('semantic-lib.js'))).toEqual({})
+    const allow = JSON.parse(read('scan-allow.json')) as Allow
+    expect(allow.files['semantic-lib.js']).toEqual({})
+  })
+
+  test('it is one ESM file exporting UMAP, with its size and sha256 recorded', () => {
+    const text = read('semantic-lib.js')
+    const meta = semanticInputs()
+    expect(meta.bundle).toBe('semantic-lib.js')
+    expect(meta.exports).toEqual(['UMAP'])
+    expect(meta.patches).toEqual([])
+    expect(Buffer.byteLength(text)).toBe(meta.bytes)
+    expect(new Bun.CryptoHasher('sha256').update(text).digest('hex')).toBe(meta.sha256)
+    expect(text).toMatch(/export\s*\{[^}]*\bUMAP\b[^}]*\}/)
+  })
+
+  test('the packages it bundles are umap-js and its arithmetic dependencies, each with a notice', () => {
+    const { packages } = semanticInputs()
+    expect(packages.map(pkg => pkg.name)).toEqual(['is-any-array', 'ml-levenberg-marquardt', 'ml-matrix', 'umap-js'])
+    expect(missingNotices(packages, read('THIRD-PARTY-NOTICES.txt'))).toEqual([])
+    // umap-js declares MIT and ships the Apache-2.0 text: the heading names the text, not the field.
+    expect(read('THIRD-PARTY-NOTICES.txt')).toContain('==== umap-js 1.4.0 (Apache-2.0) ====')
+  })
+
+  test('its type declarations cover the surface ui/semantic-worker.ts uses', () => {
+    const dts = read('semantic-lib.d.ts')
+    expect(dts).toContain('export declare class UMAP')
+    for (const member of ['fit(', 'fitAsync(', 'getEmbedding(']) expect({ member, typed: dts.includes(member) }).toEqual({ member, typed: true })
+    const worker = readFileSync(join(ROOT, 'ui', 'semantic-worker.ts'), 'utf8')
+    expect(worker).toContain("from './vendor/semantic-lib.js'")
+  })
+
+  test('the notices cover both bundles in one file, and a package in both is listed once', () => {
+    const notices = read('THIRD-PARTY-NOTICES.txt')
+    expect(missingNotices(inputs().packages, notices)).toEqual([])
+    for (const name of ['map-lib.js', 'semantic-lib.js']) expect({ name, named: notices.includes(`ui/vendor/${name} bundles:`) }).toEqual({ name, named: true })
+  })
+})
+
 describe('MAP.2.a6: the page and the vendored files as the server sends them', () => {
   const temp = tempDir('vendor-serve')
   let stop = () => {}
@@ -234,12 +280,24 @@ describe('MAP.2.a6: the page and the vendored files as the server sends them', (
     }
     const lib = await (await fetch(`http://127.0.0.1:${port}/vendor/map-lib.js`)).text()
     expect(lib).toBe(read('map-lib.js'))
+    // SEMX.1: the meaning layout's bundle goes out the same way.
+    const semantic = await (await fetch(`http://127.0.0.1:${port}/vendor/semantic-lib.js`)).text()
+    expect(semantic).toBe(read('semantic-lib.js'))
   })
 
   test('/vendor/../server.ts and /vendor/..%2fserver.ts are 404', async () => {
     const { connect } = await import('node:net')
     // Only .js is served from ui/vendor/: its types, inputs list, notices and allowlist are 404.
-    for (const path of ['/vendor/../server.ts', '/vendor/..%2fserver.ts', '/vendor/map-lib.d.ts', '/vendor/map-lib.inputs.json', '/vendor/THIRD-PARTY-NOTICES.txt', '/vendor/scan-allow.json']) {
+    for (const path of [
+      '/vendor/../server.ts',
+      '/vendor/..%2fserver.ts',
+      '/vendor/map-lib.d.ts',
+      '/vendor/map-lib.inputs.json',
+      '/vendor/THIRD-PARTY-NOTICES.txt',
+      '/vendor/scan-allow.json',
+      '/vendor/semantic-lib.d.ts',
+      '/vendor/semantic-lib.inputs.json',
+    ]) {
       // Raw bytes, so no client folds the dot segments first.
       const status = await new Promise<number>((resolve, reject) => {
         const socket = connect(port, '127.0.0.1')
