@@ -177,12 +177,10 @@ describe('GET /api/galaxy on a real store', () => {
     }
   })
 
-  test('GDATA.1.a5: /api/map stays for now, beside the galaxy route', async () => {
-    const map = await get(url, '/api/map', started.token)
-    expect(map.status).toBe(200)
-    const level = (await map.json()) as { level: string; nodes: { id: string }[] }
-    expect(level.level).toBe('projects')
-    expect(level.nodes.map(node => node.id)).toContain('project-alpha-1a2b')
+  test('GDATA.1.a5 (OLDMAP.1): GET /api/map is 404 beside /api/galaxy', async () => {
+    expect((await get(url, '/api/galaxy', started.token)).status).toBe(200)
+    expect((await get(url, '/api/map', started.token)).status).toBe(404)
+    expect((await fetch(`${url}/api/map`)).status).toBe(401)
   })
 
   test('review 2 LOW 1: no database and a store with only working_memory both give empty lists', async () => {
