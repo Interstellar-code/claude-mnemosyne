@@ -4,9 +4,9 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { Database } from 'bun:sqlite'
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { cliOf } from '../../bin/install-engine'
+import { cliOf, installStep, installStepEnv, type Runner } from '../../bin/install-engine'
 import { ENGINE_BUILD } from '../../hooks/engine-build'
-import { body, engineCall, runInstaller, tempDir, toolCall } from './helpers'
+import { body, engineCall, ROOT, runInstaller, tempDir, toolCall } from './helpers'
 
 const INSTALL_TIMEOUT = 300_000
 
@@ -61,6 +61,21 @@ describe('a real install, then one that cannot reach the registry', () => {
     const row = db.query('SELECT metadata_json FROM working_memory WHERE id = ?').get(stored.memory_id) as { metadata_json: string }
     db.close()
     expect(JSON.parse(row.metadata_json)).toEqual({ tags: ['install'] })
+  })
+
+  test('the installed onnxruntime-node 1.26.0 parses that variable and value as skip', () => {
+    // The library's own parser, against the engine this spec just installed.
+    const parser = join(engine, 'node_modules', 'onnxruntime-node', 'script', 'install-utils.js')
+    expect(existsSync(parser)).toBe(true)
+    const probe = `process.stdout.write(String(require(${JSON.stringify(parser)}).parseInstallFlag()))`
+    const base = { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' }
+    const flagWith = (env: Record<string, string>) => Bun.spawnSync([process.execPath, '-e', probe], { env, stdout: 'pipe' }).stdout.toString()
+    // `false` is the parser's "skip": install.js then exits 0 before any download.
+    expect(flagWith(installStepEnv(base))).toBe('false')
+    // Unset, the parser keeps the metadata default, which asks for cuda12 on linux/x64.
+    expect(flagWith(base)).toBe('undefined')
+    // And the hostile value the metadata would want is normalised to the same skip.
+    expect(flagWith(installStepEnv({ ...base, ONNXRUNTIME_NODE_INSTALL: 'cuda12' }))).toBe('false')
   })
 
   test('an install with an unreachable registry fails and the first engine still answers', async () => {
@@ -308,4 +323,43 @@ for (const line of lines) {
     expect(existsSync(`${engine}.next`)).toBe(false)
     expect(readdirSync(engine).sort()).toEqual(listing)
   }, INSTALL_TIMEOUT)
+})
+
+// H1 (final review r1): onnxruntime-node 1.26.0's postinstall downloads the
+// CUDA package on linux/x64 from api.nuget.org on every setup and fails the
+// whole install when that host is unreachable. The install step therefore runs
+// with ONNXRUNTIME_NODE_INSTALL=skip, the variable its own script reads.
+describe('the install step skips onnxruntime-node\'s GPU download (H1)', () => {
+  test('installStepEnv forces skip and keeps the inherited environment', () => {
+    const base = { PATH: '/usr/bin:/bin', HOME: '/home/u', LANG: 'en_US.UTF-8', ONNXRUNTIME_NODE_INSTALL: 'cuda12' }
+    const env = installStepEnv(base)
+    // A hostile inherited value cannot force the download on.
+    expect(env.ONNXRUNTIME_NODE_INSTALL).toBe('skip')
+    expect(env.PATH).toBe(base.PATH)
+    expect(env.HOME).toBe(base.HOME)
+    expect(env.LANG).toBe(base.LANG)
+    // The real inherited environment is kept too, not swapped for the pins alone.
+    const real = installStepEnv()
+    expect(real.ONNXRUNTIME_NODE_INSTALL).toBe('skip')
+    expect(real.PATH).toBe(process.env.PATH ?? '')
+    expect(real.HOME).toBe(process.env.HOME ?? '')
+  })
+
+  test('the bun install step runs with that env', async () => {
+    const calls: { argv: string[]; cwd: string; timeoutMs: number; env?: Record<string, string> }[] = []
+    const fakeRun: Runner = async (argv, cwd, _input, timeoutMs, env) => {
+      calls.push({ argv, cwd, timeoutMs, env })
+      return { stdout: '', stderr: '', exitCode: 0 }
+    }
+    const done = await installStep('/tmp/engine.next', fakeRun)
+    expect(done.exitCode).toBe(0)
+    expect(calls).toHaveLength(1)
+    const [call] = calls
+    expect(call!.argv).toEqual([process.execPath, 'install', '--production', '--omit=peer'])
+    expect(call!.cwd).toBe('/tmp/engine.next')
+    expect(call!.env?.ONNXRUNTIME_NODE_INSTALL).toBe('skip')
+    // The env is layered over the real one, so bun keeps its registry, proxy and cache settings.
+    expect(call!.env?.PATH).toBe(process.env.PATH)
+    expect(call!.timeoutMs).toBeGreaterThan(0)
+  })
 })

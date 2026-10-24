@@ -69,6 +69,23 @@ export function isInside(path: string, folder: string) {
 
 export const cliOf = (engineDir: string) => join(engineDir, 'node_modules', ...PACKAGE.split('/'), 'src', 'cli.ts')
 
+// H1: onnxruntime-node 1.26.0's postinstall downloads the CUDA package on
+// linux/x64 from api.nuget.org (hundreds of MB, every setup) and fails the
+// whole install when that host is unreachable (offline, proxy, firewall). Its
+// script reads ONNXRUNTIME_NODE_INSTALL and exits early on `skip`
+// (script/install-utils.js `parseInstallFlag`); only the CUDA/TensorRT `.so`
+// download is skipped, the CPU runtime ships inside the package.
+export function installStepEnv(base = process.env as Record<string, string>): Record<string, string> {
+  return { ...base, ONNXRUNTIME_NODE_INSTALL: 'skip' }
+}
+
+export type Runner = typeof run
+
+/** The `bun install` step that fetches the engine's dependencies, with H1's env. */
+export function installStep(next: string, runner: Runner = run) {
+  return runner([process.execPath, 'install', '--production', '--omit=peer'], next, undefined, INSTALL_STEP_TIMEOUT_MS, installStepEnv())
+}
+
 async function run(argv: string[], cwd: string, input: string | undefined, timeoutMs: number, env?: Record<string, string>) {
   const child = Bun.spawn(argv, {
     cwd,
@@ -242,7 +259,7 @@ export async function install(pluginRoot: string, engineDir: string, storeDir: s
     // so the ~500 MB the engine's own tests pull in is not installed.
     // No lockfile: Bun saves none under --production, so the pinned 18.12.3
     // packages and their dependencies resolve fresh, through Bun's global cache.
-    const installed = await run([process.execPath, 'install', '--production', '--omit=peer'], next, undefined, INSTALL_STEP_TIMEOUT_MS)
+    const installed = await installStep(next)
     if (installed.exitCode !== 0) {
       throw new InstallError(`bun install failed (exit ${installed.exitCode}): ${`${installed.stderr}\n${installed.stdout}`.trim().slice(-800)}`)
     }
