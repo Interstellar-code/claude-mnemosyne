@@ -32,7 +32,7 @@ claude plugin update mnemosyne@mnemosyne
 
 Restart Claude Code afterwards. The plugin carries its own copy of the engine; when an update brings a new engine build, session start shows a notice, and `/mnemosyne-setup` installs it. Until then the older engine keeps working, and only `memory_update` asks for the setup.
 
-After updating to 0.6.0, run `/mnemosyne-setup` once: it installs engine build `18.12.3-mnemosyne.4`, which has the knowledge tools. Without it, extraction, `/mnemosyne-knowledge` and the dashboard stay off and say so (see [What 0.6.0 does not do yet](#what-060-does-not-do-yet)).
+After updating to 0.7.0, run `/mnemosyne-setup` once: it installs engine build `18.12.3-mnemosyne.7`, which has the knowledge tools, local embeddings and `/mnemosyne-embed`. Without it, extraction, `/mnemosyne-knowledge` and the dashboard stay off and say so, and embeddings stay off (see [What 0.7.0 does not do yet](#what-070-does-not-do-yet)). Then, if you want meaning-based recall for the memories you already have, run `/mnemosyne-embed apply` (see [Embeddings](#embeddings-meaning-based-recall)).
 
 ## Uninstall
 
@@ -54,7 +54,7 @@ In a Claude Code session, run once:
 /mnemosyne-setup
 ```
 
-This installs the Mnemosyne Memory engine into `~/.claude/mnemosyne/engine/` (about 135 MB) and creates the store at `~/.claude/mnemosyne/store/`. The engine comes from the plugin's own copy (the `engine/` folder of this repo: the `@oh-my-pi/pi-mnemopi` 18.12.3 source with a few changes, listed in [engine/UPSTREAM.md](engine/UPSTREAM.md)); only its four `@oh-my-pi` dependencies are downloaded from npm. Setup builds the new engine next to the old one and swaps it in only once it answers, so a failed setup leaves the old engine working.
+This installs the Mnemosyne Memory engine into `~/.claude/mnemosyne/engine/` (about 135 MB, and about 280 MB more when embeddings are on) and creates the store at `~/.claude/mnemosyne/store/`. The engine comes from the plugin's own copy (the `engine/` folder of this repo: the `@oh-my-pi/pi-mnemopi` 18.12.3 source with a few changes, listed in [engine/UPSTREAM.md](engine/UPSTREAM.md)); only its four `@oh-my-pi` dependencies are downloaded from npm. Setup builds the new engine next to the old one and swaps it in only once it answers, so a failed setup leaves the old engine working.
 
 If you use the memory from other MCP clients (see below), restart them after setup: a client keeps the engine it started with.
 
@@ -70,23 +70,24 @@ If you use the memory from other MCP clients (see below), restart them after set
 
 Claude also saves and recalls on its own: lasting preferences, conventions, decisions. To change a fact, or give it topic tags, Claude updates it in place with `memory_update`; it keeps its id and recall history, and no duplicate is saved.
 
-Recall matches words, not meaning: "deploy Fridays" finds the fact above, "release schedule" does not.
+With embeddings off, recall matches words, not meaning: "deploy Fridays" finds the fact above, "release schedule" does not. With embeddings on (see below), a memory can also be found by what it says.
 
 ## Embeddings (meaning-based recall)
 
-Since 0.7.0 the engine can also compare memories by meaning, using a small local model, BAAI/bge-small-en-v1.5 (384 dimensions, about 63 MB). It runs on your machine only: no memory text ever leaves it for an embedding API, and every embedding setting is pinned by the plugin (empty API URL and key, fixed model).
+Since 0.7.0 the engine can also compare memories by meaning, using a small local model, BAAI/bge-small-en-v1.5 (384 dimensions, about 63 MB). It runs on your machine. The engine's route to a remote embedding API is closed: it needs an engine-only opt-in (`MNEMOPI_EMBEDDINGS_API_OPT_IN`) that the plugin pins to `0`, so memory text is never sent to an embedding API. The API URL and key, `OPENROUTER_BASE_URL`, `OPENROUTER_API_KEY` and `OPENAI_API_KEY` are also emptied, and the model name, the download host and the cache folder are pinned to fixed values. A `.env` file or a shell variable cannot send text to an embedding API, change the model or move the model cache.
 
-- **Where it comes from.** `/mnemosyne-setup` downloads the model once from `huggingface.co` (the `Qdrant/bge-small-en-v1.5-onnx-Q` repository; setup prints the host and size first). The model is cached under `~/.claude/mnemosyne/model-cache/`, not the shared `~/.omp` cache, and is only ever downloaded during setup. After updating to this version, run `/mnemosyne-setup` once to install the engine build `18.12.3-mnemosyne.5` and fetch the model; until then embeddings stay off and recall is keyword-only. A later update also needs a fresh `/mnemosyne-setup`.
-- **The option.** `embeddings` in the plugin settings is `auto` by default: on only on macOS on Apple Silicon (the tested platform), off elsewhere unless you set it to `on`. `off` keeps recall keyword-only. Changing it needs `/mnemosyne-setup` (to download the model) and a dashboard restart.
-- **The cost.** Embedding a memory is about 0.3 s per engine call, and each engine process that embeds uses about 0.4 GB of memory. The engine install grows by about 280 MB (fastembed and its ONNX runtime, which overrides onnxruntime-node to 1.26.0 so the process no longer aborts on exit under Bun).
-- **How recall changes.** A memory's keyword score is blended with its meaning score: the working-memory tiers add `0.2 × similarity`, and a candidate with too little word overlap still surfaces when its similarity is at least 0.65. Recall still answers within its timeout.
+- **Where it comes from.** `/mnemosyne-setup` downloads the model once from `huggingface.co` (the `Qdrant/bge-small-en-v1.5-onnx-Q` repository; setup prints the host and size first). The model is cached under `~/.claude/mnemosyne/model-cache/`, not the shared `~/.omp` cache, and is only ever downloaded during setup. After updating to this version, run `/mnemosyne-setup` once to install the engine build `18.12.3-mnemosyne.7` and fetch the model; until then embeddings stay off and recall is keyword-only. A later update that brings a new engine build also needs a fresh `/mnemosyne-setup`.
+- **The option.** `embeddings` in the plugin settings is `auto` by default: on only on macOS on Apple Silicon (the tested platform), off elsewhere unless you set it to `on`. `off` keeps recall keyword-only. Changing it needs `/mnemosyne-setup` (to download the model) and a dashboard restart. Windows and Linux are not verified.
+- **The install check.** With embeddings on, setup proves the model works before it swaps the engine in: it saves and recalls a test memory in a throwaway store and requires a stored vector for it. If the model cannot produce a vector (for example the download failed), setup refuses to swap the engine, keeps the old one, writes no setup marker, and says embeddings are off. Then set `embeddings` to `off` and run `/mnemosyne-setup` again, or run `/mnemosyne-setup` again when you are online.
+- **The cost.** Embedding a memory adds about 0.3 s per engine call that embeds, and each engine process that embeds uses about 0.4 GB of memory (peak, from the EMB research). The engine install grows by about 280 MB (fastembed and its ONNX runtime, which overrides onnxruntime-node to 1.26.0 so the process no longer aborts on exit under Bun).
+- **How recall changes.** A memory's keyword score is blended with its meaning score: for the working-memory tiers the score becomes 0.8 × the keyword score plus 0.2 × the similarity, and a candidate with too little word overlap still surfaces when its similarity is at least 0.65. Recall still answers within its timeout.
 - **Older memories.** Memories saved before embeddings were on have no vector until you fill them:
 
 ```
 /mnemosyne-embed
 ```
 
-That is a dry run: it counts the memories with no vector. Then `/mnemosyne-embed apply` fills them, in one engine process, and changes no memory text (only its vector). Running it again adds nothing. If you changed the model the vectors are refused unless you pass `/mnemosyne-embed rebuild`, which wipes and rebuilds every vector.
+That is a dry run: it counts the memories with no vector. Then `/mnemosyne-embed apply` fills them, in one engine process, and changes no memory text (only its vector). Running it again adds nothing; it counts again afterwards and reports an error if any memory is still missing a vector. If you changed the model the vectors are refused unless you pass `/mnemosyne-embed rebuild`, which first checks that the model loads, then wipes and rebuilds every vector.
 
 ## Dashboard
 
@@ -96,7 +97,7 @@ That is a dry run: it counts the memories with no vector. Then `/mnemosyne-embed
 
 Starts a small local web page for your memories and opens it in your default browser. The reply shows the full link, with its key after `#`, and the link is on the clipboard too, so you can open it in another browser. The page has six tabs and opens on Memories:
 
-- **Map:** every memory as a star in a glowing 3D galaxy, with what was learned from each as moons, a Timeline layout and live sparks (see [The galaxy](#the-galaxy)).
+- **Map:** every memory as a star in a glowing 3D galaxy, with what was learned from each as moons, a Timeline layout, a Meaning layout, Similar memories links and live sparks (see [The galaxy](#the-galaxy)).
 - **Memories:** every memory, with a project filter, sorting (newest, most recalled, never recalled), a text and tag filter, and a detail panel with a Forget button that asks before it deletes.
 - **Activity:** the activity log, live, with the app and the session that made each call (see [Activity log](#activity-log)).
 - **Search:** the same recall Claude uses, with scores. Searching here does not change any memory's recall count.
@@ -120,9 +121,10 @@ The Map tab draws every memory as a star in a glowing galaxy (the newest 2000; p
 3. The inspector. A star shows its text, project, recalls, saved date and tags, what was learned from it, and "Open in Memories". A project or topic shows its totals.
 4. Knowledge moons. The knowledge mined from the selected memory (at most 8 items) orbits its star as small moons, coloured by kind: blue facts, pink preferences, green instructions, amber dated events, violet relations. A moon is clickable, and the inspector lists every item. Under reduced motion the moons stand still. The "Knowledge moons" switch turns them off.
 5. The knowledge filter. The Knowledge chips (Facts, Preferences, Instructions, Timeline, Relations) count the memories that have each kind. Pick one or more and every memory without any of them dims to a tenth, so you see what was learned where. The chips and the moons stay disabled until the store holds extracted knowledge.
-6. Layouts. Galaxy is the default. Timeline lines the memories up by saved date: today on the right, one lane per project, with a range of 7 days, 30 days or All (the oldest memory) and an axis of day marks. Memories older than the range, or with no saved date, are hidden. Switching morphs the stars into place; the layout you last used is remembered in your browser. Meaning (a layout by what memories say) and the Similar memories links are in the rail but disabled: they arrive in 0.7.0.
-7. Live. Recalls and saves from the activity log light the map as they happen: a gold spark flies from the Claude core to each recalled star, a teal one to a saved or updated star, a red one to a forgotten star. A memory saved while the page is open is added to the map as a new star. The Recall and Write layer switches turn each kind off, the Live pill pauses the whole stream (it starts paused under reduced motion), and the live strip under the map lists the last few events.
-8. Simulate. "Simulate a recall" and "Simulate a write" play demo sparks on the map so you can see the live view on a quiet day. They are demo only: they make no request, never touch the store and never write a line to the activity log. After the first press the demo repeats every few seconds while Live is on.
+6. Layouts. Galaxy is the default. Timeline lines the memories up by saved date: today on the right, one lane per project, with a range of 7 days, 30 days or All (the oldest memory) and an axis of day marks. Memories older than the range, or with no saved date, are hidden. Switching morphs the stars into place; the layout you last used is remembered in your browser. Meaning places the memories by what they say (see below).
+7. Meaning and Similar memories. With embeddings on and vectors filled (see [Embeddings](#embeddings-meaning-based-recall)), the Meaning layout places every memory that has a vector by its meaning: the engine's vectors are laid out in 3D with UMAP, so memories that say similar things sit near each other, across projects. Project colours stay. A memory without a vector waits on a ring at the edge, labelled "Not embedded", until `/mnemosyne-embed apply` fills it. Meaning needs at least 10 memories with a vector; below that the map keeps the topic layout. The first layout over a new set of vectors takes a moment and is cached in `~/.claude/mnemosyne/meaning.json` (owner-only); if it is not ready within 8 seconds the map shows the topic layout and the layout appears on the next load. The Similar memories switch draws faint links between a memory and its closest neighbours (up to 3, at a cosine of at least 0.65), and the inspector lists them with a percentage. The Meaning button and the Similar memories switch are disabled, with the hint "Turn on embeddings, then run /mnemosyne-embed apply", until there are enough vectors.
+8. Live. Recalls and saves from the activity log light the map as they happen: a gold spark flies from the Claude core to each recalled star, a teal one to a saved or updated star, a red one to a forgotten star. A memory saved while the page is open is added to the map as a new star. The Recall and Write layer switches turn each kind off, the Live pill pauses the whole stream (it starts paused under reduced motion), and the live strip under the map lists the last few events.
+9. Simulate. "Simulate a recall" and "Simulate a write" play demo sparks on the map so you can see the live view on a quiet day. They are demo only: they make no request, never touch the store and never write a line to the activity log. After the first press the demo repeats every few seconds while Live is on.
 
 The Glow control in the rail sets how strongly stars glow: Soft (the default), Full (the 0.6.0 look) or Off; your choice is remembered. The map needs WebGL; without it the map area says so, and the other tabs still work. Its 3D library (three.js, `3d-force-graph` and the bloom passes, about 830 KB) loads only when you first open the Map tab.
 
@@ -130,7 +132,7 @@ The Glow control in the rail sets how strongly stars glow: Soft (the default), F
 
 Knowledge lists what extraction pulled out of your memories (see [Knowledge extraction](#knowledge-extraction-what-claude-learned)), one table per kind: Facts, Preferences, Instructions, Timeline and Relations. A row shows the item, its topic (the memory's first tag), its project, the memory it came from, its status (an instruction is active or retired, a relation shows its confidence), how many times that memory was recalled and when it was last used. Show on map selects the source star on the Map tab. A notice at the top says when extraction is off, or when the store holds no items yet.
 
-Health shows four numbers (memories, never recalled, recalls in the log, store size), the share of memories that have topic tags, knowledge, a recorded author and at least one recall, recalls per day over the last 14 days, the projects, the 50 newest memories never recalled with Review and Forget (which asks again before deleting) and the 10 most recalled. The "Embeddings" bar always reads 0 in 0.6.0, because embeddings arrive in 0.7.0.
+Health shows four numbers (memories, never recalled, recalls in the log, store size), the share of memories that have topic tags, knowledge, a recorded author and at least one recall, recalls per day over the last 14 days, the projects, the 50 newest memories never recalled with Review and Forget (which asks again before deleting) and the 10 most recalled. The "Embeddings (meaning search)" bar counts the memories that have a vector; while there are none it reads 0 and shows the hint "Turn on embeddings, then run /mnemosyne-embed apply".
 
 ### Topic tags: /mnemosyne-tags
 
@@ -174,13 +176,13 @@ Try `apply` on a copy of the store first.
 
 The extracted items are stored in the engine's own tables (facts, preferences, instructions, timelines, relations), replaced whenever a memory is extracted again, and deleted with the memory when you forget it. The Map and Knowledge tabs show them.
 
-### What 0.6.0 does not do yet
+### What 0.7.0 does not do yet
 
-1. Meaning layout and Similar memories arrive in 0.7.0, with embeddings. Until then recall matches words only, the Meaning button and the Similar memories switch are disabled, and the Health tab's embeddings bar reads 0.
-2. Moons for a memory saved or extracted after the page loaded show only after you reload the dashboard page: the map reads the knowledge once, when the page loads.
-3. The dashboard keeps the `extractionModel` it started with. After you change the setting, `/mnemosyne-ui` on the running dashboard says it must be restarted: end the session that started it, then run `/mnemosyne-ui` again.
-4. Saves by outside agents (Codex, Cursor and others, through the proxy) get no automatic extraction. They need `/mnemosyne-knowledge apply`.
-5. This update needs the plugin's newer engine build (`18.12.3-mnemosyne.4`, which has the knowledge tools): run `/mnemosyne-setup` once after updating. Until then extraction stays off and says so in the activity log (`engine out of date`).
+1. Moons for a memory saved or extracted after the page loaded show only after you reload the dashboard page: the map reads the knowledge once, when the page loads.
+2. The dashboard keeps the `extractionModel` and the `embeddings` setting it started with. After you change either, `/mnemosyne-ui` on the running dashboard says it must be restarted: end the session that started it, then run `/mnemosyne-ui` again.
+3. Saves by outside agents (Codex, Cursor and others, through the proxy) get no automatic extraction. They need `/mnemosyne-knowledge apply`.
+4. This update needs the plugin's newer engine build (`18.12.3-mnemosyne.7`, which has the knowledge tools, local embeddings and `reembed`): run `/mnemosyne-setup` once after updating. Until then extraction stays off and says so in the activity log (`engine out of date`), and embeddings are off: they switch on only after setup has downloaded the model.
+5. Embeddings are tested on macOS on Apple Silicon only. On Windows and Linux they are off under `auto`, and turning them on is not verified there.
 
 ### Who wrote a memory
 
@@ -228,7 +230,7 @@ For Cursor, Codex and others, use the same path as the server command. It offers
 
 The plugin hooks into Claude Code at four points:
 
-- **Session start:** adds the memory tools and the `/mnemosyne-setup`, `/mnemosyne-ui`, `/mnemosyne-tags` and `/mnemosyne-knowledge` commands, and says so if the installed engine is older than the plugin's.
+- **Session start:** adds the memory tools and the `/mnemosyne-setup`, `/mnemosyne-ui`, `/mnemosyne-tags`, `/mnemosyne-knowledge` and `/mnemosyne-embed` commands, and says so if the installed engine is older than the plugin's.
 - **System prompt:** adds a short, fixed set of rules telling Claude when to save and recall.
 - **Your prompt:** on the first prompt (again after a compaction), or one starting with a term above, looks up memories and attaches them to that prompt.
 - **Tool calls:** when Claude calls a memory tool, runs the engine once and returns the answer.
