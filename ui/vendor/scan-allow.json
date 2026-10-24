@@ -50,6 +50,7 @@
         "count": 1,
         "why": "three-forcegraph's jsonUrl property: when set, it fetches graph data from that URL. ui/map.ts never sets jsonUrl (it passes graphData), so the call never runs; if it did, the CSP's connect-src 'self' would allow only this server."
       }
-    }
+    },
+    "semantic-lib.js": {}
   }
 }
