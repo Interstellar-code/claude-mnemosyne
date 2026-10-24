@@ -9,8 +9,9 @@
 // requests, built and read by hooks/engine.ts (shared with the dashboard server).
 // The owner id (global, or the repo's) rides on MNEMOPI_SESSION_ID: recall
 // reads that owner's rows plus every `scope: 'global'` row, and forget deletes
-// only the owner's. MNEMOPI_NO_EMBEDDINGS=1 because a spawned bun panics on
-// fastembed (DESIGN §2.5), so recall is full-text only.
+// only the owner's. Embeddings are off until /mnemosyne-setup downloads the
+// model and engineEnv turns them on; MNEMOPI_NO_EMBEDDINGS=1 keeps recall
+// full-text only otherwise (DESIGN §2.5).
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, PluginOptions, Register } from 'claude-code'
 
@@ -374,7 +375,14 @@ export MNEMOPI_EMBEDDING_API_URL=
 export MNEMOPI_EMBEDDINGS_VIA_API=
 export MNEMOPI_EMBEDDING_API_KEY=
 export MNEMOPI_EMBEDDING_MODEL=${EMBEDDINGS_MODEL}
+export MNEMOPI_EMBEDDING_DIM=
+export OPENROUTER_BASE_URL=
+export OPENROUTER_API_KEY=
+export OPENAI_API_KEY=
 export PI_CONFIG_DIR=${EMBEDDINGS_CACHE_DIR}
+export XDG_CACHE_HOME=
+export OMP_PROFILE=
+export PI_PROFILE=
 export MNEMOSYNE_CLI=${shellQuote(cli)}
 export MNEMOSYNE_ACTIVITY_LOG=${activity ? shellQuote(activity) : ''}
 exec bun ${shellQuote(proxy)}
@@ -398,7 +406,14 @@ set "MNEMOPI_EMBEDDING_API_URL="\r
 set "MNEMOPI_EMBEDDINGS_VIA_API="\r
 set "MNEMOPI_EMBEDDING_API_KEY="\r
 set "MNEMOPI_EMBEDDING_MODEL=${EMBEDDINGS_MODEL}"\r
+set "MNEMOPI_EMBEDDING_DIM="\r
+set "OPENROUTER_BASE_URL="\r
+set "OPENROUTER_API_KEY="\r
+set "OPENAI_API_KEY="\r
 set "PI_CONFIG_DIR=${EMBEDDINGS_CACHE_DIR}"\r
+set "XDG_CACHE_HOME="\r
+set "OMP_PROFILE="\r
+set "PI_PROFILE="\r
 set "MNEMOSYNE_CLI=${cli}"\r
 set "MNEMOSYNE_ACTIVITY_LOG=${activity}"\r
 bun "${proxy}"\r
@@ -1111,6 +1126,13 @@ export const register: Register = (on, options) => {
         { timeoutMs: SETUP_TIMEOUT_MS },
       )
       if (installed.exitCode !== 0) {
+        // M2: when embeddings were requested but the install check could not prove
+        // the model loaded (recall had no dense score), the swap was refused and no
+        // marker is written: report "embeddings off", not a generic install failure.
+        if (embeddings && /no dense score|model did not load/i.test(`${installed.stderr}${installed.stdout}`)) {
+          await bunFs($, 'fs.rmSync(a[0], { force: true })', `${pluginRoot}/${EMBEDDINGS_MARKER}`)
+          return { text: 'Embeddings are off: the model did not load, so the engine was not swapped and no marker was written. Run /mnemosyne-setup again once the download can complete, or set the embeddings option to off.' }
+        }
         return { text: `Engine install failed; the engine already installed (if any) is unchanged:\n${`${installed.stderr}\n${installed.stdout}`.trim().slice(-800)}` }
       }
       // The model is on disk now (or embeddings are off): record which model, so
@@ -1126,7 +1148,10 @@ export const register: Register = (on, options) => {
       const external =
         options.externalMcp === true ? `\nOther MCP clients: claude mcp add mnemosyne-memory -- ${wrapper}` : ''
       const saved = filled.length > 0 ? `\nSaved defaults for ${filled.join(', ')}; restart Claude Code to see them in /plugin.` : ''
-      return { text: `Mnemosyne ready. Engine: ${engine}. Store: ${store}.${external}${saved}\n${stats}` }
+      // M2: embeddings are reported on only after the install check proved the
+      // model loaded (the marker is written above).
+      const embeddingsNote = embeddings ? '\nEmbeddings on: the model is downloaded and local only.' : ''
+      return { text: `Mnemosyne ready. Engine: ${engine}. Store: ${store}.${external}${saved}${embeddingsNote}\n${stats}` }
     } catch (err) {
       return { text: `Mnemosyne setup failed: ${(err as Error).message}` }
     }

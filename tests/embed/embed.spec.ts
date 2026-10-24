@@ -13,6 +13,7 @@ import { Database } from 'bun:sqlite'
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { engineEnv } from '../../hooks/engine'
 
 const ROOT = join(import.meta.dir, '..', '..')
 const CLI = join(ROOT, 'engine', 'src', 'cli.ts')
@@ -29,8 +30,9 @@ function tempStore() {
   return dir
 }
 
-// The production engineEnv (hooks/engine.ts), restated here so this gate uses the
-// exact variables the plugin pins. Embeddings are ON: MNEMOPI_NO_EMBEDDINGS empty.
+// The production engineEnv (hooks/engine.ts): this gate uses it instead of
+// restating the variables, so drift in engineEnv (e.g. a new pin) is caught by
+// the one real-model gate (L3). Embeddings are ON: MNEMOPI_NO_EMBEDDINGS empty.
 function embedEnv(store: string) {
   // Drop NODE_ENV/BUN_ENV=test: the engine's embeddings.ts short-circuits under a
   // test runtime and would never load fastembed; this gate must use the real path.
@@ -40,21 +42,7 @@ function embedEnv(store: string) {
   return {
     ...base,
     HOME: CACHE_HOME,
-    MNEMOPI_DATA_DIR: store,
-    MNEMOPI_SESSION_ID: 'embed-gate',
-    MNEMOPI_CHANNEL_ID: 'embed-gate',
-    MNEMOPI_NO_EMBEDDINGS: '',
-    MNEMOPI_MCP_BANK: '',
-    MNEMOPI_LLM_BASE_URL: '',
-    MNEMOPI_HOST_LLM_ENABLED: '',
-    MNEMOPI_AUTHOR_ID: '',
-    MNEMOPI_AUTHOR_TYPE: '',
-    MNEMOPI_POLYPHONIC_RECALL: '0',
-    MNEMOPI_EMBEDDING_API_URL: '',
-    MNEMOPI_EMBEDDINGS_VIA_API: '',
-    MNEMOPI_EMBEDDING_API_KEY: '',
-    MNEMOPI_EMBEDDING_MODEL: MODEL,
-    PI_CONFIG_DIR: '.claude/mnemosyne/model-cache',
+    ...engineEnv(store, 'embed-gate', { embeddings: true }),
   }
 }
 
@@ -138,5 +126,20 @@ describe('embeddings under Bun, 3 of 3 runs', () => {
       expect(dense.some(score => score > 0)).toBe(true)
     },
     300_000,
+  )
+
+  test(
+    'L1/EMB.2.a2: a one-shot run (remember then recall) exits within 5 s',
+    async () => {
+      const store = tempStore()
+      const started = performance.now()
+      const result = await runEngine(store)
+      const elapsed = performance.now() - started
+      expect(result.exitCode).toBe(0)
+      expect(result.replies.get(1)).toBeDefined()
+      expect(result.replies.get(2)).toBeDefined()
+      expect(elapsed).toBeLessThan(5_000)
+    },
+    60_000,
   )
 })

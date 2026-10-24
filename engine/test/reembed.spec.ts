@@ -63,6 +63,9 @@ function env(store: string, overrides: Record<string, string> = {}) {
 		MNEMOPI_EMBEDDING_DIM: String(DIMS),
 		MNEMOPI_EMBEDDING_MODEL: MODEL,
 		PI_CONFIG_DIR: ".claude/mnemosyne/model-cache",
+		// change 10: the API route now needs an explicit opt-in. This gate opts in
+		// so the local stub stands in for the model and keeps test:bun offline.
+		MNEMOPI_EMBEDDINGS_API_OPT_IN: "1",
 		...overrides,
 	};
 }
@@ -154,4 +157,36 @@ describe("mnemopi reembed", () => {
 		expect(vectors(store).model).toBe(MODEL);
 		expect(vectors(store).n).toBe(2);
 	}, 120_000);
+
+	test("M1: an unloadable model makes apply exit non-zero naming how many are still missing", async () => {
+		const store = join(temp("reembed-unloadable"), "store");
+		await storeWithoutVectors(store);
+		// An API model name routes to the stub only when the opt-in is on; without
+		// it the local path runs and `probe/unloadable` is not a known fastembed
+		// model, so embed() returns null and no vector is written.
+		const [stdout, stderr, exitCode] = await cli(store, ["reembed", "apply"], {
+			MNEMOPI_EMBEDDING_MODEL: "probe/unloadable",
+			MNEMOPI_EMBEDDINGS_API_OPT_IN: "",
+		});
+		expect(exitCode).toBe(1);
+		expect(`${stdout}${stderr}`).toMatch(/still have no vector/);
+		expect(vectors(store).n).toBe(0);
+	}, 60_000);
+
+	test("M1: rebuild proves the model loads before the wipe, so an unloadable model wipes nothing", async () => {
+		const store = join(temp("reembed-rebuild-unloadable"), "store");
+		await storeWithoutVectors(store);
+		expect((await cli(store, ["reembed", "apply"]))[2]).toBe(0);
+		expect(vectors(store).n).toBe(2);
+		// A different, unloadable model plus rebuild: the probe fails, so the wipe
+		// is skipped and every vector survives.
+		const [stdout, stderr, exitCode] = await cli(store, ["reembed", "rebuild"], {
+			MNEMOPI_EMBEDDING_MODEL: "probe/unloadable",
+			MNEMOPI_EMBEDDINGS_API_OPT_IN: "",
+		});
+		expect(exitCode).toBe(1);
+		expect(`${stdout}${stderr}`).toMatch(/did not load/);
+		expect(vectors(store).n).toBe(2);
+		expect(vectors(store).model).toBe(MODEL);
+	}, 60_000);
 });

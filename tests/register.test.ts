@@ -109,7 +109,14 @@ test('remember runs the private engine against the private store, global bank', 
     MNEMOPI_EMBEDDINGS_VIA_API: '',
     MNEMOPI_EMBEDDING_API_KEY: '',
     MNEMOPI_EMBEDDING_MODEL: 'BAAI/bge-small-en-v1.5',
+    MNEMOPI_EMBEDDING_DIM: '',
+    OPENROUTER_BASE_URL: '',
+    OPENROUTER_API_KEY: '',
+    OPENAI_API_KEY: '',
     PI_CONFIG_DIR: '.claude/mnemosyne/model-cache',
+    XDG_CACHE_HOME: '',
+    OMP_PROFILE: '',
+    PI_PROFILE: '',
     MNEMOPI_NO_EMBEDDINGS: '1',
   })
   // `imported`: the durable tier the engine's 24h working-memory trim skips.
@@ -1777,4 +1784,37 @@ test('EMB.4.a2: /mnemosyne-embed is registered at session start and refuses with
   expect(registered).toContain('mnemosyne-embed')
   const ran = await $.command.run({ command: 'mnemosyne-embed', args: 'nonsense' } as never)
   expect((ran as { text?: string }).text).toBe(EMBED_USAGE)
+})
+
+test('M2: setup whose install check could not prove the model loaded reports "embeddings off" and writes no marker', { options: { embeddings: 'on' } }, async ($, on) => {
+  // A host that is macOS arm64 so setup asks for embeddings, but whose installer
+  // exits 1 with the no-dense-score failure: the swap was refused, so setup must
+  // report embeddings off and write no marker.
+  on('env.get', (_$, e) => ({ value: (e as { name: string }).name === 'OS' ? 'Darwin' : '/home/u' }))
+  on('fs.stat', (_$, e) => {
+    const path = (e as { path: string }).path
+    if (path === MARKER || path.startsWith(MODEL_DIR)) return { deny: 'ENOENT' } as never
+    return { value: { kind: 'file' } } as never
+  })
+  const writes: string[] = []
+  on('fs.write', (_$, e) => {
+    writes.push((e as { path?: string }).path ?? '')
+    return { value: undefined }
+  })
+  on('process.run', (_$, e) => {
+    if ((e.argv[0] ?? '') === 'uname') {
+      const stdout = e.argv[1] === '-s' ? 'Darwin\n' : 'arm64\n'
+      return { value: { exitCode: 0, stdout, stderr: '' } } as never
+    }
+    if ((e.argv[1] ?? '').endsWith('/bin/install-engine.ts')) {
+      return { value: { exitCode: 1, stdout: '', stderr: 'install-engine: embeddings check failed: recall answered with no dense score, so the model did not load' } } as never
+    }
+    return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
+  })
+  on('ui.log', () => ({ value: undefined }))
+  on('ui.status', () => ({ value: undefined }))
+  const ran = await $.command.run({ command: 'mnemosyne-setup', args: '' } as never)
+  expect((ran as { text?: string }).text).toContain('Embeddings are off: the model did not load')
+  // No marker written: only the rmSync (fs code) touches the marker path, never a write.
+  expect(writes).toEqual([])
 })

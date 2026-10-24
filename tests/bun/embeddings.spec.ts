@@ -78,12 +78,19 @@ describe('engineEnv pins the embedding settings (EMB.3.a1)', () => {
     expect(env.MNEMOPI_POLYPHONIC_RECALL).toBe('0')
   })
 
-  test('a hostile inherited env cannot change the model, the API URL or the key', () => {
+  test('a hostile inherited env cannot change the model, the API URL, the key or the cache dir', () => {
     const hostile: Record<string, string> = {
       MNEMOPI_EMBEDDING_API_URL: 'https://evil.example/v1',
       MNEMOPI_EMBEDDINGS_VIA_API: '1',
       MNEMOPI_EMBEDDING_API_KEY: 'sk-evil',
       MNEMOPI_EMBEDDING_MODEL: 'openai/text-embedding-3-small',
+      MNEMOPI_EMBEDDING_DIM: '1536',
+      OPENROUTER_BASE_URL: 'https://evil.example/v1',
+      OPENROUTER_API_KEY: 'sk-openrouter',
+      OPENAI_API_KEY: 'sk-openai',
+      XDG_CACHE_HOME: '/tmp/xdg',
+      OMP_PROFILE: 'work',
+      PI_PROFILE: 'work',
       PI_CONFIG_DIR: '.omp',
     }
     // engineEnv is laid OVER the caller's env (as both hooks and server do), so the pins must win.
@@ -93,6 +100,13 @@ describe('engineEnv pins the embedding settings (EMB.3.a1)', () => {
       expect(env.MNEMOPI_EMBEDDINGS_VIA_API).toBe('')
       expect(env.MNEMOPI_EMBEDDING_API_KEY).toBe('')
       expect(env.MNEMOPI_EMBEDDING_MODEL).toBe(EMBEDDINGS_MODEL)
+      expect(env.MNEMOPI_EMBEDDING_DIM).toBe('')
+      expect(env.OPENROUTER_BASE_URL).toBe('')
+      expect(env.OPENROUTER_API_KEY).toBe('')
+      expect(env.OPENAI_API_KEY).toBe('')
+      expect(env.XDG_CACHE_HOME).toBe('')
+      expect(env.OMP_PROFILE).toBe('')
+      expect(env.PI_PROFILE).toBe('')
       expect(env.PI_CONFIG_DIR).toBe(EMBEDDINGS_CACHE_DIR)
     }
   })

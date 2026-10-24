@@ -53,8 +53,21 @@ export function engineEnv(store: string, owner: string, options: EngineEnvOption
     MNEMOPI_EMBEDDINGS_VIA_API: '',
     MNEMOPI_EMBEDDING_API_KEY: '',
     MNEMOPI_EMBEDDING_MODEL: EMBEDDINGS_MODEL,
+    // The dimension is fixed by the model (384 for bge-small); an inherited
+    // MNEMOPI_EMBEDDING_DIM must not change it.
+    MNEMOPI_EMBEDDING_DIM: '',
+    // The engine's API-route fallback: an empty MNEMOPI_EMBEDDING_API_URL would
+    // otherwise fall back to these, routing memory text to a remote API (C1).
+    OPENROUTER_BASE_URL: '',
+    OPENROUTER_API_KEY: '',
+    OPENAI_API_KEY: '',
     // The model cache under the plugin's root, never the shared ~/.omp one.
     PI_CONFIG_DIR: EMBEDDINGS_CACHE_DIR,
+    // pi-utils would otherwise move the cache to an inherited XDG/profile dir and
+    // the engine would download the model lazily outside setup (H1).
+    XDG_CACHE_HOME: '',
+    OMP_PROFILE: '',
+    PI_PROFILE: '',
     // On only when the caller proved the model is downloaded. Off blocks the
     // engine's lazy model download outside /mnemosyne-setup; on clears an
     // inherited MNEMOPI_NO_EMBEDDINGS (empty counts as unset in the engine).

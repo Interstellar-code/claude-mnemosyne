@@ -118,7 +118,14 @@ async function check(next: string, build: string, embeddings: boolean) {
     MNEMOPI_EMBEDDINGS_VIA_API: '',
     MNEMOPI_EMBEDDING_API_KEY: '',
     MNEMOPI_EMBEDDING_MODEL: 'BAAI/bge-small-en-v1.5',
+    MNEMOPI_EMBEDDING_DIM: '',
+    OPENROUTER_BASE_URL: '',
+    OPENROUTER_API_KEY: '',
+    OPENAI_API_KEY: '',
     PI_CONFIG_DIR: '.claude/mnemosyne/model-cache',
+    XDG_CACHE_HOME: '',
+    OMP_PROFILE: '',
+    PI_PROFILE: '',
   }
   const request = (id: number, name: string, args: Record<string, unknown>) =>
     `${JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } })}\n`
@@ -156,6 +163,22 @@ async function check(next: string, build: string, embeddings: boolean) {
       const detail = reply?.error?.message ?? reply?.result?.content?.[0]?.text ?? 'no reply'
       throw new InstallError(`embeddings check failed: ${what} did not succeed (${detail})`)
     }
+  }
+  // M2: prove the embedding path really ran, not a silent full-text fallback.
+  // A model that fails to load still answers remember/recall (full text), so exit
+  // 0 alone is not proof. The recall reply carries a dense_score > 0 only when a
+  // vector was computed and used.
+  const recallText = replies.get(3)?.result?.content?.[0]?.text ?? ''
+  const recallBody = (() => {
+    try {
+      return JSON.parse(recallText) as { results?: { dense_score?: number }[] }
+    } catch {
+      return null
+    }
+  })()
+  const dense = recallBody?.results?.some(row => (row.dense_score ?? 0) > 0)
+  if (dense !== true) {
+    throw new InstallError('embeddings check failed: recall answered with no dense score, so the model did not load')
   }
 }
 

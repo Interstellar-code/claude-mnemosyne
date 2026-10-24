@@ -7,7 +7,7 @@ import { BankManager, ValueError } from "./core/banks";
 import { BeamMemory } from "./core/beam";
 import { reconcileEmbeddingModel } from "./core/beam/store";
 import type { ImportStats, JsonValue, RecallResult } from "./core/beam/types";
-import { currentEmbeddingModel, embeddingsDisabled } from "./core/embeddings";
+import { currentEmbeddingModel, embed, embeddingsDisabled } from "./core/embeddings";
 import { runDiagnostics } from "./diagnose";
 import { main as runMcpMain } from "./mcp-server";
 
@@ -402,8 +402,26 @@ export const cmdReembed: CommandHandler = async (args, context) => {
 			out(context, "Run 'mnemopi reembed apply' to fill them.");
 			return 0;
 		}
+		// A model change wipes every stored vector; prove the active model loads
+		// before that wipe, so a broken model never destroys a valid corpus (M1).
+		if (mode === "rebuild" && staleModels.length > 0) {
+			const probe = await embed(["mnemopi reembed model probe"]);
+			if (probe === null) {
+				fail(`the embedding model ${active} did not load; no vector was written and nothing was wiped`, 1);
+			}
+		}
 		reconcileEmbeddingModel(memory);
 		if (owned) await memory.flushExtractions();
+		// Recount after the drain: a model that failed to load writes nothing, and
+		// reporting the pre-run count would claim success (M1).
+		const remaining = reembedSurvey(memory.db, active).missing;
+		if (remaining > 0) {
+			fail(
+				`re-embedded ${survey.missing - remaining} of ${survey.missing} memories (${active}); ` +
+					`${remaining} still have no vector`,
+				1,
+			);
+		}
 		out(context, `Re-embedded: ${survey.missing} memories (${active})`);
 		return 0;
 	} finally {

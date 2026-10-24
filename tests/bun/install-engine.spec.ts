@@ -253,3 +253,59 @@ for (const line of lines) {
     expect(readdirSync(engine).sort()).toEqual(listing)
   }, INSTALL_TIMEOUT)
 })
+
+// M2 (EMB review round 2): a recall that falls back to full text (dense_score 0)
+// must not count as a proved embedding path. The install check requires a dense
+// score, so a stub whose recall replies cleanly but without one still refuses the
+// swap, leaving the old engine in place.
+describe('an embeddings check whose recall has no dense score refuses the swap (M2)', () => {
+  const stubRoot = tempDir('stub-fulltext')
+  const temp = tempDir('emb-fulltext')
+  const engine = join(temp.dir, 'engine')
+  const store = join(temp.dir, 'store')
+
+  beforeAll(async () => {
+    const stubEngine = join(stubRoot.dir, 'engine')
+    mkdirSync(join(stubEngine, 'src'), { recursive: true })
+    writeFileSync(
+      join(stubEngine, 'package.json'),
+      `${JSON.stringify({ name: '@oh-my-pi/pi-mnemopi', version: ENGINE_BUILD, type: 'module' })}\n`,
+    )
+    // The stub answers remember/recall cleanly, but recall carries no dense_score:
+    // the shape of a model that silently failed to load and fell back to full text.
+    writeFileSync(
+      join(stubEngine, 'src', 'cli.ts'),
+      `const lines = (await Bun.stdin.text()).split('\\n').filter(Boolean)
+for (const line of lines) {
+  const { id, method, params } = JSON.parse(line)
+  if (method === 'tools/list') {
+    console.log(JSON.stringify({ jsonrpc: '2.0', id, result: { tools: [{ name: 'mnemopi_update', inputSchema: { properties: { metadata: {} } } }] } }))
+  } else if (params.name === 'mnemopi_recall') {
+    console.log(JSON.stringify({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify({ status: 'ok', results: [{ id: 'm1', content: 'dark mode', keyword_score: 0.9, dense_score: 0 }] }) }] } }))
+  } else {
+    console.log(JSON.stringify({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify({ status: 'stored', memory_id: 'm1' }) }] } }))
+  }
+}
+`,
+    )
+    // A working engine first, so the swap has something to keep.
+    expect((await runInstaller(engine, store)).exitCode).toBe(0)
+  })
+
+  test('a recall with no dense score refuses the swap and leaves the previous engine working', async () => {
+    const listing = readdirSync(engine).sort()
+    const child = Bun.spawn(
+      [process.execPath, join(import.meta.dir, '..', '..', 'bin', 'install-engine.ts'), stubRoot.dir, engine, store, 'embeddings'],
+      { env: process.env as Record<string, string>, stdout: 'pipe', stderr: 'pipe' },
+    )
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ])
+    expect(code).toBe(1)
+    expect(`${stdout}${stderr}`).toContain('no dense score')
+    expect(existsSync(`${engine}.next`)).toBe(false)
+    expect(readdirSync(engine).sort()).toEqual(listing)
+  }, INSTALL_TIMEOUT)
+})

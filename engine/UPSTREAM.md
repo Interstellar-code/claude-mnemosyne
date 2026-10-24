@@ -28,8 +28,9 @@ Ours, not upstream's (engine-diff ignores them): `UPSTREAM.md`, `bun.lock` (our 
 | 18.12.3-mnemosyne.3 | 68cb174dee8ac991c6594c9f9079ca3830e6371b850ebe75edc84fc1832027ef |
 | 18.12.3-mnemosyne.4 | 445e8260986ffeb14737f38ce74a7e48a5cb32b367e484c2ace5e369e74a4803 |
 | 18.12.3-mnemosyne.5 | e67c4972b298ce2692bad37b377a423881b53d1141390474782f0ce44f8a9b2f |
+| 18.12.3-mnemosyne.6 | 0444615859cc5d26331686a86ce458da92c0df9263423a7d04dd410319e78d14 |
 
-The `18.12.3` row is the untouched upstream source, for reference. `.1` had changes 1 to 3; `.2` makes the change 1 merge keep a `__proto__` key as plain data (it was dropped); `.3` adds the two knowledge tools (change 4) and keeps the first author on dedupe with empty author env unset (change 5); `.4` is the review fix round: the knowledge reply is normalised by `parseExtractedFactCategories` (change 4), and the author pair merges as one unit (change 5); `.5` turns embeddings on: fastembed is a real dependency with an onnxruntime override (change 6), the CLI exits naturally on success (change 7), the on-demand runtime install is gone (change 8), and a `reembed` command backfills vectors (change 9).
+The `18.12.3` row is the untouched upstream source, for reference. `.1` had changes 1 to 3; `.2` makes the change 1 merge keep a `__proto__` key as plain data (it was dropped); `.3` adds the two knowledge tools (change 4) and keeps the first author on dedupe with empty author env unset (change 5); `.4` is the review fix round: the knowledge reply is normalised by `parseExtractedFactCategories` (change 4), and the author pair merges as one unit (change 5); `.5` turns embeddings on: fastembed is a real dependency with an onnxruntime override (change 6), the CLI exits naturally on success (change 7), the on-demand runtime install is gone (change 8), and a `reembed` command backfills vectors (change 9); `.6` is the review fix round: `reembed` recounts after the drain and proves the model before a rebuild (change 9), and the API embedding route is refused without an explicit opt-in (change 10).
 
 ## Changes
 
@@ -55,7 +56,7 @@ Status is `open` (ours only) or `merged-upstream` (drop it at the next rebase).
 
 ### 3. Packaging: our build number
 
-- What: `package.json` `version` is `18.12.3-mnemosyne.5` (our build number) instead of `18.12.3`, so the plugin can tell its own build from the npm one (`ENGINE_BUILD` in `hooks/engine-build.ts`, the `isCurrent` check in `hooks/register.ts`, the proxy's check in `bin/mcp-proxy.ts`). Nothing else in `package.json` changes here: the dependencies stay pinned at `18.12.3` (the fastembed dependency and the onnxruntime override are change 6).
+- What: `package.json` `version` is `18.12.3-mnemosyne.6` (our build number) instead of `18.12.3`, so the plugin can tell its own build from the npm one (`ENGINE_BUILD` in `hooks/engine-build.ts`, the `isCurrent` check in `hooks/register.ts`, the proxy's check in `bin/mcp-proxy.ts`). Nothing else in `package.json` changes here: the dependencies stay pinned at `18.12.3` (the fastembed dependency and the onnxruntime override are change 6).
 - Why: a stale engine (the npm one, or an older build of ours) must be spotted and refused for features that need changes 1 and 2.
 - Files: `package.json`
 - Upstream issue: none (ours only)
@@ -91,7 +92,7 @@ Status is `open` (ours only) or `merged-upstream` (drop it at the next rebase).
 - What: `src/cli.ts` no longer calls `process.exit(code)` when a command succeeds. A clean run sets `process.exitCode = 0` and lets the event loop drain, so onnxruntime-node's teardown (ORT #24579) does not abort in `process.exit()`. A failing command still calls `process.exit(code)` and exits non-zero.
 - Why: a spawned engine that embedded must be able to exit 0; the ORT override alone is not enough on the fastembed path — an explicit `process.exit(0)` after a model session still aborts.
 - Files: `src/cli.ts`
-- Tests: `test/cli-exit.spec.ts`
+- Tests: `../../tests/embed/embed.spec.ts` (a timed < 5 s one-shot run)
 - Status: open
 
 ### 8. No on-demand fastembed install; a failed import means embeddings off
@@ -104,10 +105,18 @@ Status is `open` (ours only) or `merged-upstream` (drop it at the next rebase).
 
 ### 9. `mnemopi reembed` backfills embeddings
 
-- What: `src/cli.ts` gains a `reembed` command. No argument is a dry run: it counts the live memories with no vector for the active model and writes nothing. `apply` runs the engine's own backfill, `reconcileEmbeddingModel` (`src/core/beam/store.ts`), and drains its background work, so the memories saved before embeddings were on get vectors. `rebuild` is required when the store holds vectors from another model: `reconcileEmbeddingModel` wipes every vector on a model mismatch, which `reembed` refuses without `rebuild`. It never edits or deletes a `working_memory` row; it only writes `memory_embeddings`.
+- What: `src/cli.ts` gains a `reembed` command. No argument is a dry run: it counts the live memories with no vector for the active model and writes nothing. `apply` runs the engine's own backfill, `reconcileEmbeddingModel` (`src/core/beam/store.ts`), and drains its background work, so the memories saved before embeddings were on get vectors. `rebuild` is required when the store holds vectors from another model: `reconcileEmbeddingModel` wipes every vector on a model mismatch, which `reembed` refuses without `rebuild`. It never edits or deletes a `working_memory` row; it only writes `memory_embeddings`. After the drain it recounts the still-missing rows and exits non-zero naming how many remain, so a model that failed to load can never report success; `rebuild` first proves the model loads (embeds one probe text) before the wipe.
 - Why: the MCP and CLI paths never called the backfill; only the `Mnemopi` library class did. `/mnemosyne-embed` drives this command to fill the older memories' vectors.
 - Files: `src/cli.ts` `src/core/beam/store.ts`
 - Tests: `test/reembed.spec.ts`
+- Status: open
+
+### 10. The API embedding route is refused without an explicit opt-in
+
+- What: `src/core/embeddings.ts` `isApiModel` now returns `false` unless `MNEMOPI_EMBEDDINGS_API_OPT_IN` is a truthy flag. The plugin never sets that flag, so an empty `MNEMOPI_EMBEDDING_API_URL` can no longer fall back to an inherited `OPENROUTER_BASE_URL` (or `OPENROUTER_API_KEY` / `OPENAI_API_KEY`) and route memory text to a remote API. Local-only embeddings are the only route this build takes by default.
+- Why: a hostile shell that exports `OPENROUTER_BASE_URL` (which outside agents such as Codex usually carry, with a key) would send every memory and recall query to a remote API despite the plugin's empty `MNEMOPI_EMBEDDING_API_URL` pin, because the engine treated the empty value as unset.
+- Files: `src/core/embeddings.ts`
+- Tests: `test/embeddings-api-gate.spec.ts`
 - Status: open
 
 Not changed: `dist/types/*.d.ts` still describe upstream 18.12.3 (no `metadata` on `updateWorking`). Nothing in the plugin reads them; regenerating them needs upstream's monorepo build.

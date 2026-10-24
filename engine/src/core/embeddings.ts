@@ -248,7 +248,22 @@ export function currentEmbeddingModel(): string {
 	return defaultModel();
 }
 
+/**
+ * The API embedding route is refused in this build unless a caller explicitly
+ * opts in (change 10). The plugin never sets `MNEMOPI_EMBEDDINGS_API_OPT_IN`,
+ * so memory text can never leave this machine through the API route even when a
+ * hostile shell exports `OPENROUTER_BASE_URL` / `OPENROUTER_API_KEY` /
+ * `OPENAI_API_KEY` and an empty `MNEMOPI_EMBEDDING_API_URL` would otherwise fall
+ * back to them.
+ */
+function apiEmbeddingsOptedIn(): boolean {
+	return $flag("MNEMOPI_EMBEDDINGS_API_OPT_IN");
+}
+
 export function isApiModel(modelName: string): boolean {
+	if (!apiEmbeddingsOptedIn()) {
+		return false;
+	}
 	if (
 		modelName.startsWith("openai/") ||
 		modelName.includes("text-embedding") ||
