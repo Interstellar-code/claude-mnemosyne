@@ -1,10 +1,11 @@
 // Shared helpers for the Bun specs: temporary folders, the real installer, and
 // one-shot calls to a real engine cli.
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { engineEnv } from '../../hooks/engine'
 
+const REAL_HOME = homedir()
 export const ROOT = join(import.meta.dir, '..', '..')
 export const INSTALLER = join(ROOT, 'bin', 'install-engine.ts')
 
@@ -18,10 +19,17 @@ export function isolatedEnv(prefix = 'isolated') {
   const home = mkdtempSync(join(tmpdir(), `mnemosyne-${prefix}-`))
   const piConfig = join(home, '.claude', 'mnemosyne', 'model-cache')
   mkdirSync(piConfig, { recursive: true })
+  // Reuse the already-downloaded model cache (a cache, not user data) via a
+  // symlink so tests do not re-download it; `logs/` stays a real folder in the
+  // temp home and is removed with it. rmSync(home, { recursive: true }) deletes
+  // the symlink, never its target.
+  const realCache = join(REAL_HOME, '.claude', 'mnemosyne', 'model-cache', 'cache')
+  const link = join(piConfig, 'cache')
+  try { if (existsSync(realCache)) symlinkSync(realCache, link, 'dir') } catch {}
   _isolatedHomes.add(home)
   return { HOME: home, PI_CONFIG_DIR: piConfig }
 }
-function _cleanupIsolated() { for (const h of _isolatedHomes) { try { rmSync(h, { recursive: true, force: true }) } catch {} } }
+function _cleanupIsolated() { for (const h of _isolatedHomes) { try { rmSync(h, { recursive: true, force: true }) } catch {} } } // rmSync removes the cache symlink, not its target
 process.on('exit', _cleanupIsolated)
 
 export async function runInstaller(engineDir: string, storeDir: string, env: Record<string, string> = {}) {
