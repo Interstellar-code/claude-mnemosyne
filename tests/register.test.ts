@@ -31,6 +31,8 @@ type Extra = {
   embeddingsReady?: boolean
   // L4: the marker is present but the model files are missing (a half-finished setup).
   markerOnly?: boolean
+  // META.3: the engine's text for a request, by tool name and arguments; undefined falls back to `reply`.
+  replyFor?: (name: string, args: Record<string, unknown>) => string | undefined
 }
 const MODEL_DIR = '/home/u/.claude/mnemosyne/model-cache/cache/fastembed/Qdrant_bge-small-en-v1.5-onnx-Q'
 const MARKER = '/home/u/.claude/mnemosyne/embeddings.json'
@@ -73,12 +75,12 @@ function world(on: On, reply: string, isInstalled = true, exitCode = 0, build: s
       return { value: { exitCode: 0, stdout, stderr: '' } } as never
     }
     runs.push(e)
-    const ids = (e.init?.stdin ?? '').split('\n').filter(Boolean).map(line => JSON.parse(line).id)
+    const sent = (e.init?.stdin ?? '').split('\n').filter(Boolean).map(line => JSON.parse(line))
     const stdout =
       exitCode !== 0
         ? ''
-        : ids
-            .map(id => `${JSON.stringify({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: reply }] } })}\n`)
+        : sent
+            .map(({ id, params }) => `${JSON.stringify({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: extra.replyFor?.(params.name, params.arguments) ?? reply }] } })}\n`)
             .join('')
     return { value: { exitCode, stdout, stderr: '' } } as never
   })
@@ -207,6 +209,139 @@ test('META.1.a3: the rules text asks for a kind and says to update or replace ra
   for (const name of ['fact', 'preference', 'instruction', 'decision', 'context', 'error', 'artifact', 'event']) expect(rules).toContain(name)
   expect(rules).toContain('near-duplicate')
   expect(rules).toMatch(/update it \(or replace it/)
+})
+
+// ---- META.3: G3, a save warns about near-duplicates ----
+
+const NEAR = { id: 'abcd1234abcd1234', owner: 'global', score: 0.93, preview: 'We deploy the service on Fridays only' }
+const STORED_REPLY = '{"status":"stored","memory_id":"a1b2c3d4e5f60718"}'
+const nearWorld = (on: On, matches: unknown[] = [NEAR], extra: Extra = {}) =>
+  world(on, STORED_REPLY, true, 0, ENGINE_BUILD, {
+    embeddingsReady: true,
+    replyFor: name => (name === 'mnemopi_similar' ? JSON.stringify({ matches, embeddings: true }) : undefined),
+    ...extra,
+  })
+const names = (runs: Run[]) => runs.map(run => (JSON.parse(run.init!.stdin!.split('\n')[0]!).params as { name: string }).name)
+const NEAR_TEXT = 'We ship the service every Friday afternoon only.'
+
+test('META.3.a1: before a save the engine is asked mnemopi_similar (top 3, 0.88) as its own run, then the save', async ($, on) => {
+  const runs = nearWorld(on, [])
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: NEAR_TEXT, kind: 'fact' })
+  expect(names(runs)).toEqual(['mnemopi_similar', 'mnemopi_remember'])
+  expect(request(runs[0]!).arguments).toEqual({ content: NEAR_TEXT, top_k: 3, min_score: 0.88 })
+  expect(runs[0]!.init?.env?.MNEMOPI_SESSION_ID).toBe(runs[1]!.init?.env?.MNEMOPI_SESSION_ID)
+  // No close memory: the save is unchanged, with no guard key and no warning.
+  expect('metadata' in request(runs[1]!).arguments).toBe(false)
+  expect(ran.result).toBe(STORED_REPLY)
+})
+
+test('META.3.a2: strict mode refuses a save with a close memory, naming id, owner, score and preview, and the save is never sent', async ($, on) => {
+  const runs = nearWorld(on)
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: NEAR_TEXT, kind: 'fact' })
+  expect(names(runs)).toEqual(['mnemopi_similar'])
+  expect(ran.deny).toContain('G3')
+  expect(ran.deny).toContain(NEAR.id)
+  expect(ran.deny).toContain('owner global')
+  expect(ran.deny).toContain('0.93')
+  expect(ran.deny).toContain(NEAR.preview)
+  expect(ran.deny).toContain('Update one of these instead')
+  expect(ran.deny).toContain('confirm: true')
+  // The log line holds the rule id only: no memory text.
+  const logged = lines(runs).find(entry => entry.action === 'remember')!
+  expect(logged).toMatchObject({ ok: false, error: 'guard:G3' })
+  expect(JSON.stringify(logged)).not.toContain('Friday')
+})
+
+test('META.3.a2: confirm: true saves it, flagged near-duplicate:<id> in metadata.guard, with the matches in the reply', async ($, on) => {
+  const runs = nearWorld(on)
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: NEAR_TEXT, kind: 'fact', tags: ['ops'], confirm: true })
+  expect(ran.deny).toBeUndefined()
+  expect(names(runs)).toEqual(['mnemopi_similar', 'mnemopi_remember'])
+  expect(request(runs[1]!).arguments.metadata).toEqual({ tags: ['ops'], guard: [`near-duplicate:${NEAR.id}`] })
+  expect('confirm' in request(runs[1]!).arguments).toBe(false)
+  const [reply, ...warnings] = String(ran.result).split('\n')
+  expect(reply).toBe(STORED_REPLY)
+  expect(warnings).toHaveLength(1)
+  expect(warnings[0]).toContain(NEAR.id)
+  expect(warnings[0]).toContain('Update one of these instead')
+})
+
+test('META.3.a2: in warn mode the save lands at once with the flag and the warning', { options: { guardMode: 'warn' } }, async ($, on) => {
+  const runs = nearWorld(on, [NEAR, { ...NEAR, id: 'ffff0000ffff0000', score: 0.9, owner: 'project-x' }])
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: NEAR_TEXT, kind: 'fact' })
+  expect(ran.deny).toBeUndefined()
+  expect(request(runs[1]!).arguments.metadata).toEqual({ guard: [`near-duplicate:${NEAR.id}`, 'near-duplicate:ffff0000ffff0000'] })
+  expect(String(ran.result)).toContain('owner project-x')
+})
+
+test('META.3.a2: a G4 warning and a near-duplicate flag sit together in metadata.guard', { options: { guardMode: 'warn' } }, async ($, on) => {
+  const runs = nearWorld(on)
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'Today the importer was rewired to use the guard module', kind: 'fact' })
+  expect(request(runs[1]!).arguments.metadata).toEqual({ guard: ['G4', `near-duplicate:${NEAR.id}`] })
+})
+
+test('META.3.a2: a refused save leaves the remember trigger for the retry, which is still the human\'s', async ($, on) => {
+  const runs = nearWorld(on)
+  on('prompt.submit', (_$, e) => ({ text: e.text, context: e.context }))
+  await $.prompt.submit(trigger() as never)
+  const refused = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: NEAR_TEXT, kind: 'fact' })
+  expect(refused.deny).toContain('G3')
+  const retry = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: NEAR_TEXT, kind: 'fact', confirm: true })
+  expect(retry.deny).toBeUndefined()
+  expect(request(runs[runs.length - 1]!).arguments).toMatchObject({ author_type: 'human', veracity: 'stated', source: 'user', trust_tier: 'STATED' })
+})
+
+test('META.3.a3: with embeddings off no similar request is made and the save is unchanged', async ($, on) => {
+  const runs = world(on, STORED_REPLY, true, 0, ENGINE_BUILD, { replyFor: name => (name === 'mnemopi_similar' ? JSON.stringify({ matches: [NEAR], embeddings: true }) : undefined) })
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: NEAR_TEXT, kind: 'fact' })
+  expect(names(runs)).toEqual(['mnemopi_remember'])
+  expect(ran.result).toBe(STORED_REPLY)
+})
+
+test('META.3.a3: the embeddings option off, or an engine that says embeddings false, gives no warning', async ($, on) => {
+  const falseRuns = nearWorld(on, [NEAR], { replyFor: name => (name === 'mnemopi_similar' ? JSON.stringify({ matches: [], embeddings: false }) : undefined) })
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: NEAR_TEXT, kind: 'fact' })
+  expect(ran.deny).toBeUndefined()
+  expect(names(falseRuns)).toEqual(['mnemopi_similar', 'mnemopi_remember'])
+  expect(ran.result).toBe(STORED_REPLY)
+})
+
+test('META.3.a3: the embeddings setting off skips the check even with the model in place', { options: { embeddings: 'off' } }, async ($, on) => {
+  const runs = nearWorld(on)
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: NEAR_TEXT, kind: 'fact' })
+  expect(names(runs)).toEqual(['mnemopi_remember'])
+  expect(ran.deny).toBeUndefined()
+})
+
+test('META.3: the check fails open: a reply that is not JSON gives no warning and the save lands', async ($, on) => {
+  const runs = nearWorld(on, [], { replyFor: name => (name === 'mnemopi_similar' ? 'not json at all' : undefined) })
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: NEAR_TEXT, kind: 'fact' })
+  expect(ran.deny).toBeUndefined()
+  expect(names(runs)).toEqual(['mnemopi_similar', 'mnemopi_remember'])
+  expect('metadata' in request(runs[1]!).arguments).toBe(false)
+})
+
+test('META.3: a match below 0.88 gives no warning and the save lands', async ($, on) => {
+  const runs = nearWorld(on, [{ ...NEAR, score: 0.87 }])
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: NEAR_TEXT, kind: 'fact' })
+  expect(ran.deny).toBeUndefined()
+  expect('metadata' in request(runs[runs.length - 1]!).arguments).toBe(false)
+  expect(ran.result).toBe(STORED_REPLY)
+})
+
+test('META.3: saving the same text again is the engine\'s dedupe, not a near-duplicate', async ($, on) => {
+  const runs = nearWorld(on, [{ id: 'abcd1234abcd1234', owner: 'global', score: 1, preview: NEAR_TEXT.slice(0, 80) }])
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: NEAR_TEXT, kind: 'fact' })
+  expect(ran.deny).toBeUndefined()
+  expect('metadata' in request(runs[runs.length - 1]!).arguments).toBe(false)
+  expect(ran.result).toBe(STORED_REPLY)
+})
+
+test('META.3: a stale engine skips the check (mnemopi_similar needs this build) and the save still goes', async ($, on) => {
+  const runs = world(on, STORED_REPLY, true, 0, '18.12.3', { embeddingsReady: true })
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: NEAR_TEXT, kind: 'fact' })
+  expect(ran.deny).toBeUndefined()
+  expect(names(runs)).toEqual(['mnemopi_remember'])
 })
 
 test('per-project keeps a repo bank and still writes global on request', { options: { scope: 'per-project' } }, async ($, on) => {

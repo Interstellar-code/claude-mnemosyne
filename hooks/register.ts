@@ -41,8 +41,8 @@ import { buildRequests, EMBEDDINGS_CACHE_DIR, EMBEDDINGS_MODEL, engineEnv, parse
 import type { EngineRequest } from './engine'
 import { ENGINE_BUILD, SETUP_TIMEOUT_MS } from './engine-build'
 import { mnemosyneStats } from './surface'
-import { admit } from './guard'
-import type { GuardResult } from './guard'
+import { admit, NEAR_DUPLICATE_SCORE, nearDuplicateFlags, nearDuplicateMessage, nearMatchesOf } from './guard'
+import type { GuardResult, NearMatch } from './guard'
 import { expiresInDaysProblem, KIND_NAMES, kindProblem, validUntilFor, withNoKindWarning } from './kinds'
 import { cleanTags } from './tags'
 import { openDashboard, stopDashboard } from './ui-launch'
@@ -513,6 +513,25 @@ async function call($: EngineInterface, options: PluginOptions, name: string, ar
   const [answer] = await runAll($, options, [[name, args]], as)
   if (answer instanceof Error) throw answer
   return answer ?? ''
+}
+
+/**
+ * G3: the close memories (cosine 0.88 or more, the engine's mnemopi_similar) of a text about to be saved.
+ * Advisory, so it fails open: embeddings off, an engine that is not installed or too old, or any failure
+ * gives none and the save goes on as it would have. Runs as the owner the save will, before it.
+ * (Two engine runs, similar then the save: $.process.run takes its whole stdin up front, and the save
+ * needs the matches for its metadata.guard and, in strict mode, may have to be refused.)
+ */
+async function nearDuplicates($: EngineInterface, options: PluginOptions, content: string, as?: string): Promise<NearMatch[]> {
+  try {
+    if (!(await isInstalled($, options)) || !(await isCurrent($, options)) || !(await embeddingsOn($, options))) return []
+    const [answer] = await runAll($, options, [['mnemopi_similar', { content, top_k: 3, min_score: NEAR_DUPLICATE_SCORE }]], as)
+    if (typeof answer !== 'string') return []
+    const reply = JSON.parse(answer) as { embeddings?: unknown; matches?: unknown }
+    return reply.embeddings === true ? nearMatchesOf(reply.matches, content) : []
+  } catch {
+    return []
+  }
 }
 
 // Recall rows carry a dozen scoring fields; the model needs only these.
@@ -1329,10 +1348,14 @@ export const register: Register = (on, options) => {
     // Strict mode: a warned save is refused until the call says confirm: true. A block has no override.
     const needsConfirm = guard?.verdict === 'warn' && guardModeOf(options) === 'strict' && input.confirm !== true
     const refusedByGuard = guard?.verdict === 'block' || needsConfirm
+    // G3 (META.3): close memories of a text about to be saved. Before the trigger is consumed, so a refusal leaves it for the retry.
+    const near = tool === 'memory_remember' && !refusedByGuard ? await nearDuplicates($, options, input.content as string) : []
+    const nearRefused = near.length > 0 && guardModeOf(options) === 'strict' && input.confirm !== true
+    const refused = refusedByGuard || nearRefused
     // KNOWX.1: only the main thread's first save after a remember phrase is the
     // human's. A subagent's event carries an agentId and never consumes the trigger.
     let provenance: { author_type: 'human'; veracity: 'stated' } | undefined
-    if (tool === 'memory_remember' && e.agentId === undefined && !refusedByGuard) {
+    if (tool === 'memory_remember' && e.agentId === undefined && !refused) {
       const session = await $.session.id().catch(() => undefined)
       if (session !== undefined) {
         // Consumed inside the updater, which sees the value as it is when the update lands: of two saves at once only one takes it.
@@ -1350,6 +1373,9 @@ export const register: Register = (on, options) => {
       try {
         if (guard?.verdict === 'block') {
           return { deny: `Mnemosyne: the save guard blocked this save (${guardIds.join(', ')}). ${guard.hits.map(hit => hit.message).join(' ')}` }
+        }
+        if (nearRefused) {
+          return { deny: `Mnemosyne: the save guard warns about this save (G3). ${nearDuplicateMessage(near)} Or resend with confirm: true if a new memory is wanted.` }
         }
         if (needsConfirm) {
           return { deny: `Mnemosyne: the save guard warns about this save (${guardIds.join(', ')}). ${guard!.hits.map(hit => hit.message).join(' ')} Resend with confirm: true if the save is wanted.` }
@@ -1376,15 +1402,16 @@ export const register: Register = (on, options) => {
         // A warned save is stored, flagged with the rule ids in metadata.guard.
         // A content update that now passes the guard clean clears an old flag (null removes the key through the metadata merge).
         const clearsGuard = tool === 'memory_update' && typeof input.content === 'string' && warnIds.length === 0
+        const flags = [...warnIds, ...nearDuplicateFlags(near)]
         const sent: Record<string, unknown> =
-          warnIds.length > 0
-            ? { ...withProvenance, metadata: { ...(withProvenance as { metadata?: object }).metadata, guard: warnIds } }
+          flags.length > 0
+            ? { ...withProvenance, metadata: { ...(withProvenance as { metadata?: object }).metadata, guard: flags } }
             : clearsGuard
               ? { ...withProvenance, metadata: { ...(withProvenance as { metadata?: object }).metadata, guard: null } }
               : withProvenance
         const text = await call($, options, name, sent, as)
         // One warning line per hit, after the engine's reply; `reply` stays the engine's own text.
-        const warnings = warnIds.length > 0 ? guard!.hits.map(hit => `\nMnemosyne guard warning: ${hit.message}`).join('') : ''
+        const warnings = (warnIds.length > 0 ? guard!.hits.map(hit => `\nMnemosyne guard warning: ${hit.message}`).join('') : '') + (near.length > 0 ? `\nMnemosyne guard warning: ${nearDuplicateMessage(near)}` : '')
         // A remember that named no kind is saved as 'unknown', with one warning in the reply; never a refusal.
         const noKind = tool === 'memory_remember' && (input.kind === undefined || input.kind === null)
         return { reply: text, result: name === 'mnemopi_recall' ? JSON.stringify(compact(text)) : name === 'mnemopi_stats' ? mnemosyneStats(text) : `${noKind ? withNoKindWarning(text) : text}${warnings}` }
@@ -1393,9 +1420,9 @@ export const register: Register = (on, options) => {
       }
     })()
     if (action !== undefined) {
-      const blocked = refusedByGuard
+      const blocked = refused
       // A refused call logs its rule ids only: no content text, in the line or the error.
-      const outcome = blocked ? { ok: false, error: `guard:${guardIds.join(',')}` } : 'deny' in answer ? { ok: false, error: answer.deny } : callOutcome(action, input, answer.reply)
+      const outcome = blocked ? { ok: false, error: `guard:${[...guardIds, ...(near.length > 0 ? ['G3'] : [])].join(',')}` } : 'deny' in answer ? { ok: false, error: answer.deny } : callOutcome(action, input, answer.reply)
       // Tags as the engine gets them, cleaned, as the proxy logs them.
       const shown = Array.isArray(input.tags) ? { ...input, tags: cleanTags(input.tags) } : input
       await record($, options, [{ action, origin: 'tool', owner: as, text: blocked ? '' : callText(action, shown), ...outcome, ...(provenance ?? {}) }])
