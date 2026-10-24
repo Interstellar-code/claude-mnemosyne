@@ -245,6 +245,22 @@ export const SIMILAR_SCHEMA = {
 	required: ["content"],
 } as const;
 
+export const EXPIRE_UNUSED_SCHEMA = {
+	type: "object",
+	properties: {
+		days: { type: "number", description: "Days without a recall before a memory is unused. At least 30.", default: 90 },
+		kinds: {
+			type: "array",
+			items: { type: "string" },
+			description: "Kinds (memory_type) that may expire. fact, preference, instruction, decision and unknown never do.",
+			default: ["context", "event", "error", "artifact"],
+		},
+		dry_run: { type: "boolean", description: "List the candidates and change nothing.", default: true },
+		limit: { type: "number", description: "At most this many rows, 1 to 200.", default: 50 },
+		bank: { type: "string", default: "default" },
+	},
+} as const;
+
 export const UPDATE_SCHEMA = {
 	type: "object",
 	properties: {
@@ -354,6 +370,12 @@ export const TOOLS: readonly ToolDefinition[] = [
 		name: "mnemopi_similar",
 		description: "Read-only: the closest live memories to a text by embedding cosine. Writes nothing.",
 		inputSchema: SIMILAR_SCHEMA,
+	},
+	{
+		name: "mnemopi_expire_unused",
+		description:
+			"Set valid_until on the caller's own memories of the expirable kinds that nobody has recalled for N days. Dry run by default; never deletes; update with restore brings a row back.",
+		inputSchema: EXPIRE_UNUSED_SCHEMA,
 	},
 	{
 		name: "mnemopi_recall",
@@ -632,6 +654,33 @@ async function handleSimilar(args: ToolArguments): Promise<ToolResult> {
 		const vector = await embedQuery(content);
 		if (vector === null) return { matches: [], embeddings: false };
 		return { matches: beam.similarWorking(vector, topK, minScore), embeddings: true };
+	});
+}
+
+const EXPIRABLE_KINDS = ["context", "event", "error", "artifact"];
+
+async function handleExpireUnused(args: ToolArguments): Promise<ToolResult> {
+	const days = Math.max(30, numberArg(args, "days", 90));
+	const limit = Math.min(200, Math.max(1, Math.trunc(numberArg(args, "limit", 50))));
+	// Anything but an explicit boolean false is a dry run.
+	const dryRun = args.dry_run !== false;
+	let kinds = EXPIRABLE_KINDS;
+	if ("kinds" in args) {
+		const given = args.kinds;
+		if (!Array.isArray(given) || !given.every(kind => typeof kind === "string" && kind.trim().length > 0))
+			return { error: "kinds must be a list of non-empty strings" };
+		kinds = given.map(kind => (kind as string).trim());
+	}
+	return withBeam(args, (beam, bank) => {
+		const rows = beam.expireUnused({ days, kinds, dryRun, limit });
+		return {
+			status: "ok",
+			dry_run: dryRun,
+			days,
+			count: rows.length,
+			[dryRun ? "candidates" : "expired"]: rows,
+			bank,
+		};
 	});
 }
 
@@ -1092,6 +1141,7 @@ const TOOL_HANDLERS: Record<string, Handler> = {
 	mnemopi_remember: handleRemember,
 	mnemopi_recall: handleRecall,
 	mnemopi_similar: handleSimilar,
+	mnemopi_expire_unused: handleExpireUnused,
 	mnemopi_shared_remember: handleSharedRemember,
 	mnemopi_shared_recall: handleSharedRecall,
 	mnemopi_shared_forget: handleSharedForget,

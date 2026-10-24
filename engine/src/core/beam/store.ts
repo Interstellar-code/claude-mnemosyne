@@ -903,6 +903,119 @@ export function similarWorking(
 	return matches.slice(0, topK);
 }
 
+/** Kinds `expireUnused` never touches, whatever the caller passes (mnemosyne change 15). */
+export const PROTECTED_KINDS: readonly string[] = ["fact", "preference", "instruction", "decision", "unknown"];
+
+export interface ExpireUnusedOptions {
+	/** Idle days before a row is a candidate. */
+	readonly days: number;
+	/** Kinds (`memory_type`) that may expire. */
+	readonly kinds: readonly string[];
+	/** True lists the candidates and writes nothing. */
+	readonly dryRun: boolean;
+	/** At most this many rows, longest unused first. */
+	readonly limit: number;
+	/** The clock, for tests. */
+	readonly now?: Date;
+}
+
+export interface ExpiredRow {
+	readonly id: string;
+	readonly kind: string;
+	readonly last_used: string;
+	readonly preview: string;
+}
+
+/** SQLite's `CURRENT_TIMESTAMP` is 'YYYY-MM-DD HH:MM:SS' in UTC; recall writes ISO. Both read as UTC. */
+function utcMillis(value: unknown): number | null {
+	if (typeof value !== "string" || value === "") return null;
+	const text = /(?:Z|[+-]\d\d:?\d\d)$/.test(value) ? value : `${value.replace(" ", "T")}Z`;
+	const ms = Date.parse(text);
+	return Number.isNaN(ms) ? null : ms;
+}
+
+/** True unless the metadata is readable JSON that does not pin the row: unreadable metadata is spared. */
+function isPinnedOrUnreadable(metadataJson: unknown): boolean {
+	if (metadataJson == null || metadataJson === "") return false;
+	try {
+		const parsed = JSON.parse(String(metadataJson)) as unknown;
+		if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return true;
+		const pinned = (parsed as Record<string, unknown>).pinned;
+		return pinned === true || pinned === 1 || pinned === "true";
+	} catch {
+		return true;
+	}
+}
+
+/**
+ * Expires working memories nobody has recalled for `days` (mnemosyne change 15). The caller's own
+ * rows only (`session_id`); a row is a candidate when its scope is not 'session', it has no
+ * `valid_until` and no `superseded_by`, its `memory_type` is in `kinds` (never a protected kind),
+ * it is not pinned (`metadata.pinned`), and `max(last_recalled, created_at)` is older than `days`.
+ * A real run sets `valid_until` to now on each, in one transaction, and writes nothing else:
+ * nothing is deleted and `restoreWorking` brings each row back.
+ */
+export function expireUnused(beam: BeamMemoryState, options: ExpireUnusedOptions): ExpiredRow[] {
+	const kinds = options.kinds.filter(kind => !PROTECTED_KINDS.includes(kind));
+	if (kinds.length === 0 || options.limit <= 0) return [];
+	const now = options.now ?? new Date();
+	const cutoff = now.getTime() - options.days * 86_400_000;
+	const select = (): ExpiredRow[] => {
+		const rows = beam.db
+			.query(`
+				SELECT id, memory_type, content, metadata_json, created_at, last_recalled
+				FROM working_memory
+				WHERE session_id = ?
+				  AND scope IS NOT NULL AND scope != 'session'
+				  AND valid_until IS NULL
+				  AND superseded_by IS NULL
+				  AND memory_type IN (${kinds.map(() => "?").join(", ")})
+			`)
+			.all(beam.sessionId, ...kinds) as {
+			id: string;
+			memory_type: string;
+			content: string;
+			metadata_json: unknown;
+			created_at: unknown;
+			last_recalled: unknown;
+		}[];
+		const candidates: (ExpiredRow & { ms: number })[] = [];
+		for (const row of rows) {
+			const created = utcMillis(row.created_at);
+			const recalled = utcMillis(row.last_recalled);
+			// No readable clock at all: spare the row.
+			const used = Math.max(created ?? Number.NEGATIVE_INFINITY, recalled ?? Number.NEGATIVE_INFINITY);
+			if (!Number.isFinite(used) || used >= cutoff) continue;
+			if (isPinnedOrUnreadable(row.metadata_json)) continue;
+			candidates.push({
+				id: row.id,
+				kind: row.memory_type,
+				last_used: toUtcIso(new Date(used)),
+				preview: String(row.content).slice(0, 80),
+				ms: used,
+			});
+		}
+		candidates.sort((a, b) => a.ms - b.ms || (a.id < b.id ? -1 : 1));
+		return candidates.slice(0, options.limit).map(({ ms: _ms, ...row }) => row);
+	};
+	if (options.dryRun) return select();
+	const expired = immediateTransaction(beam.db, () => {
+		const chosen = select();
+		const stamp = toUtcIso(now);
+		const kept: ExpiredRow[] = [];
+		for (const row of chosen) {
+			const changes = beam.db.run(
+				"UPDATE working_memory SET valid_until = ? WHERE id = ? AND session_id = ? AND valid_until IS NULL AND superseded_by IS NULL",
+				[stamp, row.id, beam.sessionId],
+			).changes;
+			if (changes > 0) kept.push(row);
+		}
+		return kept;
+	});
+	if (expired.length > 0) invalidateCaches(beam);
+	return expired;
+}
+
 export function get(beam: BeamMemoryState, memoryId: string): Row | null {
 	using workingStatement = beam.db.prepare(`
 		SELECT id, content, source, timestamp, session_id,

@@ -30,7 +30,7 @@ Ours, not upstream's (engine-diff ignores them): `UPSTREAM.md`, `bun.lock` (our 
 | 18.12.3-mnemosyne.5 | e67c4972b298ce2692bad37b377a423881b53d1141390474782f0ce44f8a9b2f |
 | 18.12.3-mnemosyne.6 | 0444615859cc5d26331686a86ce458da92c0df9263423a7d04dd410319e78d14 |
 | 18.12.3-mnemosyne.7 | 4c6e5c1512eeb225d91d5c733b668860d6b324eea94e31ac302473da44eccb96 |
-| 18.12.3-mnemosyne.8 | b4d5c65c58da40d92d721f78481786b8c14c2f05577f367861ef1741b53db172 |
+| 18.12.3-mnemosyne.8 | 95deafd2de12e73f7709514d5594665453272a2d65f39db32dafbe59e3e30789 |
 
 The `18.12.3` row is the untouched upstream source, for reference. `.1` had changes 1 to 3; `.2` makes the change 1 merge keep a `__proto__` key as plain data (it was dropped); `.3` adds the two knowledge tools (change 4) and keeps the first author on dedupe with empty author env unset (change 5); `.4` is the review fix round: the knowledge reply is normalised by `parseExtractedFactCategories` (change 4), and the author pair merges as one unit (change 5); `.5` turns embeddings on: fastembed is a real dependency with an onnxruntime override (change 6), the CLI exits naturally on success (change 7), the on-demand runtime install is gone (change 8), and a `reembed` command backfills vectors (change 9); `.6` is the review fix round: `reembed` recounts after the drain and proves the model before a rebuild (change 9), and the API embedding route is refused without an explicit opt-in (change 10); `.7` is the second fix round: the fastembed cache dir is read from the plugin-pinned `PI_CONFIG_DIR` directly, immune to the dotenv/XDG/profile refill (change 11), and the dry run prints the 'apply' hint only when something is missing (change 9). `.8` is phase MODEL (v3): the trim spares every row whose scope is not 'session' (change 12). Later MODEL tasks add their changes to this build and re-record its hash.
 
@@ -151,6 +151,14 @@ Status is `open` (ours only) or `merged-upstream` (drop it at the next rebase).
 - Why: the plugin needs to ask "is this already remembered?" before a save without paying for a recall that bumps counts; the 0.88 default is the threshold chosen in `research/v3-research.md` section 3.5.
 - Files: `src/mcp-tools.ts` `src/core/beam/store.ts` `src/core/beam/index.ts`
 - Tests: `test/similar.spec.ts` (fixture vectors through a local embeddings stub), `../../tests/embed/similar.spec.ts` (the real model)
+- Status: open
+
+### 15. mnemopi_expire_unused: expire memories nobody has recalled for N days
+
+- What: a new engine tool `mnemopi_expire_unused { days, kinds, dry_run, limit }`. `days` defaults to 90 and is held to at least 30; `kinds` (the `memory_type` values) defaults to `context`, `event`, `error`, `artifact`, and `fact`, `preference`, `instruction`, `decision` and `unknown` are removed from any list given (`PROTECTED_KINDS`); `limit` defaults to 50 and is held to 1-200; `dry_run` is true unless the argument is the boolean `false`. Only the caller's own rows are looked at (`session_id = MNEMOPI_SESSION_ID`). A row is a candidate when its scope is set and is not `session`, it has no `valid_until` and no `superseded_by`, its kind is in the list, it is not pinned (`metadata.pinned` true, 1 or "true"; metadata that is not a readable JSON object counts as pinned and the row is spared), and `max(last_recalled, created_at)` is older than `days` (a row with no readable clock is spared). Candidates are taken longest unused first. A dry run returns `{ status, dry_run: true, days, count, candidates: [{ id, kind, last_used, preview }] }` and writes nothing; a real run returns the same rows under `expired`, after one `BEGIN IMMEDIATE` transaction that sets `valid_until` to now on each (guarded again by `valid_until IS NULL AND superseded_by IS NULL`) and nothing else. Nothing is deleted, and `mnemopi_update` with `restore: true` (change 13) brings each row back. `kinds` that is not a list of non-empty strings is refused. It is not in `bin/mcp-proxy.ts`'s allow-list, so no agent can call it. Recalling a row resets its clock, because recall writes `last_recalled`; it only reads the row's own `working_memory` clock, so a recall served by a consolidated episodic copy does not reset it.
+- Why: Rohit chose auto-expire (2026-10-24) so unpinned project-state notes fade without anyone retiring them by hand; the guards (own rows, expirable kinds, pinned exempt, dry run by default, no delete, restore) keep it from losing a memory he wants.
+- Files: `src/mcp-tools.ts` `src/core/beam/store.ts` `src/core/beam/index.ts`
+- Tests: `test/expire-unused.spec.ts`
 - Status: open
 
 Not changed: `dist/types/*.d.ts` still describe upstream 18.12.3 (no `metadata` on `updateWorking`). Nothing in the plugin reads them; regenerating them needs upstream's monorepo build.

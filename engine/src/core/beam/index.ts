@@ -43,6 +43,9 @@ import {
 	scratchpadRead,
 	scratchpadWrite,
 	type MetadataPatch,
+	type ExpiredRow,
+	type ExpireUnusedOptions,
+	expireUnused,
 	restoreWorking,
 	type SimilarMatch,
 	similarWorking,
@@ -265,6 +268,10 @@ export class BeamMemory implements BeamMemoryState {
 
 	restoreWorking(memoryId: string): "restored" | "unchanged" | "not_found" {
 		return restoreWorking(this, memoryId);
+	}
+
+	expireUnused(options: ExpireUnusedOptions): ExpiredRow[] {
+		return expireUnused(this, options);
 	}
 
 	similarWorking(queryVector: ArrayLike<number>, topK: number, minScore: number): SimilarMatch[] {
