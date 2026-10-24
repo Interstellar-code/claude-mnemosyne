@@ -647,9 +647,9 @@ button.toggle-name:focus-visible { outline: 2px solid var(--accent); outline-off
 /* The dark stage with its overlays: path (top left), find (top right), controls and hint (bottom). */
 .stage {
   position: relative;
-  height: 540px;
+  /* Wide screens: the graph fills the window below the header, never under 540px. */
+  height: max(540px, calc(100vh - 150px));
   min-height: 360px;
-  max-height: 80vh;
   border-radius: 14px;
   overflow: hidden;
   background: var(--stage-bg);

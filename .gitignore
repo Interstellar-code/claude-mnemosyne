@@ -8,3 +8,7 @@ node_modules/
 .omc/
 **/.omc/
 .serena/
+
+# MatrixKoder data for this repo (database, plans, runs); set through MK_HOME in .claude/settings.local.json
+.matrixkoder/
+.claude/settings.local.json

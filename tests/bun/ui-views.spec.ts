@@ -1216,12 +1216,12 @@ describe('QAPAGE R1: the page, read as a tree and a stylesheet', () => {
     expect(styleOf(stage, rules, 'max-height', [PHONE])).toBe('none')
     // On the QA's 390x844 phone: 60vh is 506px, so the canvas ends well above the fold of a 844px screen once the header (about 150px) is counted.
     expect(Math.round(0.6 * 844)).toBe(506)
-    // Wide screens: rail, centre (graph, then the selection card) and the side column in a row; the stage 540px.
+    // Wide screens: rail, centre (graph, then the selection card) and the side column in a row; the stage fills the window, never under 540px.
     expect(flowOf(view, rules, [])).toEqual(['map-rail', 'map-centre', 'map-side'])
     // The Back link is hidden outside the phone query, and starts hidden in the markup.
     expect(styleOf(byIdIn(tree, 'map-back'), rules, 'display', [])).toBe('none')
     expect(styleOf(view, rules, 'flex-direction', [])).toBeUndefined()
-    expect(styleOf(stage, rules, 'height', [])).toBe('540px')
+    expect(styleOf(stage, rules, 'height', [])).toBe('max(540px, calc(100vh - 150px))')
     expect(styleOf(byIdIn(tree, 'map-inspector'), rules, 'order', [])).toBeUndefined()
     expect(rules.filter(rule => rule.media === null && 'order' in rule.decls)).toEqual([])
     // Nothing inside the phone query reaches a wide screen: every rule it holds is in that one media query.
