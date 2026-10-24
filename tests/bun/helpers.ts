@@ -31,7 +31,7 @@ export async function engineCall(cli: string, store: string, owner: string, mess
   const piConfig = join(home, '.claude', 'mnemosyne', 'model-cache')
   mkdirSync(piConfig, { recursive: true })
   const child = Bun.spawn([process.execPath, cli, 'mcp'], {
-    env: { ...(process.env as Record<string, string>), HOME: home, PI_CONFIG_DIR: piConfig, ...engineEnv(store, owner) },
+    env: { ...(process.env as Record<string, string>), ...engineEnv(store, owner), HOME: home, PI_CONFIG_DIR: piConfig },
     stdin: 'pipe',
     stdout: 'pipe',
     stderr: 'pipe',
