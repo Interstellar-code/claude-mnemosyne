@@ -28,7 +28,9 @@ export function isolatedEnv(prefix = 'isolated') {
   const link = join(piConfig, 'cache')
   try { if (existsSync(realCache)) symlinkSync(realCache, link, 'dir') } catch {}
   _isolatedHomes.add(home)
-  return { HOME: home, PI_CONFIG_DIR: piConfig }
+  // The package cache is a download cache, not user data; reusing it keeps
+  // tests offline-fast and writes no logs to the real home.
+  return { HOME: home, PI_CONFIG_DIR: piConfig, BUN_INSTALL_CACHE_DIR: process.env.BUN_INSTALL_CACHE_DIR || join(REAL_HOME, '.bun', 'install', 'cache') }
 }
 function _cleanupIsolated() { for (const h of _isolatedHomes) { try { rmSync(h, { recursive: true, force: true }) } catch {} } } // rmSync removes the cache symlink, not its target
 process.on('exit', _cleanupIsolated)
