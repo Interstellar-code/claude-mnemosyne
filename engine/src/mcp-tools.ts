@@ -34,6 +34,12 @@ export const REMEMBER_SCHEMA = {
 			default: "session",
 		},
 		valid_until: { type: "string", description: "Optional expiry date or timestamp." },
+		memory_type: { type: "string", description: "Optional kind of memory, stored as given." },
+		trust_tier: {
+			type: "string",
+			enum: ["STATED", "DERIVED", "EXTERNAL_WRITE", "IMPORTED"],
+			description: "Provenance tier. Any other value is ignored and the tier is derived from source.",
+		},
 		extract_entities: {
 			type: "boolean",
 			description: "Extract named entities for fuzzy recall.",
@@ -237,6 +243,13 @@ export const UPDATE_SCHEMA = {
 			type: "object",
 			description: "Keys to merge into the memory's metadata. A key set to null is removed; other keys stay.",
 		},
+		memory_type: { type: "string", description: "New kind of memory." },
+		valid_until: { type: ["string", "null"], description: "New expiry date or timestamp; null clears the expiry." },
+		restore: {
+			type: "boolean",
+			description:
+				"Restore a retired memory of your own: clears valid_until and superseded_by. Cannot be combined with other fields.",
+		},
 		bank: { type: "string", default: "default" },
 	},
 	required: ["memory_id"],
@@ -403,7 +416,7 @@ export const TOOLS: readonly ToolDefinition[] = [
 	},
 	{
 		name: "mnemopi_update",
-		description: "Update the content, importance or metadata of an existing memory.",
+		description: "Update the content, importance, metadata, kind or expiry of an existing memory, or restore a retired one.",
 		inputSchema: UPDATE_SCHEMA,
 	},
 	{
@@ -452,6 +465,28 @@ function numberArg(args: ToolArguments, key: string, fallback: number): number {
 function booleanArg(args: ToolArguments, key: string, fallback = false): boolean {
 	const value = args[key];
 	return typeof value === "boolean" ? value : fallback;
+}
+
+const TRUST_TIER_ARGS: Record<string, true> = { STATED: true, DERIVED: true, EXTERNAL_WRITE: true, IMPORTED: true };
+
+/** A known trust tier, else undefined so the engine derives the tier from the source. */
+function trustTierArg(args: ToolArguments): string | undefined {
+	const value = args.trust_tier;
+	return typeof value === "string" && TRUST_TIER_ARGS[value] === true ? value : undefined;
+}
+
+/** A non-empty memory_type as given, else undefined. */
+function memoryTypeArg(args: ToolArguments): string | undefined {
+	const value = args.memory_type;
+	return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+/** An expiry as a UTC ISO timestamp; null when absent or empty; an `{ error }` when it is not a date. */
+function validUntilArg(args: ToolArguments): string | null | { error: string } {
+	const value = args.valid_until;
+	if (value === undefined || value === null || value === "") return null;
+	if (typeof value !== "string" || Number.isNaN(Date.parse(value))) return { error: "valid_until must be a date or timestamp" };
+	return new Date(value).toISOString();
 }
 
 function metadataArg(args: ToolArguments): Record<string, JsonValue> | null {
@@ -552,6 +587,8 @@ function required(args: ToolArguments, key: string): string | ToolResult {
 async function handleRemember(args: ToolArguments): Promise<ToolResult> {
 	const content = required(args, "content");
 	if (typeof content !== "string") return content;
+	const validUntil = validUntilArg(args);
+	if (validUntil !== null && typeof validUntil === "object") return validUntil;
 	return withBeam(args, (beam, bank) => {
 		const memoryId = beam.remember(content, {
 			source: stringArg(args, "source", "mcp"),
@@ -561,6 +598,9 @@ async function handleRemember(args: ToolArguments): Promise<ToolResult> {
 			extract: booleanArg(args, "extract"),
 			veracity: stringArg(args, "veracity", "unknown"),
 			scope: stringArg(args, "scope", "session"),
+			memoryType: memoryTypeArg(args),
+			trustTier: trustTierArg(args),
+			validUntil: validUntil ?? undefined,
 		});
 		return { status: "stored", memory_id: memoryId, bank, content_preview: content.slice(0, 100) };
 	});
@@ -674,10 +714,29 @@ async function handleGet(args: ToolArguments): Promise<ToolResult> {
 async function handleUpdate(args: ToolArguments): Promise<ToolResult> {
 	const memoryId = required(args, "memory_id");
 	if (typeof memoryId !== "string") return memoryId;
-	if (!("content" in args) && !("importance" in args) && !("metadata" in args))
-		return { error: "content, importance or metadata is required" };
+	const restore = args.restore === true;
+	const hasFields = ["content", "importance", "metadata", "memory_type", "valid_until"].some(key => key in args);
+	if (restore && hasFields) return { error: "restore cannot be combined with other fields" };
+	if (restore) {
+		return withBeam(args, (beam, bank) => {
+			const status = beam.restoreWorking(memoryId);
+			return { status, memory_id: memoryId, bank };
+		});
+	}
+	if (!hasFields) return { error: "content, importance or metadata is required" };
 	const metadata = "metadata" in args ? metadataArg(args) : null;
 	if ("metadata" in args && metadata === null) return { error: "metadata must be an object" };
+	const fields: { memoryType?: string; validUntil?: string | null } = {};
+	if ("memory_type" in args) {
+		const memoryType = memoryTypeArg(args);
+		if (memoryType === undefined) return { error: "memory_type must be a non-empty string" };
+		fields.memoryType = memoryType;
+	}
+	if ("valid_until" in args) {
+		const validUntil = validUntilArg(args);
+		if (validUntil !== null && typeof validUntil === "object") return validUntil;
+		fields.validUntil = validUntil;
+	}
 	return withBeam(args, (beam, bank) => {
 		const content = "content" in args ? stringArg(args, "content") : null;
 		if (content !== null && content.trim().length === 0) return { error: "content is required" };
@@ -687,6 +746,7 @@ async function handleUpdate(args: ToolArguments): Promise<ToolResult> {
 			content,
 			importance !== null && Number.isFinite(importance) ? importance : null,
 			metadata,
+			fields,
 		);
 		return { status: ok ? "updated" : "not_found", memory_id: memoryId, bank };
 	});

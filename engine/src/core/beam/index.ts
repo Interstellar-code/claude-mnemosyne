@@ -43,7 +43,9 @@ import {
 	scratchpadRead,
 	scratchpadWrite,
 	type MetadataPatch,
+	restoreWorking,
 	updateWorking,
+	type WorkingFieldPatch,
 } from "./store";
 import type {
 	BeamCaches,
@@ -254,8 +256,13 @@ export class BeamMemory implements BeamMemoryState {
 		content: string | null = null,
 		importance: number | null = null,
 		metadata: MetadataPatch | null = null,
+		fields: WorkingFieldPatch = {},
 	): boolean {
-		return updateWorking(this, memoryId, content, importance, metadata);
+		return updateWorking(this, memoryId, content, importance, metadata, fields);
+	}
+
+	restoreWorking(memoryId: string): "restored" | "unchanged" | "not_found" {
+		return restoreWorking(this, memoryId);
 	}
 
 	get(memoryId: string): unknown | null {

@@ -30,7 +30,7 @@ Ours, not upstream's (engine-diff ignores them): `UPSTREAM.md`, `bun.lock` (our 
 | 18.12.3-mnemosyne.5 | e67c4972b298ce2692bad37b377a423881b53d1141390474782f0ce44f8a9b2f |
 | 18.12.3-mnemosyne.6 | 0444615859cc5d26331686a86ce458da92c0df9263423a7d04dd410319e78d14 |
 | 18.12.3-mnemosyne.7 | 4c6e5c1512eeb225d91d5c733b668860d6b324eea94e31ac302473da44eccb96 |
-| 18.12.3-mnemosyne.8 | 49878cf3e81ab74a6aefe138032d7c014355e9e59696285d6565732021b0c675 |
+| 18.12.3-mnemosyne.8 | 9c2232417dbe54c873c111e2b4d622e79dfc7e3c446e5145f6488dfbef43e97b |
 
 The `18.12.3` row is the untouched upstream source, for reference. `.1` had changes 1 to 3; `.2` makes the change 1 merge keep a `__proto__` key as plain data (it was dropped); `.3` adds the two knowledge tools (change 4) and keeps the first author on dedupe with empty author env unset (change 5); `.4` is the review fix round: the knowledge reply is normalised by `parseExtractedFactCategories` (change 4), and the author pair merges as one unit (change 5); `.5` turns embeddings on: fastembed is a real dependency with an onnxruntime override (change 6), the CLI exits naturally on success (change 7), the on-demand runtime install is gone (change 8), and a `reembed` command backfills vectors (change 9); `.6` is the review fix round: `reembed` recounts after the drain and proves the model before a rebuild (change 9), and the API embedding route is refused without an explicit opt-in (change 10); `.7` is the second fix round: the fastembed cache dir is read from the plugin-pinned `PI_CONFIG_DIR` directly, immune to the dotenv/XDG/profile refill (change 11), and the dry run prints the 'apply' hint only when something is missing (change 9). `.8` is phase MODEL (v3): the trim spares every row whose scope is not 'session' (change 12). Later MODEL tasks add their changes to this build and re-record its hash.
 
@@ -135,6 +135,14 @@ Status is `open` (ours only) or `merged-upstream` (drop it at the next rebase).
 - Why: the trim spared only `IMPORTED` rows, so the plugin had to label every durable save `imported` to keep it, which hid where each memory came from. With scope deciding durability, a save can carry its true provenance (`trust_tier`) and still survive. A NULL scope is spared rather than trimmed so that a row with no scope can never be deleted by mistake.
 - Files: `src/core/beam/store.ts`
 - Tests: `test/trim-scope.spec.ts`
+- Status: open
+
+### 13. remember and update store memory_type, trust_tier and valid_until; update can restore a retired row
+
+- What: `mnemopi_remember` forwards three optional arguments to the store: `memory_type` (a non-empty string, stored as given, else the default `unknown`), `trust_tier` (one of `STATED`, `DERIVED`, `EXTERNAL_WRITE`, `IMPORTED`; any other value is ignored and the tier is derived from `source` as before) and `valid_until` (a date or timestamp, stored as a UTC ISO string; a value that is not a date is refused before the store is opened). `mnemopi_update` accepts `memory_type`, `valid_until` (`null` clears it; same date rule) and `restore: true`. `restore` is a separate call (combining it with any other field is an error): in one `BEGIN IMMEDIATE` transaction it finds the row with `session_id = MNEMOPI_SESSION_ID`, and if the row is retired (`superseded_by` set, or `valid_until` already passed) it clears both `valid_until` and `superseded_by` and replies `restored`; a live row (no replacement, no expiry or one still ahead) is left untouched and replies `unchanged`; another owner's row, a global one included, replies `not_found` and is untouched. Restore reaches `working_memory` only. The dedupe path of `remember` keeps its rules (first author kept as one unit, veracity never lowered); one fix: a re-save that names no `memory_type` no longer overwrites the stored kind with `unknown`.
+- Why: the plugin must save a memory with its true kind, provenance and expiry now that the trim spares by scope (change 12), and must undo a retire or an expiry sweep without deleting and re-saving the row (which would lose its id and recall history).
+- Files: `src/mcp-tools.ts` `src/core/beam/store.ts` `src/core/beam/index.ts`
+- Tests: `test/remember-fields.spec.ts`
 - Status: open
 
 Not changed: `dist/types/*.d.ts` still describe upstream 18.12.3 (no `metadata` on `updateWorking`). Nothing in the plugin reads them; regenerating them needs upstream's monorepo build.

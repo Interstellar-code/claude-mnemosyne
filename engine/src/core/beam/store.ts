@@ -443,6 +443,8 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 	const veracity = clampVeracity(options.veracity);
 	const trustTier = normalizeTrustTier(options.trustTier, source);
 	const memoryType = options.memoryType ?? "unknown";
+	// A re-save that names no kind must not overwrite the stored one with 'unknown'.
+	const resaveMemoryType = options.memoryType === undefined || options.memoryType === "unknown" ? null : memoryType;
 	const validUntil = options.validUntil ?? options.valid_until ?? null;
 	const authorId = options.authorId ?? options.author_id ?? beam.authorId;
 	const authorType = options.authorType ?? options.author_type ?? beam.authorType;
@@ -477,7 +479,7 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 				authorId,
 				authorType,
 				channelId,
-				memoryType,
+				resaveMemoryType,
 				veracity,
 				veracity,
 				trustTier,
@@ -762,15 +764,32 @@ export function immediateTransaction<T>(db: Database, fn: () => T): T {
 	}
 }
 
+/** Fields `updateWorking` can set besides content, importance and metadata (mnemosyne change 13). */
+export interface WorkingFieldPatch {
+	/** The kind to store. Unset leaves it as it is. */
+	memoryType?: string;
+	/** An expiry timestamp to store; `null` clears it; unset leaves it as it is. */
+	validUntil?: string | null;
+}
+
 export function updateWorking(
 	beam: BeamMemoryState,
 	memoryId: string,
 	content: string | null = null,
 	importance: number | null = null,
 	metadata: MetadataPatch | null = null,
+	fields: WorkingFieldPatch = {},
 ): boolean {
 	const assignments: string[] = [];
 	const params: SQLQueryBindings[] = [];
+	if (fields.memoryType !== undefined) {
+		assignments.push("memory_type = ?");
+		params.push(fields.memoryType);
+	}
+	if (fields.validUntil !== undefined) {
+		assignments.push("valid_until = ?");
+		params.push(fields.validUntil);
+	}
 	if (content !== null) {
 		assignments.push("content = ?", "embed_text = NULL");
 		params.push(content);
@@ -804,6 +823,34 @@ export function updateWorking(
 		if (content !== null) scheduleEmbedding(beam, [{ memoryId, content }]);
 	}
 	return changes > 0;
+}
+
+/**
+ * Restores a retired row of the caller's own session (mnemosyne change 13): clears
+ * `valid_until` and `superseded_by`. A row is retired when it names a replacement or
+ * its expiry has passed. A live row (no replacement, no expiry or one still ahead) is
+ * left exactly as it is, and another owner's row is never touched, even a global one.
+ */
+export function restoreWorking(beam: BeamMemoryState, memoryId: string): "restored" | "unchanged" | "not_found" {
+	const result = immediateTransaction(beam.db, () => {
+		using statement = beam.db.prepare(
+			"SELECT valid_until, superseded_by FROM working_memory WHERE id = ? AND session_id = ?",
+		);
+		const row = statement.get(memoryId, beam.sessionId) as {
+			valid_until: string | null;
+			superseded_by: string | null;
+		} | null;
+		if (row == null) return "not_found" as const;
+		const expired = row.valid_until != null && row.valid_until <= toUtcIso();
+		if (row.superseded_by == null && !expired) return "unchanged" as const;
+		beam.db.run(
+			"UPDATE working_memory SET valid_until = NULL, superseded_by = NULL WHERE id = ? AND session_id = ?",
+			[memoryId, beam.sessionId],
+		);
+		return "restored" as const;
+	});
+	if (result === "restored") invalidateCaches(beam);
+	return result;
 }
 
 export function get(beam: BeamMemoryState, memoryId: string): Row | null {
