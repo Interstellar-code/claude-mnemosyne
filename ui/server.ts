@@ -36,7 +36,7 @@
 // MNEMOSYNE_PLUGIN_ROOT; MNEMOSYNE_UI_PARENT_CHECK_MS (default 10000, held to
 // 100 ms - 10 s) sets how often the parent is checked.
 import { Database } from 'bun:sqlite'
-import { randomBytes, timingSafeEqual } from 'node:crypto'
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import {
   chmodSync,
   closeSync,
@@ -60,7 +60,9 @@ import { activityEntry, preview } from '../hooks/activity-log'
 import type { ActivityFields } from '../hooks/activity-log'
 import { buildRequests, engineEnv, parseReplies } from '../hooks/engine'
 import type { EngineRequest } from '../hooks/engine'
+import { CORE_SPREAD } from './map-layout'
 import { countByDay, isClaudeRecall, isOtherAppsRecall } from './recalls'
+import type { MeaningReply as MeaningWorkerReply, MeaningStarted } from './semantic-worker'
 
 const UI_DIR = import.meta.dir
 const VENDOR_DIR = join(UI_DIR, 'vendor')
@@ -664,6 +666,11 @@ function storeOwners(db: Database | null): string[] {
 
 // At most this many memories in one galaxy reply; `total` and `shown` say how many were cut.
 export const GALAXY_LIMIT = 2000
+// The rows a galaxy reply shows: a memory with an owner session, newest first, ties by id.
+// One definition, so the reply and the meaning layout's vector read can never pick different
+// rows (review M1: the layout used to take the newest memories that had a vector).
+export const GALAXY_WHERE = "session_id IS NOT NULL AND session_id <> ''"
+export const GALAXY_ORDER = 'timestamp DESC, id'
 // C0 and C1 control characters and DEL, and the bidirectional marks: a label must not
 // reflow or read as something else (the same set ui/escape.ts removes).
 const GALAXY_CONTROL = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g
@@ -690,8 +697,390 @@ const KNOWLEDGE_TABLES = [
 ] as const
 
 export type GalaxyKnowledge = { id: string; kind: string; text: string; memory: string }
-export type GalaxyMemory = { id: string; owner: string; tags: string[]; recalls: number; lastRecalled: string | null; created: string | null; label: string }
+export type GalaxyMemory = {
+  id: string
+  owner: string
+  tags: string[]
+  recalls: number
+  lastRecalled: string | null
+  created: string | null
+  label: string
+  // SEMX.1: only a memory with a vector carries these two.
+  position?: [number, number, number]
+  similar?: { id: string; score: number }[]
+}
 export type GalaxyProject = { owner: string; label: string; count: number; recalls: number }
+
+// ---- Meaning (SEMX.1): UMAP positions and the similar memories beside them ----
+
+// Below this many vectors the map keeps its topic layout: too few points to read.
+export const MIN_MEANING_VECTORS = 10
+// The cached meaning layout, under the dashboard's root (MNEMOSYNE_ROOT), owner-only.
+export const MEANING_CACHE = 'meaning.json'
+// Bumped when the layout's maths or constants change: an older cache file is then a miss
+// instead of a stale layout (review LOW-1).
+export const MEANING_VERSION = 1
+// A run that has not answered by now is dead: reject it, terminate the worker, start fresh.
+export const MEANING_RUN_TIMEOUT_MS = 30_000
+// How long a galaxy request waits for a cold layout before it answers the topic map instead.
+// Below Bun's 10 s idle timeout, so the request always gets its answer (review MEDIUM-2).
+export const MEANING_WAIT_MS = 8_000
+// Bound ids per SELECT: a statement stays well inside SQLite's variable limit.
+const VECTOR_CHUNK = 500
+
+export type MeaningReply = MeaningWorkerReply
+export type MeaningNeighbour = { id: string; score: number }
+export type Meaning = {
+  meaning: boolean
+  positions: Record<string, [number, number, number]>
+  similar: Record<string, MeaningNeighbour[]>
+}
+export const NO_MEANING: Meaning = { meaning: false, positions: {}, similar: {} }
+
+/**
+ * The cache key: the layout version, the model, the vectors' newest `created_at` and
+ * every memory id that has a vector, in order. A changed set of ids, a re-embedded
+ * memory (a newer row) or a changed model recomputes; anything else is a hit.
+ */
+export function meaningKey(model: string, ids: readonly string[], newest: string = '', version: number = MEANING_VERSION): string {
+  return createHash('sha256').update(`${version}\n${model}\n${newest}\n${ids.join('\n')}`).digest('hex')
+}
+
+/** The cached layout for `key`, or null: a corrupt, foreign or absent file is a miss. */
+export function readMeaningCache(root: string, key: string): Meaning | null {
+  try {
+    const cached = JSON.parse(readFileSync(join(root, MEANING_CACHE), 'utf8')) as { key?: unknown; meaning?: Meaning }
+    if (cached.key !== key || cached.meaning?.meaning !== true) return null
+    return cached.meaning
+  } catch {
+    return null
+  }
+}
+
+/** Writes the layout as a fresh 0600 file, then renames it over the old one. */
+export function writeMeaningCache(root: string, key: string, meaning: Meaning) {
+  mkdirSync(root, { recursive: true, mode: 0o700 })
+  const temp = join(root, `${MEANING_CACHE}.${process.pid}.tmp`)
+  rmSync(temp, { force: true })
+  writeFileSync(temp, `${JSON.stringify({ key, meaning })}\n`, { mode: 0o600, flag: 'wx' })
+  if (!IS_WINDOWS) chmodSync(temp, 0o600)
+  renameSync(temp, join(root, MEANING_CACHE))
+}
+
+/**
+ * Removes the cached layout: below the floor, or with embeddings off, the file would
+ * keep the ids and neighbour links of memories the map no longer lays out (review LOW-2).
+ */
+export function clearMeaningCache(root: string) {
+  rmSync(join(root, MEANING_CACHE), { force: true })
+}
+
+// The vectors, read-only, of the memories the galaxy shows: the model most rows
+// carry (vectors from two models are not comparable) and the rows, by id.
+
+/**
+ * The model most vectors name, the newest `created_at` among them, and the ids that
+ * carry it (at most `limit`, in the galaxy reply's own order): the cache key's input,
+ * with no vector parsed.
+ */
+export type MeaningIndex = { model: string; ids: string[]; newest: string }
+
+/**
+ * The vectors of the memories the galaxy reply shows, read-only: the reply's own rows
+ * (the same WHERE, ORDER and LIMIT, from the one definition above), keeping those that
+ * have a vector. So `similar` never names a star the reply dropped, and UMAP never works
+ * on a point nobody sees (review MEDIUM-2 and M1: a memory without a vector is simply
+ * not laid out, and it does not push out an older one that is).
+ */
+export function readVectorIndex(db: Database, limit = GALAXY_LIMIT): MeaningIndex {
+  const empty: MeaningIndex = { model: '', ids: [], newest: '' }
+  const present = new Set(
+    (db.query("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map(row => row.name),
+  )
+  if (!present.has('memory_embeddings')) return empty
+  // A legacy table can exist without created_at: the key then falls back to ids and version.
+  const created = tableColumns(db, 'memory_embeddings').has('created_at') ? 'e.created_at' : 'NULL'
+  let rows: { id: string; model: string | null; created: string | null }[]
+  try {
+    rows = db
+      .query(
+        `SELECT e.memory_id AS id, e.model AS model, ${created} AS created
+         FROM memory_embeddings e
+         JOIN (SELECT id, timestamp FROM working_memory WHERE ${GALAXY_WHERE} ORDER BY ${GALAXY_ORDER} LIMIT ?) w
+           ON w.id = e.memory_id
+         ORDER BY w.timestamp DESC, w.id`,
+      )
+      .all(limit) as { id: string; model: string | null; created: string | null }[]
+  } catch {
+    return empty
+  }
+  const counts = new Map<string, number>()
+  for (const row of rows) {
+    const model = typeof row.model === 'string' ? row.model : ''
+    counts.set(model, (counts.get(model) ?? 0) + 1)
+  }
+  let model = ''
+  let best = -1
+  for (const [name, count] of counts) {
+    if (count > best || (count === best && name < model)) {
+      model = name
+      best = count
+    }
+  }
+  let newest = ''
+  for (const row of rows) {
+    if ((typeof row.model === 'string' ? row.model : '') !== model) continue
+    const created = typeof row.created === 'string' ? row.created : ''
+    if (created > newest) newest = created
+  }
+  return { model, ids: rows.filter(row => (typeof row.model === 'string' ? row.model : '') === model).map(row => row.id), newest }
+}
+
+/** The stored JSON of `ids`' vectors, in the order given (a cache miss only). */
+export function readVectorInputs(db: Database, ids: readonly string[]): { id: string; json: string }[] {
+  if (ids.length === 0) return []
+  // Chunked: 2000 ids would otherwise be 2000 bound variables in one statement.
+  const byId = new Map<string, string>()
+  for (let from = 0; from < ids.length; from += VECTOR_CHUNK) {
+    const chunk = ids.slice(from, from + VECTOR_CHUNK)
+    const rows = db
+      .query(`SELECT memory_id AS id, embedding_json AS json FROM memory_embeddings WHERE memory_id IN (${chunk.map(() => '?').join(', ')})`)
+      .all(...chunk) as { id: string; json: string }[]
+    for (const row of rows) byId.set(row.id, row.json)
+  }
+  return ids.flatMap(id => {
+    const json = byId.get(id)
+    return json === undefined ? [] : [{ id, json }]
+  })
+}
+
+/**
+ * One UMAP run in the Worker (ui/semantic-worker.ts), never on this loop: one
+ * worker per server, started on first use. The worker's own message queue is the
+ * serialisation, so two galaxy requests run one after the other in it.
+ *
+ * A worker that dies or hangs is dropped rather than reused (review HIGH-1): a
+ * failure rejects every request waiting on it, terminates it and clears it, so the
+ * next run starts a fresh one; a run that has not answered inside `timeoutMs` is
+ * treated the same way. A dead worker can never leave a request waiting forever.
+ */
+export type MeaningRunnerOptions = {
+  // The worker script: the server's own, or a broken one in a test.
+  worker?: string | URL
+  timeoutMs?: number
+}
+
+// A run the worker has been given: `started` turns true when the worker takes the job, which
+// is when its own clock starts (review L1).
+type MeaningPending = {
+  resolve: (reply: MeaningReply) => void
+  reject: (err: Error) => void
+  started: boolean
+  timer?: ReturnType<typeof setTimeout>
+}
+
+export class MeaningRunner {
+  private worker: Worker | null = null
+  private next = 0
+  private pending = new Map<number, MeaningPending>()
+  // One run in flight per cache key: every concurrent caller joins it (review MEDIUM-1).
+  private inflight = new Map<string, Promise<Meaning>>()
+  private readonly url: string | URL
+  private readonly timeoutMs: number
+
+  constructor(options: MeaningRunnerOptions = {}) {
+    this.url = options.worker ?? new URL('./semantic-worker.ts', import.meta.url).href
+    this.timeoutMs = options.timeoutMs ?? MEANING_RUN_TIMEOUT_MS
+  }
+
+  private start(): Worker {
+    if (this.worker !== null) return this.worker
+    const worker = new Worker(this.url)
+    worker.onmessage = (event: MessageEvent) => {
+      const answer = event.data as MeaningReply | MeaningStarted
+      const waiting = this.pending.get(answer.id)
+      if (waiting === undefined) return
+      // The worker has taken the job off its queue: the run itself is timed from here, so a
+      // request that waited behind another run does not spend its budget queueing (review L1).
+      if ('started' in answer) {
+        waiting.started = true
+        this.armRun(waiting, answer.id)
+        // The worker is alive: every job still queued behind this one restarts its wait window
+        // instead of reading a busy worker as a stalled one.
+        for (const [id, queued] of this.pending) if (!queued.started) this.armWait(queued, id)
+        return
+      }
+      this.pending.delete(answer.id)
+      clearTimeout(waiting.timer)
+      // One request's bad input is not a dead worker: reject that one, keep the worker.
+      if ('error' in answer) waiting.reject(new Error(answer.error))
+      else waiting.resolve(answer)
+    }
+    worker.onerror = (event: ErrorEvent) => {
+      this.fail(new Error(event.message || 'the semantic worker failed'))
+    }
+    // Bun fires no close event on a worker; a runtime that has one drops the worker too.
+    const closable = worker as unknown as { onclose?: (event: { reason?: string }) => void }
+    if (typeof closable.onclose !== 'undefined' || 'onclose' in worker) {
+      closable.onclose = event => this.fail(new Error(event?.reason || 'the semantic worker closed'))
+    }
+    this.worker = worker
+    return worker
+  }
+
+  /**
+   * Arms a queued run's wait clock. It fires only when the worker has taken no job at all: a
+   * worker busy with another run proves it is alive, so the clock is re-armed instead of
+   * killing that healthy run (review L1).
+   */
+  private armWait(run: MeaningPending, id: number) {
+    clearTimeout(run.timer)
+    run.timer = setTimeout(() => {
+      if (this.pending.get(id) !== run || run.started) return
+      const busy = [...this.pending.values()].some(other => other.started)
+      if (busy) this.armWait(run, id)
+      else this.fail(new Error(`the semantic worker did not start the run within ${this.timeoutMs} ms`))
+    }, this.timeoutMs)
+  }
+
+  /** Arms a started run's own clock: this is the UMAP work itself, from the worker's first word. */
+  private armRun(run: MeaningPending, id: number) {
+    clearTimeout(run.timer)
+    run.timer = setTimeout(() => {
+      if (this.pending.get(id) !== run) return
+      this.fail(new Error(`the semantic worker did not answer within ${this.timeoutMs} ms`))
+    }, this.timeoutMs)
+  }
+
+  /** Drops the worker and rejects everything waiting on it; the next run starts a fresh one. */
+  private fail(error: Error) {
+    const worker = this.worker
+    this.worker = null
+    for (const waiting of this.pending.values()) {
+      clearTimeout(waiting.timer)
+      waiting.reject(error)
+    }
+    this.pending.clear()
+    worker?.terminate()
+  }
+
+  /** The worker's answer to one layout question; the worker itself runs them one at a time. */
+  run(inputs: readonly { id: string; json: string }[]): Promise<Extract<MeaningReply, { count: number }>> {
+    let worker: Worker
+    try {
+      worker = this.start()
+    } catch (err) {
+      return Promise.reject(err instanceof Error ? err : new Error(String(err)))
+    }
+    const id = ++this.next
+    const { promise, resolve, reject } = Promise.withResolvers<Extract<MeaningReply, { count: number }>>()
+    const pending: MeaningPending = { resolve: resolve as (reply: MeaningReply) => void, reject, started: false }
+    this.pending.set(id, pending)
+    this.armWait(pending, id)
+    try {
+      worker.postMessage({ id, inputs })
+    } catch (err) {
+      this.fail(err instanceof Error ? err : new Error(String(err)))
+    }
+    return promise
+  }
+
+  /**
+   * One shared run per cache key, waited on for at most `waitMs` (review MEDIUM-1 and
+   * MEDIUM-2). Every caller for the same key joins the same promise, so N concurrent
+   * cold requests cause one UMAP run; a caller whose budget runs out answers NO_MEANING
+   * while the run continues into the cache for the next request.
+   */
+  async layout(key: string, compute: () => Promise<Meaning>, waitMs: number): Promise<Meaning> {
+    let shared = this.inflight.get(key)
+    if (shared === undefined) {
+      shared = compute().finally(() => {
+        if (this.inflight.get(key) === shared) this.inflight.delete(key)
+      })
+      this.inflight.set(key, shared)
+    }
+    // A run nobody is waiting on any more must not raise an unhandled rejection.
+    shared.catch(() => {})
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const budget = new Promise<Meaning>(resolve => {
+      timer = setTimeout(() => resolve(NO_MEANING), waitMs)
+    })
+    try {
+      return await Promise.race([shared, budget])
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  stop() {
+    this.fail(new Error('the server is stopping'))
+  }
+}
+
+/** The radius the meaning layout is scaled to: the core sphere the 0.6.1 layout places its projects on. */
+export function meaningRadius(projects: number): number {
+  return projects <= 1 ? CORE_SPREAD : (CORE_SPREAD * Math.sqrt(projects)) / Math.sqrt(4 * Math.PI)
+}
+
+/** A meaning layout's unit positions, multiplied by the galaxy's own extent. */
+export function scaleMeaning(meaning: Meaning, radius: number): Meaning {
+  if (!meaning.meaning) return meaning
+  const positions: Record<string, [number, number, number]> = {}
+  for (const [id, [x, y, z]] of Object.entries(meaning.positions)) positions[id] = [x * radius, y * radius, z * radius]
+  return { meaning: true, positions, similar: meaning.similar }
+}
+
+/**
+ * The meaning layout for a store: nothing below MIN_MEANING_VECTORS, the cached
+ * layout on a key hit, else one Worker run and the 0600 cache file under `root`.
+ * The cache holds unit positions (scale-free); the caller scales them. The
+ * database is only ever read.
+ *
+ * Concurrent cold requests for one key share a single run (review MEDIUM-1): the
+ * cache is re-checked inside the shared promise, so a run that finished while a
+ * later caller waited is a cache read, not a second UMAP. `waitMs` bounds how long
+ * this call waits (review MEDIUM-2): a layout that is not ready answers NO_MEANING
+ * now, and the run it started still lands in the cache for the next request.
+ */
+export type MeaningOptions = {
+  waitMs?: number
+  limit?: number
+}
+
+export async function meaningLevel(db: Database | null, root: string, runner: MeaningRunner, options: MeaningOptions = {}): Promise<Meaning> {
+  // No store, no table, too few vectors (embeddings off): the map keeps its topic layout.
+  // The layout file is removed, so it cannot outlive the memories it names (review LOW-2).
+  if (db === null) {
+    clearMeaningCache(root)
+    return NO_MEANING
+  }
+  const database = db
+  const { model, ids, newest } = readVectorIndex(database, options.limit ?? GALAXY_LIMIT)
+  if (ids.length < MIN_MEANING_VECTORS) {
+    clearMeaningCache(root)
+    return NO_MEANING
+  }
+  const key = meaningKey(model, ids, newest)
+  const cached = readMeaningCache(root, key)
+  if (cached !== null) return cached
+  const compute = async (): Promise<Meaning> => {
+    // Re-checked here: a run may have finished between a caller's first look and this queue.
+    const late = readMeaningCache(root, key)
+    if (late !== null) return late
+    const reply = await runner.run(readVectorInputs(database, ids))
+    // Rows that do not parse are dropped in the worker: the floor counts usable vectors, so
+    // a store of corrupt rows stays on the topic layout and is never cached (review MEDIUM-3).
+    if (reply.count < MIN_MEANING_VECTORS) return NO_MEANING
+    const meaning: Meaning = { meaning: true, positions: reply.positions, similar: reply.similar }
+    try {
+      writeMeaningCache(root, key, meaning)
+    } catch {
+      // a cache that cannot be written is still a good reply
+    }
+    return meaning
+  }
+  return runner.layout(key, compute, options.waitMs ?? MEANING_WAIT_MS)
+}
 
 /**
  * The columns a table actually has: a legacy store may predate `source_memory_id`
@@ -705,13 +1094,17 @@ function tableColumns(db: Database, table: string): Set<string> {
  * GET /api/galaxy: every memory (newest first, at most `limit`), its project and the
  * knowledge rows mined from it, read-only. A missing store or a missing memoria table
  * gives empty lists; nothing here writes.
+ *
+ * `meaning` (SEMX.1) is the layout ui/semantic-worker.ts computed: a memory with a
+ * vector carries its `position` and its `similar` neighbours, and the reply says
+ * `meaning: true`. Without it the reply is the topic layout's, `meaning: false`.
  */
-export function galaxyLevel(db: Database | null, limit = GALAXY_LIMIT): Answer {
+export function galaxyLevel(db: Database | null, limit = GALAXY_LIMIT, meaning: Meaning = NO_MEANING): Answer {
   if (db === null) return { status: 200, body: { projects: [], memories: [], knowledge: [], meaning: false, total: 0, shown: 0 } }
   const present = new Set(
     (db.query("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map(row => row.name),
   )
-  const where = "session_id IS NOT NULL AND session_id <> ''"
+  const where = GALAXY_WHERE
   const total = (db.query(`SELECT COUNT(*) AS n FROM working_memory WHERE ${where}`).get() as { n: number }).n
   const projects: GalaxyProject[] = (
     db
@@ -723,18 +1116,25 @@ export function galaxyLevel(db: Database | null, limit = GALAXY_LIMIT): Answer {
     .query(
       `SELECT id, session_id AS owner, ${RECALLS} AS recalls, last_recalled AS lastRecalled,
               timestamp AS created, substr(content, 1, 4000) AS head, metadata_json
-       FROM working_memory WHERE ${where} ORDER BY timestamp DESC, id LIMIT ?`,
+       FROM working_memory WHERE ${where} ORDER BY ${GALAXY_ORDER} LIMIT ?`,
     )
     .all(limit) as { id: string; owner: string; recalls: number; lastRecalled: string | null; created: string | null; head: string | null; metadata_json: string | null }[]
-  const memories: GalaxyMemory[] = rows.map(row => ({
-    id: row.id,
-    owner: row.owner,
-    tags: tagsOf(parseMetadata(row.metadata_json)),
-    recalls: row.recalls,
-    lastRecalled: row.lastRecalled,
-    created: row.created,
-    label: galaxyLabel(row.head),
-  }))
+  const memories: GalaxyMemory[] = rows.map(row => {
+    const memory: GalaxyMemory = {
+      id: row.id,
+      owner: row.owner,
+      tags: tagsOf(parseMetadata(row.metadata_json)),
+      recalls: row.recalls,
+      lastRecalled: row.lastRecalled,
+      created: row.created,
+      label: galaxyLabel(row.head),
+    }
+    const position = meaning.positions[row.id]
+    if (position !== undefined) memory.position = position
+    const similar = meaning.similar[row.id]
+    if (similar !== undefined) memory.similar = similar
+    return memory
+  })
 
   const knowledge: GalaxyKnowledge[] = []
   if (memories.length > 0) {
@@ -758,7 +1158,7 @@ export function galaxyLevel(db: Database | null, limit = GALAXY_LIMIT): Answer {
       }
     }
   }
-  return { status: 200, body: { projects, memories, knowledge, meaning: false, total, shown: memories.length } }
+  return { status: 200, body: { projects, memories, knowledge, meaning: meaning.meaning, total, shown: memories.length } }
 }
 
 export type KnowledgeItem = {
@@ -1236,6 +1636,10 @@ export type ServerOptions = {
   maxStreams?: number
   streamMaxMs?: number
   engineTimeoutMs?: number
+  // SEMX.1: the meaning layout's worker and wait budget, so a test can observe the runs
+  // or hand the route a worker that fails (review HIGH-1 to MEDIUM-2).
+  meaningRunner?: MeaningRunner
+  meaningWaitMs?: number
 }
 
 export async function startServer(config: Config, options: ServerOptions = {}): Promise<Started> {
@@ -1264,6 +1668,9 @@ export async function startServer(config: Config, options: ServerOptions = {}): 
     forgets: limiter(1),
   }
   const streams = new Set<() => void>()
+  // SEMX.1: the meaning layout's one Worker, started on the first galaxy request that needs it.
+  const meaning = options.meaningRunner ?? new MeaningRunner()
+  const meaningWaitMs = options.meaningWaitMs ?? MEANING_WAIT_MS
 
   // The two POST routes: the page's own origin, JSON, a small body; then the handler.
   async function post(request: Request, handle: (views: Views, text: string) => Promise<Answer>) {
@@ -1329,10 +1736,12 @@ export async function startServer(config: Config, options: ServerOptions = {}): 
 
   function api(request: Request, url: URL, server: { timeout(request: Request, seconds: number): void }): Response | Promise<Response> {
     const path = url.pathname
-    const get = (answer: () => Answer | Response) => {
+    const get = (answer: () => Answer | Response | Promise<Answer>): Response | Promise<Response> => {
       if (request.method !== 'GET') return notAllowed()
       const out = answer()
-      return out instanceof Response ? out : json(out.body, out.status)
+      if (out instanceof Response) return out
+      // The galaxy route is the one answer that waits (its UMAP run is in a Worker): everything else is already settled.
+      return out instanceof Promise ? out.then(settled => json(settled.body, settled.status)) : json(out.body, out.status)
     }
     if (path === '/api/health') return get(() => ({ status: 200, body: health(config, store, engine) }))
     if (path === '/api/health-report') return get(() => healthReport(config, store, engine))
@@ -1351,7 +1760,24 @@ export async function startServer(config: Config, options: ServerOptions = {}): 
         return getMemory((store.db ??= openStore(config.store)), id)
       })
     }
-    if (path === '/api/galaxy') return get(() => galaxyLevel((store.db ??= openStore(config.store))))
+    // One UMAP run at a time in the Worker; every other route stays synchronous. The wait is
+    // bounded, so a cold layout answers the topic map now and lands in the cache for the next
+    // request instead of running into Bun's idle timeout (review MEDIUM-2).
+    if (path === '/api/galaxy') {
+      return get(async () => {
+        const db = (store.db ??= openStore(config.store))
+        let layout = NO_MEANING
+        try {
+          layout = scaleMeaning(
+            await meaningLevel(db, config.root, meaning, { waitMs: meaningWaitMs, limit: GALAXY_LIMIT }),
+            meaningRadius(storeOwners(db).length),
+          )
+        } catch {
+          // a layout that fails, or a worker that died, leaves the topic map: meaning false
+        }
+        return galaxyLevel(db, GALAXY_LIMIT, layout)
+      })
+    }
     if (path === '/api/activity') {
       return get(() => {
         const asked = url.searchParams.get('limit')
@@ -1414,6 +1840,7 @@ export async function startServer(config: Config, options: ServerOptions = {}): 
     token,
     stop() {
       for (const finish of [...streams]) finish()
+      meaning.stop()
       void server.stop(true)
       store.db?.close()
     },

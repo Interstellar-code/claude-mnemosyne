@@ -1,0 +1,33 @@
+{
+  "bundle": "semantic-lib.js",
+  "built_by": "scripts/vendor-map.ts",
+  "bytes": 106662,
+  "gzip_bytes": 29366,
+  "sha256": "63566ae09d4e984655a491904e8158924ba8d8bb6e2ff588652d6070356dd6e4",
+  "exports": [
+    "UMAP"
+  ],
+  "packages": [
+    {
+      "name": "is-any-array",
+      "version": "0.1.1",
+      "license": "MIT"
+    },
+    {
+      "name": "ml-levenberg-marquardt",
+      "version": "2.1.1",
+      "license": "MIT"
+    },
+    {
+      "name": "ml-matrix",
+      "version": "6.15.1",
+      "license": "MIT"
+    },
+    {
+      "name": "umap-js",
+      "version": "1.4.0",
+      "license": "MIT"
+    }
+  ],
+  "patches": []
+}
