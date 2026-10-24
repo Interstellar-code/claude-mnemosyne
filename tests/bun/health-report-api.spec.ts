@@ -5,7 +5,7 @@ import { Database } from 'bun:sqlite'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { MOST_RECALLED_LIST, NEVER_RECALLED_LIST, ping, startServer } from '../../ui/server'
+import { MOST_RECALLED_LIST, NEVER_RECALLED_LIST, ping, pluginVersion, startServer } from '../../ui/server'
 import type { Started } from '../../ui/server'
 import { body, engineCall, ROOT, tempDir, toolCall } from './helpers'
 
@@ -191,6 +191,9 @@ describe('KAPI.2: GET /api/health and /api/health-report', () => {
     expect(health.activity).toBe(true)
     expect(health.total).toBe(6)
     expect(Array.isArray(health.owners)).toBe(true)
+    // The plugin version of the code this server runs, for the page's corner badge.
+    expect(health.plugin).toBe(JSON.parse(readFileSync(join(ROOT, '.claude-plugin', 'plugin.json'), 'utf8')).version)
+    expect(pluginVersion(join(ROOT, 'no-such-dir', 'ui'))).toBeUndefined()
   })
 
   test('KAPI.2.a2: /api/health-report is token-guarded and read-only', async () => {

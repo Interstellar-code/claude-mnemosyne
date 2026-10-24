@@ -244,9 +244,19 @@ export function engineVersion(cli: string): string | undefined {
   }
 }
 
-function health(config: Config, store: Store, engine: string | undefined) {
+// The plugin's version, from the plugin.json of the code this server runs from (so a stale install shows its own number).
+export function pluginVersion(uiDir: string = UI_DIR): string | undefined {
+  try {
+    const version = JSON.parse(readFileSync(join(uiDir, '..', '.claude-plugin', 'plugin.json'), 'utf8'))?.version
+    return typeof version === 'string' ? version : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function health(config: Config, store: Store, engine: string | undefined, plugin: string | undefined) {
   store.db ??= openStore(config.store)
-  const base = { ok: true, pid: process.pid, store: config.store, engine: engine ?? null, activity: config.activityLog !== '' }
+  const base = { ok: true, pid: process.pid, store: config.store, engine: engine ?? null, plugin: plugin ?? null, activity: config.activityLog !== '' }
   if (store.db === null) return { ...base, total: 0, owners: [], note: 'The store has no database yet.' }
   try {
     const owners = store.db
@@ -1657,6 +1667,7 @@ export async function startServer(config: Config, options: ServerOptions = {}): 
   const app = await buildApp()
   const store: Store = { db: null }
   const engine = engineVersion(config.cli)
+  const plugin = pluginVersion()
   let host = ''
   // Every search and forget that reaches the engine leaves one line, origin ui (C3).
   const log = (fields: ActivityFields, extra: Record<string, unknown> = {}) => {
@@ -1746,7 +1757,7 @@ export async function startServer(config: Config, options: ServerOptions = {}): 
       // The galaxy route is the one answer that waits (its UMAP run is in a Worker): everything else is already settled.
       return out instanceof Promise ? out.then(settled => json(settled.body, settled.status)) : json(out.body, out.status)
     }
-    if (path === '/api/health') return get(() => ({ status: 200, body: health(config, store, engine) }))
+    if (path === '/api/health') return get(() => ({ status: 200, body: health(config, store, engine, plugin) }))
     if (path === '/api/health-report') return get(() => healthReport(config, store, engine))
     if (path === '/api/knowledge') return get(() => knowledgeList((store.db ??= openStore(config.store))))
     if (path === '/api/memories') {

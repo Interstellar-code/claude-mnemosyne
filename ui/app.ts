@@ -36,6 +36,8 @@ type Health = {
   pid: number
   store: string
   engine: string | null
+  /** The plugin version of the running server; absent from servers before 0.7.5. */
+  plugin?: string | null
   activity: boolean
   total: number
   owners: Owner[]
@@ -735,6 +737,9 @@ async function loadHealth() {
   const projects = owners.length
   byId('summary').textContent = `${health.total} ${health.total === 1 ? 'memory' : 'memories'} · ${projects} ${projects === 1 ? 'project' : 'projects'}`
   byId('engine').textContent = health.engine ? `engine ${health.engine}` : ''
+  const version = byId('plugin-version')
+  version.textContent = health.plugin ? `Mnemosyne v${health.plugin}` : ''
+  version.hidden = !health.plugin
   for (const id of ['mem-owner', 'search-owner']) {
     const select = byId<HTMLSelectElement>(id)
     const chosen = select.value
