@@ -20,8 +20,8 @@ type Ready = { port: number; pid: number }
 type Child = ReturnType<typeof Bun.spawn>
 
 const serverEnv = (root: string, store: string, extra: Record<string, string> = {}) => ({
-  ...isolatedEnv(),
   ...(process.env as Record<string, string>),
+  ...isolatedEnv(),
   MNEMOSYNE_ROOT: root,
   MNEMOSYNE_STORE: store,
   MNEMOSYNE_CLI: CLI,
@@ -119,7 +119,7 @@ const HOOK_PING_ENV = {
 
 /** The hook's health check, as it runs it: `bun ui/server.ts --ping <port> <pid>`, the token on stdin. */
 async function runPing(port: number, pid: number, token: string, env: Record<string, string> = {}) {
-  const child = Bun.spawn([process.execPath, SERVER, '--ping', String(port), String(pid)], {
+  const child = Bun.spawn([process.execPath, SERVER, '--ping', String(port), String(pid)], { env: { ...isolatedEnv() },
     env: { ...(process.env as Record<string, string>), ...env },
     stdin: new Blob([token]),
     stdout: 'ignore',

@@ -27,7 +27,7 @@ afterAll(() => {
 /** One engine process for `messages`, env as given (laid over a clean, non-hostile base). */
 async function spawnEngine(store: string, env: Record<string, string>, messages: readonly object[]) {
   const child = Bun.spawn([process.execPath, CLI, 'mcp'], {
-    env: { ...isolatedEnv(), ...(process.env as Record<string, string>), ...env, MNEMOPI_DATA_DIR: store },
+    env: { ...(process.env as Record<string, string>), ...isolatedEnv(), ...env, MNEMOPI_DATA_DIR: store },
     stdin: 'pipe',
     stdout: 'pipe',
     stderr: 'pipe',

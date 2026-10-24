@@ -419,8 +419,8 @@ for await (const chunk of Bun.stdin.stream()) {
     writeFileSync(capture, '')
     const child = Bun.spawn([process.execPath, PROXY], {
       env: {
-        ...isolatedEnv(),
         ...(process.env as Record<string, string>),
+        ...isolatedEnv(),
         ...engineEnv(join(temp.dir, 'store'), 'global'),
         MNEMOSYNE_CLI: fakeEngine,
         MNEMOSYNE_ACTIVITY_LOG: log,

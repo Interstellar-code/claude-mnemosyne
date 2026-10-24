@@ -86,7 +86,7 @@ export async function makeHost(opts: HostOptions = {}) {
     runs.push(record)
     // The host lays init.env over its own environment.
     const child = Bun.spawn([...argv], {
-      env: { ...(process.env as Record<string, string>), ...(opts.parentEnv ?? {}), ...(init?.env ?? {}) },
+      env: { ...(process.env as Record<string, string>), ...isolatedEnv(), ...(opts.parentEnv ?? {}), ...(init?.env ?? {}) },
       stdin: init?.stdin === undefined ? 'ignore' : new Blob([init.stdin]),
       stdout: 'pipe',
       stderr: 'pipe',

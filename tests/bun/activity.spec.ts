@@ -6,9 +6,7 @@ import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, 
 import { join } from 'node:path'
 import { appendActivity, LOCK_STALE_MS, MAX_BYTES, rotate } from '../../bin/activity'
 import { activityLine } from '../../hooks/activity-log'
-import { ROOT, tempDir } from './helpers'
-import { isolatedEnv } from './helpers'
-// @ts-ignore
+import { ROOT, tempDir, isolatedEnv } from './helpers'
 
 const SCRIPT = join(ROOT, 'bin', 'activity.ts')
 const isPosix = process.platform !== 'win32'

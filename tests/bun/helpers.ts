@@ -13,16 +13,20 @@ export function tempDir(prefix: string) {
   return { dir, dispose: () => rmSync(dir, { recursive: true, force: true }) }
 }
 
+const _isolatedHomes = new Set<string>()
 export function isolatedEnv(prefix = 'isolated') {
   const home = mkdtempSync(join(tmpdir(), `mnemosyne-${prefix}-`))
   const piConfig = join(home, '.claude', 'mnemosyne', 'model-cache')
   mkdirSync(piConfig, { recursive: true })
+  _isolatedHomes.add(home)
   return { HOME: home, PI_CONFIG_DIR: piConfig }
 }
+function _cleanupIsolated() { for (const h of _isolatedHomes) { try { rmSync(h, { recursive: true, force: true }) } catch {} } }
+process.on('exit', _cleanupIsolated)
 
 export async function runInstaller(engineDir: string, storeDir: string, env: Record<string, string> = {}) {
   const child = Bun.spawn([process.execPath, INSTALLER, ROOT, engineDir, storeDir], {
-    env: { ...(process.env as Record<string, string>), ...env },
+    env: { ...(process.env as Record<string, string>), ...isolatedEnv(), ...env },
     stdout: 'pipe',
     stderr: 'pipe',
   })

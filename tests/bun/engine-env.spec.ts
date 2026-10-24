@@ -1,8 +1,9 @@
 import { afterAll, describe, expect, test } from 'bun:test'
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { Database } from 'bun:sqlite'
 import { engineEnv } from '../../hooks/engine'
-import { tempDir } from './helpers'
+import { isolatedEnv, tempDir } from './helpers'
 
 const ROOT = join(import.meta.dir, '..', '..')
 const CLI = join(ROOT, 'engine', 'src', 'cli.ts')
@@ -10,7 +11,7 @@ const CLI = join(ROOT, 'engine', 'src', 'cli.ts')
 async function engineCallWithCwd(cli: string, cwd: string, env: Record<string, string>) {
   const child = Bun.spawn([process.execPath, cli, 'mcp'], {
     cwd,
-    env: { ...(process.env as Record<string, string>), ...env },
+    env: { ...(process.env as Record<string, string>), ...isolatedEnv(), ...env },
     stdin: 'pipe',
     stdout: 'pipe',
     stderr: 'pipe',
@@ -39,6 +40,11 @@ describe('MNEMOPI_MCP_BANK cannot be set from a .env (HARDEN.1)', () => {
     const { exitCode } = await engineCallWithCwd(CLI, work, env)
     expect(exitCode).toBe(0)
     expect(existsSync(join(store, 'banks', 'evil'))).toBe(false)
+    expect(existsSync(join(store, 'mnemopi.db'))).toBe(true)
+    const db = new Database(join(store, 'mnemopi.db'))
+    const row = db.query("SELECT content FROM working_memory WHERE content = 'bank env hole probe memory'").get() as { content: string } | null
+    expect(row?.content).toBe('bank env hole probe memory')
+    db.close()
   })
 
   test('HOME .env with MNEMOPI_MCP_BANK=evil lands in default bank', async () => {
@@ -55,5 +61,10 @@ describe('MNEMOPI_MCP_BANK cannot be set from a .env (HARDEN.1)', () => {
     const { exitCode } = await engineCallWithCwd(CLI, work, env)
     expect(exitCode).toBe(0)
     expect(existsSync(join(store, 'banks', 'evil'))).toBe(false)
+    expect(existsSync(join(store, 'mnemopi.db'))).toBe(true)
+    const db2 = new Database(join(store, 'mnemopi.db'))
+    const row2 = db2.query("SELECT content FROM working_memory WHERE content = 'bank env hole probe memory'").get() as { content: string } | null
+    expect(row2?.content).toBe('bank env hole probe memory')
+    db2.close()
   })
 })

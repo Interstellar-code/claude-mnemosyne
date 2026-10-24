@@ -10,9 +10,7 @@ import { join } from 'node:path'
 import { getRows } from '../../bin/memories'
 import { BACKFILL_TEXT_LIMIT, hasTags, judge, parseProposals, parseRows, PROPOSALS_FILE } from '../../hooks/backfill'
 import type { Proposal } from '../../hooks/backfill'
-import { body, engineCall, ROOT, tempDir, toolCall } from './helpers'
-import { isolatedEnv } from './helpers'
-// @ts-ignore
+import { body, engineCall, ROOT, tempDir, toolCall, isolatedEnv } from './helpers'
 
 const CLI = join(ROOT, 'engine', 'src', 'cli.ts')
 const SCRIPT = join(ROOT, 'bin', 'memories.ts')
