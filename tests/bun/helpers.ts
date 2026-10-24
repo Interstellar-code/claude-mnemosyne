@@ -26,10 +26,12 @@ export async function runInstaller(engineDir: string, storeDir: string, env: Rec
 // The engine variables, from the one place the hooks and the server take them (SRV.1).
 export { engineEnv } from '../../hooks/engine'
 
-/** One engine process answering raw JSON-RPC messages; the parsed replies by id. */
 export async function engineCall(cli: string, store: string, owner: string, messages: readonly object[]) {
+  const home = mkdtempSync(join(tmpdir(), 'mnemosyne-enginehome-'))
+  const piConfig = join(home, '.claude', 'mnemosyne', 'model-cache')
+  mkdirSync(piConfig, { recursive: true })
   const child = Bun.spawn([process.execPath, cli, 'mcp'], {
-    env: { ...(process.env as Record<string, string>), ...engineEnv(store, owner) },
+    env: { ...(process.env as Record<string, string>), HOME: home, PI_CONFIG_DIR: piConfig, ...engineEnv(store, owner) },
     stdin: 'pipe',
     stdout: 'pipe',
     stderr: 'pipe',
