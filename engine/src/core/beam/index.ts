@@ -43,7 +43,15 @@ import {
 	scratchpadRead,
 	scratchpadWrite,
 	type MetadataPatch,
+	attestWorking,
+	type ExpiredRow,
+	type ExpireUnusedOptions,
+	expireUnused,
+	restoreWorking,
+	type SimilarMatch,
+	similarWorking,
 	updateWorking,
+	type WorkingFieldPatch,
 } from "./store";
 import type {
 	BeamCaches,
@@ -233,8 +241,8 @@ export class BeamMemory implements BeamMemoryState {
 		return getContext(this, limit);
 	}
 
-	invalidate(memoryId: string, replacementId: string | null = null): boolean {
-		return invalidate(this, memoryId, replacementId);
+	invalidate(memoryId: string, replacementId: string | null = null, validator: string | null = null): boolean {
+		return invalidate(this, memoryId, replacementId, validator);
 	}
 
 	getWorkingStats(
@@ -254,8 +262,26 @@ export class BeamMemory implements BeamMemoryState {
 		content: string | null = null,
 		importance: number | null = null,
 		metadata: MetadataPatch | null = null,
+		fields: WorkingFieldPatch = {},
+		validator: string | null = null,
 	): boolean {
-		return updateWorking(this, memoryId, content, importance, metadata);
+		return updateWorking(this, memoryId, content, importance, metadata, fields, validator);
+	}
+
+	restoreWorking(memoryId: string, validator: string | null = null): "restored" | "unchanged" | "not_found" {
+		return restoreWorking(this, memoryId, validator);
+	}
+
+	attestWorking(memoryId: string, validator: string): boolean {
+		return attestWorking(this, memoryId, validator);
+	}
+
+	expireUnused(options: ExpireUnusedOptions): ExpiredRow[] {
+		return expireUnused(this, options);
+	}
+
+	similarWorking(queryVector: ArrayLike<number>, topK: number, minScore: number): SimilarMatch[] {
+		return similarWorking(this, queryVector, topK, minScore);
 	}
 
 	get(memoryId: string): unknown | null {

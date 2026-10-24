@@ -94,7 +94,7 @@ const request = (run: Run) => JSON.parse(run.init?.stdin ?? '{}').params
 
 test('remember runs the private engine against the private store, global bank', async ($, on) => {
   const runs = world(on, '{"status":"stored"}')
-  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'fact' })
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'a durable test fact' })
 
   expect(ran.result).toBe('{"status":"stored"}')
   const run = runs[0]!
@@ -127,14 +127,14 @@ test('remember runs the private engine against the private store, global bank', 
   // `imported`: the durable tier the engine's 24h working-memory trim skips.
   expect(request(run)).toEqual({
     name: 'mnemopi_remember',
-    arguments: { content: 'fact', importance: 0.5, source: 'imported', scope: 'global', author_id: 'claude-code', author_type: 'agent' },
+    arguments: { content: 'a durable test fact', importance: 0.5, source: 'imported', scope: 'global', author_id: 'claude-code', author_type: 'agent' },
   })
 })
 
 test('per-project keeps a repo bank and still writes global on request', { options: { scope: 'per-project' } }, async ($, on) => {
   const runs = world(on, '{}')
-  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'local' })
-  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'shared', global: true })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'a local project fact' })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'a shared global fact', global: true })
 
   expect(runs[0]!.init?.env?.MNEMOPI_SESSION_ID).toMatch(/^project-My-Repo-[0-9a-z]+$/)
   expect(runs[0]!.init?.env?.MNEMOPI_CHANNEL_ID).toBe(runs[0]!.init?.env?.MNEMOPI_SESSION_ID)
@@ -475,7 +475,7 @@ test('memory_update runs mnemopi_update as the given owner, tags cleaned into me
     tool: 'mcp__mnemosyne__memory_update',
     memory_id: 'm1',
     owner: 'project-Other-abc',
-    content: 'new text',
+    content: 'new text of the fact',
     importance: 7,
     tags: [' Build ', 'build', 'CI', '', 'a-very-long-tag-name-that-goes-past-24', 'x', 'y', 'z'],
   })
@@ -486,7 +486,7 @@ test('memory_update runs mnemopi_update as the given owner, tags cleaned into me
     name: 'mnemopi_update',
     arguments: {
       memory_id: 'm1',
-      content: 'new text',
+      content: 'new text of the fact',
       importance: 1,
       metadata: { tags: ['build', 'ci', 'a-very-long-tag-name-tha', 'x', 'y'] },
     },
@@ -495,10 +495,10 @@ test('memory_update runs mnemopi_update as the given owner, tags cleaned into me
 
 test('memory_update without tags sends no metadata; tags [] sends tags null', async ($, on) => {
   const runs = world(on, '{"status":"updated"}')
-  await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1', content: 'only text' })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1', content: 'only the text changes' })
   await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1', tags: [] })
 
-  expect(request(runs[0]!).arguments).toEqual({ memory_id: 'm1', content: 'only text' })
+  expect(request(runs[0]!).arguments).toEqual({ memory_id: 'm1', content: 'only the text changes' })
   expect(request(runs[1]!).arguments).toEqual({ memory_id: 'm1', metadata: { tags: null } })
   // no owner given: this project's (global here)
   expect(runs[0]!.init?.env?.MNEMOPI_SESSION_ID).toBe('global')
@@ -522,7 +522,7 @@ test('on a stale engine memory_update is denied with /mnemosyne-setup, and the f
   expect(runs.length).toBe(0)
 
   await $.tool.call({ tool: 'mcp__mnemosyne__memory_recall', query: 'x' })
-  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'fact' })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'a durable test fact' })
   await $.tool.call({ tool: 'mcp__mnemosyne__memory_forget', memory_id: 'm1' })
   await $.tool.call({ tool: 'mcp__mnemosyne__memory_stats' })
   expect(runs.map(run => request(run).name)).toEqual(['mnemopi_recall', 'mnemopi_remember', 'mnemopi_forget', 'mnemopi_stats'])
@@ -726,7 +726,7 @@ test('a recall the engine fails logs ok false with the error', async ($, on) => 
 test('each of the five tools logs origin tool, with its owner, ids and count', { options: { scope: 'per-project' } }, async ($, on) => {
   const runs = world(on, RECALL_REPLY)
   await $.tool.call({ tool: 'mcp__mnemosyne__memory_recall', query: 'pnpm' })
-  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'we use pnpm' })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'we use pnpm for installs' })
   await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1', owner: 'project-Other-abc', tags: ['Build', 'CI'] })
   await $.tool.call({ tool: 'mcp__mnemosyne__memory_forget', memory_id: 'm2', owner: 'project-Other-abc' })
   await $.tool.call({ tool: 'mcp__mnemosyne__memory_stats' })
@@ -741,7 +741,7 @@ test('each of the five tools logs origin tool, with its owner, ids and count', {
   ])
   expect(got[0]).toMatchObject({ text: 'pnpm', ids: ['m1', 'm2'], count: 2 })
   expect(got[0].owner).toMatch(/^project-My-Repo-/)
-  expect(got[1]).toMatchObject({ text: 'we use pnpm' })
+  expect(got[1]).toMatchObject({ text: 'we use pnpm for installs' })
   // tags as the engine gets them: cleaned, as the proxy logs them
   expect(got[2]).toMatchObject({ owner: 'project-Other-abc', ids: ['m1'], count: 1, text: 'tags: build, ci' })
   expect(got[3]).toMatchObject({ owner: 'project-Other-abc', ids: ['m2'], count: 1, text: '' })
@@ -749,7 +749,7 @@ test('each of the five tools logs origin tool, with its owner, ids and count', {
 
 test('a tool call the engine fails logs ok false and the error text', async ($, on) => {
   const failing = world(on, '{}', true, 1)
-  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'fact' })
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'a durable test fact' })
   expect(ran.deny).toContain('engine exited 1')
   expect(lines(failing)).toMatchObject([{ action: 'remember', origin: 'tool', ok: false, error: 'Mnemosyne: engine exited 1:' }])
 })
@@ -795,7 +795,8 @@ const SECRETS = [
 test('text is redacted, then cut to 200 characters: no credential-shaped string reaches the line', async ($, on) => {
   const runs = world(on, '{"status":"stored","memory_id":"m7"}')
   const content = `deploy key ${SECRETS[0]} and token ${SECRETS[1]}, aws ${SECRETS[2]}, password=${SECRETS[3]}, sha ${SECRETS[4]}, blob ${SECRETS[5]}. ${'tail '.repeat(80)}`
-  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content })
+  // A save with these secrets is blocked by the guard (GUARD.2 below); the redaction is still checked on a recall query.
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_recall', query: content })
 
   const line = runs.appends[0]!.init!.stdin!
   for (const secret of SECRETS) expect(line).not.toContain(secret)
@@ -861,14 +862,14 @@ test('activityLog off: no hook starts an append', { options: { activityLog: 'off
 
 test('MNEMOSYNE_ACTIVITY_APPEND=await awaits the append, capped at 1 s', async ($, on) => {
   const runs = world(on, '{"status":"stored","memory_id":"m7"}', true, 0, ENGINE_BUILD, { env: { MNEMOSYNE_ACTIVITY_APPEND: 'await' } })
-  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'fact' })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'a durable test fact' })
   expect(runs.appends.length).toBe(1)
   expect(runs.appends[0]!.init?.timeoutMs).toBe(1000)
 })
 
 test('MNEMOSYNE_ACTIVITY_APPEND=run starts an un-awaited $.process.run with a 5 s timeout instead', async ($, on) => {
   const runs = world(on, '{"status":"stored","memory_id":"m7"}', true, 0, ENGINE_BUILD, { env: { MNEMOSYNE_ACTIVITY_APPEND: 'run' } })
-  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'fact' })
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'a durable test fact' })
 
   expect(ran.result).toBe('{"status":"stored","memory_id":"m7"}')
   expect(runs.appends.map(a => a.via)).toEqual(['run'])
@@ -960,9 +961,9 @@ test('TAGS.1.a2: the memory_remember input schema has a tags array of strings', 
 test('TAGS.1.a3: the engine call carries metadata {tags}, cleaned by hooks/tags.ts', async ($, on) => {
   const runs = world(on, '{"status":"stored"}')
   const tags = [' Build ', 'build', 'CI', '', 'a-very-long-tag-name-that-goes-past-24', 'x', 'y', 'z', 7, null]
-  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'fact', tags })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'a durable test fact', tags })
   expect(request(runs[0]!).arguments).toEqual({
-    content: 'fact',
+    content: 'a durable test fact',
     importance: 0.5,
     source: 'imported',
     scope: 'global',
@@ -975,10 +976,10 @@ test('TAGS.1.a3: the engine call carries metadata {tags}, cleaned by hooks/tags.
 
 test('TAGS.1.a4: a call without tags, with an empty or all-blank list, or with tags that are not a list sends no metadata', async ($, on) => {
   const runs = world(on, '{"status":"stored"}')
-  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'one' })
-  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'two', tags: [] })
-  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'three', tags: ['', '  ', 4] })
-  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'four', tags: 'git' })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'first plain fact' })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'second plain fact', tags: [] })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'third plain fact', tags: ['', '  ', 4] })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'fourth plain fact', tags: 'git' })
   for (const run of runs) expect(Object.keys(request(run).arguments).sort()).toEqual(['author_id', 'author_type', 'content', 'importance', 'scope', 'source'])
   expect(runs.length).toBe(4)
 })
@@ -1642,7 +1643,7 @@ test('KNOWX.1.a1 and a2: a trigger then a save gives human and stated; a save wi
   await $.prompt.submit({ text: 'hello' } as never) // first prompt, no term
   await $.prompt.submit(trigger() as never)
   await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'we deploy on Fridays' })
-  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'a second fact' })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'a second durable fact' })
   const saved = remembers(runs)
   expect(saved[0]).toMatchObject({ author_type: 'human', veracity: 'stated' })
   // The second save of the turn is not the human's: Claude's own, agent and no veracity.
@@ -1665,7 +1666,7 @@ test('KNOWX.1.a1: a subagent save never consumes the trigger; the main thread\'s
   const runs = world(on, '{"status":"stored","memory_id":"a1b2c3d4e5f60718"}')
   on('prompt.submit', (_$, e) => ({ text: e.text, context: e.context }))
   await $.prompt.submit(trigger() as never)
-  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'subagent save', agentId: 'agent-1' } as never)
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'a subagent save here', agentId: 'agent-1' } as never)
   await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'main thread save' })
   const saved = remembers(runs)
   expect(saved[0]).toMatchObject({ author_type: 'agent' })
@@ -1677,8 +1678,8 @@ test('KNOWX.1.a3 and a7: a save line carries author_type and veracity; memory_up
   const runs = world(on, '{"status":"stored","memory_id":"a1b2c3d4e5f60718"}')
   on('prompt.submit', (_$, e) => ({ text: e.text, context: e.context }))
   await $.prompt.submit(trigger() as never)
-  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'a human fact' })
-  await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'a1b2c3d4e5f60718', content: 'edited' })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'a human stated fact' })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'a1b2c3d4e5f60718', content: 'edited fact text here' })
   const line = lines(runs).find(entry => entry.action === 'remember' && entry.origin === 'tool')
   expect(line).toMatchObject({ author_type: 'human', veracity: 'stated' })
   // An update sends no provenance at all.
@@ -1721,7 +1722,7 @@ test('EMB.3.a3: the embeddings option resolves to on only on macOS arm64 by defa
 
 test('EMB.3.a1: on macOS arm64 with the model downloaded, an engine run turns embeddings on', { options: { embeddings: 'on' } }, async ($, on) => {
   const runs = embedWorld(on, { darwinArm64: true, ready: true })
-  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'fact' })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'a durable test fact' })
   const env = runs.find(r => (r.argv[1] ?? '').endsWith('/src/cli.ts'))?.init?.env
   // Embeddings on: MNEMOPI_NO_EMBEDDINGS is empty, and the local-only pins are set.
   expect(env?.MNEMOPI_NO_EMBEDDINGS).toBe('')
@@ -1734,7 +1735,7 @@ test('EMB.3.a1: on macOS arm64 with the model downloaded, an engine run turns em
 
 test('EMB.2.a4: an empty cache (no marker or model files) keeps embeddings off, even when the option is on', { options: { embeddings: 'on' } }, async ($, on) => {
   const runs = embedWorld(on, { darwinArm64: true, ready: false })
-  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'fact' })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'a durable test fact' })
   const env = runs.find(r => (r.argv[1] ?? '').endsWith('/src/cli.ts'))?.init?.env
   expect(env?.MNEMOPI_NO_EMBEDDINGS).toBe('1')
   // The pins are still there, so a stray API URL could never be used even when off.
@@ -1744,7 +1745,7 @@ test('EMB.2.a4: an empty cache (no marker or model files) keeps embeddings off, 
 
 test('L4: marker present but model files missing keeps embeddings off, no download', { options: { embeddings: 'on' } }, async ($, on) => {
   const runs = world(on, '{"status":"stored"}', true, 0, ENGINE_BUILD, { darwinArm64: true, markerOnly: true })
-  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'fact' })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'a durable test fact' })
   const env = runs.find(r => (r.argv[1] ?? '').endsWith('/src/cli.ts'))?.init?.env
   // The marker alone is not enough: every model file must be present too.
   expect(env?.MNEMOPI_NO_EMBEDDINGS).toBe('1')
@@ -1754,7 +1755,7 @@ test('EMB.3.a3: elsewhere (not macOS arm64) setup writes no marker, so engine ru
   // The platform decision lives in /mnemosyne-setup: off-machine it does not download,
   // so no marker and no model files exist and an engine run keeps embeddings off.
   const runs = embedWorld(on, { darwinArm64: false, ready: false })
-  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'fact' })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'a durable test fact' })
   const env = runs.find(r => (r.argv[1] ?? '').endsWith('/src/cli.ts'))?.init?.env
   expect(env?.MNEMOPI_NO_EMBEDDINGS).toBe('1')
 })
@@ -1834,4 +1835,187 @@ test('M2: setup whose install check could not prove the model loaded reports "em
   expect((ran as { text?: string }).text).toContain('re-run /mnemosyne-setup when online')
   // No marker written: only the rmSync (fs code) touches the marker path, never a write.
   expect(writes).toEqual([])
+})
+
+// GUARD.2: memory_remember and a content memory_update go through hooks/guard.ts before any engine process.
+const AWS_KEY = 'AKIA' + 'IOSFODNN7EXAMPLE'
+const GUARD_SECRET_TEXT = `the bucket key is ${AWS_KEY} for the deploy`
+
+test('GUARD.2: a blocked remember is a deny naming the rule ids, and no engine process starts', async ($, on) => {
+  const runs = world(on, '{"status":"stored"}')
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: GUARD_SECRET_TEXT })
+  expect(ran.deny).toContain('G1')
+  expect(ran.deny).not.toContain(AWS_KEY)
+  expect(runs.length).toBe(0)
+  const short = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'tiny' })
+  expect(short.deny).toContain('G2')
+  expect(runs.length).toBe(0)
+})
+
+test('GUARD.2: a blocked content update is a deny too; tags-only and importance-only updates are not guarded', async ($, on) => {
+  const runs = world(on, '{"status":"updated","memory_id":"m1"}')
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1', content: GUARD_SECRET_TEXT })
+  expect(ran.deny).toContain('G1')
+  expect(runs.length).toBe(0)
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1', tags: ['ops'] })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1', importance: 0.9 })
+  expect(runs.length).toBe(2)
+})
+
+test('GUARD.2: the activity line of a blocked call is ok false, error guard:<rule ids>, with no content text', async ($, on) => {
+  const runs = world(on, '{"status":"stored"}')
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: `${GUARD_SECRET_TEXT} today and password=hunter2hunter2hunter2` })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1', content: 'short' })
+  const [remembered, updated] = lines(runs)
+  expect(remembered).toMatchObject({ action: 'remember', origin: 'tool', ok: false, error: 'guard:G1,G4', text: '' })
+  expect(updated).toMatchObject({ action: 'update', ok: false, error: 'guard:G2', text: '' })
+  // nothing of the content is anywhere in the appended text
+  const written = runs.appends.map(run => run.init?.stdin ?? '').join('')
+  for (const piece of [AWS_KEY, 'hunter2', 'bucket', 'short']) expect(written.includes(piece)).toBe(false)
+})
+
+test('GUARD.2: in warn mode a warned remember is stored with metadata.guard and the reply has one warning line per hit', { options: { guardMode: 'warn' } }, async ($, on) => {
+  const runs = world(on, '{"status":"stored","memory_id":"a1b2c3d4e5f60718"}')
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'Today the importer was rewired to use the guard module', tags: ['Ops'] })
+  expect(runs.length).toBeGreaterThanOrEqual(1)
+  expect(request(runs[0]!).arguments.metadata).toEqual({ tags: ['ops'], guard: ['G4'] })
+  const [reply, ...warnings] = String(ran.result).split('\n')
+  expect(reply).toBe('{"status":"stored","memory_id":"a1b2c3d4e5f60718"}')
+  expect(warnings.length).toBe(1)
+  expect(warnings[0]).toContain('G4')
+  // a clean save carries no guard key and no extra lines
+  const clean = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'The plugin keeps its memories in one local SQLite file.' })
+  expect(clean.result).toBe('{"status":"stored","memory_id":"a1b2c3d4e5f60718"}')
+  expect(request(runs[runs.length - 1]!).arguments.metadata).toBeUndefined()
+})
+
+test('GUARD.2: in warn mode a warned content update is stored with metadata.guard', { options: { guardMode: 'warn' } }, async ($, on) => {
+  const runs = world(on, '{"status":"updated","memory_id":"m1"}')
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1', content: 'Tonight the audit script is being written for the guard' })
+  expect(request(runs[0]!).arguments.metadata).toEqual({ guard: ['G4'] })
+  expect(String(ran.result).split('\n').length).toBe(2)
+})
+
+test('GUARD.2: a blocked save does not use up the remember trigger', async ($, on) => {
+  const runs = world(on, '{"status":"stored","memory_id":"a1b2c3d4e5f60718"}')
+  on('prompt.submit', (_$, e) => ({ text: e.text, context: e.context }))
+  await $.prompt.submit({ text: 'hello' } as never)
+  await $.prompt.submit(trigger() as never)
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: GUARD_SECRET_TEXT })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'the bucket key now lives in the vault' })
+  expect(remembers(runs)[0]).toMatchObject({ author_type: 'human', veracity: 'stated' })
+})
+
+// GUARD.3: guardMode strict (the default) refuses a warned save unless the call passes confirm: true; warn saves it.
+const WARNED_TEXT = 'Today the importer was rewired to use the guard module'
+const STORED = '{"status":"stored","memory_id":"a1b2c3d4e5f60718"}'
+
+test('GUARD.3: strict is the default: a warned remember is refused naming each rule, asks for confirm: true, and starts no engine process', async ($, on) => {
+  const runs = world(on, STORED)
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: `${WARNED_TEXT} on 2026-10-24, released` })
+  expect(ran.deny).toContain('G4')
+  expect(ran.deny).toContain('Resend with confirm: true if the save is wanted.')
+  expect(ran.deny).not.toContain('importer')
+  expect(runs.length).toBe(0)
+  const long = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'a long fact '.repeat(150) })
+  expect(long.deny).toContain('G2')
+  expect(long.deny).toContain('confirm: true')
+  expect(runs.length).toBe(0)
+  const update = await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1', content: WARNED_TEXT })
+  expect(update.deny).toContain('confirm: true')
+  expect(runs.length).toBe(0)
+})
+
+test('GUARD.3: a refused warned save logs ok false, guard:<rule ids> and no content text', async ($, on) => {
+  const runs = world(on, STORED)
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: WARNED_TEXT })
+  const [line] = lines(runs)
+  expect(line).toMatchObject({ action: 'remember', origin: 'tool', ok: false, error: 'guard:G4', text: '' })
+  expect(runs.appends.map(run => run.init?.stdin ?? '').join('').includes('importer')).toBe(false)
+})
+
+test('GUARD.3: confirm: true saves a warned save with metadata.guard and the warning lines; confirm never reaches the engine', async ($, on) => {
+  const runs = world(on, STORED)
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: WARNED_TEXT, confirm: true })
+  expect(ran.deny).toBeUndefined()
+  expect(runs.length).toBeGreaterThanOrEqual(1)
+  expect(request(runs[0]!).arguments.metadata).toEqual({ guard: ['G4'] })
+  expect('confirm' in request(runs[0]!).arguments).toBe(false)
+  expect(String(ran.result).split('\n')).toEqual([STORED, expect.stringContaining('G4')])
+  const updated = await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1', content: WARNED_TEXT, confirm: true })
+  expect(updated.deny).toBeUndefined()
+  expect(request(runs[runs.length - 1]!).arguments.metadata).toEqual({ guard: ['G4'] })
+  expect('confirm' in request(runs[runs.length - 1]!).arguments).toBe(false)
+})
+
+test('GUARD.3: confirm: true never overrides a secret or size block, in either mode', async ($, on) => {
+  const runs = world(on, STORED)
+  for (const content of [GUARD_SECRET_TEXT, 'tiny', 'x'.repeat(4001)]) {
+    const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content, confirm: true })
+    expect(ran.deny).toContain('blocked')
+  }
+  expect(runs.length).toBe(0)
+})
+
+test('GUARD.3: in warn mode no confirm is needed, and confirm: true still does not override a block', { options: { guardMode: 'warn' } }, async ($, on) => {
+  const runs = world(on, STORED)
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: WARNED_TEXT })
+  expect(ran.deny).toBeUndefined()
+  expect(request(runs[0]!).arguments.metadata).toEqual({ guard: ['G4'] })
+  const blocked = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: GUARD_SECRET_TEXT, confirm: true })
+  expect(blocked.deny).toContain('G1')
+})
+
+test('GUARD.3: a guardMode that is neither strict nor warn counts as strict', { options: { guardMode: 'loose' } }, async ($, on) => {
+  const runs = world(on, STORED)
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: WARNED_TEXT })
+  expect(ran.deny).toContain('confirm: true')
+  expect(runs.length).toBe(0)
+})
+
+test('GUARD.3: a refused warned save does not use up the remember trigger', async ($, on) => {
+  const runs = world(on, STORED)
+  on('prompt.submit', (_$, e) => ({ text: e.text, context: e.context }))
+  await $.prompt.submit({ text: 'hello' } as never)
+  await $.prompt.submit(trigger() as never)
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: WARNED_TEXT })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: WARNED_TEXT, confirm: true })
+  expect(remembers(runs)[0]).toMatchObject({ author_type: 'human', veracity: 'stated' })
+})
+
+test('GUARD.3: memory_remember and memory_update list a confirm boolean in their input schema', async ($, on) => {
+  const registered: { name: string; inputSchema: { properties: Record<string, { type?: string }> } }[] = []
+  world(on, '{}')
+  on('command.register', () => ({ value: {} }) as never)
+  on('tool.register', (_$, e) => {
+    registered.push(e as never)
+    return { value: {} } as never
+  })
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/w', surface: null, isInteractive: false } as never)
+  const byName = Object.fromEntries(registered.map(tool => [tool.name, tool]))
+  for (const name of ['memory_remember', 'memory_update']) expect(byName[name]?.inputSchema.properties.confirm?.type).toBe('boolean')
+  expect(byName.memory_recall?.inputSchema.properties.confirm).toBeUndefined()
+})
+
+for (const [mode, expected] of [[undefined, 'strict'], ['warn', 'warn'], ['strict', 'strict'], ['bogus', 'strict']] as const) {
+  test(`GUARD.3: the sh wrapper exports MNEMOSYNE_GUARD_MODE=${expected} (guardMode ${mode ?? 'unset'})`, { options: { externalMcp: true, ...(mode ? { guardMode: mode } : {}) } }, async ($, on) => {
+    expect(await wrapperText($, on)).toContain(`export MNEMOSYNE_GUARD_MODE=${expected}\n`)
+  })
+}
+
+test('GUARD.3: the cmd wrapper sets MNEMOSYNE_GUARD_MODE', { options: { externalMcp: true, guardMode: 'warn' } }, async ($, on) => {
+  const runs: { argv: readonly string[] }[] = []
+  on('env.get', (_$, e) => ({ value: ({ OS: 'Windows_NT', USERPROFILE: 'C:\\Users\\u' } as Record<string, string>)[(e as { name: string }).name] }))
+  on('fs.stat', () => ({ value: { kind: 'file' } }) as never)
+  on('process.run', (_$, e) => {
+    runs.push(e)
+    return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
+  })
+  on('command.register', () => ({ value: {} }) as never)
+  on('tool.register', () => ({ value: {} }) as never)
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: 'C:\\w', surface: null, isInteractive: false } as never)
+  expect(runs.find(r => r.argv[2]?.includes('writeFileSync'))?.argv[4]).toContain('set "MNEMOSYNE_GUARD_MODE=warn"\r\n')
 })
