@@ -9,6 +9,7 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { homeEnv } from "./helpers";
 
 const ENGINE = join(import.meta.dir, "..");
 const CLI = join(ENGINE, "src", "cli.ts");
@@ -62,7 +63,7 @@ function env(store: string, overrides: Record<string, string> = {}) {
 		MNEMOPI_EMBEDDING_API_KEY: "local",
 		MNEMOPI_EMBEDDING_DIM: String(DIMS),
 		MNEMOPI_EMBEDDING_MODEL: MODEL,
-		PI_CONFIG_DIR: ".claude/mnemosyne/model-cache",
+		...homeEnv(),
 		// change 10: the API route now needs an explicit opt-in. This gate opts in
 		// so the local stub stands in for the model and keeps test:bun offline.
 		MNEMOPI_EMBEDDINGS_API_OPT_IN: "1",
