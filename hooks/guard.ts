@@ -1,10 +1,12 @@
 // The admission guard: one check that every memory write goes through before it
 // reaches the engine. admit() blocks known secret formats (G1) and empty,
 // too-short or oversize text (G2), and warns about oversize-ish text (G2) and
-// dated task chatter (G4). A message names the rule, never the matched text, so a
+// dated task chatter (G4). G3, near-duplicates, needs the engine's embeddings, so
+// it is not in admit(): the callers that can ask the engine run it and use the
+// helpers at the end of this file. A message names the rule, never the matched text, so a
 // caller can log or show it without leaking what it caught. No imports, so the
 // hooks, the proxy, the dashboard server and the importers can all use it.
-export type GuardRule = 'G1' | 'G2' | 'G4'
+export type GuardRule = 'G1' | 'G2' | 'G3' | 'G4'
 export type GuardVerdict = 'allow' | 'warn' | 'block'
 export interface GuardHit {
   rule: GuardRule
@@ -93,4 +95,43 @@ export function admit(input: GuardInput): GuardResult {
   if (blocks.length > 0) return { verdict: 'block', hits: [...blocks, ...warnings] }
   if (warnings.length > 0) return { verdict: 'warn', hits: warnings }
   return { verdict: 'allow', hits: [] }
+}
+
+// ---- G3: near-duplicates (META.3) ----
+
+/** The cosine score from which a stored memory counts as a near-duplicate of a save. */
+export const NEAR_DUPLICATE_SCORE = 0.88
+
+/** One close memory as the engine's mnemopi_similar returns it. The preview is at most 80 characters. */
+export interface NearMatch {
+  id: string
+  owner: string
+  score: number
+  preview: string
+}
+
+/**
+ * The matches that are real near-duplicates. A match that is the save's own text again (score about 1 and the
+ * same first 80 characters) is the engine's dedupe: the same memory written again, no new row, so no warning.
+ */
+export function nearMatchesOf(matches: unknown, content: string): NearMatch[] {
+  if (!Array.isArray(matches)) return []
+  const out: NearMatch[] = []
+  for (const item of matches) {
+    const m = item as Partial<NearMatch> | null
+    if (m === null || typeof m !== 'object' || typeof m.id !== 'string' || typeof m.owner !== 'string' || typeof m.score !== 'number' || typeof m.preview !== 'string') continue
+    if (m.score < NEAR_DUPLICATE_SCORE) continue
+    if (m.score >= 0.9999 && m.preview === content.slice(0, 80)) continue
+    out.push({ id: m.id, owner: m.owner, score: m.score, preview: m.preview })
+  }
+  return out
+}
+
+/** `metadata.guard` entries for a save that went in beside close memories: `near-duplicate:<id>`. */
+export const nearDuplicateFlags = (matches: readonly NearMatch[]) => matches.map(match => `near-duplicate:${match.id}`)
+
+/** One line naming each close memory (id, owner, score, preview) and what to do instead. */
+export function nearDuplicateMessage(matches: readonly NearMatch[]): string {
+  const list = matches.map(match => `${match.id} (owner ${match.owner}, score ${match.score.toFixed(2)}): ${JSON.stringify(match.preview)}`).join('; ')
+  return `G3 near-duplicate: close memories already exist: ${list}. Update one of these instead (memory_update with its id and owner).`
 }

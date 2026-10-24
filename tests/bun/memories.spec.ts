@@ -5,12 +5,14 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { Database } from 'bun:sqlite'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { getRows } from '../../bin/memories'
+import { backupName, backupStore, BACKUP_KEEP, getRows } from '../../bin/memories'
 import { BACKFILL_TEXT_LIMIT, hasTags, judge, parseProposals, parseRows, PROPOSALS_FILE } from '../../hooks/backfill'
 import type { Proposal } from '../../hooks/backfill'
-import { body, engineCall, ROOT, tempDir, toolCall, isolatedEnv } from './helpers'
+import { makeHost } from './knowledge-host'
+import type { Host } from './knowledge-host'
+import { body, engineCall, isolatedEnv, ROOT, tempDir, toolCall } from './helpers'
 
 const CLI = join(ROOT, 'engine', 'src', 'cli.ts')
 const SCRIPT = join(ROOT, 'bin', 'memories.ts')
@@ -459,5 +461,352 @@ describe('bin/memories.ts pending and --no-knowledge', () => {
     const promptReply = body((await engineCall(CLI, store, 'global', [toolCall(1, 'mnemopi_knowledge_prompt', { memory_id: id })])).get(1))
     expect(got.sha256).toBe(promptReply.sha256)
     expect(got.sha256).toBe(sha(text))
+  })
+})
+
+// META.5 (C9): the backup every apply command runs first, on a store made by the real engine.
+describe('bin/memories.ts backup', () => {
+  const temp = tempDir('backup')
+  const root = join(temp.dir, 'data')
+  const store = join(root, 'store')
+  const folder = join(root, 'backups')
+  const names = () => (existsSync(folder) ? readdirSync(folder).sort() : [])
+
+  beforeAll(async () => {
+    for (const [i, content] of ['the first note kept in the backup store', 'the second note kept in the backup store', 'the third note kept in the backup store'].entries()) {
+      const reply = body((await engineCall(CLI, store, i === 2 ? 'project-a' : 'global', [toolCall(1, 'mnemopi_remember', { content })])).get(1))
+      if (typeof reply?.memory_id !== 'string') throw new Error(`remember failed: ${JSON.stringify(reply)}`)
+    }
+  })
+  afterAll(() => {
+    if (existsSync(folder)) chmodSync(folder, 0o700)
+    temp.dispose()
+  })
+
+  test('META.5.a1: backup writes <root>/backups/mnemopi-<UTC stamp>.db with VACUUM INTO, mode 0600, and prints the path and the row count', async () => {
+    const ran = await memories(['--store', store, 'backup'])
+    expect(ran.exitCode).toBe(0)
+    const out = JSON.parse(ran.stdout) as { path: string; rows: number; pruned: number }
+    expect(out.rows).toBe(3)
+    expect(out.pruned).toBe(0)
+    expect(out.path.startsWith(`${folder}/mnemopi-`)).toBe(true)
+    expect(out.path).toMatch(/\/mnemopi-\d{8}T\d{9}Z\.db$/)
+    expect(names()).toEqual([out.path.slice(folder.length + 1)])
+    expect(statSync(out.path).mode & 0o777).toBe(0o600)
+    expect(statSync(folder).mode & 0o777).toBe(0o700)
+    // It is a whole database: it opens, passes a check and holds the same rows.
+    const copy = new Database(out.path, { readonly: true })
+    try {
+      expect((copy.query('SELECT COUNT(*) AS n FROM working_memory').get() as { n: number }).n).toBe(3)
+      expect((copy.query('PRAGMA integrity_check').get() as { integrity_check: string }).integrity_check).toBe('ok')
+    } finally {
+      copy.close()
+    }
+    // The store itself is untouched.
+    const live = new Database(join(store, 'mnemopi.db'), { readonly: true })
+    try {
+      expect((live.query('SELECT COUNT(*) AS n FROM working_memory').get() as { n: number }).n).toBe(3)
+    } finally {
+      live.close()
+    }
+  })
+
+  test('META.5.a1: backup <root> names the data root when the store lives elsewhere', async () => {
+    const elsewhere = join(temp.dir, 'elsewhere')
+    const ran = await memories(['--store', store, 'backup', elsewhere])
+    expect(ran.exitCode).toBe(0)
+    expect(JSON.parse(ran.stdout).path.startsWith(`${elsewhere}/backups/mnemopi-`)).toBe(true)
+  })
+
+  test('META.5.a2: it refuses, before copying, when the disk has less free space than twice the store', () => {
+    const before = names()
+    const size = statSync(join(store, 'mnemopi.db')).size
+    expect(() => backupStore(store, root, { freeBytes: () => 2 * size - 1 })).toThrow(/not enough disk space for a backup/)
+    expect(names()).toEqual(before)
+    // Exactly twice the store is enough.
+    const result = backupStore(store, root, { freeBytes: () => 2 * size + 4096, now: new Date('2030-01-01T00:00:00.000Z') })
+    expect(result.path.endsWith('mnemopi-20300101T000000000Z.db')).toBe(true)
+  })
+
+  test('META.5.a2: it keeps the newest 10 backups and removes only older mnemopi-*.db files', () => {
+    const stray = join(folder, 'notes.txt')
+    writeFileSync(stray, 'not a backup')
+    for (let i = 0; i < 14; i++) backupStore(store, root, { now: new Date(Date.UTC(2031, 0, 1, 0, 0, i)) })
+    const backups = names().filter(name => name.startsWith('mnemopi-'))
+    expect(backups.length).toBe(BACKUP_KEEP)
+    // The newest ten: the last ten of the 2031 series, none of the earlier ones.
+    expect(backups).toEqual(Array.from({ length: 10 }, (_, i) => backupName(new Date(Date.UTC(2031, 0, 1, 0, 0, i + 4)))))
+    expect(existsSync(stray)).toBe(true)
+  })
+
+  test('META.5.a3: a read-only backups folder makes it fail with a non-zero exit and leaves no file', async () => {
+    if (process.getuid?.() === 0) return // root ignores folder modes
+    const before = names()
+    chmodSync(folder, 0o500)
+    try {
+      const ran = await memories(['--store', store, 'backup'])
+      expect(ran.exitCode).toBe(1)
+      expect(ran.stderr).toContain('mnemosyne memories:')
+      expect(ran.stdout).toBe('')
+    } finally {
+      chmodSync(folder, 0o700)
+    }
+    expect(names()).toEqual(before)
+  })
+
+  test('META.5.a1: a store with no database, a missing --store and extra arguments are refused', async () => {
+    const empty = join(temp.dir, 'empty-store')
+    mkdirSync(empty, { recursive: true })
+    const none = await memories(['--store', empty, 'backup'])
+    expect(none.exitCode).toBe(1)
+    expect(none.stderr).toContain('there is no store database')
+    expect(existsSync(join(temp.dir, 'backups'))).toBe(false)
+    expect((await memories(['backup'])).exitCode).toBe(1)
+    expect((await memories(['--store', store, 'backup', 'a', 'b'])).exitCode).toBe(1)
+    expect((await memories(['--store', store, 'backup', '--evil'])).exitCode).toBe(1)
+  })
+})
+
+// META.2 (C4): what each save path writes, read back from the row, through the real hooks/register.ts
+// over the real engine (the host of the knowledge specs; only the model is a stand-in, and it is off here).
+describe('META.2: the save paths write honest source, trust tier and veracity', () => {
+  const hosts: Host[] = []
+  const open = async (options: Record<string, unknown> = {}) => {
+    const host = await makeHost({ options: { extractionModel: 'off', ...options } })
+    hosts.push(host)
+    return host
+  }
+  afterAll(() => {
+    for (const host of hosts.splice(0)) host.dispose()
+  })
+
+  const COLUMNS = 'id, content, source, trust_tier, veracity, memory_type, valid_until, scope, author_type, metadata_json'
+  type Saved = { id: string; content: string; source: string; trust_tier: string; veracity: string; memory_type: string; valid_until: string | null; scope: string; author_type: string; metadata_json: string | null }
+  const rows = (host: Host) => {
+    const db = new Database(join(host.store, 'mnemopi.db'), { readonly: true })
+    try {
+      return db.query(`SELECT ${COLUMNS} FROM working_memory ORDER BY timestamp, id`).all() as Saved[]
+    } finally {
+      db.close()
+    }
+  }
+  const rowOf = (host: Host, content: string) => rows(host).find(row => row.content === content)!
+  const idOf = (reply: { result?: string }) => JSON.parse(String(reply.result).split('\nMnemosyne')[0]!).memory_id as string
+  const DAY = 86_400_000
+  /** Within a minute of `days` from now. */
+  const inDays = (value: string | null, days: number) => {
+    expect(value).not.toBeNull()
+    expect(Math.abs(Date.parse(value!) - (Date.now() + days * DAY))).toBeLessThan(60_000)
+  }
+
+  test('META.2.a1/a3: Claude\'s save is source claude-code, tier DERIVED, veracity unknown, kind as given, no expiry', async () => {
+    const host = await open()
+    await host.tool('memory_remember', { content: 'we use bun for every script here', kind: 'decision' })
+    expect(rowOf(host, 'we use bun for every script here')).toMatchObject({ source: 'claude-code', trust_tier: 'DERIVED', veracity: 'unknown', memory_type: 'decision', valid_until: null, scope: 'global', author_type: 'agent' })
+  })
+
+  test('META.2.a1/a3: a trigger-phrase save is source user, tier STATED, veracity stated; the next save is Claude\'s', async () => {
+    const host = await open({ rememberTerms: 'remember that' })
+    await host.prompt('remember that we deploy on fridays')
+    await host.tool('memory_remember', { content: 'we deploy on fridays only', kind: 'fact' })
+    await host.tool('memory_remember', { content: 'the second save of that turn', kind: 'fact' })
+    expect(rowOf(host, 'we deploy on fridays only')).toMatchObject({ source: 'user', trust_tier: 'STATED', veracity: 'stated', memory_type: 'fact', author_type: 'human', scope: 'global' })
+    expect(rowOf(host, 'the second save of that turn')).toMatchObject({ source: 'claude-code', trust_tier: 'DERIVED', veracity: 'unknown', author_type: 'agent' })
+  })
+
+  test('META.2.a2/a3: a context note expires in 14 days; expires_in_days sets it (1-365); other kinds have none; a bad value is refused', async () => {
+    const host = await open()
+    await host.tool('memory_remember', { content: 'the importer is half done today', kind: 'context' })
+    await host.tool('memory_remember', { content: 'the importer wrap up is set for next quarter', kind: 'context', expires_in_days: 30 })
+    await host.tool('memory_remember', { content: 'a fact that never expires on its own', kind: 'fact' })
+    await host.tool('memory_remember', { content: 'a note with no kind and no expiry' })
+    inDays(rowOf(host, 'the importer is half done today').valid_until, 14)
+    inDays(rowOf(host, 'the importer wrap up is set for next quarter').valid_until, 30)
+    expect(rowOf(host, 'a fact that never expires on its own').valid_until).toBeNull()
+    expect(rowOf(host, 'a note with no kind and no expiry').valid_until).toBeNull()
+    const before = rows(host).length
+    for (const expires_in_days of [0, 366, 1.5, '7', -1]) {
+      const refused = await host.tool('memory_remember', { content: 'a context note with a bad expiry', kind: 'context', expires_in_days })
+      expect(refused.deny).toContain('expires_in_days must be a whole number from 1 to 365')
+    }
+    expect(rows(host).length).toBe(before)
+    const edge = await host.tool('memory_remember', { content: 'the longest expiry allowed here', kind: 'context', expires_in_days: 365 })
+    expect(edge.deny).toBeUndefined()
+    inDays(rowOf(host, 'the longest expiry allowed here').valid_until, 365)
+  })
+
+  test('MODEL NB1/NB2 (b): re-saving identical text keeps scope and tier: a global row stays global, a per-project row stays channel', async () => {
+    for (const [options, input, scope] of [
+      [{}, {}, 'global'],
+      [{ scope: 'per-project' }, {}, 'channel'],
+      [{ scope: 'per-project' }, { global: true }, 'global'],
+    ] as const) {
+      const host = await open(options)
+      const content = `re-saving this note must not change its scope (${scope})`
+      await host.tool('memory_remember', { content, kind: 'fact', ...input })
+      const first = rowOf(host, content)
+      expect(first.scope).toBe(scope)
+      await host.tool('memory_remember', { content, kind: 'fact', ...input })
+      await host.tool('memory_remember', { content, ...input }) // no kind: the stored kind stays too
+      expect(rows(host).filter(row => row.content === content)).toHaveLength(1)
+      expect(rowOf(host, content)).toMatchObject({ id: first.id, scope, trust_tier: 'DERIVED', source: 'claude-code', memory_type: 'fact' })
+    }
+  })
+
+  test('META.2.a4 / (c): rows saved before v3 are not relabelled; only a row whose exact text is saved again takes the new path\'s values', async () => {
+    const host = await open()
+    // Two rows written the pre-v3 way, straight through the engine.
+    const old = async (content: string) => {
+      const reply = body((await engineCall(join(ROOT, 'engine', 'src', 'cli.ts'), host.store, 'global', [toolCall(1, 'mnemopi_remember', { content, source: 'imported', scope: 'global' })])).get(1))
+      return reply!.memory_id as string
+    }
+    await old('an older memory that stays exactly as it is')
+    await old('an older memory that is saved a second time')
+    const snapshot = (content: string) => rowOf(host, content)
+    const untouched = snapshot('an older memory that stays exactly as it is')
+    expect(untouched).toMatchObject({ source: 'imported', trust_tier: 'IMPORTED' })
+    // Other saves, an update of a different row and a kind-less save: none of them relabels it.
+    await host.tool('memory_remember', { content: 'a brand new memory saved after the old ones', kind: 'fact' })
+    expect(snapshot('an older memory that stays exactly as it is')).toEqual(untouched)
+    // Saving the exact text again is the same memory written again: it takes the new path's values.
+    await host.tool('memory_remember', { content: 'an older memory that is saved a second time', kind: 'fact' })
+    expect(snapshot('an older memory that is saved a second time')).toMatchObject({ source: 'claude-code', trust_tier: 'DERIVED', scope: 'global', memory_type: 'fact' })
+    expect(snapshot('an older memory that stays exactly as it is')).toEqual(untouched)
+  })
+
+  test('GUARD review finding 3 (a): a content update that is clean clears the old metadata.guard flag, and keeps the tags', async () => {
+    const host = await open({ guardMode: 'warn' })
+    const saved = await host.tool('memory_remember', { content: 'Today the importer was rewired to use the guard module', kind: 'fact', tags: ['ops'] })
+    const id = idOf(saved)
+    expect(JSON.parse(rowOf(host, 'Today the importer was rewired to use the guard module').metadata_json!)).toEqual({ tags: ['ops'], guard: ['G4'] })
+    const updated = await host.tool('memory_update', { memory_id: id, content: 'The importer uses the guard module for every save path.' })
+    expect(updated.deny).toBeUndefined()
+    expect(JSON.parse(rowOf(host, 'The importer uses the guard module for every save path.').metadata_json!)).toEqual({ tags: ['ops'] })
+    // A content update that is warned again sets the flag again.
+    await host.tool('memory_update', { memory_id: id, content: 'Today the importer was rewired to use the guard module again' })
+    expect(JSON.parse(rowOf(host, 'Today the importer was rewired to use the guard module again').metadata_json!)).toEqual({ tags: ['ops'], guard: ['G4'] })
+  })
+
+  test('META.2.a1: no hooks/ or bin/ file writes source: \'imported\' (bin/install-engine.ts is the one named exception)', async () => {
+    const files: string[] = []
+    for (const folder of ['hooks', 'bin']) for (const name of readdirSync(join(ROOT, folder))) if (name.endsWith('.ts')) files.push(join(folder, name))
+    // bin/install-engine.ts: its install-check probe saves one line to a throwaway temp store that is deleted afterwards; it is not a save path.
+    const found = files.filter(file => file !== join('bin', 'install-engine.ts') && /source:\s*['"]imported['"]/.test(readFileSync(join(ROOT, file), 'utf8')))
+    expect(found).toEqual([])
+    expect(files.length).toBeGreaterThan(10)
+  })
+})
+
+// META.4: replaces retires the row a save supersedes, through the real hooks/register.ts over the real engine.
+describe('META.4: replaces retires, never deletes', () => {
+  const hosts: Host[] = []
+  const open = async (options: Record<string, unknown> = {}) => {
+    const host = await makeHost({ options: { extractionModel: 'off', ...options } })
+    hosts.push(host)
+    return host
+  }
+  afterAll(() => {
+    for (const host of hosts.splice(0)) host.dispose()
+  })
+  const CLI = join(ROOT, 'engine', 'src', 'cli.ts')
+  type Row = { id: string; content: string; session_id: string; scope: string; valid_until: string | null; superseded_by: string | null }
+  const rowOf = (host: Host, id: string) => {
+    const db = new Database(join(host.store, 'mnemopi.db'), { readonly: true })
+    try {
+      return db.query('SELECT id, content, session_id, scope, valid_until, superseded_by FROM working_memory WHERE id = ?').get(id) as Row | null
+    } finally {
+      db.close()
+    }
+  }
+  const auditOf = (host: Host, id: string) => {
+    const db = new Database(join(host.store, 'mnemopi.db'), { readonly: true })
+    try {
+      return db.query('SELECT validator, action FROM memory_validations WHERE memory_id = ? ORDER BY validation_id').all(id) as { validator: string; action: string }[]
+    } finally {
+      db.close()
+    }
+  }
+  const first = (reply: { result?: string }) => JSON.parse(String(reply.result).split('\nMnemosyne')[0]!)
+  const recalled = async (host: Host, query: string) => (JSON.parse((await host.tool('memory_recall', { query })).result!) as { id: string }[]).map(row => row.id)
+  /** A row written straight through the engine as another owner, the way an older project's memory sits in the store. */
+  const seed = async (host: Host, owner: string, content: string, scope: string) =>
+    (body((await engineCall(CLI, host.store, owner, [toolCall(1, 'mnemopi_remember', { content, scope, source: 'claude-code', trust_tier: 'DERIVED' })])).get(1))!.memory_id as string)
+
+  test('META.4.a1/a3/a4: the old row is retired as claude-code, recall stops returning it, nothing is deleted, restore brings it back, and the log has a retire line', async () => {
+    const host = await open()
+    const old = first(await host.tool('memory_remember', { content: 'The staging cluster runs on the blue network segment.', kind: 'fact' })).memory_id as string
+    expect(await recalled(host, 'staging cluster blue network')).toContain(old)
+    const saved = await host.tool('memory_remember', { content: 'The staging cluster now runs on the green network segment.', kind: 'fact', replaces: old })
+    expect(saved.deny).toBeUndefined()
+    const fresh = first(saved).memory_id as string
+    expect(String(saved.result)).toContain(`retired ${old}, replaced by ${fresh}`)
+
+    // Retired, not deleted.
+    const retired = rowOf(host, old)!
+    expect(retired.content).toBe('The staging cluster runs on the blue network segment.')
+    expect(retired.superseded_by).toBe(fresh)
+    expect(retired.valid_until).not.toBeNull()
+    expect(rowOf(host, fresh)).toMatchObject({ superseded_by: null, valid_until: null })
+    // Recall no longer returns it; the new row is found.
+    const after = await recalled(host, 'staging cluster network segment')
+    expect(after).toContain(fresh)
+    expect(after).not.toContain(old)
+    // The audit trail names who retired it.
+    expect(auditOf(host, old)).toEqual([{ validator: 'claude-code', action: 'retire' }])
+    // The activity log has a retire line with both ids and no memory text.
+    const retireLine = host.activity().find(line => line.action === 'retire')!
+    expect(retireLine).toMatchObject({ action: 'retire', origin: 'tool', ok: true, ids: [old, fresh], count: 1 })
+    expect(JSON.stringify(retireLine)).not.toContain('staging')
+
+    // Restore (MODEL.2) brings it back, as its owner: recall returns it again.
+    const restored = body((await engineCall(CLI, host.store, 'global', [toolCall(1, 'mnemopi_update', { memory_id: old, restore: true, validator: 'rohit' })])).get(1))
+    expect(restored?.status).toBe('restored')
+    expect(rowOf(host, old)).toMatchObject({ valid_until: null, superseded_by: null })
+    expect(await recalled(host, 'staging cluster blue network')).toContain(old)
+    expect(auditOf(host, old)).toEqual([{ validator: 'claude-code', action: 'retire' }, { validator: 'rohit', action: 'restore' }])
+  })
+
+  test('META.4.a2: an unknown id leaves the new memory saved and names the failure; nothing else changes', async () => {
+    const host = await open()
+    const bystander = first(await host.tool('memory_remember', { content: 'The bystander memory must stay exactly as it is.', kind: 'fact' })).memory_id as string
+    const before = rowOf(host, bystander)
+    const saved = await host.tool('memory_remember', { content: 'A fresh memory that claims to replace a missing one.', kind: 'fact', replaces: 'deadbeefdeadbeef' })
+    expect(saved.deny).toBeUndefined()
+    expect(rowOf(host, first(saved).memory_id)).not.toBeNull()
+    expect(String(saved.result)).toContain('replaces deadbeefdeadbeef did not retire it')
+    expect(String(saved.result)).toContain('no memory deadbeefdeadbeef found for this project')
+    expect(rowOf(host, bystander)).toEqual(before)
+    expect(host.activity().find(line => line.action === 'retire')).toMatchObject({ ok: false, ids: ['deadbeefdeadbeef', first(saved).memory_id] })
+  })
+
+  test('META.4.a2: a project-only row of another owner is not retired unless its owner is named; a global row is', async () => {
+    const host = await open({ scope: 'per-project' })
+    const theirs = await seed(host, 'project-other-9z', 'The other project keeps its release notes in the wiki.', 'channel')
+    const theirsGlobal = await seed(host, 'project-other-9z', 'The other project shares its style guide with everyone.', 'global')
+    // Without the owner, the row is not this project's to retire: the step fails, the new memory stays.
+    const miss = await host.tool('memory_remember', { content: 'This project keeps its release notes in the repository.', kind: 'fact', replaces: theirs })
+    expect(String(miss.result)).toContain(`no memory ${theirs} found for this project`)
+    expect(rowOf(host, theirs)).toMatchObject({ valid_until: null, superseded_by: null })
+    // A global row is another project's too, but visible to all.
+    const shared = await host.tool('memory_remember', { content: 'This project follows the shared style guide in its own wiki.', kind: 'fact', replaces: theirsGlobal })
+    expect(String(shared.result)).toContain(`retired ${theirsGlobal}`)
+    expect(rowOf(host, theirsGlobal)!.superseded_by).toBe(first(shared).memory_id)
+    // With the owner named (as memory_recall shows it), the project-only row is retired as that owner.
+    const named = await host.tool('memory_remember', { content: 'This project keeps its release notes in the repository wiki.', kind: 'fact', replaces: theirs, owner: 'project-other-9z' })
+    expect(String(named.result)).toContain(`retired ${theirs}`)
+    expect(rowOf(host, theirs)!.superseded_by).toBe(first(named).memory_id)
+    const retireLines = host.activity().filter(line => line.action === 'retire')
+    expect(retireLines.map(line => line.ok)).toEqual([false, true, true])
+    expect(retireLines[2]!.owner).toBe('project-other-9z')
+  })
+
+  test('META.4: saving the same text again with replaces naming its own id retires nothing', async () => {
+    const host = await open()
+    const text = { content: 'The nightly job runs at three in the morning.', kind: 'fact' }
+    const id = first(await host.tool('memory_remember', text)).memory_id as string
+    const again = await host.tool('memory_remember', { ...text, replaces: id })
+    expect(first(again).memory_id).toBe(id)
+    expect(String(again.result)).toContain('nothing to retire')
+    expect(rowOf(host, id)).toMatchObject({ valid_until: null, superseded_by: null })
   })
 })

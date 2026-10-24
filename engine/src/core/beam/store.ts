@@ -449,6 +449,9 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 	// A re-save that names no kind must not overwrite the stored one with 'unknown'.
 	const resaveMemoryType = options.memoryType === undefined || options.memoryType === "unknown" ? null : memoryType;
 	const validUntil = options.validUntil ?? options.valid_until ?? null;
+	// A re-save changes the stored tier only when the call names one (engine/UPSTREAM.md change 17).
+	const resaveTrustTier =
+		options.trustTier === undefined || options.trustTier === null ? null : normalizeTrustTier(options.trustTier, source);
 	const authorId = options.authorId ?? options.author_id ?? beam.authorId;
 	const authorType = options.authorType ?? options.author_type ?? beam.authorType;
 	const channelId = options.channelId ?? options.channel_id ?? beam.channelId;
@@ -457,16 +460,23 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 
 	const existingId = findDuplicate(beam, content);
 	if (existingId !== null) {
+		// engine/UPSTREAM.md change 17: a re-save never lowers a stored scope (session < channel < global),
+		// keeps the stored trust tier unless the call names one, and never changes the kind or adds an expiry
+		// to a fact, preference, instruction or decision. The first author and the veracity rules are unchanged.
 		beam.db.run(
 			`
 				UPDATE working_memory
 				SET importance = MAX(importance, ?), timestamp = ?, source = ?,
-					valid_until = COALESCE(?, valid_until),
-					scope = COALESCE(?, scope),
+					valid_until = CASE WHEN memory_type IN ('fact', 'preference', 'instruction', 'decision') THEN valid_until ELSE COALESCE(?, valid_until) END,
+					scope = CASE
+						WHEN scope = 'session' THEN COALESCE(?, scope)
+						WHEN scope = 'channel' AND ? = 'global' THEN 'global'
+						ELSE scope
+					END,
 					author_id = CASE WHEN author_id IS NULL AND author_type IS NULL THEN ? ELSE author_id END,
 					author_type = CASE WHEN author_id IS NULL AND author_type IS NULL THEN ? ELSE author_type END,
 					channel_id = COALESCE(?, channel_id),
-					memory_type = COALESCE(?, memory_type),
+					memory_type = CASE WHEN memory_type IN ('fact', 'preference', 'instruction', 'decision') THEN memory_type ELSE COALESCE(?, memory_type) END,
 					veracity = CASE WHEN ? != 'unknown' THEN ? ELSE veracity END,
 					trust_tier = COALESCE(?, trust_tier),
 					embed_text = COALESCE(?, embed_text),
@@ -479,13 +489,14 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 				source,
 				validUntil,
 				scope,
+				scope,
 				authorId,
 				authorType,
 				channelId,
 				resaveMemoryType,
 				veracity,
 				veracity,
-				trustTier,
+				resaveTrustTier,
 				storedEmbeddingText(content, embedText),
 				existingId,
 				beam.sessionId,

@@ -361,7 +361,7 @@ describe('provenance through the real engine', () => {
     expect(snapshot()).toBe(before)
   })
 
-  test('spec 10b: the engine keeps veracity in the veracity column; trust_tier is the same IMPORTED for a human-stated and an agent save', async () => {
+  test('spec 10b: the engine keeps veracity in the veracity column; trust_tier is STATED for a human-stated save and DERIVED for an agent save', async () => {
     const host = await open({ options: TRIGGER, model: good })
     await host.prompt('remember that we deploy on fridays')
     await host.tool('memory_remember', { content: 'the human stated this' })
@@ -372,9 +372,9 @@ describe('provenance through the real engine', () => {
     const agent = rows.find(row => row.content === 'the agent decided this')!
     expect(human).toMatchObject({ author_type: 'human', veracity: 'stated' })
     expect(agent).toMatchObject({ author_type: 'agent', veracity: 'unknown' })
-    // trust_tier follows the save's `source` ('imported' -> IMPORTED), not its veracity: it cannot tell the two apart.
-    expect(human.trust_tier).toBe('IMPORTED')
-    expect(agent.trust_tier).toBe('IMPORTED')
+    // C4: trust_tier follows the save path: the trigger save is STATED, Claude's own save is DERIVED.
+    expect(human.trust_tier).toBe('STATED')
+    expect(agent.trust_tier).toBe('DERIVED')
   })
 
   test('spec 11: a content memory_update keeps the row human + stated', async () => {
@@ -444,7 +444,7 @@ describe('finding 6: the real proxy never accepts veracity or a trust tier from 
       try {
         const row = db.query('SELECT veracity, trust_tier, author_id, author_type FROM working_memory').get() as Record<string, string>
         expect(row.veracity).toBe('unknown')
-        expect(row.trust_tier).toBe('IMPORTED')
+        expect(row.trust_tier).toBe('EXTERNAL_WRITE')
         expect(row.author_type).toBe('agent')
         expect(row.author_id).toBe('cursor')
       } finally {

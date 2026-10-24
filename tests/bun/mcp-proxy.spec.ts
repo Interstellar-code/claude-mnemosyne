@@ -136,6 +136,152 @@ describe('the proxy against a real installed engine', () => {
     expect(importance()).toBe(1)
   })
 
+  // META.1: `kind` is the client's word for the engine's memory_type.
+  const rowOf = (id: string) => {
+    const db = new Database(join(store, 'mnemopi.db'), { readonly: true })
+    try {
+      return db.query('SELECT memory_type FROM working_memory WHERE id = ?').get(id) as { memory_type: string } | null
+    } finally {
+      db.close()
+    }
+  }
+  const auditOf = (id: string) => {
+    const db = new Database(join(store, 'mnemopi.db'), { readonly: true })
+    try {
+      return db.query('SELECT validator, action FROM memory_validations WHERE memory_id = ? ORDER BY validation_id').all(id) as { validator: string; action: string }[]
+    } finally {
+      db.close()
+    }
+  }
+
+  test('META.1.a4: tools/list shows kind (the eight names) on remember and update, and never memory_type', async () => {
+    const replies = await proxy(cli, store, [{ jsonrpc: '2.0', id: 1, method: 'tools/list' }])
+    const tools = replies.get(1).result.tools as { name: string; inputSchema: { properties: Record<string, any> } }[]
+    for (const name of ['memory_remember', 'memory_update']) {
+      const properties = tools.find(tool => tool.name === name)!.inputSchema.properties
+      expect(properties.kind.enum).toEqual(['fact', 'preference', 'instruction', 'decision', 'context', 'error', 'artifact', 'event'])
+      expect(properties.memory_type).toBeUndefined()
+    }
+  })
+
+  test('META.1.a4: remember with a kind stores it as memory_type; none saves as unknown with a warning in the reply; a client memory_type is dropped', async () => {
+    const replies = await proxy(cli, store, [
+      toolCall(1, 'memory_remember', { content: 'the proxy saves a decision here', kind: 'decision', tags: ['d'] }),
+      toolCall(2, 'memory_remember', { content: 'the proxy saves a note with no kind' }),
+      toolCall(3, 'memory_remember', { content: 'the proxy ignores a memory_type of its own', memory_type: 'decision' }),
+    ])
+    expect(rowOf(text(replies.get(1)).memory_id)?.memory_type).toBe('decision')
+    expect(text(replies.get(1)).warning).toBeUndefined()
+    expect(rowOf(text(replies.get(2)).memory_id)?.memory_type).toBe('unknown')
+    const noKind = text(replies.get(2))
+    expect(noKind.warning).toContain("no kind given, saved as 'unknown'")
+    expect(noKind.warning).not.toContain('\n')
+    expect(rowOf(text(replies.get(3)).memory_id)?.memory_type).toBe('unknown')
+  })
+
+  test('META.1.a4: an unknown kind is a -32602 error naming the choices, and nothing is stored', async () => {
+    const before = (() => {
+      const db = new Database(join(store, 'mnemopi.db'), { readonly: true })
+      try {
+        return (db.query('SELECT COUNT(*) AS n FROM working_memory').get() as { n: number }).n
+      } finally {
+        db.close()
+      }
+    })()
+    const replies = await proxy(cli, store, [
+      toolCall(1, 'memory_remember', { content: 'the proxy refuses a bad kind', kind: 'unknown' }),
+      toolCall(2, 'memory_remember', { content: 'the proxy refuses another bad kind', kind: 'note' }),
+      toolCall(3, 'memory_update', { memory_id: 'x', kind: 'nope' }),
+    ])
+    for (const id of [1, 2, 3]) {
+      expect(replies.get(id).error.code).toBe(-32602)
+      expect(replies.get(id).error.message).toContain('unknown kind')
+      expect(replies.get(id).error.message).toContain('fact, preference, instruction (rule or runbook)')
+    }
+    const db = new Database(join(store, 'mnemopi.db'), { readonly: true })
+    try {
+      expect((db.query('SELECT COUNT(*) AS n FROM working_memory').get() as { n: number }).n).toBe(before)
+    } finally {
+      db.close()
+    }
+  })
+
+  test('META.1.a4: update takes kind as memory_type, alone or with content; a content change names the client as validator, whatever the client sends', async () => {
+    const saved = await proxy(cli, store, [toolCall(1, 'memory_remember', { content: 'the proxy updates the kind of this', kind: 'fact' })])
+    const id = text(saved.get(1)).memory_id
+    const kindOnly = await proxy(cli, store, [toolCall(1, 'memory_update', { memory_id: id, kind: 'context' })])
+    expect(text(kindOnly.get(1))).toMatchObject({ status: 'updated' })
+    expect(rowOf(id)?.memory_type).toBe('context')
+    expect(auditOf(id)).toEqual([])
+    const withContent = await proxy(cli, store, [
+      { jsonrpc: '2.0', id: 0, method: 'initialize', params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'codex', version: '1' } } },
+      toolCall(1, 'memory_update', { memory_id: id, content: 'the proxy updates the kind of this, edited', kind: 'event', validator: 'claude-code' }),
+    ])
+    expect(text(withContent.get(1))).toMatchObject({ status: 'updated' })
+    expect(rowOf(id)?.memory_type).toBe('event')
+    expect(auditOf(id)).toEqual([{ validator: 'mcp:codex', action: 'update' }])
+  })
+
+  // META.2 (C4): what the proxy writes for an outside agent, read back from the row.
+  const fullRow = (id: string) => {
+    const db = new Database(join(store, 'mnemopi.db'), { readonly: true })
+    try {
+      return db.query('SELECT source, trust_tier, veracity, memory_type, valid_until, scope, author_id, author_type, metadata_json FROM working_memory WHERE id = ?').get(id) as Record<string, string | null>
+    } finally {
+      db.close()
+    }
+  }
+  const hello = (name: string) => ({ jsonrpc: '2.0', id: 0, method: 'initialize', params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name, version: '1' } } })
+  const DAY = 86_400_000
+
+  test('META.2.a1/a3: an outside agent\'s save is source mcp:<client>, tier EXTERNAL_WRITE, veracity unknown, whatever the client claims', async () => {
+    const replies = await proxy(cli, store, [
+      hello('cursor'),
+      toolCall(1, 'memory_remember', { content: 'the outside agent saves this decision', kind: 'decision', veracity: 'stated', trust_tier: 'STATED', source: 'user', valid_until: '2099-01-01', author_type: 'human' }),
+    ])
+    expect(fullRow(text(replies.get(1)).memory_id)).toMatchObject({ source: 'mcp:cursor', trust_tier: 'EXTERNAL_WRITE', veracity: 'unknown', memory_type: 'decision', valid_until: null, scope: 'global', author_id: 'cursor', author_type: 'agent' })
+    const unnamed = await proxy(cli, store, [toolCall(1, 'memory_remember', { content: 'an agent that gave no name saves this', kind: 'fact' })])
+    expect(fullRow(text(unnamed.get(1)).memory_id)).toMatchObject({ source: 'mcp:unknown', trust_tier: 'EXTERNAL_WRITE', author_id: 'unknown' })
+  })
+
+  test('META.2.a2: through the proxy a context note expires in 14 days, expires_in_days sets it, a bad value is a -32602 error and stores nothing', async () => {
+    const replies = await proxy(cli, store, [
+      hello('cursor'),
+      toolCall(1, 'memory_remember', { content: 'the proxy context note, left at the default', kind: 'context' }),
+      toolCall(2, 'memory_remember', { content: 'the proxy context note, set to 90 days', kind: 'context', expires_in_days: 90 }),
+      toolCall(3, 'memory_remember', { content: 'the proxy fact with no expiry at all', kind: 'fact' }),
+      toolCall(4, 'memory_remember', { content: 'the proxy context note with a bad expiry', kind: 'context', expires_in_days: 400 }),
+    ])
+    const near = (value: string | null | undefined, days: number) => expect(Math.abs(Date.parse(String(value)) - (Date.now() + days * DAY))).toBeLessThan(60_000)
+    near(fullRow(text(replies.get(1)).memory_id).valid_until, 14)
+    near(fullRow(text(replies.get(2)).memory_id).valid_until, 90)
+    expect(fullRow(text(replies.get(3)).memory_id).valid_until).toBeNull()
+    expect(replies.get(4).error.code).toBe(-32602)
+    expect(replies.get(4).error.message).toContain('expires_in_days must be a whole number from 1 to 365')
+  })
+
+  test('MODEL NB1/NB2 (b): re-saving identical text through the proxy keeps the scope: global stays global, a project owner\'s row stays channel', async () => {
+    for (const [owner, scope] of [['global', 'global'], ['project-x-1a2b', 'channel']] as const) {
+      const save = () => proxy(cli, store, [hello('cursor'), toolCall(1, 'memory_remember', { content: `re-saved through the proxy as ${owner}`, kind: 'fact' })], owner)
+      const first = text((await save()).get(1)).memory_id
+      expect(fullRow(first).scope).toBe(scope)
+      const again = text((await save()).get(1)).memory_id
+      expect(again).toBe(first)
+      expect(fullRow(first)).toMatchObject({ scope, trust_tier: 'EXTERNAL_WRITE', source: 'mcp:cursor' })
+    }
+  })
+
+  test('GUARD review finding 3 (a): through the proxy a clean content update clears the old guard flag and keeps the tags', async () => {
+    const env = { MNEMOSYNE_GUARD_MODE: 'warn' }
+    const saved = await proxy(cli, store, [toolCall(1, 'memory_remember', { content: 'Today the proxy importer was rewired to use the guard', kind: 'fact', tags: ['ops'] })], 'global', '', env)
+    // A warned save's reply has guard warning lines after the engine's JSON.
+    const id = JSON.parse(String(saved.get(1).result.content[0].text).split('\nMnemosyne')[0]!).memory_id
+    expect(JSON.parse(fullRow(id).metadata_json!)).toEqual({ tags: ['ops'], guard: ['G4'] })
+    const updated = await proxy(cli, store, [toolCall(1, 'memory_update', { memory_id: id, content: 'The proxy importer uses the guard module for each save.' })], 'global', '', env)
+    expect(text(updated.get(1))).toMatchObject({ status: 'updated' })
+    expect(JSON.parse(fullRow(id).metadata_json!)).toEqual({ tags: ['ops'] })
+  })
+
   test('remember without tags sends no metadata', async () => {
     const saved = await proxy(cli, store, [toolCall(1, 'memory_remember', { content: 'an untagged proxy fact', metadata: { x: 1 } })])
     expect(metadataOf(text(saved.get(1)).memory_id)).toBeNull()
@@ -545,5 +691,17 @@ for await (const chunk of Bun.stdin.stream()) {
     // A name of only control characters names nothing: the client stays unknown.
     const empty = await rawProxy(`${initialize({ name: '\u0000\u202e ' })}\n${remember()}\n`, join(temp.dir, 'logs-final-empty', 'activity.jsonl'))
     expect(forwardedCall(empty.forwarded, 2).author_id).toBe('unknown')
+  })
+})
+
+// META.1: hooks/kinds.ts is import-free and names engine memory types.
+describe('hooks/kinds.ts', () => {
+  test('META.1.a1: it imports nothing, and every kind is one of the engine\'s own memory types', async () => {
+    const source = readFileSync(join(ROOT, 'hooks', 'kinds.ts'), 'utf8')
+    expect(source).not.toMatch(/^\s*import|^\s*export.*\sfrom\s|require\(/m)
+    const { KIND_NAMES } = await import('../../hooks/kinds')
+    const engine = readFileSync(join(ROOT, 'engine', 'src', 'core', 'typed-memory.ts'), 'utf8')
+    for (const name of KIND_NAMES) expect(engine).toContain(`"${name}"`)
+    expect(KIND_NAMES.length).toBe(8)
   })
 })
