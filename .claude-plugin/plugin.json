@@ -89,6 +89,17 @@
       "type": "string",
       "default": "haiku",
       "description": "The model that pulls facts, preferences, instructions, dated events and relations out of each saved memory in the background (an alias such as haiku, or a full model id). It also drives /mnemosyne-tags. off turns extraction off: no model call, and /mnemosyne-tags says so."
+    },
+    "embeddings": {
+      "title": "Embeddings (meaning-based recall)",
+      "type": "string",
+      "options": [
+        "auto",
+        "on",
+        "off"
+      ],
+      "default": "auto",
+      "description": "auto: on only on macOS on Apple Silicon (the tested platform), off elsewhere. on: always on. off: keyword-only recall. Embeddings run on this machine only; /mnemosyne-setup downloads the model once (about 63 MB from huggingface.co), and /mnemosyne-embed fills vectors for memories saved before."
     }
   }
 }

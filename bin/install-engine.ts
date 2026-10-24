@@ -17,6 +17,7 @@
 // <engine dir>/node_modules/@oh-my-pi/pi-mnemopi/src/cli.ts.
 import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { Database } from 'bun:sqlite'
 import { INSTALL_CHECK_TIMEOUT_MS, INSTALL_STEP_TIMEOUT_MS } from '../hooks/engine-build'
 
 const PACKAGE = '@oh-my-pi/pi-mnemopi'
@@ -94,7 +95,7 @@ async function run(argv: string[], cwd: string, input: string | undefined, timeo
 }
 
 /** The new engine answers tools/list, and its mnemopi_update takes metadata (our build). */
-async function check(next: string, build: string) {
+async function check(next: string, build: string, embeddings: boolean) {
   const installed = join(next, 'node_modules', ...PACKAGE.split('/'), 'package.json')
   if (!existsSync(installed)) throw new InstallError(`bun install left no ${PACKAGE} in ${next}`)
   const version = JSON.parse(readFileSync(installed, 'utf8')).version
@@ -102,38 +103,92 @@ async function check(next: string, build: string) {
   // A throwaway data dir inside .next: the check writes nothing outside the three folders.
   const data = join(next, '.check-store')
   mkdirSync(data, { recursive: true })
+  // With embeddings on, the check also proves the native stack works on this
+  // machine: it remembers, recalls and exits cleanly, which downloads the model
+  // once into <root>'s pinned cache. The embedding settings are pinned local-only
+  // exactly as engineEnv pins them (hooks/engine.ts), so this is the real path.
   const env: Record<string, string> = {
     ...(process.env as Record<string, string>),
     MNEMOPI_DATA_DIR: data,
     MNEMOPI_SESSION_ID: 'install-check',
-    MNEMOPI_NO_EMBEDDINGS: '1',
+    MNEMOPI_NO_EMBEDDINGS: embeddings ? '' : '1',
     MNEMOPI_MCP_BANK: '',
     MNEMOPI_LLM_BASE_URL: '',
     MNEMOPI_HOST_LLM_ENABLED: '',
+    MNEMOPI_EMBEDDING_API_URL: '',
+    MNEMOPI_EMBEDDINGS_VIA_API: '',
+    MNEMOPI_EMBEDDING_API_KEY: '',
+    MNEMOPI_EMBEDDING_MODEL: 'BAAI/bge-small-en-v1.5',
+    MNEMOPI_EMBEDDING_DIM: '',
+    OPENROUTER_BASE_URL: '',
+    OPENROUTER_API_KEY: '',
+    OPENAI_API_KEY: '',
+    MNEMOPI_EMBEDDINGS_API_OPT_IN: '0',
+    HF_ENDPOINT: 'https://huggingface.co',
+    PI_CONFIG_DIR: '.claude/mnemosyne/model-cache',
   }
-  const ran = await run(
-    [process.execPath, cliOf(next), 'mcp'],
-    next,
-    `${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' })}\n`,
-    INSTALL_CHECK_TIMEOUT_MS,
-    env,
-  )
-  rmSync(data, { recursive: true, force: true })
-  let tools: { name: string; inputSchema?: { properties?: Record<string, unknown> } }[] | undefined
+  const request = (id: number, name: string, args: Record<string, unknown>) =>
+    `${JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } })}\n`
+  // tools/list first; then, with embeddings on, one remember and one recall.
+  const stdin = embeddings
+    ? `${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' })}\n` +
+      request(2, 'mnemopi_remember', { content: 'The install check prefers dark mode.', source: 'imported', scope: 'global' }) +
+      request(3, 'mnemopi_recall', { query: 'dark mode' })
+    : `${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' })}\n`
+  const ran = await run([process.execPath, cliOf(next), 'mcp'], next, stdin, INSTALL_CHECK_TIMEOUT_MS, env)
+  const replies = new Map<number, { result?: { content?: { text?: string }[]; isError?: boolean }; error?: { message?: string } }>()
   for (const line of ran.stdout.split('\n')) {
     try {
       const message = JSON.parse(line)
-      if (message?.id === 1) tools = message.result?.tools
+      if (typeof message?.id === 'number') replies.set(message.id, message)
     } catch {
       // engine chatter
     }
   }
+  const tools = (replies.get(1)?.result as { tools?: { name: string; inputSchema?: { properties?: Record<string, unknown> } }[] } | undefined)?.tools
   if (!Array.isArray(tools)) throw new InstallError(`the new engine did not answer tools/list (exit ${ran.exitCode}): ${ran.stderr.trim().slice(-400)}`)
   const update = tools.find(tool => tool.name === 'mnemopi_update')
   if (!update?.inputSchema?.properties?.metadata) throw new InstallError('the new engine has no mnemopi_update with metadata')
+  if (!embeddings) {
+    rmSync(data, { recursive: true, force: true })
+    return
+  }
+  // A clean embeddings run: remember and recall reply, the process exits 0, and
+  // no ORT exit panic is on stderr. Any failure refuses the swap (EMB.3.a4).
+  if (ran.exitCode !== 0) throw new InstallError(`embeddings check failed: engine exited ${ran.exitCode}: ${ran.stderr.trim().slice(-400)}`)
+  if (/panic: A C\+\+ exception occurred|oh no: Bun has crashed/i.test(ran.stderr)) {
+    throw new InstallError(`embeddings check failed: the engine crashed on exit (onnxruntime): ${ran.stderr.trim().slice(-400)}`)
+  }
+  for (const [id, what] of [[2, 'remember'], [3, 'recall']] as const) {
+    const reply = replies.get(id)
+    if (reply === undefined || reply.error !== undefined || reply.result?.isError === true) {
+      const detail = reply?.error?.message ?? reply?.result?.content?.[0]?.text ?? 'no reply'
+      throw new InstallError(`embeddings check failed: ${what} did not succeed (${detail})`)
+    }
+  }
+  // M2 (EMB review round 2): prove the embedding path really ran, not a silent
+  // full-text fallback. A model that fails to load still answers remember/recall
+  // (full text), so a clean exit alone is not proof: the check store must hold a
+  // memory_embeddings row for the remembered memory.
+  const vectorRows = (() => {
+    // A check store that never opened the engine's DB (or a fallback-to-full-text
+    // run that wrote no vector) leaves no mnemopi.db / no memory_embeddings row.
+    if (!existsSync(join(data, 'mnemopi.db'))) return 0
+    const db = new Database(join(data, 'mnemopi.db'), { readonly: true })
+    try {
+      const table = db.query("SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='memory_embeddings'").get() as { n: number }
+      return table.n > 0 ? (db.query('SELECT COUNT(*) AS n FROM memory_embeddings').get() as { n: number }).n : 0
+    } finally {
+      db.close()
+    }
+  })()
+  rmSync(data, { recursive: true, force: true })
+  if (vectorRows === 0) {
+    throw new InstallError('embeddings check failed: the check store has no memory_embeddings row, so the model did not load')
+  }
 }
 
-export async function install(pluginRoot: string, engineDir: string, storeDir: string) {
+export async function install(pluginRoot: string, engineDir: string, storeDir: string, embeddings = false) {
   for (const [name, path] of [['plugin root', pluginRoot], ['engine dir', engineDir], ['store dir', storeDir]] as const) {
     if (!path || !isAbsolute(path)) throw new InstallError(`${name} must be an absolute path (got "${path}")`)
   }
@@ -165,17 +220,33 @@ export async function install(pluginRoot: string, engineDir: string, storeDir: s
     })
     writeFileSync(
       join(next, 'package.json'),
-      `${JSON.stringify({ name: 'mnemosyne-engine', private: true, dependencies: { [PACKAGE]: 'file:./pi-mnemopi' } }, null, 2)}\n`,
+      `${JSON.stringify(
+        {
+          name: 'mnemosyne-engine',
+          private: true,
+          dependencies: { [PACKAGE]: 'file:./pi-mnemopi' },
+          // `overrides` only apply from the install root, so the engine's own
+          // manifest cannot fix fastembed's onnxruntime-node here: it must be
+          // restated on this root package.json. 1.26.0 is a fastembed 3.0.0
+          // install with ORT's exit crash (ORT #24579) fixed; @anush008/tokenizers
+          // 0.6.0 adds the linux-arm64 bindings fastembed's ^0.0.0 lacks.
+          overrides: { 'onnxruntime-node': '1.26.0', '@anush008/tokenizers': '0.6.0' },
+          trustedDependencies: ['onnxruntime-node'],
+        },
+        null,
+        2,
+      )}\n`,
     )
-    // Bun installs a file: folder's dev and peer dependencies too; the engine
-    // needs neither (no embeddings), and they would add onnxruntime (~500 MB).
+    // --production --omit=peer installs the engine's dependencies (now including
+    // fastembed at the root overrides above) and skips dev and peer dependencies,
+    // so the ~500 MB the engine's own tests pull in is not installed.
     // No lockfile: Bun saves none under --production, so the pinned 18.12.3
     // packages and their dependencies resolve fresh, through Bun's global cache.
     const installed = await run([process.execPath, 'install', '--production', '--omit=peer'], next, undefined, INSTALL_STEP_TIMEOUT_MS)
     if (installed.exitCode !== 0) {
       throw new InstallError(`bun install failed (exit ${installed.exitCode}): ${`${installed.stderr}\n${installed.stdout}`.trim().slice(-800)}`)
     }
-    await check(next, build)
+    await check(next, build, embeddings)
   } catch (error) {
     rmSync(next, { recursive: true, force: true })
     throw error
@@ -205,9 +276,11 @@ export async function install(pluginRoot: string, engineDir: string, storeDir: s
 }
 
 if (import.meta.main) {
-  const [pluginRoot = '', engineDir = '', storeDir = ''] = process.argv.slice(2)
+  const [pluginRoot = '', engineDir = '', storeDir = '', embeddingsArg = ''] = process.argv.slice(2)
   try {
-    const done = await install(pluginRoot, engineDir, storeDir)
+    // The 4th argument is "embeddings" when /mnemosyne-setup's option is on:
+    // the check then also downloads the model once and proves a clean exit.
+    const done = await install(pluginRoot, engineDir, storeDir, embeddingsArg === 'embeddings')
     console.log(JSON.stringify({ ok: true, ...done }))
   } catch (error) {
     console.error(`install-engine: ${(error as Error).message}`)

@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On, ProcessRunInit, SessionCompactResult } from 'claude-code'
-import { afterTerm, ENGINE_BUILD, ENGINE_VERSION, tagsApply, tagsDryRun } from '../hooks/register'
+import { afterTerm, EMBED_USAGE, embeddingsSetting, ENGINE_BUILD, ENGINE_VERSION, tagsApply, tagsDryRun } from '../hooks/register'
 import { ENGINE_BUILD as BUILD_FILE, INSTALL_CHECK_TIMEOUT_MS, INSTALL_STEP_TIMEOUT_MS, SETUP_TIMEOUT_MS } from '../hooks/engine-build'
 import { engineTool, mnemosyneStats, publicTool } from '../hooks/surface'
 import { extractionModelOf, extractionOff, parseProposals, parseTags, pool, SYSTEM_PROMPT } from '../hooks/backfill'
@@ -19,16 +19,40 @@ const isAppend = (argv: readonly string[]) => (argv[1] ?? '').endsWith('/bin/act
 // every call answers `reply`, and a record of each process run. Activity log
 // appends (`bun bin/activity.ts <log>`, by $.process.spawn or $.process.run) are
 // kept apart, in `runs.appends`, with `via` and the lines as `init.stdin`;
-// `extra.append` makes each append hang forever or throw, `extra.env` sets variables.
+// `extra.append` makes each append hang forever or throw, `extra.env` sets
+// variables, `extra.darwinArm64` answers the uname platform probe.
 type Extra = {
   append?: 'ok' | 'hang' | 'throw'
   env?: Record<string, string>
   session?: 'ok' | 'throw'
+  darwinArm64?: boolean
+  // True to report the setup marker + model files as present (embeddings ready).
+  embeddingsReady?: boolean
+  // L4: the marker is present but the model files are missing (a half-finished setup).
+  markerOnly?: boolean
 }
+const MODEL_DIR = '/home/u/.claude/mnemosyne/model-cache/cache/fastembed/Qdrant_bge-small-en-v1.5-onnx-Q'
+const MARKER = '/home/u/.claude/mnemosyne/embeddings.json'
+
 function world(on: On, reply: string, isInstalled = true, exitCode = 0, build: string = ENGINE_BUILD, extra: Extra = {}) {
   const runs: Run[] & { appends: Run[] } = Object.assign([] as Run[], { appends: [] as Run[] })
   on('env.get', (_$, e) => ({ value: extra.env?.[(e as { name: string }).name] ?? '/home/u' }))
-  on('fs.stat', () => (isInstalled ? { value: { kind: 'file' } } : { deny: 'ENOENT' }) as never)
+  // A file for the installed engine; an empty embedding cache unless extra.embeddingsReady.
+  on(
+    'fs.stat',
+    (_$, e) =>
+      (!isInstalled
+        ? { deny: 'ENOENT' }
+        : (e as { path: string }).path === MARKER
+          ? extra.markerOnly || extra.embeddingsReady
+            ? ({ value: { kind: 'file' } } as never)
+            : ({ deny: 'ENOENT' } as never)
+          : (e as { path: string }).path.startsWith(MODEL_DIR)
+            ? extra.embeddingsReady
+              ? ({ value: { kind: 'file' } } as never)
+              : ({ deny: 'ENOENT' } as never)
+            : { value: { kind: 'file' } }) as never,
+  )
   on('fs.read', (_$, e) => (e.path === INSTALLED_PACKAGE && isInstalled ? { value: JSON.stringify({ name: '@oh-my-pi/pi-mnemopi', version: build }) } : { deny: 'ENOENT' }) as never)
   on('session.id', () => {
     if (extra.session === 'throw') throw new Error('session store unavailable')
@@ -41,6 +65,11 @@ function world(on: On, reply: string, isInstalled = true, exitCode = 0, build: s
       if (extra.append === 'hang') return new Promise(() => {}) as never
       if (extra.append === 'throw') throw new Error('append failed')
       return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
+    }
+    // The platform probe /mnemosyne-setup asks (hooks/register.ts isMacArm64).
+    if (e.argv[0] === 'uname') {
+      const stdout = e.argv[1] === '-s' ? (extra.darwinArm64 ? 'Darwin\n' : 'Linux\n') : extra.darwinArm64 ? 'arm64\n' : 'x86_64\n'
+      return { value: { exitCode: 0, stdout, stderr: '' } } as never
     }
     runs.push(e)
     const ids = (e.init?.stdin ?? '').split('\n').filter(Boolean).map(line => JSON.parse(line).id)
@@ -74,13 +103,26 @@ test('remember runs the private engine against the private store, global bank', 
     MNEMOPI_DATA_DIR: '/home/u/.claude/mnemosyne/store',
     MNEMOPI_SESSION_ID: 'global',
     MNEMOPI_CHANNEL_ID: 'global',
-    MNEMOPI_NO_EMBEDDINGS: '1',
     MNEMOPI_MCP_BANK: '',
     MNEMOPI_LLM_BASE_URL: '',
     MNEMOPI_HOST_LLM_ENABLED: '',
     MNEMOPI_AUTHOR_ID: '',
     MNEMOPI_AUTHOR_TYPE: '',
     MNEMOPI_POLYPHONIC_RECALL: '0',
+    // EMB.3.a1: local-only embedding pins, embeddings off (the test host is not a
+    // macOS arm64 with the model downloaded).
+    MNEMOPI_EMBEDDING_API_URL: '',
+    MNEMOPI_EMBEDDINGS_VIA_API: '',
+    MNEMOPI_EMBEDDING_API_KEY: '',
+    MNEMOPI_EMBEDDING_MODEL: 'BAAI/bge-small-en-v1.5',
+    MNEMOPI_EMBEDDING_DIM: '',
+    OPENROUTER_BASE_URL: '',
+    OPENROUTER_API_KEY: '',
+    OPENAI_API_KEY: '',
+    MNEMOPI_EMBEDDINGS_API_OPT_IN: '0',
+    HF_ENDPOINT: 'https://huggingface.co',
+    PI_CONFIG_DIR: '.claude/mnemosyne/model-cache',
+    MNEMOPI_NO_EMBEDDINGS: '1',
   })
   // `imported`: the durable tier the engine's 24h working-memory trim skips.
   expect(request(run)).toEqual({
@@ -245,6 +287,14 @@ test('externalMcp writes an owner-only stdio wrapper', { options: { externalMcp:
   expect(wrapper.text).toContain(`export MNEMOPI_DATA_DIR='/home/u/it'\\''s mine'`)
   expect(wrapper.text).toContain('MNEMOPI_NO_EMBEDDINGS=1')
   expect(wrapper.text).toContain('export MNEMOPI_LLM_BASE_URL=')
+  // EMB.3.a2: the wrapper carries the same local-only embedding pins as the hooks.
+  expect(wrapper.text).toContain('export MNEMOPI_EMBEDDING_API_URL=')
+  expect(wrapper.text).toContain('export MNEMOPI_EMBEDDINGS_VIA_API=')
+  expect(wrapper.text).toContain('export MNEMOPI_EMBEDDING_API_KEY=')
+  expect(wrapper.text).toContain('export MNEMOPI_EMBEDDING_MODEL=BAAI/bge-small-en-v1.5')
+  expect(wrapper.text).toContain('export MNEMOPI_EMBEDDINGS_API_OPT_IN=0')
+  expect(wrapper.text).toContain('export HF_ENDPOINT=https://huggingface.co')
+  expect(wrapper.text).toContain('export PI_CONFIG_DIR=.claude/mnemosyne/model-cache')
   expect(wrapper.text).toMatch(/exec bun '.*\/bin\/mcp-proxy\.ts'/)
   // Folder work runs through `bun -e`: the code, then its path arguments.
   const fsRuns = runs.filter(r => r.argv[1] === '-e').map(r => ({ code: r.argv[2]!, args: r.argv.slice(3) }))
@@ -1650,4 +1700,138 @@ test('KNOWX.2.a1: /mnemosyne-tags with extractionModel off makes no model call a
   expect(ran.text).toContain('extractionModel')
   expect(ran.text).toContain('off')
   expect(state.model).toEqual([])
+})
+
+// ---- EMB.3: embeddings on, local only, pinned; setup downloads the model ----
+
+/** A world whose host answers uname as `darwinArm64`, with the marker and model files present when `ready`. */
+function embedWorld(on: On, options: { darwinArm64?: boolean; ready?: boolean; reply?: string } = {}) {
+  return world(on, options.reply ?? '{"status":"stored"}', true, 0, ENGINE_BUILD, {
+    darwinArm64: options.darwinArm64 ?? true,
+    embeddingsReady: options.ready ?? true,
+  })
+}
+
+test('EMB.3.a3: the embeddings option resolves to on only on macOS arm64 by default', () => {
+  expect(embeddingsSetting({})).toBe('auto')
+  expect(embeddingsSetting({ embeddings: 'on' })).toBe('on')
+  expect(embeddingsSetting({ embeddings: 'off' })).toBe('off')
+  expect(embeddingsSetting({ embeddings: '  ' })).toBe('auto')
+})
+
+test('EMB.3.a1: on macOS arm64 with the model downloaded, an engine run turns embeddings on', { options: { embeddings: 'on' } }, async ($, on) => {
+  const runs = embedWorld(on, { darwinArm64: true, ready: true })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'fact' })
+  const env = runs.find(r => (r.argv[1] ?? '').endsWith('/src/cli.ts'))?.init?.env
+  // Embeddings on: MNEMOPI_NO_EMBEDDINGS is empty, and the local-only pins are set.
+  expect(env?.MNEMOPI_NO_EMBEDDINGS).toBe('')
+  expect(env?.MNEMOPI_EMBEDDING_API_URL).toBe('')
+  expect(env?.MNEMOPI_EMBEDDINGS_VIA_API).toBe('')
+  expect(env?.MNEMOPI_EMBEDDING_API_KEY).toBe('')
+  expect(env?.MNEMOPI_EMBEDDING_MODEL).toBe('BAAI/bge-small-en-v1.5')
+  expect(env?.PI_CONFIG_DIR).toBe('.claude/mnemosyne/model-cache')
+})
+
+test('EMB.2.a4: an empty cache (no marker or model files) keeps embeddings off, even when the option is on', { options: { embeddings: 'on' } }, async ($, on) => {
+  const runs = embedWorld(on, { darwinArm64: true, ready: false })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'fact' })
+  const env = runs.find(r => (r.argv[1] ?? '').endsWith('/src/cli.ts'))?.init?.env
+  expect(env?.MNEMOPI_NO_EMBEDDINGS).toBe('1')
+  // The pins are still there, so a stray API URL could never be used even when off.
+  expect(env?.MNEMOPI_EMBEDDING_API_URL).toBe('')
+  expect(env?.MNEMOPI_EMBEDDING_MODEL).toBe('BAAI/bge-small-en-v1.5')
+})
+
+test('L4: marker present but model files missing keeps embeddings off, no download', { options: { embeddings: 'on' } }, async ($, on) => {
+  const runs = world(on, '{"status":"stored"}', true, 0, ENGINE_BUILD, { darwinArm64: true, markerOnly: true })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'fact' })
+  const env = runs.find(r => (r.argv[1] ?? '').endsWith('/src/cli.ts'))?.init?.env
+  // The marker alone is not enough: every model file must be present too.
+  expect(env?.MNEMOPI_NO_EMBEDDINGS).toBe('1')
+})
+
+test('EMB.3.a3: elsewhere (not macOS arm64) setup writes no marker, so engine runs stay off', async ($, on) => {
+  // The platform decision lives in /mnemosyne-setup: off-machine it does not download,
+  // so no marker and no model files exist and an engine run keeps embeddings off.
+  const runs = embedWorld(on, { darwinArm64: false, ready: false })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'fact' })
+  const env = runs.find(r => (r.argv[1] ?? '').endsWith('/src/cli.ts'))?.init?.env
+  expect(env?.MNEMOPI_NO_EMBEDDINGS).toBe('1')
+})
+
+test('EMB.3.a4: setup tells the host and size before it downloads, and passes embeddings to the installer', { options: { embeddings: 'on' } }, async ($, on) => {
+  const runs = embedWorld(on, { darwinArm64: true })
+  on('fs.write', () => ({ value: undefined }))
+  const logged: string[] = []
+  on('ui.log', (_$, e) => {
+    logged.push((e as { text: string }).text)
+    return { value: undefined }
+  })
+  on('ui.status', () => ({ value: undefined }))
+  await $.command.run({ command: 'mnemosyne-setup', args: '' } as never)
+  const install = runs.find(r => (r.argv[1] ?? '').endsWith('/bin/install-engine.ts'))
+  expect(install?.argv.at(-1)).toBe('embeddings')
+  // The notice names the host (huggingface.co) and the size (about 63 MB) before the install.
+  const note = logged.join('\n')
+  expect(note).toContain('huggingface.co')
+  expect(note).toContain('63 MB')
+})
+
+test('EMB.3.a4: setup with embeddings off passes no embeddings argument to the installer', { options: { embeddings: 'off' } }, async ($, on) => {
+  const runs = embedWorld(on, { darwinArm64: true })
+  on('fs.write', () => ({ value: undefined }))
+  await $.command.run({ command: 'mnemosyne-setup', args: '' } as never)
+  const install = runs.find(r => (r.argv[1] ?? '').endsWith('/bin/install-engine.ts'))
+  expect(install?.argv.slice(3)).toEqual(['/home/u/.claude/mnemosyne/engine', '/home/u/.claude/mnemosyne/store'])
+})
+
+test('EMB.4.a2: /mnemosyne-embed is registered at session start and refuses with usage for a bad argument', { options: { embeddings: 'on' } }, async ($, on) => {
+  embedWorld(on, { darwinArm64: true })
+  const registered: string[] = []
+  on('command.register', (_$, e) => {
+    registered.push((e as { name: string }).name)
+    return { value: {} } as never
+  })
+  on('tool.register', () => ({ value: {} }) as never)
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/w', surface: null, isInteractive: false } as never)
+  expect(registered).toContain('mnemosyne-embed')
+  const ran = await $.command.run({ command: 'mnemosyne-embed', args: 'nonsense' } as never)
+  expect((ran as { text?: string }).text).toBe(EMBED_USAGE)
+})
+
+test('M2: setup whose install check could not prove the model loaded reports "embeddings off" and writes no marker', { options: { embeddings: 'on' } }, async ($, on) => {
+  // A host that is macOS arm64 so setup asks for embeddings, but whose installer
+  // exits 1 with the no-dense-score failure: the swap was refused, so setup must
+  // report embeddings off and write no marker.
+  on('env.get', (_$, e) => ({ value: (e as { name: string }).name === 'OS' ? 'Darwin' : '/home/u' }))
+  on('fs.stat', (_$, e) => {
+    const path = (e as { path: string }).path
+    if (path === MARKER || path.startsWith(MODEL_DIR)) return { deny: 'ENOENT' } as never
+    return { value: { kind: 'file' } } as never
+  })
+  const writes: string[] = []
+  on('fs.write', (_$, e) => {
+    writes.push((e as { path?: string }).path ?? '')
+    return { value: undefined }
+  })
+  on('process.run', (_$, e) => {
+    if ((e.argv[0] ?? '') === 'uname') {
+      const stdout = e.argv[1] === '-s' ? 'Darwin\n' : 'arm64\n'
+      return { value: { exitCode: 0, stdout, stderr: '' } } as never
+    }
+    if ((e.argv[1] ?? '').endsWith('/bin/install-engine.ts')) {
+      return { value: { exitCode: 1, stdout: '', stderr: 'install-engine: embeddings check failed: the check store has no memory_embeddings row, so the model did not load' } } as never
+    }
+    return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
+  })
+  on('ui.log', () => ({ value: undefined }))
+  on('ui.status', () => ({ value: undefined }))
+  const ran = await $.command.run({ command: 'mnemosyne-setup', args: '' } as never)
+  expect((ran as { text?: string }).text).toContain('Embeddings are off: the model did not load')
+  // L5: the message also says to re-run setup when online.
+  expect((ran as { text?: string }).text).toContain('re-run /mnemosyne-setup when online')
+  // No marker written: only the rmSync (fs code) touches the marker path, never a write.
+  expect(writes).toEqual([])
 })

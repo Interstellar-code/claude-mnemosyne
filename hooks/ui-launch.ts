@@ -46,6 +46,8 @@ export type UiPaths = {
   activity: string
   /** The extractionModel setting, or 'off' (C11). */
   extraction?: string
+  /** Whether embeddings are on for this server ('on'/'off'), or 'unknown' (C11). */
+  embeddings?: string
 }
 
 type State = { port: number; token: string; pid: number }
@@ -157,6 +159,8 @@ function start($: EngineInterface, paths: UiPaths, session: string) {
         MNEMOSYNE_ACTIVITY_LOG: paths.activity,
         // C11: the dashboard shows the extraction setting it started with.
         MNEMOSYNE_EXTRACTION: paths.extraction ?? 'unknown',
+        // C11: and the embeddings setting it started with ('on'/'off'/'unknown').
+        MNEMOSYNE_EMBEDDINGS: paths.embeddings ?? 'unknown',
       },
     })
     const pieces = stream[Symbol.asyncIterator]()
@@ -227,34 +231,53 @@ async function stopEntry($: EngineInterface, session: string, entry: Entry) {
   forget(session, entry)
 }
 
-/** The extractionModel the server `pid` was started with, or undefined when none is recorded for it. */
-async function startedWith($: EngineInterface, root: string, pid: number) {
+type StartedWith = { extraction?: string; embeddings?: string }
+
+/** The settings the server `pid` was started with, or undefined when none is recorded for it. */
+async function startedWith($: EngineInterface, root: string, pid: number): Promise<StartedWith | undefined> {
   try {
-    const recorded = JSON.parse(await $.fs.read(`${root}/${EXTRACTION_STATE}`)) as { pid?: unknown; extraction?: unknown }
-    return recorded?.pid === pid && typeof recorded.extraction === 'string' ? recorded.extraction : undefined
+    const recorded = JSON.parse(await $.fs.read(`${root}/${EXTRACTION_STATE}`)) as {
+      pid?: unknown
+      extraction?: unknown
+      embeddings?: unknown
+    }
+    if (recorded?.pid !== pid) return undefined
+    return {
+      extraction: typeof recorded.extraction === 'string' ? recorded.extraction : undefined,
+      embeddings: typeof recorded.embeddings === 'string' ? recorded.embeddings : undefined,
+    }
   } catch {
     return undefined
   }
 }
 
-// A reused dashboard keeps the extraction setting it started with (C11, KNOWX.2.a9): when the setting
-// differs now, the reply says the dashboard must be restarted. A server with no record predates the setting.
+// A reused dashboard keeps the settings it started with (C11, KNOWX.2.a9, EMB.3.a2): when a setting
+// differs now, the reply says the dashboard must be restarted. A server with no record predates it.
 async function restartNote($: EngineInterface, paths: UiPaths, state: State) {
-  if (paths.extraction === undefined) return ''
+  if (paths.extraction === undefined && paths.embeddings === undefined) return ''
   const was = await startedWith($, paths.root, state.pid)
-  if (was === paths.extraction) return ''
-  const before = was === undefined ? 'no extraction setting' : `extractionModel "${was}"`
-  return ` (this dashboard started with ${before}, and extractionModel is "${paths.extraction}" now. A running dashboard keeps what it started with: end the session that started it, then run /mnemosyne-ui again to restart it)`
+  const changed: string[] = []
+  if (paths.extraction !== undefined && was?.extraction !== paths.extraction) {
+    const before = was?.extraction === undefined ? 'no extraction setting' : `extractionModel "${was.extraction}"`
+    changed.push(`started with ${before}, and extractionModel is "${paths.extraction}" now`)
+  }
+  if (paths.embeddings !== undefined && was?.embeddings !== paths.embeddings) {
+    const before = was?.embeddings === undefined ? 'no embeddings setting' : `embeddings "${was.embeddings}"`
+    changed.push(`started with ${before}, and embeddings is "${paths.embeddings}" now`)
+  }
+  if (changed.length === 0) return ''
+  return ` (this dashboard ${changed.join('; ')}. A running dashboard keeps what it started with: end the session that started it, then run /mnemosyne-ui again to restart it)`
 }
 
-// Records, mode 0600 and renamed into place, which setting the server `pid` started with.
+// Records, mode 0600 and renamed into place, the settings the server `pid` started with.
 async function recordStartedWith($: EngineInterface, paths: UiPaths, pid: number) {
-  if (paths.extraction === undefined) return
+  if (paths.extraction === undefined && paths.embeddings === undefined) return
   const code =
     'const fs = require("fs"); const a = process.argv.slice(1); const t = a[0] + ".tmp"; fs.rmSync(t, { force: true }); fs.writeFileSync(t, a[1], { mode: 0o600, flag: "wx" }); fs.chmodSync(t, 0o600); fs.renameSync(t, a[0]);'
+  const record = JSON.stringify({ pid, extraction: paths.extraction, embeddings: paths.embeddings })
   // run() resolves on a non-zero exit, so the exit code is checked too: a failed write must not pass as done.
   await $.process
-    .run(['bun', '-e', code, `${paths.root}/${EXTRACTION_STATE}`, `${JSON.stringify({ pid, extraction: paths.extraction })}\n`], { timeoutMs: ALIVE_TIMEOUT_MS })
+    .run(['bun', '-e', code, `${paths.root}/${EXTRACTION_STATE}`, `${record}\n`], { timeoutMs: ALIVE_TIMEOUT_MS })
     .then(ran => (ran.exitCode === 0 ? undefined : Promise.reject(new Error(ran.stderr))))
     .catch(() => undefined)
 }

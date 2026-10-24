@@ -180,8 +180,11 @@ export async function runEngine(
   baseEnv: Record<string, string | undefined> = process.env,
   timeoutMs = ENGINE_TIMEOUT_MS,
 ): Promise<(string | Error)[]> {
+  // C11: the embeddings setting this server started with, passed by hooks/ui-launch.ts
+  // (MNEMOSYNE_EMBEDDINGS). 'on' only when /mnemosyne-setup downloaded the model.
+  const embeddings = baseEnv.MNEMOSYNE_EMBEDDINGS === 'on'
   const child = Bun.spawn([process.execPath, config.cli, 'mcp'], {
-    env: { ...baseEnv, ...engineEnv(config.store, owner) },
+    env: { ...baseEnv, ...engineEnv(config.store, owner, { embeddings }) },
     stdin: 'pipe',
     stdout: 'pipe',
     stderr: 'pipe',

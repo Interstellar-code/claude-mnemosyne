@@ -1,5 +1,6 @@
 import { mkdirSync } from "node:fs";
 import * as fsp from "node:fs/promises";
+import { homedir } from "node:os";
 import * as nodePath from "node:path";
 import { type ApiKey, getOpenRouterHeaders, withAuth } from "@oh-my-pi/pi-ai";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
@@ -9,7 +10,6 @@ import {
 	$flag,
 	extractHttpStatusFromError,
 	fetchWithRetry,
-	getFastembedCacheDir,
 	logger,
 	withLoopPhase,
 } from "@oh-my-pi/pi-utils";
@@ -57,6 +57,36 @@ let localModelInitializer: LocalModelInitializer = defaultLocalModelInitializer;
 let apiCallCount = 0;
 const queryCache = new LRUCache<string, Vector>({ max: QUERY_CACHE_MAX });
 
+/**
+ * The local fastembed model cache directory, resolved from the plugin-pinned
+ * `PI_CONFIG_DIR` and independent of every dotenv/XDG/profile variable (change 11).
+ *
+ * `PI_CONFIG_DIR` is set by the plugin (engineEnv, both wrapper scripts and the
+ * install-check env) to the non-empty `.claude/mnemosyne/model-cache`, so the
+ * pi-utils dotenv pass (`env.ts:300-306`, which only fills falsy keys) cannot
+ * replace it. This reads it directly — never through pi-utils' `dirs` resolver,
+ * which derives the fastembed cache from `PI_CONFIG_DIR` PLUS `XDG_CACHE_HOME` /
+ * `OMP_PROFILE` / `PI_PROFILE` / `PI_CODING_AGENT_DIR` and rebuilds after the
+ * dotenv files load, so an `XDG_CACHE_HOME` line in `~/.env` could move the cache
+ * and make the engine download the model mid-call. When the variable is absent
+ * (an engine run outside the plugin), the fastembed default under `~/.omp` is kept.
+ */
+function fastembedCacheDir(): string {
+	const configDir = $env.PI_CONFIG_DIR;
+	const base =
+		configDir !== undefined && configDir !== ""
+			? nodePath.resolve(homedir(), configDir)
+			: nodePath.join(homedir(), ".omp");
+	return nodePath.join(base, "cache", "fastembed");
+}
+
+/**
+ * The resolved fastembed cache dir (change 11). Exported for the guard specs,
+ * which run it in a fresh subprocess with a hostile `~/.env`/cwd `.env`.
+ * @internal exported for tests
+ */
+export const resolveFastembedCacheDir = fastembedCacheDir;
+
 // Provider identity table for the cache key. Each unique `provider` object/function
 // (configured via `withMnemopiRuntimeOptions`) gets a stable integer id so the cache
 // scope reflects the runtime's actual embedding source. Two Mnemopi instances in the
@@ -80,7 +110,7 @@ export async function quarantineCorruptModelFile(message: string, cacheDir?: str
 	const match = /Load model from (.+?\.onnx) failed:.*Protobuf parsing failed/i.exec(message);
 	if (!match) return false;
 	const modelFile = nodePath.resolve(match[1]);
-	const cacheRoot = nodePath.resolve(cacheDir ?? getFastembedCacheDir());
+	const cacheRoot = nodePath.resolve(cacheDir ?? fastembedCacheDir());
 	if (!modelFile.startsWith(cacheRoot + nodePath.sep)) return false;
 	try {
 		await fsp.rename(modelFile, `${modelFile}.corrupt-${Date.now()}`);
@@ -101,7 +131,7 @@ export async function quarantineCorruptModelFile(message: string, cacheDir?: str
  * subprocess; the in-process seam stays {@link setLocalModelInitializer}.
  */
 export async function defaultLocalModelInitializer(options: LocalModelInitOptions): Promise<LocalEmbeddingModel> {
-	const cacheDir = options.cacheDir ?? getFastembedCacheDir();
+	const cacheDir = options.cacheDir ?? fastembedCacheDir();
 	const initOptions = options.cacheDir === undefined ? { ...options, cacheDir } : options;
 	const { FlagEmbedding } = await loadFastembed();
 	try {
@@ -248,7 +278,22 @@ export function currentEmbeddingModel(): string {
 	return defaultModel();
 }
 
+/**
+ * The API embedding route is refused in this build unless a caller explicitly
+ * opts in (change 10). The plugin never sets `MNEMOPI_EMBEDDINGS_API_OPT_IN`,
+ * so memory text can never leave this machine through the API route even when a
+ * hostile shell exports `OPENROUTER_BASE_URL` / `OPENROUTER_API_KEY` /
+ * `OPENAI_API_KEY` and an empty `MNEMOPI_EMBEDDING_API_URL` would otherwise fall
+ * back to them.
+ */
+function apiEmbeddingsOptedIn(): boolean {
+	return $flag("MNEMOPI_EMBEDDINGS_API_OPT_IN");
+}
+
 export function isApiModel(modelName: string): boolean {
+	if (!apiEmbeddingsOptedIn()) {
+		return false;
+	}
 	if (
 		modelName.startsWith("openai/") ||
 		modelName.includes("text-embedding") ||
@@ -333,7 +378,7 @@ async function getLocalModel(): Promise<LocalEmbeddingModel | null> {
 	if (modelName === null) {
 		return null;
 	}
-	const cacheDir = getFastembedCacheDir();
+	const cacheDir = fastembedCacheDir();
 	mkdirSync(cacheDir, { recursive: true });
 	const loading = localModelInitializer({
 		model: modelName,

@@ -569,6 +569,18 @@ describe('SRV.1: the server runs the engine as the hooks do', () => {
     MNEMOPI_AUTHOR_ID: '',
     MNEMOPI_AUTHOR_TYPE: '',
     MNEMOPI_POLYPHONIC_RECALL: '0',
+    // EMB.3.a1: the local-only embedding pins; MNEMOSYNE_EMBEDDINGS absent means off.
+    MNEMOPI_EMBEDDING_API_URL: '',
+    MNEMOPI_EMBEDDINGS_VIA_API: '',
+    MNEMOPI_EMBEDDING_API_KEY: '',
+    MNEMOPI_EMBEDDING_MODEL: 'BAAI/bge-small-en-v1.5',
+    MNEMOPI_EMBEDDING_DIM: '',
+    OPENROUTER_BASE_URL: '',
+    OPENROUTER_API_KEY: '',
+    OPENAI_API_KEY: '',
+    MNEMOPI_EMBEDDINGS_API_OPT_IN: '0',
+    HF_ENDPOINT: 'https://huggingface.co',
+    PI_CONFIG_DIR: '.claude/mnemosyne/model-cache',
   })
 
   test('its own environment with engineEnv laid over it; the variables match the hooks for the same owner', async () => {
@@ -579,7 +591,8 @@ describe('SRV.1: the server runs the engine as the hooks do', () => {
       writeFileSync(
         fake,
         `const lines = (await Bun.stdin.text()).split('\\n').filter(Boolean)
-const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => k.startsWith('MNEMOPI_') || k === 'KEEP_ME'))
+const PINNED = new Set(['PI_CONFIG_DIR','HF_ENDPOINT','OPENROUTER_BASE_URL','OPENROUTER_API_KEY','OPENAI_API_KEY','KEEP_ME'])
+const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => k.startsWith('MNEMOPI_') || PINNED.has(k)))
 for (const line of lines) {
   const { id } = JSON.parse(line)
   console.log(JSON.stringify({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify({ argv: process.argv.slice(2), env }) }] } }))

@@ -5,7 +5,9 @@ import { dirname, join } from "node:path";
 import { dataDir as configuredDataDir, dbPath as configuredDbPath } from "./config";
 import { BankManager, ValueError } from "./core/banks";
 import { BeamMemory } from "./core/beam";
+import { reconcileEmbeddingModel } from "./core/beam/store";
 import type { ImportStats, JsonValue, RecallResult } from "./core/beam/types";
+import { currentEmbeddingModel, embed, embeddingsDisabled } from "./core/embeddings";
 import { runDiagnostics } from "./diagnose";
 import { main as runMcpMain } from "./mcp-server";
 
@@ -342,6 +344,91 @@ export const cmdBank: CommandHandler = (args, context) => {
 	}
 };
 
+/** A model already stamped on a stored vector, as `reembed` reads it. */
+type StaleVector = { model: string | null };
+
+/**
+ * The live memories with no vector for `active`, and the stale models already
+ * stamped on stored vectors. Both queries mirror `reconcileEmbeddingModel`: a
+ * live row is one not superseded, and a vector belongs to a model by its stamp.
+ */
+function reembedSurvey(db: BeamMemory["db"], active: string) {
+	const stale = db.query("SELECT DISTINCT model FROM memory_embeddings WHERE model IS NOT ?").all(active) as StaleVector[];
+	const missing = db
+		.query(`
+			SELECT
+				(SELECT COUNT(*) FROM working_memory WHERE superseded_by IS NULL AND id NOT IN (SELECT memory_id FROM memory_embeddings WHERE model = ?))
+				+ (SELECT COUNT(*) FROM episodic_memory WHERE superseded_by IS NULL AND id NOT IN (SELECT memory_id FROM memory_embeddings WHERE model = ?))
+			AS total
+		`)
+		.get(active, active) as { total: number };
+	return { stale, missing: missing.total };
+}
+
+const REEMBED_USAGE =
+	"Usage: mnemopi reembed [apply | rebuild]   (no argument: count memories with no vector; apply: fill them; rebuild: also allowed after a model change)";
+
+/**
+ * `mnemopi reembed`: fill vectors for the memories saved before embeddings were
+ * on, through the engine's own `reconcileEmbeddingModel` backfill (store.ts),
+ * which the MCP and CLI paths never reach. No argument is a dry run: it counts
+ * the memories with no vector for the active model and writes nothing.
+ *
+ * A model change is refused unless `rebuild` is passed: `reconcileEmbeddingModel`
+ * wipes every stored vector on a model mismatch (a vector from another model is
+ * not comparable), and `rebuild` is the person's explicit consent to that wipe.
+ * It never edits or deletes a `working_memory` row: it only writes vectors.
+ */
+export const cmdReembed: CommandHandler = async (args, context) => {
+	const mode = args[0] ?? "";
+	if (mode !== "" && mode !== "apply" && mode !== "rebuild") usage(REEMBED_USAGE);
+	if (embeddingsDisabled()) fail("embeddings are off (MNEMOPI_NO_EMBEDDINGS is set); nothing to do", 1);
+	const active = currentEmbeddingModel().trim();
+	if (active === "") fail("the embedding model is unset; nothing to do", 1);
+
+	const { memory, owned } = getMemory(context);
+	try {
+		const survey = reembedSurvey(memory.db, active);
+		const staleModels = survey.stale.map(row => row.model ?? "(unstamped)");
+		if (staleModels.length > 0 && mode !== "rebuild") {
+			fail(
+				`the store holds vectors from another model (${staleModels.join(", ")}), not ${active}. ` +
+					`Re-embedding would wipe every stored vector and rebuild them; pass 'rebuild' to do that.`,
+				1,
+			);
+		}
+		if (mode === "") {
+			out(context, `Memories with no vector (${active}): ${survey.missing}`);
+			if (survey.missing > 0) out(context, "Run 'mnemopi reembed apply' to fill them.");
+			return 0;
+		}
+		// A model change wipes every stored vector; prove the active model loads
+		// before that wipe, so a broken model never destroys a valid corpus (M1).
+		if (mode === "rebuild" && staleModels.length > 0) {
+			const probe = await embed(["mnemopi reembed model probe"]);
+			if (probe === null) {
+				fail(`the embedding model ${active} did not load; no vector was written and nothing was wiped`, 1);
+			}
+		}
+		reconcileEmbeddingModel(memory);
+		if (owned) await memory.flushExtractions();
+		// Recount after the drain: a model that failed to load writes nothing, and
+		// reporting the pre-run count would claim success (M1).
+		const remaining = reembedSurvey(memory.db, active).missing;
+		if (remaining > 0) {
+			fail(
+				`re-embedded ${survey.missing - remaining} of ${survey.missing} memories (${active}); ` +
+					`${remaining} still have no vector`,
+				1,
+			);
+		}
+		out(context, `Re-embedded: ${survey.missing} memories (${active})`);
+		return 0;
+	} finally {
+		if (owned) memory.close();
+	}
+};
+
 export const cmdDiagnose: CommandHandler = (_args, context) => {
 	const result = runDiagnostics({
 		dbPath: resolveDbPath(context),
@@ -375,6 +462,7 @@ export const COMMANDS: Readonly<Record<string, CommandHandler>> = {
 	scratchpad: cmdScratchpad,
 	sp: cmdScratchpad,
 	bank: cmdBank,
+	reembed: cmdReembed,
 	diagnose: cmdDiagnose,
 	doctor: cmdDiagnose,
 	mcp: cmdMcp,
@@ -423,6 +511,10 @@ export async function runCli(args: readonly string[] = Bun.argv.slice(2), contex
 }
 
 if (import.meta.main) {
+	// A clean run ends on its own: onnxruntime-node aborts inside process.exit()
+	// after a model session existed (ORT #24579), so only a failure forces an
+	// exit code through process.exit(). A failing command still exits non-zero.
 	const code = await runCli();
-	process.exit(code);
+	if (code === 0) process.exitCode = 0;
+	else process.exit(code);
 }

@@ -1,62 +1,24 @@
 import { createRequire } from "node:module";
 import * as path from "node:path";
-import {
-	ensureRuntimeInstalled,
-	getFastembedRuntimeDir,
-	installRuntimeModuleResolver,
-	logger,
-	type RuntimeInstallSpec,
-	resolveRuntimeModule,
-} from "@oh-my-pi/pi-utils";
+import { resolveRuntimeModule } from "@oh-my-pi/pi-utils";
 import type * as Fastembed from "fastembed";
 import packageManifest from "../../package.json" with { type: "json" };
 
 type FastembedModule = typeof Fastembed;
 
-/** Runtime install inputs for the optional fastembed embedding stack. */
-export interface FastembedRuntimeInstallPlan {
-	/** Cache directory key; changes when runtime resolution policy changes. */
-	versionKey: string;
-	/** Dependency graph written to the runtime cache package manifest. */
-	install: RuntimeInstallSpec;
-}
-
 /**
- * `fastembed` is an optional peer (~270MB of native assets across platforms),
- * never bundled and never installed eagerly. When the direct import cannot
- * resolve — bundled `dist/cli.js`, compiled binary, a consumer that skipped the
- * optional peer, or a native loader failure — fastembed is `bun install`ed into
- * a per-version runtime cache on first use and loaded from there (#2389).
+ * `fastembed` is installed as a regular dependency of this package (see
+ * `package.json`, which overrides `onnxruntime-node` to a version whose exit
+ * crash ORT #24579 is fixed). It is loaded from that install only.
  *
- * The fastembed pin lives in `peerDependencies` as an exact version (not
- * `catalog:`) so this module reads a concrete spec even when the workspace
- * manifest is inlined into a bundle. The runtime install deliberately does not
- * override fastembed's `onnxruntime-node` dependency: the prebuilt native addon
- * links against that package's bundled ORT dylib/so/dll name.
- *
- * It does override `@anush008/tokenizers`: every fastembed release pins
- * `^0.0.0`, which resolves to a build without linux-arm64 bindings (#14083).
- * {@link TOKENIZERS_SPEC} keeps the identical JS API and adds them.
+ * There is deliberately no on-demand `bun install` fallback: a plugin never
+ * installs packages or downloads a model behind the user's back. When the
+ * direct import cannot resolve or its native loader fails, this module throws
+ * an error naming the reason; `embeddings.ts` then treats local embeddings as
+ * off (full-text recall) rather than reaching the network.
  */
 const FASTEMBED_SPEC = packageManifest.peerDependencies.fastembed;
 
-/** `@anush008/tokenizers` release with linux-arm64 gnu/musl bindings (added in 0.5.0). */
-const TOKENIZERS_SPEC = "0.6.0";
-
-/** Build the deterministic fastembed runtime install plan used by local embeddings. */
-export function fastembedRuntimeInstallPlan(): FastembedRuntimeInstallPlan {
-	return {
-		versionKey: `fastembed-${FASTEMBED_SPEC}_transitive-ort_tokenizers-${TOKENIZERS_SPEC}`.replace(
-			/[^A-Za-z0-9._-]/g,
-			"_",
-		),
-		install: {
-			dependencies: { fastembed: FASTEMBED_SPEC },
-			overrides: { "@anush008/tokenizers": TOKENIZERS_SPEC },
-			trustedDependencies: ["onnxruntime-node"],
-		},
-	};
-}
 let fastembedLoad: Promise<FastembedModule> | null = null;
 
 /** Inputs for selecting the Windows DLL directory paired with a fastembed installation. */
@@ -129,21 +91,13 @@ export function loadFastembed(): Promise<FastembedModule> {
 }
 
 async function loadFastembedOnce(): Promise<FastembedModule> {
-	try {
-		const requireDirect = createRequire(import.meta.url);
-		const manifestPath = requireDirect.resolve("fastembed/package.json");
-		const manifest: { version?: unknown } = requireDirect(manifestPath);
-		if (manifest.version !== FASTEMBED_SPEC) {
-			throw new Error(`Cannot find package fastembed@${FASTEMBED_SPEC}; resolved ${String(manifest.version)}`);
-		}
-		return await loadResolvedFastembed(requireDirect.resolve("fastembed"), path.dirname(manifestPath));
-	} catch (error) {
-		if (!isRecoverableFastembedLoadError(error)) throw error;
-		logger.debug("mnemopi: fastembed not loadable, using on-demand runtime install", {
-			error: String(error),
-		});
-		return loadFromRuntimeInstall();
+	const requireDirect = createRequire(import.meta.url);
+	const manifestPath = requireDirect.resolve("fastembed/package.json");
+	const manifest: { version?: unknown } = requireDirect(manifestPath);
+	if (manifest.version !== FASTEMBED_SPEC) {
+		throw new Error(`Cannot find package fastembed@${FASTEMBED_SPEC}; resolved ${String(manifest.version)}`);
 	}
+	return loadResolvedFastembed(requireDirect.resolve("fastembed"), path.dirname(manifestPath));
 }
 
 async function loadResolvedFastembed(entry: string, fastembedPackageDir: string): Promise<FastembedModule> {
@@ -154,30 +108,4 @@ async function loadResolvedFastembed(entry: string, fastembedPackageDir: string)
 	}
 	const loaded: FastembedModule = requireFastembed(entry);
 	return loaded;
-}
-
-async function loadFromRuntimeInstall(): Promise<FastembedModule> {
-	const plan = fastembedRuntimeInstallPlan();
-	const runtimeDir = await ensureRuntimeInstalled({
-		runtimeDir: path.join(getFastembedRuntimeDir(), plan.versionKey),
-		install: plan.install,
-		probePackage: "fastembed",
-	});
-	const nodeModules = path.join(runtimeDir, "node_modules");
-	// The compiled-binary resolver ignores `main`/`exports` for real-FS bare
-	// specifiers (Bun #1763); route the runtime graph's requires (fastembed →
-	// onnxruntime-node, @anush008/tokenizers → platform binding, …) through
-	// the runtime cache.
-	installRuntimeModuleResolver({ runtimeNodeModules: nodeModules });
-	const entry = resolveRuntimeModule(nodeModules, "fastembed");
-	if (!entry) throw new Error(`fastembed runtime install at ${runtimeDir} has no loadable entry`);
-	return loadResolvedFastembed(entry, path.join(nodeModules, "fastembed"));
-}
-
-function isRecoverableFastembedLoadError(error: unknown): boolean {
-	if (typeof error !== "object" || error === null) return false;
-	const { name, code, message } = error as { name?: unknown; code?: unknown; message?: unknown };
-	if (name === "ResolveMessage") return true;
-	if (code === "ERR_MODULE_NOT_FOUND" || code === "MODULE_NOT_FOUND" || code === "ERR_DLOPEN_FAILED") return true;
-	return typeof message === "string" && /cannot find (module|package)/i.test(message);
 }
