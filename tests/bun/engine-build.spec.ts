@@ -35,8 +35,9 @@ test('the installer\'s own timeouts stay well below the host\'s limit on setup (
   const { INSTALL_CHECK_TIMEOUT_MS, INSTALL_STEP_TIMEOUT_MS, SETUP_TIMEOUT_MS } = await import('../../hooks/engine-build')
   expect(INSTALL_STEP_TIMEOUT_MS + INSTALL_CHECK_TIMEOUT_MS).toBeLessThanOrEqual(SETUP_TIMEOUT_MS - 30_000)
   const installer = readFileSync(join(ROOT, 'bin', 'install-engine.ts'), 'utf8')
-  // The install step's timeout is proved behaviourally in install-engine.spec.ts
-  // (installStep's runner call), so this reads only the check's call shape.
+  // The bun install step is bounded by the constant, not a literal: it is the
+  // timeout argument of the install call (H1 moved that call behind installStep).
+  expect(installer).toMatch(/'--omit=peer'\], next, undefined, INSTALL_STEP_TIMEOUT_MS, installStepEnv\(\)\)/)
   expect(installer).toContain('INSTALL_CHECK_TIMEOUT_MS,')
   expect(installer).not.toMatch(/\d{3}_000/)
   expect(readFileSync(join(ROOT, 'hooks', 'register.ts'), 'utf8')).toContain('timeoutMs: SETUP_TIMEOUT_MS')
