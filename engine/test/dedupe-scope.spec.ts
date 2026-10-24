@@ -110,12 +110,12 @@ describe("MODEL.7: a re-save never lowers scope or relabels a protected kind", (
 		expect(row(store.dir, channel)?.scope).toBe("global");
 	}, 60_000);
 
-	test("MODEL.7.a4: a re-save keeps the stored trust tier unless the call names one", async () => {
+	test("MODEL.7.a4: a re-save keeps the stored trust tier, even when the call names another (MODEL.8)", async () => {
 		const id = await save("a row with an imported trust tier", { source: "imported", scope: "global" });
 		await save("a row with an imported trust tier", { source: "mcp" });
 		expect(row(store.dir, id)?.trust_tier).toBe("IMPORTED");
 		await save("a row with an imported trust tier", { source: "mcp", trust_tier: "DERIVED" });
-		expect(row(store.dir, id)?.trust_tier).toBe("DERIVED");
+		expect(row(store.dir, id)?.trust_tier).toBe("IMPORTED");
 	});
 
 	test("MODEL.7.a5: the first author is kept and the veracity is never lowered by a default re-save", async () => {
