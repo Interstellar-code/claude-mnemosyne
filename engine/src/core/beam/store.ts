@@ -224,7 +224,8 @@ function purgeWorkingMemoryArtifacts(db: BeamMemoryState["db"], ids: readonly st
  * eligible: `consolidated_at IS NULL` no longer suffices on its own, since
  * restored or imported durable rows legitimately carry a NULL consolidation
  * marker with an old event timestamp (issue #4819). Rows flagged `IMPORTED`
- * are treated as durable and never trimmed, and trimmed rows cascade all linked
+ * are treated as durable and never trimmed, as is any row whose scope is not
+ * 'session' (channel, global, NULL: engine/UPSTREAM.md change 12), and trimmed rows cascade all linked
  * artifacts via `purgeWorkingMemoryArtifacts`.
  */
 function trimWorkingMemory(beam: BeamMemoryState): void {
@@ -238,11 +239,13 @@ function trimWorkingMemory(beam: BeamMemoryState): void {
 			WHERE session_id = ?
 			  AND consolidated_at IS NULL
 			  AND trust_tier IS NOT 'IMPORTED'
+			  AND scope = 'session'
 			  AND (
 				timestamp < ? OR
 				id NOT IN (
 					SELECT id FROM working_memory
 					WHERE session_id = ? AND consolidated_at IS NULL AND trust_tier IS NOT 'IMPORTED'
+					  AND scope = 'session'
 					ORDER BY timestamp DESC
 					LIMIT ?
 				)
