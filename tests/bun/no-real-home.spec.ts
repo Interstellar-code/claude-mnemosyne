@@ -19,8 +19,8 @@ describe('no spawned process inherits the real home', () => {
         let block = line
         let j = i
         while (j + 1 < lines.length && !/\}\s*\)/.test(lines[j])) { j++; block += '\n' + lines[j] }
-        if (!/env\s*:/.test(block)) continue
-        const ok = /isolatedEnv\(\)/.test(block) || /serverEnv\(/.test(block) || /HOME:\s*[^,]*tmpdir|tmpdir\(\)/.test(block) || /HOME:\s*home\b/.test(block) || /HOME:\s*tmpHome/.test(block)
+        if (!/env\s*:/.test(block as string)) continue
+        const ok = /isolatedEnv\(\)/.test(block as string) || /serverEnv\(/.test(block as string) || /HOME:\s*[^,]*tmpdir|tmpdir\(\)/.test(block as string) || /HOME:\s*home\b/.test(block as string) || /HOME:\s*tmpHome/.test(block as string)
         if (!ok) offenders.push(`${name as string}:${i + 1}`)
       }
     }
