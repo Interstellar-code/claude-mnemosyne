@@ -14,7 +14,7 @@ describe('no spawned process inherits the real home', () => {
       const lines = text.split('\n')
       for (let i = 0; i < lines.length; i++) {
         const line = lines[i]
-        if (!/Bun\.(spawn|spawnSync)\s*\(/.test(line) && !/spawn\s*\(/.test(line)) continue
+        if (!/Bun\.(spawn|spawnSync)\s*\(/.test(line as string) && !/spawn\s*\(/.test(line as string)) continue
         // gather the env object roughly: find matching closing by scanning until a line containing stdin/stdout/stderr or })
         let block = line
         let j = i
