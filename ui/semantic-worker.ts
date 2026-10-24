@@ -93,19 +93,31 @@ function cosine(a: readonly number[], b: readonly number[]): number {
   let sum = 0
   const n = Math.min(a.length, b.length)
   for (let i = 0; i < n; i++) sum += (a[i] ?? 0) * (b[i] ?? 0)
-  return Math.max(-1, Math.min(1, sum))
+  return sum > 1 ? 1 : sum < -1 ? -1 : sum
 }
 
-/** Each vector's top TOP_K neighbours at or above MIN_COSINE, best first, ties by index, as vector indices. */
+/**
+ * Each vector's top TOP_K neighbours at or above MIN_COSINE, best first, ties by
+ * index, as vector indices. The best few are kept in place, never a sort of the
+ * whole row: at GALAXY_LIMIT points the full sort is most of the work (review
+ * MEDIUM-2).
+ */
 export function neighboursOf(vectors: readonly number[][]): { index: number; score: number }[][] {
   return vectors.map((vector, i) => {
-    const scored: { index: number; score: number }[] = []
+    const best: { index: number; score: number }[] = []
     for (let j = 0; j < vectors.length; j++) {
       if (j === i) continue
       const score = cosine(vector, vectors[j] ?? [])
-      if (score >= MIN_COSINE) scored.push({ index: j, score })
+      if (score < MIN_COSINE) continue
+      // A row already full drops anything that does not beat its weakest entry; an equal
+      // score keeps the earlier index, the order a full sort gave.
+      if (best.length === TOP_K && score <= (best[TOP_K - 1]?.score ?? 0)) continue
+      let at = best.length
+      while (at > 0 && (best[at - 1]?.score ?? 0) < score) at--
+      best.splice(at, 0, { index: j, score })
+      if (best.length > TOP_K) best.length = TOP_K
     }
-    return scored.sort((a, b) => b.score - a.score || a.index - b.index).slice(0, TOP_K)
+    return best
   })
 }
 

@@ -712,6 +712,16 @@ export type GalaxyProject = { owner: string; label: string; count: number; recal
 export const MIN_MEANING_VECTORS = 10
 // The cached meaning layout, under the dashboard's root (MNEMOSYNE_ROOT), owner-only.
 export const MEANING_CACHE = 'meaning.json'
+// Bumped when the layout's maths or constants change: an older cache file is then a miss
+// instead of a stale layout (review LOW-1).
+export const MEANING_VERSION = 1
+// A run that has not answered by now is dead: reject it, terminate the worker, start fresh.
+export const MEANING_RUN_TIMEOUT_MS = 30_000
+// How long a galaxy request waits for a cold layout before it answers the topic map instead.
+// Below Bun's 10 s idle timeout, so the request always gets its answer (review MEDIUM-2).
+export const MEANING_WAIT_MS = 8_000
+// Bound ids per SELECT: a statement stays well inside SQLite's variable limit.
+const VECTOR_CHUNK = 500
 
 export type MeaningReply = MeaningWorkerReply
 export type MeaningNeighbour = { id: string; score: number }
@@ -723,11 +733,12 @@ export type Meaning = {
 export const NO_MEANING: Meaning = { meaning: false, positions: {}, similar: {} }
 
 /**
- * The cache key: the model name and every memory id that has a vector, in order.
- * A changed set of ids or a changed model recomputes; anything else is a hit.
+ * The cache key: the layout version, the model, the vectors' newest `created_at` and
+ * every memory id that has a vector, in order. A changed set of ids, a re-embedded
+ * memory (a newer row) or a changed model recomputes; anything else is a hit.
  */
-export function meaningKey(model: string, ids: readonly string[]): string {
-  return createHash('sha256').update(`${model}\n${ids.join('\n')}`).digest('hex')
+export function meaningKey(model: string, ids: readonly string[], newest: string = '', version: number = MEANING_VERSION): string {
+  return createHash('sha256').update(`${version}\n${model}\n${newest}\n${ids.join('\n')}`).digest('hex')
 }
 
 /** The cached layout for `key`, or null: a corrupt, foreign or absent file is a miss. */
@@ -751,32 +762,49 @@ export function writeMeaningCache(root: string, key: string, meaning: Meaning) {
   renameSync(temp, join(root, MEANING_CACHE))
 }
 
+/**
+ * Removes the cached layout: below the floor, or with embeddings off, the file would
+ * keep the ids and neighbour links of memories the map no longer lays out (review LOW-2).
+ */
+export function clearMeaningCache(root: string) {
+  rmSync(join(root, MEANING_CACHE), { force: true })
+}
+
 // The vectors, read-only, of the memories the galaxy shows: the model most rows
 // carry (vectors from two models are not comparable) and the rows, by id.
-export type MeaningVectors = { model: string; inputs: { id: string; json: string }[] }
 
-/** The model most vectors name and the ids that carry it: the cache key's input, with no vector parsed. */
-export type MeaningIndex = { model: string; ids: string[] }
+/**
+ * The model most vectors name, the newest `created_at` among them, and the ids that
+ * carry it (at most `limit`, in the galaxy reply's own order): the cache key's input,
+ * with no vector parsed.
+ */
+export type MeaningIndex = { model: string; ids: string[]; newest: string }
 
-export function readVectorIndex(db: Database): MeaningIndex {
+/**
+ * The vectors of the memories the galaxy reply shows, read-only: the same rows, the same
+ * order and the same `limit`, so `similar` never names a star the reply dropped and UMAP
+ * never works on a point nobody sees (review MEDIUM-2).
+ */
+export function readVectorIndex(db: Database, limit = GALAXY_LIMIT): MeaningIndex {
+  const empty: MeaningIndex = { model: '', ids: [], newest: '' }
   const present = new Set(
     (db.query("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map(row => row.name),
   )
-  if (!present.has('memory_embeddings')) return { model: '', ids: [] }
-  let rows: { id: string; model: string | null }[]
+  if (!present.has('memory_embeddings')) return empty
+  // A legacy table can exist without created_at: the key then falls back to ids and version.
+  const created = tableColumns(db, 'memory_embeddings').has('created_at') ? 'e.created_at' : 'NULL'
+  let rows: { id: string; model: string | null; created: string | null }[]
   try {
-    // The same rows the galaxy reply shows: a memory with an owner session. A vector for a
-    // memory the map never draws would only make UMAP work on a star nobody sees.
     rows = db
       .query(
-        `SELECT e.memory_id AS id, e.model AS model
+        `SELECT e.memory_id AS id, e.model AS model, ${created} AS created
          FROM memory_embeddings e JOIN working_memory w ON w.id = e.memory_id
          WHERE w.session_id IS NOT NULL AND w.session_id <> ''
-         ORDER BY e.memory_id`,
+         ORDER BY w.timestamp DESC, w.id LIMIT ?`,
       )
-      .all() as { id: string; model: string | null }[]
+      .all(limit) as { id: string; model: string | null; created: string | null }[]
   } catch {
-    return { model: '', ids: [] }
+    return empty
   }
   const counts = new Map<string, number>()
   for (const row of rows) {
@@ -791,72 +819,151 @@ export function readVectorIndex(db: Database): MeaningIndex {
       best = count
     }
   }
-  return { model, ids: rows.filter(row => (typeof row.model === 'string' ? row.model : '') === model).map(row => row.id) }
+  let newest = ''
+  for (const row of rows) {
+    if ((typeof row.model === 'string' ? row.model : '') !== model) continue
+    const created = typeof row.created === 'string' ? row.created : ''
+    if (created > newest) newest = created
+  }
+  return { model, ids: rows.filter(row => (typeof row.model === 'string' ? row.model : '') === model).map(row => row.id), newest }
 }
 
 /** The stored JSON of `ids`' vectors, in the order given (a cache miss only). */
 export function readVectorInputs(db: Database, ids: readonly string[]): { id: string; json: string }[] {
   if (ids.length === 0) return []
-  const rows = db
-    .query(`SELECT memory_id AS id, embedding_json AS json FROM memory_embeddings WHERE memory_id IN (${ids.map(() => '?').join(', ')})`)
-    .all(...ids) as { id: string; json: string }[]
-  const byId = new Map(rows.map(row => [row.id, row.json]))
+  // Chunked: 2000 ids would otherwise be 2000 bound variables in one statement.
+  const byId = new Map<string, string>()
+  for (let from = 0; from < ids.length; from += VECTOR_CHUNK) {
+    const chunk = ids.slice(from, from + VECTOR_CHUNK)
+    const rows = db
+      .query(`SELECT memory_id AS id, embedding_json AS json FROM memory_embeddings WHERE memory_id IN (${chunk.map(() => '?').join(', ')})`)
+      .all(...chunk) as { id: string; json: string }[]
+    for (const row of rows) byId.set(row.id, row.json)
+  }
   return ids.flatMap(id => {
     const json = byId.get(id)
     return json === undefined ? [] : [{ id, json }]
   })
 }
 
-/** The whole read: the index and the rows behind it. */
-export function readVectors(db: Database): MeaningVectors {
-  const { model, ids } = readVectorIndex(db)
-  return { model, inputs: readVectorInputs(db, ids) }
-}
-
 /**
  * One UMAP run in the Worker (ui/semantic-worker.ts), never on this loop: one
  * worker per server, started on first use. The worker's own message queue is the
  * serialisation, so two galaxy requests run one after the other in it.
+ *
+ * A worker that dies or hangs is dropped rather than reused (review HIGH-1): a
+ * failure rejects every request waiting on it, terminates it and clears it, so the
+ * next run starts a fresh one; a run that has not answered inside `timeoutMs` is
+ * treated the same way. A dead worker can never leave a request waiting forever.
  */
+export type MeaningRunnerOptions = {
+  // The worker script: the server's own, or a broken one in a test.
+  worker?: string | URL
+  timeoutMs?: number
+}
+
 export class MeaningRunner {
   private worker: Worker | null = null
   private next = 0
-  private pending = new Map<number, { resolve: (reply: MeaningReply) => void; reject: (err: Error) => void }>()
+  private pending = new Map<number, { resolve: (reply: MeaningReply) => void; reject: (err: Error) => void; timer: ReturnType<typeof setTimeout> }>()
+  // One run in flight per cache key: every concurrent caller joins it (review MEDIUM-1).
+  private inflight = new Map<string, Promise<Meaning>>()
+  private readonly url: string | URL
+  private readonly timeoutMs: number
+
+  constructor(options: MeaningRunnerOptions = {}) {
+    this.url = options.worker ?? new URL('./semantic-worker.ts', import.meta.url).href
+    this.timeoutMs = options.timeoutMs ?? MEANING_RUN_TIMEOUT_MS
+  }
 
   private start(): Worker {
     if (this.worker !== null) return this.worker
-    const worker = new Worker(new URL('./semantic-worker.ts', import.meta.url).href)
+    const worker = new Worker(this.url)
     worker.onmessage = (event: MessageEvent) => {
       const reply = event.data as MeaningReply
       const waiting = this.pending.get(reply.id)
       if (waiting === undefined) return
       this.pending.delete(reply.id)
+      clearTimeout(waiting.timer)
+      // One request's bad input is not a dead worker: reject that one, keep the worker.
       if ('error' in reply) waiting.reject(new Error(reply.error))
       else waiting.resolve(reply)
     }
     worker.onerror = (event: ErrorEvent) => {
-      for (const waiting of this.pending.values()) waiting.reject(new Error(event.message || 'the semantic worker failed'))
-      this.pending.clear()
+      this.fail(new Error(event.message || 'the semantic worker failed'))
+    }
+    // Bun fires no close event on a worker; a runtime that has one drops the worker too.
+    const closable = worker as unknown as { onclose?: (event: { reason?: string }) => void }
+    if (typeof closable.onclose !== 'undefined' || 'onclose' in worker) {
+      closable.onclose = event => this.fail(new Error(event?.reason || 'the semantic worker closed'))
     }
     this.worker = worker
     return worker
   }
 
+  /** Drops the worker and rejects everything waiting on it; the next run starts a fresh one. */
+  private fail(error: Error) {
+    const worker = this.worker
+    this.worker = null
+    for (const waiting of this.pending.values()) {
+      clearTimeout(waiting.timer)
+      waiting.reject(error)
+    }
+    this.pending.clear()
+    worker?.terminate()
+  }
+
   /** The worker's answer to one layout question; the worker itself runs them one at a time. */
   run(inputs: readonly { id: string; json: string }[]): Promise<Extract<MeaningReply, { count: number }>> {
-    const worker = this.start()
+    let worker: Worker
+    try {
+      worker = this.start()
+    } catch (err) {
+      return Promise.reject(err instanceof Error ? err : new Error(String(err)))
+    }
     const id = ++this.next
     return new Promise<Extract<MeaningReply, { count: number }>>((resolve, reject) => {
-      this.pending.set(id, { resolve: resolve as (reply: MeaningReply) => void, reject })
-      worker.postMessage({ id, inputs })
+      const timer = setTimeout(() => {
+        this.fail(new Error(`the semantic worker did not answer within ${this.timeoutMs} ms`))
+      }, this.timeoutMs)
+      this.pending.set(id, { resolve: resolve as (reply: MeaningReply) => void, reject, timer })
+      try {
+        worker.postMessage({ id, inputs })
+      } catch (err) {
+        this.fail(err instanceof Error ? err : new Error(String(err)))
+      }
     })
   }
 
+  /**
+   * One shared run per cache key, waited on for at most `waitMs` (review MEDIUM-1 and
+   * MEDIUM-2). Every caller for the same key joins the same promise, so N concurrent
+   * cold requests cause one UMAP run; a caller whose budget runs out answers NO_MEANING
+   * while the run continues into the cache for the next request.
+   */
+  async layout(key: string, compute: () => Promise<Meaning>, waitMs: number): Promise<Meaning> {
+    let shared = this.inflight.get(key)
+    if (shared === undefined) {
+      shared = compute().finally(() => {
+        if (this.inflight.get(key) === shared) this.inflight.delete(key)
+      })
+      this.inflight.set(key, shared)
+    }
+    // A run nobody is waiting on any more must not raise an unhandled rejection.
+    shared.catch(() => {})
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const budget = new Promise<Meaning>(resolve => {
+      timer = setTimeout(() => resolve(NO_MEANING), waitMs)
+    })
+    try {
+      return await Promise.race([shared, budget])
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
   stop() {
-    for (const waiting of this.pending.values()) waiting.reject(new Error('the server is stopping'))
-    this.pending.clear()
-    this.worker?.terminate()
-    this.worker = null
+    this.fail(new Error('the server is stopping'))
   }
 }
 
@@ -878,22 +985,51 @@ export function scaleMeaning(meaning: Meaning, radius: number): Meaning {
  * layout on a key hit, else one Worker run and the 0600 cache file under `root`.
  * The cache holds unit positions (scale-free); the caller scales them. The
  * database is only ever read.
+ *
+ * Concurrent cold requests for one key share a single run (review MEDIUM-1): the
+ * cache is re-checked inside the shared promise, so a run that finished while a
+ * later caller waited is a cache read, not a second UMAP. `waitMs` bounds how long
+ * this call waits (review MEDIUM-2): a layout that is not ready answers NO_MEANING
+ * now, and the run it started still lands in the cache for the next request.
  */
-export async function meaningLevel(db: Database | null, root: string, runner: MeaningRunner): Promise<Meaning> {
-  if (db === null) return NO_MEANING
-  const { model, ids } = readVectorIndex(db)
-  if (ids.length < MIN_MEANING_VECTORS) return NO_MEANING
-  const key = meaningKey(model, ids)
+export type MeaningOptions = {
+  waitMs?: number
+  limit?: number
+}
+
+export async function meaningLevel(db: Database | null, root: string, runner: MeaningRunner, options: MeaningOptions = {}): Promise<Meaning> {
+  // No store, no table, too few vectors (embeddings off): the map keeps its topic layout.
+  // The layout file is removed, so it cannot outlive the memories it names (review LOW-2).
+  if (db === null) {
+    clearMeaningCache(root)
+    return NO_MEANING
+  }
+  const database = db
+  const { model, ids, newest } = readVectorIndex(database, options.limit ?? GALAXY_LIMIT)
+  if (ids.length < MIN_MEANING_VECTORS) {
+    clearMeaningCache(root)
+    return NO_MEANING
+  }
+  const key = meaningKey(model, ids, newest)
   const cached = readMeaningCache(root, key)
   if (cached !== null) return cached
-  const reply = await runner.run(readVectorInputs(db, ids))
-  const meaning: Meaning = { meaning: true, positions: reply.positions, similar: reply.similar }
-  try {
-    writeMeaningCache(root, key, meaning)
-  } catch {
-    // a cache that cannot be written is still a good reply
+  const compute = async (): Promise<Meaning> => {
+    // Re-checked here: a run may have finished between a caller's first look and this queue.
+    const late = readMeaningCache(root, key)
+    if (late !== null) return late
+    const reply = await runner.run(readVectorInputs(database, ids))
+    // Rows that do not parse are dropped in the worker: the floor counts usable vectors, so
+    // a store of corrupt rows stays on the topic layout and is never cached (review MEDIUM-3).
+    if (reply.count < MIN_MEANING_VECTORS) return NO_MEANING
+    const meaning: Meaning = { meaning: true, positions: reply.positions, similar: reply.similar }
+    try {
+      writeMeaningCache(root, key, meaning)
+    } catch {
+      // a cache that cannot be written is still a good reply
+    }
+    return meaning
   }
-  return meaning
+  return runner.layout(key, compute, options.waitMs ?? MEANING_WAIT_MS)
 }
 
 /**
@@ -1450,6 +1586,10 @@ export type ServerOptions = {
   maxStreams?: number
   streamMaxMs?: number
   engineTimeoutMs?: number
+  // SEMX.1: the meaning layout's worker and wait budget, so a test can observe the runs
+  // or hand the route a worker that fails (review HIGH-1 to MEDIUM-2).
+  meaningRunner?: MeaningRunner
+  meaningWaitMs?: number
 }
 
 export async function startServer(config: Config, options: ServerOptions = {}): Promise<Started> {
@@ -1479,7 +1619,8 @@ export async function startServer(config: Config, options: ServerOptions = {}): 
   }
   const streams = new Set<() => void>()
   // SEMX.1: the meaning layout's one Worker, started on the first galaxy request that needs it.
-  const meaning = new MeaningRunner()
+  const meaning = options.meaningRunner ?? new MeaningRunner()
+  const meaningWaitMs = options.meaningWaitMs ?? MEANING_WAIT_MS
 
   // The two POST routes: the page's own origin, JSON, a small body; then the handler.
   async function post(request: Request, handle: (views: Views, text: string) => Promise<Answer>) {
@@ -1569,15 +1710,20 @@ export async function startServer(config: Config, options: ServerOptions = {}): 
         return getMemory((store.db ??= openStore(config.store)), id)
       })
     }
-    // One UMAP run at a time in the Worker; every other route stays synchronous.
+    // One UMAP run at a time in the Worker; every other route stays synchronous. The wait is
+    // bounded, so a cold layout answers the topic map now and lands in the cache for the next
+    // request instead of running into Bun's idle timeout (review MEDIUM-2).
     if (path === '/api/galaxy') {
       return get(async () => {
         const db = (store.db ??= openStore(config.store))
         let layout = NO_MEANING
         try {
-          layout = scaleMeaning(await meaningLevel(db, config.root, meaning), meaningRadius(storeOwners(db).length))
+          layout = scaleMeaning(
+            await meaningLevel(db, config.root, meaning, { waitMs: meaningWaitMs, limit: GALAXY_LIMIT }),
+            meaningRadius(storeOwners(db).length),
+          )
         } catch {
-          // a layout that fails leaves the topic map: meaning false, no positions
+          // a layout that fails, or a worker that died, leaves the topic map: meaning false
         }
         return galaxyLevel(db, GALAXY_LIMIT, layout)
       })

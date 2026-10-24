@@ -14,17 +14,20 @@ import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
+  GALAXY_LIMIT,
   MEANING_CACHE,
+  MEANING_VERSION,
   MIN_MEANING_VECTORS,
   MeaningRunner,
   meaningKey,
   meaningLevel,
   scaleMeaning,
   meaningRadius,
-  readVectors,
+  readVectorIndex,
+  readVectorInputs,
   startServer,
 } from '../../ui/server'
-import type { Started } from '../../ui/server'
+import type { ServerOptions, Started } from '../../ui/server'
 import { MIN_COSINE, TOP_K, neighboursOf, parseVectors } from '../../ui/semantic-worker'
 import { ROOT, tempDir } from './helpers'
 
@@ -96,8 +99,11 @@ function fixture(perCluster: number, seed = 11) {
   return rows
 }
 
-/** A temp store with the real schema and `rows` in it, one model. */
-function makeStore(dir: string, rows: readonly { id: string; vector: number[] }[], model = MODEL) {
+/**
+ * A temp store with the real schema and `rows` in it, one model. A row's vector may be
+ * raw text, as a corrupt stored row would be; `createdAt` stamps the embedding row.
+ */
+function makeStore(dir: string, rows: readonly { id: string; vector: number[] | string }[], model = MODEL, createdAt = '2026-01-01T00:00:00Z') {
   mkdirSync(dir, { recursive: true })
   const db = new Database(join(dir, 'mnemopi.db'))
   try {
@@ -109,7 +115,8 @@ function makeStore(dir: string, rows: readonly { id: string; vector: number[] }[
         index % 2 === 0 ? 'global' : 'project-alpha-1a2b',
         `2026-01-${String((index % 28) + 1).padStart(2, '0')}T00:00:00Z`,
       ])
-      db.run('INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES (?, ?, ?)', [row.id, JSON.stringify(row.vector), model])
+      const json = typeof row.vector === 'string' ? row.vector : JSON.stringify(row.vector)
+      db.run('INSERT INTO memory_embeddings (memory_id, embedding_json, model, created_at) VALUES (?, ?, ?, ?)', [row.id, json, model, createdAt])
     })
   } finally {
     db.close()
@@ -117,14 +124,24 @@ function makeStore(dir: string, rows: readonly { id: string; vector: number[] }[
 }
 
 const digest = (path: string) => createHash('sha256').update(readFileSync(path)).digest('hex')
+
+/** The server's own read of a store's vector index, read-only, as the key builder sees it. */
+function indexOf(store: string) {
+  const db = new Database(join(store, 'mnemopi.db'), { readonly: true })
+  try {
+    return readVectorIndex(db)
+  } finally {
+    db.close()
+  }
+}
 const distance = (a: readonly number[], b: readonly number[]) => Math.hypot((a[0] ?? 0) - (b[0] ?? 0), (a[1] ?? 0) - (b[1] ?? 0), (a[2] ?? 0) - (b[2] ?? 0))
 const clusterOf = (id: string) => id.slice(1, id.indexOf('-'))
 
 type Star = { id: string; owner: string; tags: string[]; position?: number[]; similar?: { id: string; score: number }[] }
 type Reply = { meaning: boolean; memories: Star[]; projects: unknown[]; total: number; shown: number }
 
-function start(store: string, dir: string, activityLog = '') {
-  return startServer({ root: join(dir, 'root'), store, cli: '', activityLog, pluginRoot: ROOT })
+function start(store: string, dir: string, activityLog = '', options: ServerOptions = {}) {
+  return startServer({ root: join(dir, 'root'), store, cli: '', activityLog, pluginRoot: ROOT }, options)
 }
 
 const getJson = async (started: Started, path: string) => {
@@ -377,7 +394,7 @@ describe('SEMX.1.a4: the cache — 0600, a hit on the second call, a recompute w
     temp.dispose()
   })
 
-  test('the first call writes meaning.json 0600 under the dashboard root, keyed by the model and the ids', async () => {
+  test('the first call writes meaning.json 0600 under the dashboard root, keyed by the model, the newest vector and the ids', async () => {
     const cache = join(root, MEANING_CACHE)
     rmSync(cache, { force: true })
     const first = await getJson(started, '/api/galaxy')
@@ -386,10 +403,12 @@ describe('SEMX.1.a4: the cache — 0600, a hit on the second call, a recompute w
     // Owner-only, on unix: the same rule the server's own ui.json follows.
     if (process.platform !== 'win32') expect(statSync(cache).mode & 0o777).toBe(0o600)
     const stored = JSON.parse(readFileSync(cache, 'utf8')) as { key: string; meaning: { meaning: boolean; positions: Record<string, number[]> } }
-    const ids = [...rows.map(row => row.id)].sort()
-    expect(stored.key).toBe(meaningKey(MODEL, ids))
+    // The ids in the order the galaxy reply shows them (newest first), which is the run's order.
+    const index = indexOf(store)
+    expect(index.ids).toHaveLength(rows.length)
+    expect(stored.key).toBe(meaningKey(MODEL, index.ids, index.newest))
     expect(stored.meaning.meaning).toBe(true)
-    expect(Object.keys(stored.meaning.positions).sort()).toEqual(ids)
+    expect(Object.keys(stored.meaning.positions).sort()).toEqual([...index.ids].sort())
   }, 60_000)
 
   test('the second call is a cache read: instant, and the same numbers', async () => {
@@ -403,7 +422,7 @@ describe('SEMX.1.a4: the cache — 0600, a hit on the second call, a recompute w
     expect(elapsed).toBeLessThan(250)
   }, 60_000)
 
-  test('a changed set of ids recomputes; a changed model does too', async () => {
+  test('a changed set of ids recomputes; a newer vector row does too', async () => {
     const cache = join(root, MEANING_CACHE)
     const before = digest(cache)
     const db = new Database(join(store, 'mnemopi.db'))
@@ -420,8 +439,32 @@ describe('SEMX.1.a4: the cache — 0600, a hit on the second call, a recompute w
     expect(grown.body.memories.map(star => star.id)).toContain('m9-extra')
     expect(digest(cache)).not.toBe(before)
     const stored = JSON.parse(readFileSync(cache, 'utf8')) as { key: string }
-    const ids = [...rows.map(row => row.id), 'm9-extra'].sort()
-    expect(stored.key).toBe(meaningKey(MODEL, ids))
+    const index = indexOf(store)
+    expect(index.ids).toContain('m9-extra')
+    expect(stored.key).toBe(meaningKey(MODEL, index.ids, index.newest))
+  }, 60_000)
+
+  test('a re-embedded memory keeps its id but changes the key, so the layout is recomputed (LOW-1)', async () => {
+    const cache = join(root, MEANING_CACHE)
+    const before = JSON.parse(readFileSync(cache, 'utf8')) as { key: string }
+    const beforeIds = indexOf(store).ids
+    const db = new Database(join(store, 'mnemopi.db'))
+    try {
+      // Same memory, same id, same model: a newer embedding row, as a re-embed would write.
+      const vector = Array.from({ length: DIMS }, () => 0.02)
+      db.run('UPDATE memory_embeddings SET embedding_json = ?, created_at = ? WHERE memory_id = ?', [JSON.stringify(vector), '2026-06-01T00:00:00Z', beforeIds[0]!])
+    } finally {
+      db.close()
+    }
+    const after = indexOf(store)
+    expect(after.ids).toEqual(beforeIds)
+    expect(after.newest).toBe('2026-06-01T00:00:00Z')
+    expect(meaningKey(MODEL, after.ids, after.newest)).not.toBe(before.key)
+    const reply = await getJson(started, '/api/galaxy')
+    expect(reply.body.meaning).toBe(true)
+    const stored = JSON.parse(readFileSync(cache, 'utf8')) as { key: string }
+    expect(stored.key).toBe(meaningKey(MODEL, after.ids, after.newest))
+    expect(stored.key).not.toBe(before.key)
   }, 60_000)
 
   test('the vectors are read read-only: the store is byte-identical after a run, and so is its data version', async () => {
@@ -445,11 +488,14 @@ describe('SEMX.1.a4: the cache — 0600, a hit on the second call, a recompute w
   }, 60_000)
 })
 
-describe('SEMX.1.a4 and a5: the pieces directly — the key, the scale, the vector reader', () => {
-  test('the key follows the model and the id order, and nothing else', () => {
+describe('SEMX.1.a4, LOW-1 and a5: the pieces directly — the key, the scale, the vector reader', () => {
+  test('the key follows the layout version, the model, the newest vector row and the id order', () => {
     expect(meaningKey('a', ['1', '2'])).toBe(meaningKey('a', ['1', '2']))
     expect(meaningKey('a', ['1', '2'])).not.toBe(meaningKey('b', ['1', '2']))
     expect(meaningKey('a', ['1', '2'])).not.toBe(meaningKey('a', ['2', '1']))
+    // LOW-1: a re-embedded memory (a newer row) or a changed layout recomputes.
+    expect(meaningKey('a', ['1', '2'], '2026-01-01T00:00:00Z')).not.toBe(meaningKey('a', ['1', '2'], '2026-02-01T00:00:00Z'))
+    expect(meaningKey('a', ['1', '2'], '', MEANING_VERSION + 1)).not.toBe(meaningKey('a', ['1', '2'], '', MEANING_VERSION))
     expect(meaningKey('', [])).toMatch(/^[0-9a-f]{64}$/)
   })
 
@@ -466,23 +512,28 @@ describe('SEMX.1.a4 and a5: the pieces directly — the key, the scale, the vect
     expect(meaningRadius(4)).toBeCloseTo(360 * (2 / Math.sqrt(4 * Math.PI)), 6)
   })
 
-  test('readVectors takes the model most rows name, and a store without the table gives nothing', () => {
+  test('readVectorIndex takes the model most rows name, the newest vector, and the reply’s order and limit', () => {
     const temp = tempDir('semantic-vectors')
     try {
-      makeStore(join(temp.dir, 'store'), fixture(2))
+      makeStore(join(temp.dir, 'store'), fixture(2), MODEL, '2026-03-04T00:00:00Z')
       const db = new Database(join(temp.dir, 'store', 'mnemopi.db'))
       try {
-        const found = readVectors(db)
-        expect(found.model).toBe(MODEL)
-        expect(found.inputs).toHaveLength(6)
-        expect(found.inputs[0]?.id).toBe('m0-00')
+        const index = readVectorIndex(db)
+        expect(index.model).toBe(MODEL)
+        expect(index.ids).toHaveLength(6)
+        expect(index.newest).toBe('2026-03-04T00:00:00Z')
+        // MEDIUM-2: the same rows, order and limit as the galaxy reply (newest timestamp first).
+        expect(readVectorIndex(db, 4).ids).toEqual(index.ids.slice(0, 4))
+        const inputs = readVectorInputs(db, index.ids)
+        expect(inputs.map(input => input.id)).toEqual(index.ids)
+        expect(JSON.parse(inputs[0]?.json ?? 'null')).toHaveLength(DIMS)
       } finally {
         db.close()
       }
       const bare = new Database(join(temp.dir, 'bare.db'))
       try {
         bare.run(SCHEMA[0]!)
-        expect(readVectors(bare)).toEqual({ model: '', inputs: [] })
+        expect(readVectorIndex(bare)).toEqual({ model: '', ids: [], newest: '' })
       } finally {
         bare.close()
       }
@@ -499,4 +550,319 @@ describe('SEMX.1.a4 and a5: the pieces directly — the key, the scale, the vect
       runner.stop()
     }
   })
+})
+
+
+// ---- The FIX round's findings: a dead or hung worker, a herd of cold requests, an unbounded
+// store, corrupt rows, and the cache's staleness and eviction (review HIGH-1, MEDIUM-1 to 3,
+// LOW-1, LOW-2). Each spec runs the real server or the real runner; only the worker script the
+// runner loads is swapped, because a worker that fails to load is what these findings are about.
+
+/** A runner that counts its runs, so a spec can tell one UMAP run from many. */
+class CountingRunner extends MeaningRunner {
+  runs = 0
+  override run(inputs: readonly { id: string; json: string }[]) {
+    this.runs++
+    return super.run(inputs)
+  }
+}
+
+/** A worker script that throws as it loads: a partial vendor install, or a broken update. */
+function brokenWorkerScript(dir: string): string {
+  const file = join(dir, 'broken-worker.ts')
+  writeFileSync(file, 'throw new Error("the semantic worker failed to load")\n')
+  return file
+}
+
+/** A worker script that takes a message and never answers: a hung UMAP run. */
+function silentWorkerScript(dir: string): string {
+  const file = join(dir, 'silent-worker.ts')
+  writeFileSync(file, 'declare var self: Worker\nself.onmessage = () => {}\n')
+  return file
+}
+
+describe('HIGH-1: a worker that fails never breaks /api/galaxy', () => {
+  const temp = tempDir('semantic-dead')
+  const store = join(temp.dir, 'store')
+  const rows = fixture(5)
+  let started: Started
+  let runner: CountingRunner
+
+  beforeAll(async () => {
+    makeStore(store, rows)
+    runner = new CountingRunner({ worker: brokenWorkerScript(temp.dir) })
+    started = await start(store, temp.dir, '', { meaningRunner: runner })
+  }, 60_000)
+
+  afterAll(() => {
+    started?.stop()
+    runner?.stop()
+    temp.dispose()
+  })
+
+  test('two requests in a row both answer promptly with meaning false, and both carry the galaxy', async () => {
+    for (const attempt of [1, 2]) {
+      const at = Date.now()
+      const { status, body } = await getJson(started, '/api/galaxy')
+      const elapsed = Date.now() - at
+      expect({ attempt, status }).toEqual({ attempt, status: 200 })
+      expect({ attempt, meaning: body.meaning }).toEqual({ attempt, meaning: false })
+      // The topic map itself is intact: every star of the reply is still there, with no layout.
+      expect(body.memories.map(star => star.id)).toEqual(indexOf(store).ids)
+      expect(body.shown).toBe(rows.length)
+      for (const star of body.memories) {
+        expect({ attempt, id: star.id, position: star.position }).toEqual({ attempt, id: star.id, position: undefined })
+        expect({ attempt, id: star.id, similar: star.similar }).toEqual({ attempt, id: star.id, similar: undefined })
+      }
+      // Bun cuts a request at 10 s: a dead worker must never come near it.
+      expect({ attempt, quick: elapsed < 5_000 }).toEqual({ attempt, quick: true })
+    }
+    // Each request started a fresh worker instead of posting to the dead one.
+    expect(runner.runs).toBe(2)
+  }, 60_000)
+})
+
+describe('HIGH-1: a run that hangs is cut by the timeout, and the worker replaced', () => {
+  const temp = tempDir('semantic-hang')
+  const store = join(temp.dir, 'store')
+  const root = join(temp.dir, 'root')
+  const runners: MeaningRunner[] = []
+
+  beforeAll(() => {
+    makeStore(store, fixture(4))
+  }, 60_000)
+
+  afterAll(() => {
+    for (const runner of runners) runner.stop()
+    temp.dispose()
+  })
+
+  test('a run over the timeout rejects instead of hanging, and a fresh worker still answers', async () => {
+    const hung = new MeaningRunner({ worker: silentWorkerScript(temp.dir), timeoutMs: 150 })
+    runners.push(hung)
+    const db = new Database(join(store, 'mnemopi.db'), { readonly: true })
+    try {
+      const at = Date.now()
+      const outcome = await meaningLevel(db, root, hung, { waitMs: 5_000 }).then(
+        () => null,
+        (err: Error) => err,
+      )
+      const elapsed = Date.now() - at
+      // The run timeout rejects the shared run: the caller gets an error well inside its budget.
+      expect(outcome instanceof Error).toBe(true)
+      expect(outcome instanceof Error ? outcome.message : '').toContain('did not answer')
+      expect({ quick: elapsed < 3_000 }).toEqual({ quick: true })
+      // A fresh worker answers, with the layout this store deserves.
+      const fresh = new MeaningRunner()
+      runners.push(fresh)
+      const meaning = await meaningLevel(db, root, fresh, { waitMs: 30_000 })
+      expect(meaning.meaning).toBe(true)
+      expect(Object.keys(meaning.positions).sort()).toEqual([...indexOf(store).ids].sort())
+    } finally {
+      db.close()
+    }
+  }, 60_000)
+
+  test('a run that misses the wait budget answers NO_MEANING now, and its work still lands in the cache', async () => {
+    const dir = join(temp.dir, 'budget')
+    makeStore(dir, fixture(40))
+    const db = new Database(join(dir, 'mnemopi.db'), { readonly: true })
+    const runner = new CountingRunner()
+    runners.push(runner)
+    try {
+      // 1 ms is below any real UMAP run: the first request cannot have a layout yet.
+      const at = Date.now()
+      const first = await meaningLevel(db, join(dir, 'root'), runner, { waitMs: 1 })
+      const elapsed = Date.now() - at
+      expect(first).toEqual({ meaning: false, positions: {}, similar: {} })
+      expect({ quick: elapsed < 1_000 }).toEqual({ quick: true })
+      // The run it started finishes into the cache: the next request reads it, with no second run.
+      const second = await meaningLevel(db, join(dir, 'root'), runner, { waitMs: 30_000 })
+      expect(second.meaning).toBe(true)
+      expect(Object.keys(second.positions).sort()).toEqual([...indexOf(dir).ids].sort())
+      expect(runner.runs).toBe(1)
+    } finally {
+      db.close()
+    }
+  }, 60_000)
+})
+
+describe('MEDIUM-1: four concurrent cold requests cause one UMAP run', () => {
+  const temp = tempDir('semantic-herd')
+  const store = join(temp.dir, 'store')
+  const rows = fixture(70)
+  let started: Started
+  let runner: CountingRunner
+
+  beforeAll(async () => {
+    makeStore(store, rows)
+    runner = new CountingRunner()
+    started = await start(store, temp.dir, '', { meaningRunner: runner })
+  }, 120_000)
+
+  afterAll(() => {
+    started?.stop()
+    runner?.stop()
+    temp.dispose()
+  })
+
+  test('all four answer with the layout, and the runner ran once', async () => {
+    // Cold: no cache file, so each of the four misses on its own first look.
+    expect(existsSync(join(temp.dir, 'root', MEANING_CACHE))).toBe(false)
+    const replies = await Promise.all([1, 2, 3, 4].map(() => getJson(started, '/api/galaxy')))
+    for (const reply of replies) {
+      expect(reply.status).toBe(200)
+      expect(reply.body.meaning).toBe(true)
+      expect(reply.body.memories.filter(star => star.position !== undefined)).toHaveLength(rows.length)
+    }
+    // Four callers, one shared run: the id-keyed single flight, not four stacked UMAP runs.
+    expect(runner.runs).toBe(1)
+  }, 120_000)
+})
+
+describe('MEDIUM-2: the layout covers exactly the stars the reply shows', () => {
+  const temp = tempDir('semantic-bound')
+  const store = join(temp.dir, 'store')
+  const total = GALAXY_LIMIT + 200
+  let started: Started
+  let runner: CountingRunner
+
+  beforeAll(async () => {
+    // More memories than one reply shows, each with a vector. The run is real UMAP over
+    // GALAXY_LIMIT of them, and the route waits only `meaningWaitMs` for it.
+    makeStore(store, fixture(Math.ceil(total / CLUSTERS)).slice(0, total))
+    runner = new CountingRunner()
+    started = await start(store, temp.dir, '', { meaningRunner: runner, meaningWaitMs: 300 })
+  }, 240_000)
+
+  afterAll(() => {
+    started?.stop()
+    runner?.stop()
+    temp.dispose()
+  })
+
+  test('the cold request answers inside Bun’s timeout, and the layout names no star the reply dropped', async () => {
+    const at = Date.now()
+    const first = await getJson(started, '/api/galaxy')
+    const elapsed = Date.now() - at
+    expect(first.status).toBe(200)
+    expect(first.body.shown).toBe(GALAXY_LIMIT)
+    expect(first.body.total).toBe(total)
+    // The budget holds: the answer arrives well inside Bun's 10 s cut, whatever the layout does.
+    expect({ quick: elapsed < 9_000 }).toEqual({ quick: true })
+
+    // The run finishes into the cache; the next request reads it. Polling here is the client's
+    // own retry, one request per try, each bounded by the same budget.
+    let laidOut = first.body
+    for (let tries = 0; tries < 120 && !laidOut.meaning; tries++) {
+      await Bun.sleep(500)
+      laidOut = (await getJson(started, '/api/galaxy')).body
+    }
+    expect(laidOut.meaning).toBe(true)
+    const shown = new Set(laidOut.memories.map(star => star.id))
+    expect(shown.size).toBe(GALAXY_LIMIT)
+    const positioned = laidOut.memories.filter(star => star.position !== undefined)
+    expect(positioned.length).toBeGreaterThan(0)
+    expect(positioned.length).toBeLessThanOrEqual(GALAXY_LIMIT)
+    for (const star of positioned) expect({ id: star.id, shown: shown.has(star.id) }).toEqual({ id: star.id, shown: true })
+    // `similar` never names a star that is not in this reply: the ids are the reply's own.
+    for (const star of laidOut.memories) {
+      for (const similar of star.similar ?? []) expect({ id: star.id, known: shown.has(similar.id) }).toEqual({ id: star.id, known: true })
+    }
+    // The work itself was bounded: the cached layout holds the reply's stars and no others,
+    // never every vector of the store (the store has 200 more than the reply shows).
+    const cached = JSON.parse(readFileSync(join(temp.dir, 'root', MEANING_CACHE), 'utf8')) as {
+      meaning: { meaning: boolean; positions: Record<string, number[]>; similar: Record<string, { id: string; score: number }[]> }
+    }
+    const laidIds = Object.keys(cached.meaning.positions)
+    expect(laidIds).toHaveLength(GALAXY_LIMIT)
+    for (const id of laidIds) expect({ id, shown: shown.has(id) }).toEqual({ id, shown: true })
+    for (const neighbours of Object.values(cached.meaning.similar)) {
+      for (const neighbour of neighbours) expect({ id: neighbour.id, shown: shown.has(neighbour.id) }).toEqual({ id: neighbour.id, shown: true })
+    }
+    // One layout for the whole store, not one per request: the cache carried it.
+    expect(runner.runs).toBe(1)
+  }, 240_000)
+})
+
+describe('MEDIUM-3: the floor counts usable vectors, not rows', () => {
+  const temp = tempDir('semantic-corrupt')
+  const store = join(temp.dir, 'store')
+  const root = join(temp.dir, 'root')
+  // Twelve rows, three of them real vectors: the review's P3, exactly.
+  const rows = [
+    ...fixture(1).map(row => ({ id: row.id, vector: row.vector })),
+    { id: 'bad-1', vector: 'not json' },
+    { id: 'bad-2', vector: '[1,"x"]' },
+    { id: 'bad-3', vector: '{}' },
+    { id: 'bad-4', vector: '[]' },
+    { id: 'bad-5', vector: '[1]' },
+    { id: 'bad-6', vector: 'null' },
+    { id: 'bad-7', vector: '[1,2,"3"]' },
+    { id: 'bad-8', vector: '{"x":1}' },
+    // A well-formed vector of another width: the width most rows share wins, so it is dropped.
+    { id: 'bad-9', vector: '[1,2]' },
+  ]
+  let started: Started
+
+  beforeAll(async () => {
+    makeStore(store, rows)
+    started = await start(store, temp.dir)
+  }, 60_000)
+
+  afterAll(() => {
+    started?.stop()
+    temp.dispose()
+  })
+
+  test('twelve rows of which three parse: meaning false, no positions, and no cache file', async () => {
+    expect(rows).toHaveLength(12)
+    const { status, body } = await getJson(started, '/api/galaxy')
+    expect(status).toBe(200)
+    expect(body.meaning).toBe(false)
+    expect(body.memories).toHaveLength(rows.length)
+    for (const star of body.memories) {
+      expect({ id: star.id, position: star.position }).toEqual({ id: star.id, position: undefined })
+      expect({ id: star.id, similar: star.similar }).toEqual({ id: star.id, similar: undefined })
+    }
+    // A result under the floor is never cached: no stale layout outlives the bad rows.
+    expect(existsSync(join(root, MEANING_CACHE))).toBe(false)
+  }, 60_000)
+})
+
+describe('LOW-2: the layout file goes when the store falls below the floor', () => {
+  const temp = tempDir('semantic-evict')
+  const store = join(temp.dir, 'store')
+  const cache = join(temp.dir, 'root', MEANING_CACHE)
+  let started: Started
+
+  beforeAll(async () => {
+    makeStore(store, fixture(4))
+    started = await start(store, temp.dir)
+  }, 60_000)
+
+  afterAll(() => {
+    started?.stop()
+    temp.dispose()
+  })
+
+  test('a layout for twelve vectors is removed once the store drops under the floor', async () => {
+    expect((await getJson(started, '/api/galaxy')).body.meaning).toBe(true)
+    expect(existsSync(cache)).toBe(true)
+    // Forget three memories, vector and all: nine vectors left, one short of the floor.
+    const db = new Database(join(store, 'mnemopi.db'))
+    try {
+      for (const id of ['m2-01', 'm2-02', 'm2-03']) {
+        db.run('DELETE FROM memory_embeddings WHERE memory_id = ?', [id])
+        db.run('DELETE FROM working_memory WHERE id = ?', [id])
+      }
+      expect((db.query('SELECT COUNT(*) AS n FROM memory_embeddings').get() as { n: number }).n).toBe(MIN_MEANING_VECTORS - 1)
+    } finally {
+      db.close()
+    }
+    const { body } = await getJson(started, '/api/galaxy')
+    expect(body.meaning).toBe(false)
+    // The file named ids and scores of memories that are gone: it goes with them.
+    expect(existsSync(cache)).toBe(false)
+  }, 60_000)
 })
