@@ -5,9 +5,9 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { Database } from 'bun:sqlite'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { getRows } from '../../bin/memories'
+import { backupName, backupStore, BACKUP_KEEP, getRows } from '../../bin/memories'
 import { BACKFILL_TEXT_LIMIT, hasTags, judge, parseProposals, parseRows, PROPOSALS_FILE } from '../../hooks/backfill'
 import type { Proposal } from '../../hooks/backfill'
 import { body, engineCall, ROOT, tempDir, toolCall } from './helpers'
@@ -459,5 +459,108 @@ describe('bin/memories.ts pending and --no-knowledge', () => {
     const promptReply = body((await engineCall(CLI, store, 'global', [toolCall(1, 'mnemopi_knowledge_prompt', { memory_id: id })])).get(1))
     expect(got.sha256).toBe(promptReply.sha256)
     expect(got.sha256).toBe(sha(text))
+  })
+})
+
+// META.5 (C9): the backup every apply command runs first, on a store made by the real engine.
+describe('bin/memories.ts backup', () => {
+  const temp = tempDir('backup')
+  const root = join(temp.dir, 'data')
+  const store = join(root, 'store')
+  const folder = join(root, 'backups')
+  const names = () => (existsSync(folder) ? readdirSync(folder).sort() : [])
+
+  beforeAll(async () => {
+    for (const [i, content] of ['the first note kept in the backup store', 'the second note kept in the backup store', 'the third note kept in the backup store'].entries()) {
+      const reply = body((await engineCall(CLI, store, i === 2 ? 'project-a' : 'global', [toolCall(1, 'mnemopi_remember', { content })])).get(1))
+      if (typeof reply?.memory_id !== 'string') throw new Error(`remember failed: ${JSON.stringify(reply)}`)
+    }
+  })
+  afterAll(() => {
+    if (existsSync(folder)) chmodSync(folder, 0o700)
+    temp.dispose()
+  })
+
+  test('META.5.a1: backup writes <root>/backups/mnemopi-<UTC stamp>.db with VACUUM INTO, mode 0600, and prints the path and the row count', async () => {
+    const ran = await memories(['--store', store, 'backup'])
+    expect(ran.exitCode).toBe(0)
+    const out = JSON.parse(ran.stdout) as { path: string; rows: number; pruned: number }
+    expect(out.rows).toBe(3)
+    expect(out.pruned).toBe(0)
+    expect(out.path.startsWith(`${folder}/mnemopi-`)).toBe(true)
+    expect(out.path).toMatch(/\/mnemopi-\d{8}T\d{9}Z\.db$/)
+    expect(names()).toEqual([out.path.slice(folder.length + 1)])
+    expect(statSync(out.path).mode & 0o777).toBe(0o600)
+    expect(statSync(folder).mode & 0o777).toBe(0o700)
+    // It is a whole database: it opens, passes a check and holds the same rows.
+    const copy = new Database(out.path, { readonly: true })
+    try {
+      expect((copy.query('SELECT COUNT(*) AS n FROM working_memory').get() as { n: number }).n).toBe(3)
+      expect((copy.query('PRAGMA integrity_check').get() as { integrity_check: string }).integrity_check).toBe('ok')
+    } finally {
+      copy.close()
+    }
+    // The store itself is untouched.
+    const live = new Database(join(store, 'mnemopi.db'), { readonly: true })
+    try {
+      expect((live.query('SELECT COUNT(*) AS n FROM working_memory').get() as { n: number }).n).toBe(3)
+    } finally {
+      live.close()
+    }
+  })
+
+  test('META.5.a1: backup <root> names the data root when the store lives elsewhere', async () => {
+    const elsewhere = join(temp.dir, 'elsewhere')
+    const ran = await memories(['--store', store, 'backup', elsewhere])
+    expect(ran.exitCode).toBe(0)
+    expect(JSON.parse(ran.stdout).path.startsWith(`${elsewhere}/backups/mnemopi-`)).toBe(true)
+  })
+
+  test('META.5.a2: it refuses, before copying, when the disk has less free space than twice the store', () => {
+    const before = names()
+    const size = statSync(join(store, 'mnemopi.db')).size
+    expect(() => backupStore(store, root, { freeBytes: () => 2 * size - 1 })).toThrow(/not enough disk space for a backup/)
+    expect(names()).toEqual(before)
+    // Exactly twice the store is enough.
+    const result = backupStore(store, root, { freeBytes: () => 2 * size + 4096, now: new Date('2030-01-01T00:00:00.000Z') })
+    expect(result.path.endsWith('mnemopi-20300101T000000000Z.db')).toBe(true)
+  })
+
+  test('META.5.a2: it keeps the newest 10 backups and removes only older mnemopi-*.db files', () => {
+    const stray = join(folder, 'notes.txt')
+    writeFileSync(stray, 'not a backup')
+    for (let i = 0; i < 14; i++) backupStore(store, root, { now: new Date(Date.UTC(2031, 0, 1, 0, 0, i)) })
+    const backups = names().filter(name => name.startsWith('mnemopi-'))
+    expect(backups.length).toBe(BACKUP_KEEP)
+    // The newest ten: the last ten of the 2031 series, none of the earlier ones.
+    expect(backups).toEqual(Array.from({ length: 10 }, (_, i) => backupName(new Date(Date.UTC(2031, 0, 1, 0, 0, i + 4)))))
+    expect(existsSync(stray)).toBe(true)
+  })
+
+  test('META.5.a3: a read-only backups folder makes it fail with a non-zero exit and leaves no file', async () => {
+    if (process.getuid?.() === 0) return // root ignores folder modes
+    const before = names()
+    chmodSync(folder, 0o500)
+    try {
+      const ran = await memories(['--store', store, 'backup'])
+      expect(ran.exitCode).toBe(1)
+      expect(ran.stderr).toContain('mnemosyne memories:')
+      expect(ran.stdout).toBe('')
+    } finally {
+      chmodSync(folder, 0o700)
+    }
+    expect(names()).toEqual(before)
+  })
+
+  test('META.5.a1: a store with no database, a missing --store and extra arguments are refused', async () => {
+    const empty = join(temp.dir, 'empty-store')
+    mkdirSync(empty, { recursive: true })
+    const none = await memories(['--store', empty, 'backup'])
+    expect(none.exitCode).toBe(1)
+    expect(none.stderr).toContain('there is no store database')
+    expect(existsSync(join(temp.dir, 'backups'))).toBe(false)
+    expect((await memories(['backup'])).exitCode).toBe(1)
+    expect((await memories(['--store', store, 'backup', 'a', 'b'])).exitCode).toBe(1)
+    expect((await memories(['--store', store, 'backup', '--evil'])).exitCode).toBe(1)
   })
 })

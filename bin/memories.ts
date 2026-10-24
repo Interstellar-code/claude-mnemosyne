@@ -3,6 +3,7 @@
 //   bun bin/memories.ts --store <dir> list --untagged   untagged memories, as JSON
 //   bun bin/memories.ts --store <dir> get <id>...       those memories, as JSON
 //   bun bin/memories.ts save <root>/tags-proposed.json  the proposals on stdin, saved 0600
+//   bun bin/memories.ts --store <dir> backup [<root>]    a VACUUM INTO copy of the store in <root>/backups (C9)
 //
 // --store comes first and once; `--` and an id starting with `-` are refused, so
 // a memory id can never be read as an option. list and get print a JSON array of
@@ -16,8 +17,8 @@
 // count (the dashboard's untagged filter uses the same SQL).
 import { Database } from 'bun:sqlite'
 import { createHash } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
-import { basename, dirname, join } from 'node:path'
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statfsSync, statSync, writeFileSync } from 'node:fs'
+import { basename, dirname, join, resolve } from 'node:path'
 import { BACKFILL_TEXT_LIMIT, isProposalId } from '../hooks/backfill'
 import { cleanTags } from '../hooks/tags'
 
@@ -219,6 +220,93 @@ export function listNoKnowledge(db: Database | null): StoredRow[] {
   return rows.map(shape)
 }
 
+// ---- C9: the store backup every apply command runs first ----
+
+export const BACKUPS_DIR = 'backups'
+export const BACKUP_KEEP = 10
+const BACKUP_NAME = /^mnemopi-\d{8}T\d{9}Z\.db$/
+
+/** `mnemopi-<UTC stamp>.db`, the stamp YYYYMMDDTHHMMSSmmmZ: names sort in time order. */
+export function backupName(now: Date = new Date()) {
+  return `mnemopi-${now.toISOString().replace(/[-:]/g, '').replace('.', '')}.db`
+}
+
+/** The bytes the store holds on disk: the database and its write-ahead log. */
+function storeBytes(store: string) {
+  let total = 0
+  for (const name of ['mnemopi.db', 'mnemopi.db-wal']) {
+    try {
+      total += statSync(join(store, name)).size
+    } catch {
+      // no such file
+    }
+  }
+  return total
+}
+
+export type BackupResult = { path: string; rows: number; pruned: number }
+export type BackupOptions = {
+  /** Free bytes on the backups folder's disk; defaults to statfs. A spec injects a full disk. */
+  freeBytes?: (dir: string) => number
+  now?: Date
+}
+
+const freeBytesOf = (dir: string) => {
+  const stats = statfsSync(dir)
+  return Number(stats.bavail) * Number(stats.bsize)
+}
+
+/**
+ * Copies the store's database to <root>/backups/mnemopi-<UTC stamp>.db with VACUUM INTO, mode 0600,
+ * then keeps the newest BACKUP_KEEP. Refuses, before copying, when the disk has less free space than
+ * twice the store. Throws on any failure and leaves no partial file; the caller stops on a throw.
+ */
+export function backupStore(store: string, root: string, options: BackupOptions = {}): BackupResult {
+  const source = join(store, 'mnemopi.db')
+  if (!existsSync(source)) throw new Error(`there is no store database at ${source} to back up`)
+  const folder = join(root, BACKUPS_DIR)
+  // Only a folder made here is set to 0700; one that already exists is the user's and is left as it is.
+  const made = !existsSync(folder)
+  mkdirSync(folder, { recursive: true, mode: 0o700 })
+  if (made && !IS_WINDOWS) chmodSync(folder, 0o700)
+  const needed = 2 * storeBytes(store)
+  const free = (options.freeBytes ?? freeBytesOf)(folder)
+  if (free < needed) throw new Error(`not enough disk space for a backup: ${free} bytes free, ${needed} needed (twice the store)`)
+  const file = join(folder, backupName(options.now))
+  if (existsSync(file)) throw new Error(`${file} already exists`)
+  let rows = 0
+  // VACUUM INTO makes the file itself (it refuses an existing one), so a tight umask keeps it 0600 from the start.
+  const umask = IS_WINDOWS ? 0 : process.umask(0o077)
+  try {
+    try {
+      const db = new Database(source, { readonly: true })
+      try {
+        db.query('VACUUM INTO ?').run(file)
+      } finally {
+        db.close()
+      }
+    } finally {
+      if (!IS_WINDOWS) process.umask(umask)
+    }
+    if (!IS_WINDOWS) chmodSync(file, 0o600)
+    // Read the copy back: it must open, pass a quick check and hold the rows.
+    const copy = new Database(file, { readonly: true })
+    try {
+      const check = copy.query('PRAGMA quick_check').get() as { quick_check: string } | null
+      if (check?.quick_check !== 'ok') throw new Error('the backup failed its integrity check')
+      rows = (copy.query('SELECT COUNT(*) AS n FROM working_memory').get() as { n: number }).n
+    } finally {
+      copy.close()
+    }
+  } catch (err) {
+    rmSync(file, { force: true })
+    throw err
+  }
+  const old = readdirSync(folder).filter(name => BACKUP_NAME.test(name)).sort().reverse().slice(BACKUP_KEEP)
+  for (const name of old) rmSync(join(folder, name), { force: true })
+  return { path: file, rows, pruned: old.length }
+}
+
 async function main(argv: readonly string[]) {
   const args = [...argv]
   let store = ''
@@ -231,6 +319,13 @@ async function main(argv: readonly string[]) {
   if (args.includes('--store')) throw new Error('--store may be given once, before the command')
   if (args.includes('--')) throw new Error('`--` is not accepted')
   const [command, ...rest] = args
+  if (command === 'backup') {
+    if (!store) throw new Error('--store <dir> required')
+    if (rest.length > 1 || rest[0]?.startsWith('-')) throw new Error('usage: --store <dir> backup [<root>]')
+    // The data root is the store's parent unless the caller names it (a custom memoryDir lives elsewhere).
+    process.stdout.write(`${JSON.stringify(backupStore(store, rest[0] ?? dirname(resolve(store))))}\n`)
+    return
+  }
   if (command === 'list') {
     if (rest.length === 1 && rest[0] === '--untagged') {
       if (!store) throw new Error('--store <dir> is required')

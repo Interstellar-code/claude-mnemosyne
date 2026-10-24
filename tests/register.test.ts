@@ -1002,11 +1002,13 @@ const hasTagsFake = (row: FakeRow) => Array.isArray(row.metadata?.tags) && (row.
 
 // The world under /mnemosyne-tags: a store of `rows`, bin/memories.ts and the engine as stand-ins that act on
 // it, a model that answers `model(prompt)`, and a record of every model call, process run, status line and append.
-function tagsWorld(on: On, rows: FakeRow[], extra: { build?: string; installed?: boolean; saved?: string; truncateList?: boolean; model?: (prompt: string, n: number) => ModelAnswer } = {}) {
+function tagsWorld(on: On, rows: FakeRow[], extra: { build?: string; installed?: boolean; saved?: string; truncateList?: boolean; backupFails?: string; model?: (prompt: string, n: number) => ModelAnswer } = {}) {
   const state = {
     rows,
     saved: extra.saved,
     memories: [] as Run[],
+    // Each bin/memories.ts backup call, with how many engine processes and other memories calls came before it.
+    backups: [] as { argv: readonly string[]; timeoutMs?: number; enginesBefore: number; memoriesBefore: number }[],
     engine: [] as Run[],
     appends: [] as Run[],
     other: [] as Run[],
@@ -1047,6 +1049,11 @@ function tagsWorld(on: On, rows: FakeRow[], extra: { build?: string; installed?:
       // `--store <dir>` comes first for list and get; save takes the file straight after the script.
       const command = argv[2] === '--store' ? argv[4] : argv[2]
       const shown = (row: FakeRow) => ({ id: row.id, owner: row.owner, metadata: row.metadata, content: row.content, sha256: fakeSha(row.content), taggable: row.taggable !== false })
+      if (command === 'backup') {
+        state.backups.push({ argv, timeoutMs: (e as { init?: { timeoutMs?: number } }).init?.timeoutMs, enginesBefore: state.engine.length, memoriesBefore: state.memories.length - 1 })
+        if (extra.backupFails !== undefined) return { value: { exitCode: 1, stdout: '', stderr: extra.backupFails, isStdoutTruncated: false, isStderrTruncated: false } } as never
+        return out(JSON.stringify({ path: '/home/u/.claude/mnemosyne/backups/mnemopi-20261025T000000000Z.db', rows: state.rows.length, pruned: 0 }))
+      }
       if (command === 'list') return out(JSON.stringify(state.rows.filter(row => !hasTagsFake(row)).map(shown)), state.truncateList)
       if (command === 'get') {
         const ids = argv.slice(5)
@@ -1286,8 +1293,8 @@ test('TAGS.3.a3: pool runs at most `limit` at once, and stops starting work once
 })
 
 // apply works from the proposals the dry run saved, against the rows as they are now.
-async function dryThenChange(on: On, $: Engine, rows: FakeRow[], change: (rows: FakeRow[]) => void) {
-  const state = tagsWorld(on, rows)
+async function dryThenChange(on: On, $: Engine, rows: FakeRow[], change: (rows: FakeRow[]) => void, extra: { backupFails?: string } = {}) {
+  const state = tagsWorld(on, rows, extra)
   await tagsRun($)
   state.model.length = 0
   state.memories.length = 0
@@ -1317,6 +1324,38 @@ test('TAGS.3.a5: apply makes no model call and writes through mnemopi_update wit
   expect(rows.map(row => row.content)).toEqual(fakeRows(6).map(row => row.content))
   expect(ran.text).toContain('Tagged 6 memories of 6 proposed')
   expect(ran.text).toContain('Skipped: 0 gone, 0 already tagged, 0 cannot be tagged (metadata is not a JSON object), 0 changed')
+})
+
+test('META.5.a3: apply backs the store up first: one bin/memories.ts backup naming the data root, before any read or engine write', async ($, on) => {
+  const rows = fakeRows(4, ['global', 'project-a'])
+  const state = await dryThenChange(on, $, rows, () => {})
+  const ran = await tagsRun($, 'apply')
+
+  expect(state.backups.length).toBe(1)
+  const backup = state.backups[0]!
+  expect(backup.argv.slice(2)).toEqual(['--store', '/home/u/.claude/mnemosyne/store', 'backup', '/home/u/.claude/mnemosyne'])
+  expect(backup.enginesBefore).toBe(0)
+  // It is the first bin/memories.ts call of the apply (the dry run's calls were cleared): every get comes after it.
+  expect(backup.memoriesBefore).toBe(0)
+  expect(backup.timeoutMs).toBeGreaterThan(60_000)
+  expect(state.engine.length).toBeGreaterThan(0)
+  expect(rows.every(row => hasTagsFake(row))).toBe(true)
+  expect(ran.text).toContain('Tagged 4 memories of 4 proposed')
+})
+
+test('META.5.a3: a failed backup stops apply: no read of the rows, no engine process, no change, and the cause is named', async ($, on) => {
+  const rows = fakeRows(4, ['global', 'project-a'])
+  const state = await dryThenChange(on, $, rows, () => {}, { backupFails: 'not enough disk space for a backup: 10 bytes free, 900 needed (twice the store)' })
+  const ran = await tagsRun($, 'apply')
+
+  expect(state.backups.length).toBe(1)
+  expect(state.memories.length).toBe(1) // only the backup call
+  expect(state.engine.length).toBe(0)
+  expect(rows.some(row => hasTagsFake(row))).toBe(false)
+  expect(ran.text).toContain('Stopped: the backup before the change failed')
+  expect(ran.text).toContain('not enough disk space for a backup')
+  expect(ran.text).toContain('No memory was changed')
+  expect(ran.text).not.toContain('Tagged')
 })
 
 test('TAGS.3.a4: apply skips rows that are gone, already have tags, or whose text changed since the dry run, and says how many of each', async ($, on) => {
@@ -1508,6 +1547,7 @@ function fakeHost(rows: FakeRow[], extra: { saved?: string } = {}) {
         if (argv[1]?.endsWith('/bin/memories.ts')) {
           const command = argv[2] === '--store' ? argv[4] : argv[2]
           const shown = (row: FakeRow): Row => ({ id: row.id, owner: row.owner, metadata: row.metadata, content: row.content, sha256: fakeSha(row.content), taggable: true })
+          if (command === 'backup') return ok(JSON.stringify({ path: '/home/u/.claude/mnemosyne/backups/mnemopi-20261025T000000000Z.db', rows: rows.length, pruned: 0 }))
           if (command === 'list') return ok(JSON.stringify(rows.filter(row => !hasTagsFake(row)).map(shown)))
           if (command === 'get') return ok(JSON.stringify(rows.filter(row => argv.slice(5).includes(row.id)).map(shown)))
           if (command === 'save') seen.saves.push(init?.stdin ?? '')

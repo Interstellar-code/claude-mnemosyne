@@ -602,15 +602,34 @@ const TAGS_USAGE = 'Usage: /mnemosyne-tags (a dry run: Haiku proposes tags, noth
 // apply's one engine process per owner may carry every proposal of that owner.
 const APPLY_TIMEOUT_MS = 120_000
 const MEMORIES_TIMEOUT_MS = 60_000
+// The C9 backup copies the whole store (VACUUM INTO), so it gets longer than a listing.
+const BACKUP_TIMEOUT_MS = 300_000
+
+/**
+ * C9: every apply command backs the store up first and stops if that fails. Returns the stop message, or
+ * undefined when the backup was made. The message names the cause and says nothing was changed.
+ */
+async function backupFirst($: EngineInterface, options: PluginOptions, command: string): Promise<string | undefined> {
+  try {
+    const { root } = await paths($, options)
+    // The data root is named, because a custom memoryDir does not sit under it.
+    const made = JSON.parse(await memoriesCli($, options, ['backup', root], undefined, BACKUP_TIMEOUT_MS)) as { path?: unknown; rows?: unknown }
+    if (typeof made.path !== 'string') throw new Error('the backup reported no file')
+    progress($, `backed up ${typeof made.rows === 'number' ? plural(made.rows, 'memory', 'memories') : 'the store'}`)
+    return undefined
+  } catch (err) {
+    return `Stopped: the backup before the change failed (${(err as Error).message.slice(0, 300)}). No memory was changed. Fix that, then run ${command} again.`
+  }
+}
 
 // bin/memories.ts: lists and reads rows from a read-only handle, and saves the proposals file.
-async function memoriesCli($: EngineInterface, options: PluginOptions, args: readonly string[], stdin?: string) {
+async function memoriesCli($: EngineInterface, options: PluginOptions, args: readonly string[], stdin?: string, timeoutMs = MEMORIES_TIMEOUT_MS) {
   const { store } = await paths($, options)
   // --store goes first, before the command: the script refuses a second one, so no id can redirect the read.
   // save and pending name their own folder (the data root) and refuse --store.
   const ran = await $.process.run(['bun', `${slashes($.plugin.root)}/bin/memories.ts`, ...(args[0] === 'save' || args[0] === 'pending' ? [] : ['--store', store]), ...args], {
     ...(stdin === undefined ? {} : { stdin }),
-    timeoutMs: MEMORIES_TIMEOUT_MS,
+    timeoutMs,
   })
   if (ran.exitCode !== 0) throw new Error(`bin/memories.ts ${args[0]} failed: ${`${ran.stderr}\n${ran.stdout}`.trim().slice(-300)}`)
   // The host keeps 4 MiB of stdout; a cut listing would be broken JSON and a misleading error.
@@ -982,6 +1001,9 @@ export async function tagsApply($: EngineInterface, options: PluginOptions, sign
     return `The saved proposals cannot be used (${(err as Error).message}): run /mnemosyne-tags again.`
   }
   if (proposals.length === 0) return 'The saved proposals list is empty: run /mnemosyne-tags again.'
+  // C9: the backup comes before the first write; a failed backup stops the run.
+  const stopped = await backupFirst($, options, '/mnemosyne-tags apply')
+  if (stopped !== undefined) return stopped
   const byOwner = new Map<string, Proposal[]>()
   for (const proposal of proposals) byOwner.set(proposal.owner, [...(byOwner.get(proposal.owner) ?? []), proposal])
   const counts = { gone: 0, tagged: 0, untaggable: 0, changed: 0 }
