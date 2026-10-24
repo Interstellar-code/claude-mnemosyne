@@ -38,6 +38,8 @@ type Health = {
   engine: string | null
   /** The plugin version of the running server; absent from servers before 0.7.5. */
   plugin?: string | null
+  /** True only for `bun run dev:ui`: the page then reloads when a file in ui/ changes. */
+  dev?: boolean
   activity: boolean
   total: number
   owners: Owner[]
@@ -737,9 +739,6 @@ async function loadHealth() {
   const projects = owners.length
   byId('summary').textContent = `${health.total} ${health.total === 1 ? 'memory' : 'memories'} · ${projects} ${projects === 1 ? 'project' : 'projects'}`
   byId('engine').textContent = health.engine ? `engine ${health.engine}` : ''
-  const version = byId('plugin-version')
-  version.textContent = health.plugin ? `Mnemosyne v${health.plugin}` : ''
-  version.hidden = !health.plugin
   for (const id of ['mem-owner', 'search-owner']) {
     const select = byId<HTMLSelectElement>(id)
     const chosen = select.value
@@ -756,11 +755,30 @@ async function loadHealth() {
   const facts = byId('facts')
   facts.replaceChildren()
   const fact = (label: string, value: string) => facts.append(el('dt', label), el('dd', value))
+  if (health.plugin) fact('Version', `Mnemosyne v${health.plugin}`)
   fact('Store', health.store)
   fact('Server', `running, process ${health.pid}`)
   fact('Activity log', health.activity ? 'on' : 'off')
   if (health.note) fact('Note', health.note)
+  if (health.dev) fact('Mode', 'dev: reloads when ui/ changes')
   byId('foot').hidden = false
+  if (health.dev) watchDev()
+}
+
+// Dev mode: ask for the stamp of ui/ every second and reload when it changes (a restart under --watch changes it too).
+let devTimer: ReturnType<typeof setInterval> | 0 = 0
+function watchDev() {
+  if (devTimer !== 0) return
+  let seen = ''
+  devTimer = setInterval(async () => {
+    try {
+      const { stamp } = await readJson<{ stamp: string }>(await api('/api/dev-stamp'))
+      if (seen !== '' && stamp !== seen) location.reload()
+      seen = stamp
+    } catch {
+      // the server is restarting: the next tick tries again
+    }
+  }, 1000)
 }
 
 // ---- Memories ----

@@ -45,6 +45,7 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readFileSync,
   readSync,
   realpathSync,
@@ -1653,6 +1654,34 @@ export type ServerOptions = {
   // or hand the route a worker that fails (review HIGH-1 to MEDIUM-2).
   meaningRunner?: MeaningRunner
   meaningWaitMs?: number
+  // Dev mode (`bun run dev:ui`, never the plugin's launcher): the page, style and app are read and built
+  // again on every request, /api/dev-stamp changes when a file in ui/ does, and the port and token are fixed
+  // so a restart under `bun --watch` keeps the open tab working.
+  dev?: boolean
+  port?: number
+  token?: string
+}
+
+// Dev mode: a stamp of ui/ (each file's name and mtime) and of this server's start, so a page reloads when either changes.
+export function devStamp(started: number, dir: string = UI_DIR): string {
+  const hash = createHash('sha256').update(String(started))
+  for (const name of readdirSync(dir).sort()) {
+    if (!/\.(ts|html|css)$/.test(name)) continue
+    try {
+      hash.update(`${name}:${statSync(join(dir, name)).mtimeMs}\n`)
+    } catch {
+      // a file removed mid-read changes the stamp next time
+    }
+  }
+  return hash.digest('hex').slice(0, 16)
+}
+
+// Dev mode's settings from the environment: only when MNEMOSYNE_UI_DEV is 1, a port from 1024 to 65535 and a token of 32+ characters.
+export function devOptions(env: Record<string, string | undefined>): Pick<ServerOptions, 'dev' | 'port' | 'token'> {
+  if (env.MNEMOSYNE_UI_DEV !== '1') return {}
+  const port = Number(env.MNEMOSYNE_UI_PORT)
+  const token = env.MNEMOSYNE_UI_TOKEN ?? ''
+  return { dev: true, port: Number.isInteger(port) && port >= 1024 && port <= 65535 ? port : undefined, token: token.length >= 32 ? token : undefined }
 }
 
 export async function startServer(config: Config, options: ServerOptions = {}): Promise<Started> {
@@ -1661,7 +1690,9 @@ export async function startServer(config: Config, options: ServerOptions = {}): 
   const streamMaxMs = options.streamMaxMs ?? STREAM_MAX_MS
   const engines = limiter(options.maxEngines ?? MAX_ENGINES)
   const engineTimeoutMs = options.engineTimeoutMs ?? ENGINE_TIMEOUT_MS
-  const token = randomBytes(32).toString('base64url')
+  const token = options.token ?? randomBytes(32).toString('base64url')
+  const dev = options.dev === true
+  const startedAt = Date.now()
   const page = readFileSync(join(UI_DIR, 'index.html'))
   const style = readFileSync(join(UI_DIR, 'style.css'))
   const app = await buildApp()
@@ -1757,7 +1788,7 @@ export async function startServer(config: Config, options: ServerOptions = {}): 
       // The galaxy route is the one answer that waits (its UMAP run is in a Worker): everything else is already settled.
       return out instanceof Promise ? out.then(settled => json(settled.body, settled.status)) : json(out.body, out.status)
     }
-    if (path === '/api/health') return get(() => ({ status: 200, body: health(config, store, engine, plugin) }))
+    if (path === '/api/health') return get(() => ({ status: 200, body: { ...health(config, store, engine, plugin), ...(dev ? { dev: true } : {}) } }))
     if (path === '/api/health-report') return get(() => healthReport(config, store, engine))
     if (path === '/api/knowledge') return get(() => knowledgeList((store.db ??= openStore(config.store))))
     if (path === '/api/memories') {
@@ -1809,21 +1840,22 @@ export async function startServer(config: Config, options: ServerOptions = {}): 
     }
     if (path === '/api/search') return post(request, search)
     if (path === '/api/forget') return post(request, forget)
+    if (dev && path === '/api/dev-stamp') return get(() => ({ status: 200, body: { stamp: devStamp(startedAt) } }))
     return notFound()
   }
 
   const statics: Record<string, () => Response> = {
-    '/': () => reply(page, 200, { 'Content-Type': 'text/html; charset=utf-8' }),
-    '/index.html': () => reply(page, 200, { 'Content-Type': 'text/html; charset=utf-8' }),
+    '/': () => reply(dev ? readFileSync(join(UI_DIR, 'index.html')) : page, 200, { 'Content-Type': 'text/html; charset=utf-8' }),
+    '/index.html': () => reply(dev ? readFileSync(join(UI_DIR, 'index.html')) : page, 200, { 'Content-Type': 'text/html; charset=utf-8' }),
     '/app.js': () => reply(app, 200, { 'Content-Type': 'text/javascript; charset=utf-8' }),
-    '/style.css': () => reply(style, 200, { 'Content-Type': 'text/css; charset=utf-8' }),
+    '/style.css': () => reply(dev ? readFileSync(join(UI_DIR, 'style.css')) : style, 200, { 'Content-Type': 'text/css; charset=utf-8' }),
     // No icon: an empty answer, so a browser logs no failed request.
     '/favicon.ico': () => reply(null, 204),
   }
 
   const server = Bun.serve({
     hostname: '127.0.0.1',
-    port: 0,
+    port: options.port ?? 0,
     maxRequestBodySize: 64 * 1024,
     fetch(request, server) {
       // DNS rebinding: a page on another name that resolves here is refused.
@@ -1837,6 +1869,8 @@ export async function startServer(config: Config, options: ServerOptions = {}): 
         return api(request, url, server)
       }
       if (request.method !== 'GET') return notAllowed()
+      // Dev mode builds the app again for each request, so an edit shows on the next load.
+      if (dev && path === '/app.js') return buildApp().then(code => reply(code, 200, { 'Content-Type': 'text/javascript; charset=utf-8' }))
       const fixed = statics[path]
       if (fixed) return fixed()
       if (path.startsWith('/vendor/')) return vendor(vendorDir, path.slice('/vendor/'.length))
@@ -1898,7 +1932,7 @@ function watchParent(gone: () => void) {
 
 async function serve() {
   const config = configFromEnv(process.env)
-  const started = await startServer(config)
+  const started = await startServer(config, devOptions(process.env))
   let stopping = false
   const stop = (code = 0) => {
     if (stopping) return

@@ -418,9 +418,8 @@ a:hover { color: var(--accent-dark); }
 .w20 { width: 100%; }
 
 /* The store facts under the views. */
-.foot { padding: 0 32px 24px; font-size: 13px; color: var(--muted); }
+.foot { display: flex; justify-content: flex-end; padding: 0 32px 24px; font-size: 13px; color: var(--muted); }
 .foot .facts { gap: 4px 16px; }
-.plugin-version { position: fixed; right: 16px; bottom: 12px; z-index: 5; padding: 3px 9px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); color: var(--muted); font-size: 12px; pointer-events: none; }
 
 /* Map (design/Main.dc.html): the rail, the 3D stage with its path bar, and the inspector. */
 .sr-only {
