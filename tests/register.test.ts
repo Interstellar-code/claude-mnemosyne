@@ -1874,7 +1874,7 @@ test('GUARD.2: the activity line of a blocked call is ok false, error guard:<rul
   for (const piece of [AWS_KEY, 'hunter2', 'bucket', 'short']) expect(written.includes(piece)).toBe(false)
 })
 
-test('GUARD.2: a warned remember is stored with metadata.guard and the reply has one warning line per hit', async ($, on) => {
+test('GUARD.2: in warn mode a warned remember is stored with metadata.guard and the reply has one warning line per hit', { options: { guardMode: 'warn' } }, async ($, on) => {
   const runs = world(on, '{"status":"stored","memory_id":"a1b2c3d4e5f60718"}')
   const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'Today the importer was rewired to use the guard module', tags: ['Ops'] })
   expect(runs.length).toBeGreaterThanOrEqual(1)
@@ -1889,7 +1889,7 @@ test('GUARD.2: a warned remember is stored with metadata.guard and the reply has
   expect(request(runs[runs.length - 1]!).arguments.metadata).toBeUndefined()
 })
 
-test('GUARD.2: a warned content update is stored with metadata.guard', async ($, on) => {
+test('GUARD.2: in warn mode a warned content update is stored with metadata.guard', { options: { guardMode: 'warn' } }, async ($, on) => {
   const runs = world(on, '{"status":"updated","memory_id":"m1"}')
   const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1', content: 'Tonight the audit script is being written for the guard' })
   expect(request(runs[0]!).arguments.metadata).toEqual({ guard: ['G4'] })
@@ -1904,4 +1904,118 @@ test('GUARD.2: a blocked save does not use up the remember trigger', async ($, o
   await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: GUARD_SECRET_TEXT })
   await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'the bucket key now lives in the vault' })
   expect(remembers(runs)[0]).toMatchObject({ author_type: 'human', veracity: 'stated' })
+})
+
+// GUARD.3: guardMode strict (the default) refuses a warned save unless the call passes confirm: true; warn saves it.
+const WARNED_TEXT = 'Today the importer was rewired to use the guard module'
+const STORED = '{"status":"stored","memory_id":"a1b2c3d4e5f60718"}'
+
+test('GUARD.3: strict is the default: a warned remember is refused naming each rule, asks for confirm: true, and starts no engine process', async ($, on) => {
+  const runs = world(on, STORED)
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: `${WARNED_TEXT} on 2026-10-24, released` })
+  expect(ran.deny).toContain('G4')
+  expect(ran.deny).toContain('Resend with confirm: true if the save is wanted.')
+  expect(ran.deny).not.toContain('importer')
+  expect(runs.length).toBe(0)
+  const long = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'a long fact '.repeat(150) })
+  expect(long.deny).toContain('G2')
+  expect(long.deny).toContain('confirm: true')
+  expect(runs.length).toBe(0)
+  const update = await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1', content: WARNED_TEXT })
+  expect(update.deny).toContain('confirm: true')
+  expect(runs.length).toBe(0)
+})
+
+test('GUARD.3: a refused warned save logs ok false, guard:<rule ids> and no content text', async ($, on) => {
+  const runs = world(on, STORED)
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: WARNED_TEXT })
+  const [line] = lines(runs)
+  expect(line).toMatchObject({ action: 'remember', origin: 'tool', ok: false, error: 'guard:G4', text: '' })
+  expect(runs.appends.map(run => run.init?.stdin ?? '').join('').includes('importer')).toBe(false)
+})
+
+test('GUARD.3: confirm: true saves a warned save with metadata.guard and the warning lines; confirm never reaches the engine', async ($, on) => {
+  const runs = world(on, STORED)
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: WARNED_TEXT, confirm: true })
+  expect(ran.deny).toBeUndefined()
+  expect(runs.length).toBeGreaterThanOrEqual(1)
+  expect(request(runs[0]!).arguments.metadata).toEqual({ guard: ['G4'] })
+  expect('confirm' in request(runs[0]!).arguments).toBe(false)
+  expect(String(ran.result).split('\n')).toEqual([STORED, expect.stringContaining('G4')])
+  const updated = await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1', content: WARNED_TEXT, confirm: true })
+  expect(updated.deny).toBeUndefined()
+  expect(request(runs[runs.length - 1]!).arguments.metadata).toEqual({ guard: ['G4'] })
+  expect('confirm' in request(runs[runs.length - 1]!).arguments).toBe(false)
+})
+
+test('GUARD.3: confirm: true never overrides a secret or size block, in either mode', async ($, on) => {
+  const runs = world(on, STORED)
+  for (const content of [GUARD_SECRET_TEXT, 'tiny', 'x'.repeat(4001)]) {
+    const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content, confirm: true })
+    expect(ran.deny).toContain('blocked')
+  }
+  expect(runs.length).toBe(0)
+})
+
+test('GUARD.3: in warn mode no confirm is needed, and confirm: true still does not override a block', { options: { guardMode: 'warn' } }, async ($, on) => {
+  const runs = world(on, STORED)
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: WARNED_TEXT })
+  expect(ran.deny).toBeUndefined()
+  expect(request(runs[0]!).arguments.metadata).toEqual({ guard: ['G4'] })
+  const blocked = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: GUARD_SECRET_TEXT, confirm: true })
+  expect(blocked.deny).toContain('G1')
+})
+
+test('GUARD.3: a guardMode that is neither strict nor warn counts as strict', { options: { guardMode: 'loose' } }, async ($, on) => {
+  const runs = world(on, STORED)
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: WARNED_TEXT })
+  expect(ran.deny).toContain('confirm: true')
+  expect(runs.length).toBe(0)
+})
+
+test('GUARD.3: a refused warned save does not use up the remember trigger', async ($, on) => {
+  const runs = world(on, STORED)
+  on('prompt.submit', (_$, e) => ({ text: e.text, context: e.context }))
+  await $.prompt.submit({ text: 'hello' } as never)
+  await $.prompt.submit(trigger() as never)
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: WARNED_TEXT })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: WARNED_TEXT, confirm: true })
+  expect(remembers(runs)[0]).toMatchObject({ author_type: 'human', veracity: 'stated' })
+})
+
+test('GUARD.3: memory_remember and memory_update list a confirm boolean in their input schema', async ($, on) => {
+  const registered: { name: string; inputSchema: { properties: Record<string, { type?: string }> } }[] = []
+  world(on, '{}')
+  on('command.register', () => ({ value: {} }) as never)
+  on('tool.register', (_$, e) => {
+    registered.push(e as never)
+    return { value: {} } as never
+  })
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/w', surface: null, isInteractive: false } as never)
+  const byName = Object.fromEntries(registered.map(tool => [tool.name, tool]))
+  for (const name of ['memory_remember', 'memory_update']) expect(byName[name]?.inputSchema.properties.confirm?.type).toBe('boolean')
+  expect(byName.memory_recall?.inputSchema.properties.confirm).toBeUndefined()
+})
+
+for (const [mode, expected] of [[undefined, 'strict'], ['warn', 'warn'], ['strict', 'strict'], ['bogus', 'strict']] as const) {
+  test(`GUARD.3: the sh wrapper exports MNEMOSYNE_GUARD_MODE=${expected} (guardMode ${mode ?? 'unset'})`, { options: { externalMcp: true, ...(mode ? { guardMode: mode } : {}) } }, async ($, on) => {
+    expect(await wrapperText($, on)).toContain(`export MNEMOSYNE_GUARD_MODE=${expected}\n`)
+  })
+}
+
+test('GUARD.3: the cmd wrapper sets MNEMOSYNE_GUARD_MODE', { options: { externalMcp: true, guardMode: 'warn' } }, async ($, on) => {
+  const runs: { argv: readonly string[] }[] = []
+  on('env.get', (_$, e) => ({ value: ({ OS: 'Windows_NT', USERPROFILE: 'C:\\Users\\u' } as Record<string, string>)[(e as { name: string }).name] }))
+  on('fs.stat', () => ({ value: { kind: 'file' } }) as never)
+  on('process.run', (_$, e) => {
+    runs.push(e)
+    return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
+  })
+  on('command.register', () => ({ value: {} }) as never)
+  on('tool.register', () => ({ value: {} }) as never)
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: 'C:\\w', surface: null, isInteractive: false } as never)
+  expect(runs.find(r => r.argv[2]?.includes('writeFileSync'))?.argv[4]).toContain('set "MNEMOSYNE_GUARD_MODE=warn"\r\n')
 })

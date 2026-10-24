@@ -11,6 +11,10 @@
 // A client never picks a bank (it would move writes to <store>/banks/<x>) and
 // never writes metadata: only `tags`, cleaned by hooks/tags.ts, reach the
 // engine, as metadata.tags. memory_update needs this plugin's engine build.
+// Saves (remember, and update with content) pass hooks/guard.ts first: a secret or
+// size block is a -32602 error; a warned save is too in strict guard mode (the
+// default; MNEMOSYNE_GUARD_MODE, set by mnemosyne-mcp) unless the call passes
+// confirm: true, and in warn mode it is stored with metadata.guard.
 // Each call of the five tools is recorded in MNEMOSYNE_ACTIVITY_LOG (empty: off)
 // as one activity line with origin external, written once its reply is read.
 // Run by ~/.claude/mnemosyne/bin/mnemosyne-mcp, which sets the environment.
@@ -31,11 +35,17 @@ const TAGS_PROPERTY = {
   items: { type: 'string' },
   description: 'Short lowercase topic tags, at most 5. On update they replace the old ones; [] removes them.',
 }
+const CONFIRM_PROPERTY = {
+  type: 'boolean',
+  description: 'Send true to save text the guard warned about (only after a refusal that asked for it). Secrets and size blocks cannot be confirmed.',
+}
 const cli = process.env.MNEMOSYNE_CLI
 if (!cli) throw new Error('MNEMOSYNE_CLI is not set: run this through mnemosyne-mcp.')
 const owner = process.env.MNEMOPI_SESSION_ID || 'global'
 const isGlobalOwner = owner === 'global'
 const activityLog = process.env.MNEMOSYNE_ACTIVITY_LOG ?? ''
+// The guardMode option, set by mnemosyne-mcp: strict (default, also when unset) or warn.
+const strictGuard = (process.env.MNEMOSYNE_GUARD_MODE ?? '').trim().toLowerCase() !== 'warn'
 // The client's self-declared name, from its initialize request (CTX.2); unknown until it says.
 let client = 'unknown'
 
@@ -156,9 +166,22 @@ void (async () => {
           )
           continue
         }
-        if (guard.verdict === 'warn') warned = guard.hits
+        if (guard.verdict === 'warn') {
+          // Strict mode: a warned save is refused until the call says confirm: true.
+          if (strictGuard && given.confirm !== true) {
+            refuse(
+              message.id,
+              action,
+              {},
+              { code: -32602, message: `The save guard warns about this save (${ids.join(', ')}). ${guard.hits.map(hit => hit.message).join(' ')} Resend with confirm: true if the save is wanted.`, data: { rules: ids } },
+              `guard:${ids.join(',')}`,
+            )
+            continue
+          }
+          warned = guard.hits
+        }
       }
-      const { bank: _bank, metadata: _metadata, tags, ...args } = given
+      const { bank: _bank, metadata: _metadata, tags, confirm: _confirm, ...args } = given
       if (TAGGED.has(name) && tags !== undefined) {
         if (!Array.isArray(tags)) {
           refuse(message.id, action, given, { code: -32602, message: 'tags must be an array of strings' })
@@ -214,7 +237,7 @@ function publicSchema(name: string, schema: Schema | undefined): Schema {
   const { bank: _bank, metadata: _metadata, ...properties } = schema?.properties ?? {}
   return {
     ...schema,
-    properties: TAGGED.has(name) ? { ...properties, tags: TAGS_PROPERTY } : properties,
+    properties: TAGGED.has(name) ? { ...properties, tags: TAGS_PROPERTY, confirm: CONFIRM_PROPERTY } : properties,
     ...(schema?.required ? { required: schema.required.filter(key => key !== 'bank' && key !== 'metadata') } : {}),
   }
 }

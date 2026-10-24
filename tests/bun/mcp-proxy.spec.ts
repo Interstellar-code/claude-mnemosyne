@@ -12,10 +12,10 @@ import { engineEnv, ROOT, runInstaller, tempDir, toolCall } from './helpers'
 
 const PROXY = join(ROOT, 'bin', 'mcp-proxy.ts')
 
-/** One proxy process: sends `messages`, closes stdin, returns its replies by id. `log` is MNEMOSYNE_ACTIVITY_LOG. */
-async function proxy(cli: string, store: string, messages: readonly object[], owner = 'global', log = '') {
+/** One proxy process: sends `messages`, closes stdin, returns its replies by id. `log` is MNEMOSYNE_ACTIVITY_LOG; `extraEnv` adds variables such as MNEMOSYNE_GUARD_MODE. */
+async function proxy(cli: string, store: string, messages: readonly object[], owner = 'global', log = '', extraEnv: Record<string, string> = {}) {
   const child = Bun.spawn([process.execPath, PROXY], {
-    env: { ...(process.env as Record<string, string>), ...engineEnv(store, owner), MNEMOSYNE_CLI: cli, MNEMOSYNE_ACTIVITY_LOG: log },
+    env: { ...(process.env as Record<string, string>), ...engineEnv(store, owner), MNEMOSYNE_CLI: cli, MNEMOSYNE_ACTIVITY_LOG: log, ...extraEnv },
     stdin: 'pipe',
     stdout: 'pipe',
     stderr: 'pipe',
@@ -253,12 +253,12 @@ describe('the proxy against a real installed engine', () => {
     for (const piece of [AWS_KEY, 'hunter2', 'bucket', 'tiny']) expect(written.includes(piece)).toBe(false)
   })
 
-  test('GUARD.2: a warned remember is stored with metadata.guard beside its tags, and the reply carries one warning line per hit', async () => {
+  test('GUARD.2: in warn mode a warned remember is stored with metadata.guard beside its tags, and the reply carries one warning line per hit', async () => {
     const log = join(temp.dir, 'logs-guard-warn', 'activity.jsonl')
     const replies = await proxy(cli, store, [
       toolCall(1, 'memory_remember', { content: 'Today the importer was rewired to use the guard module', tags: ['Ops'] }),
       toolCall(2, 'memory_remember', { content: 'The plugin keeps its memories in one local SQLite file.' }),
-    ], 'global', log)
+    ], 'global', log, { MNEMOSYNE_GUARD_MODE: 'warn' })
     const [reply, ...warnings] = String(replies.get(1).result.content[0].text).split('\nMnemosyne guard warning: ')
     const id = JSON.parse(reply!).memory_id
     expect(warnings.length).toBe(1)
@@ -268,6 +268,64 @@ describe('the proxy against a real installed engine', () => {
     expect(replies.get(2).result.content[0].text.includes('guard warning')).toBe(false)
     expect(metadataOf(text(replies.get(2)).memory_id)).toBeNull()
     expect(logLines(log).map(l => [l.action, l.ok])).toEqual([['remember', true], ['remember', true]])
+  })
+
+  const WARNED = 'Today the importer was rewired to use the guard module'
+
+  test('GUARD.3: strict is the default: a warned remember or content update is a -32602 error naming the rules and asking for confirm: true; nothing is stored; the line holds ids only', async () => {
+    const log = join(temp.dir, 'logs-guard-strict', 'activity.jsonl')
+    const before = rowCount()
+    for (const env of [{}, { MNEMOSYNE_GUARD_MODE: 'strict' }, { MNEMOSYNE_GUARD_MODE: 'bogus' }] as Record<string, string>[]) {
+      const replies = await proxy(cli, store, [
+        toolCall(1, 'memory_remember', { content: WARNED }),
+        toolCall(2, 'memory_update', { memory_id: 'm1', content: WARNED }),
+        toolCall(3, 'memory_remember', { content: 'a long fact '.repeat(150) }),
+      ], 'global', log, env)
+      for (const [id, rule] of [[1, 'G4'], [2, 'G4'], [3, 'G2']] as const) {
+        expect(replies.get(id).error.code).toBe(-32602)
+        expect(replies.get(id).error.message).toContain(rule)
+        expect(replies.get(id).error.message).toContain('Resend with confirm: true if the save is wanted.')
+        expect(replies.get(id).error.data).toEqual({ rules: [rule] })
+        expect(replies.get(id).error.message.includes('importer')).toBe(false)
+      }
+    }
+    expect(rowCount()).toBe(before)
+    const lines = logLines(log)
+    expect(lines.length).toBe(9)
+    expect(lines.slice(0, 3).map(l => [l.action, l.ok, l.error, l.text])).toEqual([
+      ['remember', false, 'guard:G4', ''],
+      ['update', false, 'guard:G4', ''],
+      ['remember', false, 'guard:G2', ''],
+    ])
+    expect(readFileSync(log, 'utf8').includes('importer')).toBe(false)
+  })
+
+  test('GUARD.3: confirm: true stores a warned save with metadata.guard and the warning lines; confirm never reaches the engine; a block has no override', async () => {
+    const log = join(temp.dir, 'logs-guard-confirm', 'activity.jsonl')
+    const replies = await proxy(cli, store, [
+      toolCall(1, 'memory_remember', { content: WARNED, confirm: true, tags: ['Ops'] }),
+      toolCall(2, 'memory_remember', { content: `the bucket key is ${AWS_KEY} for the deploy`, confirm: true }),
+      toolCall(3, 'memory_remember', { content: 'tiny', confirm: true }),
+    ], 'global', log)
+    const [reply, ...warnings] = String(replies.get(1).result.content[0].text).split('\nMnemosyne guard warning: ')
+    expect(warnings.length).toBe(1)
+    expect(metadataOf(JSON.parse(reply!).memory_id)).toEqual({ tags: ['ops'], guard: ['G4'] })
+    expect(replies.get(2).error.code).toBe(-32602)
+    expect(replies.get(2).error.message).toContain('G1')
+    expect(replies.get(3).error.message).toContain('G2')
+    expect(replies.get(3).error.message.includes('Resend with confirm')).toBe(false)
+    // refused calls are logged at once, the stored one after the engine's reply
+    expect(logLines(log).map(l => `${l.ok} ${l.error ?? ''}`).sort()).toEqual(['false guard:G1', 'false guard:G2', 'true '])
+  })
+
+  test('GUARD.3: remember and update show a confirm boolean in tools/list', async () => {
+    const replies = await proxy(cli, store, [{ jsonrpc: '2.0', id: 1, method: 'tools/list' }])
+    const tools = replies.get(1).result.tools as { name: string; inputSchema: { properties: Record<string, unknown> } }[]
+    for (const tool of tools) {
+      const confirm = tool.inputSchema.properties.confirm
+      if (tool.name === 'memory_remember' || tool.name === 'memory_update') expect(confirm).toMatchObject({ type: 'boolean' })
+      else expect(confirm).toBeUndefined()
+    }
   })
 
   test('memory_update refused on a stale engine logs ok false', async () => {
