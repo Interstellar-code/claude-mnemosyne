@@ -44,6 +44,8 @@ import {
 	scratchpadWrite,
 	type MetadataPatch,
 	restoreWorking,
+	type SimilarMatch,
+	similarWorking,
 	updateWorking,
 	type WorkingFieldPatch,
 } from "./store";
@@ -263,6 +265,10 @@ export class BeamMemory implements BeamMemoryState {
 
 	restoreWorking(memoryId: string): "restored" | "unchanged" | "not_found" {
 		return restoreWorking(this, memoryId);
+	}
+
+	similarWorking(queryVector: ArrayLike<number>, topK: number, minScore: number): SimilarMatch[] {
+		return similarWorking(this, queryVector, topK, minScore);
 	}
 
 	get(memoryId: string): unknown | null {

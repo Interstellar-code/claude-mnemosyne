@@ -30,7 +30,7 @@ Ours, not upstream's (engine-diff ignores them): `UPSTREAM.md`, `bun.lock` (our 
 | 18.12.3-mnemosyne.5 | e67c4972b298ce2692bad37b377a423881b53d1141390474782f0ce44f8a9b2f |
 | 18.12.3-mnemosyne.6 | 0444615859cc5d26331686a86ce458da92c0df9263423a7d04dd410319e78d14 |
 | 18.12.3-mnemosyne.7 | 4c6e5c1512eeb225d91d5c733b668860d6b324eea94e31ac302473da44eccb96 |
-| 18.12.3-mnemosyne.8 | 9c2232417dbe54c873c111e2b4d622e79dfc7e3c446e5145f6488dfbef43e97b |
+| 18.12.3-mnemosyne.8 | b4d5c65c58da40d92d721f78481786b8c14c2f05577f367861ef1741b53db172 |
 
 The `18.12.3` row is the untouched upstream source, for reference. `.1` had changes 1 to 3; `.2` makes the change 1 merge keep a `__proto__` key as plain data (it was dropped); `.3` adds the two knowledge tools (change 4) and keeps the first author on dedupe with empty author env unset (change 5); `.4` is the review fix round: the knowledge reply is normalised by `parseExtractedFactCategories` (change 4), and the author pair merges as one unit (change 5); `.5` turns embeddings on: fastembed is a real dependency with an onnxruntime override (change 6), the CLI exits naturally on success (change 7), the on-demand runtime install is gone (change 8), and a `reembed` command backfills vectors (change 9); `.6` is the review fix round: `reembed` recounts after the drain and proves the model before a rebuild (change 9), and the API embedding route is refused without an explicit opt-in (change 10); `.7` is the second fix round: the fastembed cache dir is read from the plugin-pinned `PI_CONFIG_DIR` directly, immune to the dotenv/XDG/profile refill (change 11), and the dry run prints the 'apply' hint only when something is missing (change 9). `.8` is phase MODEL (v3): the trim spares every row whose scope is not 'session' (change 12). Later MODEL tasks add their changes to this build and re-record its hash.
 
@@ -143,6 +143,14 @@ Status is `open` (ours only) or `merged-upstream` (drop it at the next rebase).
 - Why: the plugin must save a memory with its true kind, provenance and expiry now that the trim spares by scope (change 12), and must undo a retire or an expiry sweep without deleting and re-saving the row (which would lose its id and recall history).
 - Files: `src/mcp-tools.ts` `src/core/beam/store.ts` `src/core/beam/index.ts`
 - Tests: `test/remember-fields.spec.ts`
+- Status: open
+
+### 14. mnemopi_similar: a read-only near-duplicate tool
+
+- What: a new engine tool `mnemopi_similar { content, top_k, min_score }`. It embeds `content` with `embedQuery`, then scans `memory_embeddings` joined to `working_memory` (a single SELECT, at most 50000 rows) for rows with a vector of the active model, owned by `MNEMOPI_SESSION_ID` or `scope = 'global'`, not superseded and not expired, and keeps those whose cosine score (`cosineSimilarity`, same dimension only) is at least `min_score` (default 0.88). `top_k` is held to 1-10 (default 3). It returns `{ matches: [{ id, owner, score, preview }], embeddings: true }`, best first, the preview being the first 80 characters; with embeddings off or no vector for the query it returns `{ matches: [], embeddings: false }` and no error. It writes nothing: no insert, no update, no recall-count touch, no annotation. It is not in `bin/mcp-proxy.ts`'s allow-list, so no agent can call it.
+- Why: the plugin needs to ask "is this already remembered?" before a save without paying for a recall that bumps counts; the 0.88 default is the threshold chosen in `research/v3-research.md` section 3.5.
+- Files: `src/mcp-tools.ts` `src/core/beam/store.ts` `src/core/beam/index.ts`
+- Tests: `test/similar.spec.ts` (fixture vectors through a local embeddings stub), `../../tests/embed/similar.spec.ts` (the real model)
 - Status: open
 
 Not changed: `dist/types/*.d.ts` still describe upstream 18.12.3 (no `metadata` on `updateWorking`). Nothing in the plugin reads them; regenerating them needs upstream's monorepo build.

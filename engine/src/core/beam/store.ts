@@ -3,12 +3,12 @@ import { logger, withLoopPhase } from "@oh-my-pi/pi-utils";
 import { transaction } from "../../db";
 import { toUtcIso } from "../../util/datetime";
 import { generateId } from "../../util/ids";
-import { currentEmbeddingModel, embeddingsDisabled } from "../embeddings";
+import { cosineSimilarity, currentEmbeddingModel, embeddingsDisabled } from "../embeddings";
 import { EpisodicGraph } from "../episodic-graph";
 import { countExtractedFactCategories, extractFactCategoriesSafe } from "../extraction";
 import { getMnemopiRuntimeOptions, withMnemopiRuntimeOptions } from "../runtime-options";
 import { storeExtractedFactCategories } from "./consolidate";
-import { type EmbedItem, scheduleEmbedding, vecAvailable, vecInsert } from "./helpers";
+import { decodeVector, type EmbedItem, scheduleEmbedding, vecAvailable, vecInsert } from "./helpers";
 import type {
 	BeamEvent,
 	BeamMemoryState,
@@ -851,6 +851,56 @@ export function restoreWorking(beam: BeamMemoryState, memoryId: string): "restor
 	});
 	if (result === "restored") invalidateCaches(beam);
 	return result;
+}
+
+/** One near-duplicate candidate found by `similarWorking`. */
+export interface SimilarMatch {
+	readonly id: string;
+	readonly owner: string;
+	readonly score: number;
+	readonly preview: string;
+}
+
+/**
+ * The live working memories closest to `queryVector` by cosine (mnemosyne change 14).
+ * Read-only: one SELECT, no write, no recall-count touch. Candidates are the caller's own
+ * rows plus global ones that have a vector of the active model, minus superseded and
+ * expired rows. Returns at most `topK` rows scoring at least `minScore`, best first.
+ */
+export function similarWorking(
+	beam: BeamMemoryState,
+	queryVector: ArrayLike<number>,
+	topK: number,
+	minScore: number,
+): SimilarMatch[] {
+	const rows = beam.db
+		.query(`
+			SELECT wm.id, wm.session_id, wm.content, me.embedding_json
+			FROM memory_embeddings me
+			JOIN working_memory wm ON me.memory_id = wm.id
+			WHERE me.model IS ?
+			  AND (wm.session_id = ? OR wm.scope = 'global')
+			  AND wm.superseded_by IS NULL
+			  AND (wm.valid_until IS NULL OR wm.valid_until > ?)
+			LIMIT 50000
+		`)
+		.all(currentEmbeddingModel(), beam.sessionId, toUtcIso()) as {
+		id: string;
+		session_id: string;
+		content: string;
+		embedding_json: string;
+	}[];
+	const matches: SimilarMatch[] = [];
+	for (const row of rows) {
+		const vector = decodeVector(row.embedding_json);
+		if (vector === null || vector.length !== queryVector.length) continue;
+		const score = cosineSimilarity(queryVector, vector);
+		if (score >= minScore) {
+			matches.push({ id: row.id, owner: row.session_id, score, preview: String(row.content).slice(0, 80) });
+		}
+	}
+	matches.sort((a, b) => b.score - a.score || (a.id < b.id ? -1 : 1));
+	return matches.slice(0, topK);
 }
 
 export function get(beam: BeamMemoryState, memoryId: string): Row | null {

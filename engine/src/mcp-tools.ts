@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { DEFAULT_DB_FILENAME, dataDir } from "./config";
 import { BankManager } from "./core/banks";
 import { BeamMemory, type RecallOptions } from "./core/beam";
+import { embedQuery } from "./core/embeddings";
 import { addTriple, queryTriples } from "./core/triples";
 
 export type JsonPrimitive = string | number | boolean | null;
@@ -233,6 +234,17 @@ export const EXPORT_SCHEMA = {
 	required: ["output_path"],
 } as const;
 
+export const SIMILAR_SCHEMA = {
+	type: "object",
+	properties: {
+		content: { type: "string", description: "The text to find near-duplicates of." },
+		top_k: { type: "number", description: "How many matches to return, 1 to 10.", default: 3 },
+		min_score: { type: "number", description: "Lowest cosine score to return.", default: 0.88 },
+		bank: { type: "string", default: "default" },
+	},
+	required: ["content"],
+} as const;
+
 export const UPDATE_SCHEMA = {
 	type: "object",
 	properties: {
@@ -337,6 +349,11 @@ export const TOOLS: readonly ToolDefinition[] = [
 		name: "mnemopi_remember",
 		description: "Store a durable memory in Mnemopi.",
 		inputSchema: REMEMBER_SCHEMA,
+	},
+	{
+		name: "mnemopi_similar",
+		description: "Read-only: the closest live memories to a text by embedding cosine. Writes nothing.",
+		inputSchema: SIMILAR_SCHEMA,
 	},
 	{
 		name: "mnemopi_recall",
@@ -603,6 +620,18 @@ async function handleRemember(args: ToolArguments): Promise<ToolResult> {
 			validUntil: validUntil ?? undefined,
 		});
 		return { status: "stored", memory_id: memoryId, bank, content_preview: content.slice(0, 100) };
+	});
+}
+
+async function handleSimilar(args: ToolArguments): Promise<ToolResult> {
+	const content = required(args, "content");
+	if (typeof content !== "string") return content;
+	const topK = Math.min(10, Math.max(1, Math.trunc(numberArg(args, "top_k", 3))));
+	const minScore = numberArg(args, "min_score", 0.88);
+	return withBeam(args, async beam => {
+		const vector = await embedQuery(content);
+		if (vector === null) return { matches: [], embeddings: false };
+		return { matches: beam.similarWorking(vector, topK, minScore), embeddings: true };
 	});
 }
 
@@ -1062,6 +1091,7 @@ const TOOL_HANDLERS: Record<string, Handler> = {
 	mnemopi_knowledge_store: handleKnowledgeStore,
 	mnemopi_remember: handleRemember,
 	mnemopi_recall: handleRecall,
+	mnemopi_similar: handleSimilar,
 	mnemopi_shared_remember: handleSharedRemember,
 	mnemopi_shared_recall: handleSharedRecall,
 	mnemopi_shared_forget: handleSharedForget,
