@@ -41,6 +41,8 @@ import { buildRequests, EMBEDDINGS_CACHE_DIR, EMBEDDINGS_MODEL, engineEnv, parse
 import type { EngineRequest } from './engine'
 import { ENGINE_BUILD, SETUP_TIMEOUT_MS } from './engine-build'
 import { mnemosyneStats } from './surface'
+import { admit } from './guard'
+import type { GuardResult } from './guard'
 import { cleanTags } from './tags'
 import { openDashboard, stopDashboard } from './ui-launch'
 
@@ -73,6 +75,14 @@ const recalled = atom({ plugin: 'mnemosyne', key: 'recalled' } as const, {} as R
 // the human's, and consumes it (KNOWX.1). A subagent's save never does.
 const pendingTrigger = atom({ plugin: 'mnemosyne', key: 'pendingTrigger' } as const, {} as PendingTrigger)
 
+const CONFIRM_PROPERTY = {
+  type: 'boolean',
+  description: 'Send true to save text the guard warned about (only after a refusal that asked for it). Secrets and size blocks cannot be confirmed.',
+} as const
+
+// The guardMode option: strict (the default) refuses a warned save unless the call passes confirm: true; warn saves it with the warnings.
+export const guardModeOf = (options: PluginOptions): 'strict' | 'warn' => (typeof options.guardMode === 'string' && options.guardMode.trim().toLowerCase() === 'warn' ? 'warn' : 'strict')
+
 const TOOLS = [
   {
     name: 'memory_remember',
@@ -92,6 +102,7 @@ const TOOLS = [
           items: { type: 'string' },
           description: '2 to 5 short lowercase topic tags for the fact, e.g. ["git", "ci"].',
         },
+        confirm: CONFIRM_PROPERTY,
       },
       required: ['content'],
     },
@@ -123,6 +134,7 @@ const TOOLS = [
           items: { type: 'string' },
           description: 'Short lowercase topic tags (at most 5); replaces the old ones. [] removes them.',
         },
+        confirm: CONFIRM_PROPERTY,
         owner: { type: 'string', description: "The row's owner from memory_recall; default this project's." },
       },
       required: ['memory_id'],
@@ -349,17 +361,18 @@ async function syncWrapper($: EngineInterface, options: PluginOptions) {
   // when the model is downloaded (EMB.3.a2).
   const embeddings = await embeddingsOn($, options)
   const text = windows
-    ? cmdWrapper(store, cli, proxy, activity, embeddings)
-    : shWrapper(store, cli, proxy, activity, embeddings)
+    ? cmdWrapper(store, cli, proxy, activity, embeddings, guardModeOf(options))
+    : shWrapper(store, cli, proxy, activity, embeddings, guardModeOf(options))
   await bunFs($, `fs.writeFileSync(a[0], a[1]); ${windows ? '' : 'fs.chmodSync(a[0], 0o700);'}`, wrapper, text)
 }
 
 const WRAPPER_NOTE = `Written by the Mnemosyne plugin (externalMcp). A stdio MCP server over its store,
 serving only remember / recall / update / forget / stats.
 MNEMOSYNE_OWNER picks the owner: global (default) or a project-... id.
-MNEMOSYNE_ACTIVITY_LOG is the activity log each call is recorded in; empty when activityLog is off.`
+MNEMOSYNE_ACTIVITY_LOG is the activity log each call is recorded in; empty when activityLog is off.
+MNEMOSYNE_GUARD_MODE is the guardMode option: strict refuses a warned save unless the call passes confirm: true, warn saves it.`
 
-const shWrapper = (store: string, cli: string, proxy: string, activity: string, embeddings: boolean) => `#!/bin/sh
+const shWrapper = (store: string, cli: string, proxy: string, activity: string, embeddings: boolean, guardMode: string) => `#!/bin/sh
 ${WRAPPER_NOTE.replace(/^/gm, '# ')}
 export MNEMOPI_DATA_DIR=${shellQuote(store)}
 export MNEMOPI_SESSION_ID="\${MNEMOSYNE_OWNER:-global}"
@@ -384,11 +397,12 @@ export HF_ENDPOINT=https://huggingface.co
 export PI_CONFIG_DIR=${EMBEDDINGS_CACHE_DIR}
 export MNEMOSYNE_CLI=${shellQuote(cli)}
 export MNEMOSYNE_ACTIVITY_LOG=${activity ? shellQuote(activity) : ''}
+export MNEMOSYNE_GUARD_MODE=${guardMode}
 exec bun ${shellQuote(proxy)}
 `
 
 // cmd has no safe quoting for " or %; paths() refuses a store holding either.
-const cmdWrapper = (store: string, cli: string, proxy: string, activity: string, embeddings: boolean) => `@echo off\r
+const cmdWrapper = (store: string, cli: string, proxy: string, activity: string, embeddings: boolean, guardMode: string) => `@echo off\r
 ${WRAPPER_NOTE.replace(/^/gm, 'rem ').replace(/\n/g, '\r\n')}\r
 set "MNEMOPI_DATA_DIR=${store}"\r
 if not defined MNEMOSYNE_OWNER set "MNEMOSYNE_OWNER=global"\r
@@ -414,6 +428,7 @@ set "HF_ENDPOINT=https://huggingface.co"\r
 set "PI_CONFIG_DIR=${EMBEDDINGS_CACHE_DIR}"\r
 set "MNEMOSYNE_CLI=${cli}"\r
 set "MNEMOSYNE_ACTIVITY_LOG=${activity}"\r
+set "MNEMOSYNE_GUARD_MODE=${guardMode}"\r
 bun "${proxy}"\r
 `
 
@@ -1253,10 +1268,21 @@ export const register: Register = (on, options) => {
     const as = ownsRow && typeof input.owner === 'string' && input.owner ? input.owner : undefined
     // A memory_* name outside the five is not a memory call: not logged.
     const action = TOOL_ACTIONS[tool]
+    // GUARD.2: the text of a save is checked before anything else. A block never starts an
+    // engine process and never consumes the remember trigger, so the retry is still the human's.
+    const saves = tool === 'memory_remember' || (tool === 'memory_update' && typeof input.content === 'string')
+    const guard: GuardResult | undefined = saves
+      ? admit({ content: input.content as string, kind: typeof input.kind === 'string' ? input.kind : undefined, origin: 'tool' })
+      : undefined
+    const guardIds = guard === undefined ? [] : [...new Set(guard.hits.map(hit => hit.rule))]
+    const warnIds = guard?.verdict === 'warn' ? guardIds : []
+    // Strict mode: a warned save is refused until the call says confirm: true. A block has no override.
+    const needsConfirm = guard?.verdict === 'warn' && guardModeOf(options) === 'strict' && input.confirm !== true
+    const refusedByGuard = guard?.verdict === 'block' || needsConfirm
     // KNOWX.1: only the main thread's first save after a remember phrase is the
     // human's. A subagent's event carries an agentId and never consumes the trigger.
     let provenance: { author_type: 'human'; veracity: 'stated' } | undefined
-    if (tool === 'memory_remember' && e.agentId === undefined) {
+    if (tool === 'memory_remember' && e.agentId === undefined && !refusedByGuard) {
       const session = await $.session.id().catch(() => undefined)
       if (session !== undefined) {
         // Consumed inside the updater, which sees the value as it is when the update lands: of two saves at once only one takes it.
@@ -1272,6 +1298,12 @@ export const register: Register = (on, options) => {
     }
     const answer = await (async (): Promise<{ result: string; reply: string } | { deny: string }> => {
       try {
+        if (guard?.verdict === 'block') {
+          return { deny: `Mnemosyne: the save guard blocked this save (${guardIds.join(', ')}). ${guard.hits.map(hit => hit.message).join(' ')}` }
+        }
+        if (needsConfirm) {
+          return { deny: `Mnemosyne: the save guard warns about this save (${guardIds.join(', ')}). ${guard!.hits.map(hit => hit.message).join(' ')} Resend with confirm: true if the save is wanted.` }
+        }
         if (tool === 'memory_update') {
           const refused = updateArgs(input)
           if (typeof refused === 'string') return { deny: `Mnemosyne: ${refused}` }
@@ -1284,17 +1316,26 @@ export const register: Register = (on, options) => {
         const [name, args] = engineArgs(tool, input)
         // The trigger save is the person's: human, with veracity 'stated'.
         const withProvenance = provenance === undefined ? args : { ...args, ...provenance }
-        const text = await call($, options, name, withProvenance, as)
-        return { reply: text, result: name === 'mnemopi_recall' ? JSON.stringify(compact(text)) : name === 'mnemopi_stats' ? mnemosyneStats(text) : text }
+        // A warned save is stored, flagged with the rule ids in metadata.guard.
+        const sent: Record<string, unknown> =
+          warnIds.length > 0
+            ? { ...withProvenance, metadata: { ...(withProvenance as { metadata?: object }).metadata, guard: warnIds } }
+            : withProvenance
+        const text = await call($, options, name, sent, as)
+        // One warning line per hit, after the engine's reply; `reply` stays the engine's own text.
+        const warnings = warnIds.length > 0 ? guard!.hits.map(hit => `\nMnemosyne guard warning: ${hit.message}`).join('') : ''
+        return { reply: text, result: name === 'mnemopi_recall' ? JSON.stringify(compact(text)) : name === 'mnemopi_stats' ? mnemosyneStats(text) : `${text}${warnings}` }
       } catch (err) {
         return { deny: `Mnemosyne: ${(err as Error).message}` }
       }
     })()
     if (action !== undefined) {
-      const outcome = 'deny' in answer ? { ok: false, error: answer.deny } : callOutcome(action, input, answer.reply)
+      const blocked = refusedByGuard
+      // A refused call logs its rule ids only: no content text, in the line or the error.
+      const outcome = blocked ? { ok: false, error: `guard:${guardIds.join(',')}` } : 'deny' in answer ? { ok: false, error: answer.deny } : callOutcome(action, input, answer.reply)
       // Tags as the engine gets them, cleaned, as the proxy logs them.
       const shown = Array.isArray(input.tags) ? { ...input, tags: cleanTags(input.tags) } : input
-      await record($, options, [{ action, origin: 'tool', owner: as, text: callText(action, shown), ...outcome, ...(provenance ?? {}) }])
+      await record($, options, [{ action, origin: 'tool', owner: as, text: blocked ? '' : callText(action, shown), ...outcome, ...(provenance ?? {}) }])
     }
     // A successful save (or a content update) starts extraction after the reply.
     // A tags-only or importance-only update changes no text, so it extracts nothing.

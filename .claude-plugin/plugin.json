@@ -49,6 +49,16 @@
       "default": "on",
       "description": "on: each memory call (recall, remember, update, forget, stats, and calls from other MCP clients) adds one line to ~/.claude/mnemosyne/activity.jsonl, owner-only, capped at 1 MB with one backup, secrets masked. off: nothing is written."
     },
+    "guardMode": {
+      "title": "Save guard mode",
+      "type": "string",
+      "options": [
+        "strict",
+        "warn"
+      ],
+      "default": "strict",
+      "description": "Every save is checked first. Secrets, empty or very short text and text over 4000 characters are always refused. strict: a save with a warning (dated task chatter, text over 1500 characters) is refused until the call is resent with confirm: true. warn: such a save is stored, flagged in its metadata, and the reply shows the warnings."
+    },
     "memoryDir": {
       "title": "Memory store",
       "type": "string",

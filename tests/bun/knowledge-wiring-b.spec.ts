@@ -329,7 +329,7 @@ describe('provenance through the real engine', () => {
   test('finding 7: two parallel saves after one trigger: exactly ONE is human + stated, the other is an agent save', async () => {
     const host = await open({ options: TRIGGER, model: good })
     await host.prompt('remember that we deploy on fridays')
-    await Promise.all([host.tool('memory_remember', { content: 'one' }), host.tool('memory_remember', { content: 'two' })])
+    await Promise.all([host.tool('memory_remember', { content: 'first plain fact' }), host.tool('memory_remember', { content: 'second plain fact' })])
     await until('two extract lines', () => host.extractLines().length === 2)
     const rows = rowsOf(host)
     expect(rows).toHaveLength(2)
