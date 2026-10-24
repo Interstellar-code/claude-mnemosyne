@@ -10,7 +10,7 @@ import { networkInterfaces } from 'node:os'
 import { join } from 'node:path'
 import { engineEnv } from '../../hooks/engine'
 import { buildApp, CSP, DEFAULT_PARENT_CHECK_MS, openStore, parentCheckMs, runEngine, startServer } from '../../ui/server'
-import { engineCall, ROOT, tempDir, toolCall } from './helpers'
+import { engineCall, ROOT, tempDir, toolCall, isolatedEnv } from './helpers'
 
 const SERVER = join(ROOT, 'ui', 'server.ts')
 const CLI = join(ROOT, 'engine', 'src', 'cli.ts')
@@ -20,6 +20,7 @@ type Ready = { port: number; pid: number }
 type Child = ReturnType<typeof Bun.spawn>
 
 const serverEnv = (root: string, store: string, extra: Record<string, string> = {}) => ({
+  ...isolatedEnv(),
   ...(process.env as Record<string, string>),
   MNEMOSYNE_ROOT: root,
   MNEMOSYNE_STORE: store,
