@@ -62,7 +62,7 @@ import { buildRequests, engineEnv, parseReplies } from '../hooks/engine'
 import type { EngineRequest } from '../hooks/engine'
 import { CORE_SPREAD } from './map-layout'
 import { countByDay, isClaudeRecall, isOtherAppsRecall } from './recalls'
-import type { MeaningReply as MeaningWorkerReply } from './semantic-worker'
+import type { MeaningReply as MeaningWorkerReply, MeaningStarted } from './semantic-worker'
 
 const UI_DIR = import.meta.dir
 const VENDOR_DIR = join(UI_DIR, 'vendor')
@@ -666,6 +666,11 @@ function storeOwners(db: Database | null): string[] {
 
 // At most this many memories in one galaxy reply; `total` and `shown` say how many were cut.
 export const GALAXY_LIMIT = 2000
+// The rows a galaxy reply shows: a memory with an owner session, newest first, ties by id.
+// One definition, so the reply and the meaning layout's vector read can never pick different
+// rows (review M1: the layout used to take the newest memories that had a vector).
+export const GALAXY_WHERE = "session_id IS NOT NULL AND session_id <> ''"
+export const GALAXY_ORDER = 'timestamp DESC, id'
 // C0 and C1 control characters and DEL, and the bidirectional marks: a label must not
 // reflow or read as something else (the same set ui/escape.ts removes).
 const GALAXY_CONTROL = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g
@@ -781,9 +786,11 @@ export function clearMeaningCache(root: string) {
 export type MeaningIndex = { model: string; ids: string[]; newest: string }
 
 /**
- * The vectors of the memories the galaxy reply shows, read-only: the same rows, the same
- * order and the same `limit`, so `similar` never names a star the reply dropped and UMAP
- * never works on a point nobody sees (review MEDIUM-2).
+ * The vectors of the memories the galaxy reply shows, read-only: the reply's own rows
+ * (the same WHERE, ORDER and LIMIT, from the one definition above), keeping those that
+ * have a vector. So `similar` never names a star the reply dropped, and UMAP never works
+ * on a point nobody sees (review MEDIUM-2 and M1: a memory without a vector is simply
+ * not laid out, and it does not push out an older one that is).
  */
 export function readVectorIndex(db: Database, limit = GALAXY_LIMIT): MeaningIndex {
   const empty: MeaningIndex = { model: '', ids: [], newest: '' }
@@ -798,9 +805,10 @@ export function readVectorIndex(db: Database, limit = GALAXY_LIMIT): MeaningInde
     rows = db
       .query(
         `SELECT e.memory_id AS id, e.model AS model, ${created} AS created
-         FROM memory_embeddings e JOIN working_memory w ON w.id = e.memory_id
-         WHERE w.session_id IS NOT NULL AND w.session_id <> ''
-         ORDER BY w.timestamp DESC, w.id LIMIT ?`,
+         FROM memory_embeddings e
+         JOIN (SELECT id, timestamp FROM working_memory WHERE ${GALAXY_WHERE} ORDER BY ${GALAXY_ORDER} LIMIT ?) w
+           ON w.id = e.memory_id
+         ORDER BY w.timestamp DESC, w.id`,
       )
       .all(limit) as { id: string; model: string | null; created: string | null }[]
   } catch {
@@ -862,10 +870,19 @@ export type MeaningRunnerOptions = {
   timeoutMs?: number
 }
 
+// A run the worker has been given: `started` turns true when the worker takes the job, which
+// is when its own clock starts (review L1).
+type MeaningPending = {
+  resolve: (reply: MeaningReply) => void
+  reject: (err: Error) => void
+  started: boolean
+  timer?: ReturnType<typeof setTimeout>
+}
+
 export class MeaningRunner {
   private worker: Worker | null = null
   private next = 0
-  private pending = new Map<number, { resolve: (reply: MeaningReply) => void; reject: (err: Error) => void; timer: ReturnType<typeof setTimeout> }>()
+  private pending = new Map<number, MeaningPending>()
   // One run in flight per cache key: every concurrent caller joins it (review MEDIUM-1).
   private inflight = new Map<string, Promise<Meaning>>()
   private readonly url: string | URL
@@ -880,14 +897,24 @@ export class MeaningRunner {
     if (this.worker !== null) return this.worker
     const worker = new Worker(this.url)
     worker.onmessage = (event: MessageEvent) => {
-      const reply = event.data as MeaningReply
-      const waiting = this.pending.get(reply.id)
+      const answer = event.data as MeaningReply | MeaningStarted
+      const waiting = this.pending.get(answer.id)
       if (waiting === undefined) return
-      this.pending.delete(reply.id)
+      // The worker has taken the job off its queue: the run itself is timed from here, so a
+      // request that waited behind another run does not spend its budget queueing (review L1).
+      if ('started' in answer) {
+        waiting.started = true
+        this.armRun(waiting, answer.id)
+        // The worker is alive: every job still queued behind this one restarts its wait window
+        // instead of reading a busy worker as a stalled one.
+        for (const [id, queued] of this.pending) if (!queued.started) this.armWait(queued, id)
+        return
+      }
+      this.pending.delete(answer.id)
       clearTimeout(waiting.timer)
       // One request's bad input is not a dead worker: reject that one, keep the worker.
-      if ('error' in reply) waiting.reject(new Error(reply.error))
-      else waiting.resolve(reply)
+      if ('error' in answer) waiting.reject(new Error(answer.error))
+      else waiting.resolve(answer)
     }
     worker.onerror = (event: ErrorEvent) => {
       this.fail(new Error(event.message || 'the semantic worker failed'))
@@ -899,6 +926,30 @@ export class MeaningRunner {
     }
     this.worker = worker
     return worker
+  }
+
+  /**
+   * Arms a queued run's wait clock. It fires only when the worker has taken no job at all: a
+   * worker busy with another run proves it is alive, so the clock is re-armed instead of
+   * killing that healthy run (review L1).
+   */
+  private armWait(run: MeaningPending, id: number) {
+    clearTimeout(run.timer)
+    run.timer = setTimeout(() => {
+      if (this.pending.get(id) !== run || run.started) return
+      const busy = [...this.pending.values()].some(other => other.started)
+      if (busy) this.armWait(run, id)
+      else this.fail(new Error(`the semantic worker did not start the run within ${this.timeoutMs} ms`))
+    }, this.timeoutMs)
+  }
+
+  /** Arms a started run's own clock: this is the UMAP work itself, from the worker's first word. */
+  private armRun(run: MeaningPending, id: number) {
+    clearTimeout(run.timer)
+    run.timer = setTimeout(() => {
+      if (this.pending.get(id) !== run) return
+      this.fail(new Error(`the semantic worker did not answer within ${this.timeoutMs} ms`))
+    }, this.timeoutMs)
   }
 
   /** Drops the worker and rejects everything waiting on it; the next run starts a fresh one. */
@@ -922,17 +973,16 @@ export class MeaningRunner {
       return Promise.reject(err instanceof Error ? err : new Error(String(err)))
     }
     const id = ++this.next
-    return new Promise<Extract<MeaningReply, { count: number }>>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.fail(new Error(`the semantic worker did not answer within ${this.timeoutMs} ms`))
-      }, this.timeoutMs)
-      this.pending.set(id, { resolve: resolve as (reply: MeaningReply) => void, reject, timer })
-      try {
-        worker.postMessage({ id, inputs })
-      } catch (err) {
-        this.fail(err instanceof Error ? err : new Error(String(err)))
-      }
-    })
+    const { promise, resolve, reject } = Promise.withResolvers<Extract<MeaningReply, { count: number }>>()
+    const pending: MeaningPending = { resolve: resolve as (reply: MeaningReply) => void, reject, started: false }
+    this.pending.set(id, pending)
+    this.armWait(pending, id)
+    try {
+      worker.postMessage({ id, inputs })
+    } catch (err) {
+      this.fail(err instanceof Error ? err : new Error(String(err)))
+    }
+    return promise
   }
 
   /**
@@ -1054,7 +1104,7 @@ export function galaxyLevel(db: Database | null, limit = GALAXY_LIMIT, meaning: 
   const present = new Set(
     (db.query("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map(row => row.name),
   )
-  const where = "session_id IS NOT NULL AND session_id <> ''"
+  const where = GALAXY_WHERE
   const total = (db.query(`SELECT COUNT(*) AS n FROM working_memory WHERE ${where}`).get() as { n: number }).n
   const projects: GalaxyProject[] = (
     db
@@ -1066,7 +1116,7 @@ export function galaxyLevel(db: Database | null, limit = GALAXY_LIMIT, meaning: 
     .query(
       `SELECT id, session_id AS owner, ${RECALLS} AS recalls, last_recalled AS lastRecalled,
               timestamp AS created, substr(content, 1, 4000) AS head, metadata_json
-       FROM working_memory WHERE ${where} ORDER BY timestamp DESC, id LIMIT ?`,
+       FROM working_memory WHERE ${where} ORDER BY ${GALAXY_ORDER} LIMIT ?`,
     )
     .all(limit) as { id: string; owner: string; recalls: number; lastRecalled: string | null; created: string | null; head: string | null; metadata_json: string | null }[]
   const memories: GalaxyMemory[] = rows.map(row => {

@@ -24,6 +24,12 @@ export type Vec3 = [number, number, number]
 export type MeaningInput = { id: string; json: string }
 export type MeaningRequest = { id: number; inputs: MeaningInput[] }
 export type MeaningNeighbour = { id: string; score: number }
+/**
+ * The worker's first word on a request: it has taken the job off its queue and is about to
+ * work. The server starts that run's clock here, not at post time, so a request queued
+ * behind another run does not spend its budget waiting (review L1).
+ */
+export type MeaningStarted = { id: number; started: true }
 export type MeaningReply =
   | { id: number; count: number; positions: Record<string, Vec3>; similar: Record<string, MeaningNeighbour[]> }
   | { id: number; error: string }
@@ -165,6 +171,9 @@ export function meaningOf(inputs: readonly MeaningInput[]): { count: number; pos
 self.onmessage = (event: MessageEvent) => {
   const request = event.data as MeaningRequest
   try {
+    // The clock for this run starts here, not when the server posted it (review L1).
+    const started: MeaningStarted = { id: request.id, started: true }
+    self.postMessage(started)
     const answer = meaningOf(request.inputs)
     const reply: MeaningReply = { id: request.id, ...answer }
     self.postMessage(reply)

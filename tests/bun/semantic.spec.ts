@@ -100,10 +100,16 @@ function fixture(perCluster: number, seed = 11) {
 }
 
 /**
- * A temp store with the real schema and `rows` in it, one model. A row's vector may be
- * raw text, as a corrupt stored row would be; `createdAt` stamps the embedding row.
+ * A temp store with the real schema and `rows` in it, one model. A row's vector may be raw
+ * text, as a corrupt stored row would be, or null for a memory with no embedding row at all;
+ * `createdAt` stamps the embedding row.
  */
-function makeStore(dir: string, rows: readonly { id: string; vector: number[] | string }[], model = MODEL, createdAt = '2026-01-01T00:00:00Z') {
+function makeStore(
+  dir: string,
+  rows: readonly { id: string; vector: number[] | string | null; timestamp?: string }[],
+  model = MODEL,
+  createdAt = '2026-01-01T00:00:00Z',
+) {
   mkdirSync(dir, { recursive: true })
   const db = new Database(join(dir, 'mnemopi.db'))
   try {
@@ -113,8 +119,10 @@ function makeStore(dir: string, rows: readonly { id: string; vector: number[] | 
         row.id,
         `memory ${row.id}`,
         index % 2 === 0 ? 'global' : 'project-alpha-1a2b',
-        `2026-01-${String((index % 28) + 1).padStart(2, '0')}T00:00:00Z`,
+        row.timestamp ?? `2026-01-${String((index % 28) + 1).padStart(2, '0')}T00:00:00Z`,
       ])
+      // A null vector is a memory the store has but embeddings never reached: no row at all.
+      if (row.vector === null) return
       const json = typeof row.vector === 'string' ? row.vector : JSON.stringify(row.vector)
       db.run('INSERT INTO memory_embeddings (memory_id, embedding_json, model, created_at) VALUES (?, ?, ?, ?)', [row.id, json, model, createdAt])
     })
@@ -574,9 +582,19 @@ function brokenWorkerScript(dir: string): string {
   return file
 }
 
-/** A worker script that takes a message and never answers: a hung UMAP run. */
+/** A worker script that starts the job and never answers: a hung UMAP run mid-flight (L1). */
 function silentWorkerScript(dir: string): string {
   const file = join(dir, 'silent-worker.ts')
+  writeFileSync(
+    file,
+    'declare var self: Worker\nself.onmessage = (event: MessageEvent) => {\n  self.postMessage({ id: event.data.id, started: true })\n}\n',
+  )
+  return file
+}
+
+/** A worker script that takes messages and never even starts them: a dead queue, no ack (L1). */
+function deafWorkerScript(dir: string): string {
+  const file = join(dir, 'deaf-worker.ts')
   writeFileSync(file, 'declare var self: Worker\nself.onmessage = () => {}\n')
   return file
 }
@@ -637,7 +655,8 @@ describe('HIGH-1: a run that hangs is cut by the timeout, and the worker replace
     temp.dispose()
   })
 
-  test('a run over the timeout rejects instead of hanging, and a fresh worker still answers', async () => {
+  test('a started run that never answers is cut, and a fresh worker still answers', async () => {
+    // The worker acknowledges the job, then hangs: the clock that fires is the run's own.
     const hung = new MeaningRunner({ worker: silentWorkerScript(temp.dir), timeoutMs: 150 })
     runners.push(hung)
     const db = new Database(join(store, 'mnemopi.db'), { readonly: true })
@@ -661,6 +680,50 @@ describe('HIGH-1: a run that hangs is cut by the timeout, and the worker replace
     } finally {
       db.close()
     }
+  }, 60_000)
+
+  test('a worker that never starts the job is cut by the wait clock, not mistaken for a busy one', async () => {
+    const deaf = new MeaningRunner({ worker: deafWorkerScript(temp.dir), timeoutMs: 150 })
+    runners.push(deaf)
+    const db = new Database(join(store, 'mnemopi.db'), { readonly: true })
+    try {
+      // A root of its own: the earlier case cached this store's layout under `root`.
+      const outcome = await meaningLevel(db, join(temp.dir, 'deaf-root'), deaf, { waitMs: 5_000 }).then(
+        () => null,
+        (err: Error) => err,
+      )
+      // No job ever started, so no run could be healthy: the wait clock is the one that fires.
+      expect(outcome instanceof Error ? outcome.message : '').toContain('did not start the run')
+    } finally {
+      db.close()
+    }
+  }, 60_000)
+
+  test('L1: three queued runs all answer, though each waits past the run timeout in the queue', async () => {
+    // Each job takes 250 ms in the worker; the timeout is 400 ms. Posted together, jobs 2 and 3
+    // stand in line longer than 400 ms. The old code started every clock at post time, so a
+    // stale expiry killed the worker mid-run and rejected the queued jobs; now each clock starts
+    // when the worker takes its job, and a busy worker re-arms the waiting ones.
+    const script = join(temp.dir, 'queue-worker.ts')
+    writeFileSync(
+      script,
+      [
+        'declare var self: Worker',
+        'self.onmessage = async (event: MessageEvent) => {',
+        '  const { id } = event.data',
+        '  self.postMessage({ id, started: true })',
+        '  await new Promise(resolve => setTimeout(resolve, 250))',
+        '  self.postMessage({ id, count: 1, positions: {}, similar: {} })',
+        '}',
+        '',
+      ].join('\n'),
+    )
+    const queued = new MeaningRunner({ worker: script, timeoutMs: 400 })
+    runners.push(queued)
+    const replies = await Promise.all([queued.run([]), queued.run([]), queued.run([])])
+    // All three settled with the worker's own answer, none rejected by a clock that ran out
+    // while its job was still waiting in the queue.
+    expect(replies.map(reply => reply.count)).toEqual([1, 1, 1])
   }, 60_000)
 
   test('a run that misses the wait budget answers NO_MEANING now, and its work still lands in the cache', async () => {
@@ -783,6 +846,84 @@ describe('MEDIUM-2: the layout covers exactly the stars the reply shows', () => 
     // One layout for the whole store, not one per request: the cache carried it.
     expect(runner.runs).toBe(1)
   }, 240_000)
+})
+
+describe('M1: vector-less memories among the shown ones', () => {
+  const temp = tempDir('semantic-mixed')
+  const store = join(temp.dir, 'store')
+  const total = GALAXY_LIMIT + 500
+  // The newest 1000 memories have no vector; the 1500 older ones do. The reply shows the newest
+  // GALAXY_LIMIT (1000 without a vector + 1000 of the older ones), so a layout built from "the
+  // newest memories that have a vector" would name 1500 stars while the reply shows 1000 of them.
+  let started: Started
+  let runner: CountingRunner
+
+  beforeAll(async () => {
+    const withVector = fixture(Math.ceil(1500 / CLUSTERS))
+      .slice(0, 1500)
+      .map((row, i) => ({ ...row, timestamp: `2026-01-01T00:${String(Math.floor(i / 60)).padStart(2, '0')}:${String(i % 60).padStart(2, '0')}Z` }))
+    const rows: { id: string; vector: number[] | null; timestamp: string }[] = [
+      // The newest 1000 memories have no vector: they come first, with later timestamps.
+      ...Array.from({ length: 1000 }, (_, i) => ({
+        id: `nov-${String(i).padStart(4, '0')}`,
+        vector: null,
+        timestamp: `2026-02-01T00:${String(Math.floor(i / 60)).padStart(2, '0')}:${String(i % 60).padStart(2, '0')}Z`,
+      })),
+      ...withVector,
+    ]
+    makeStore(store, rows)
+    runner = new CountingRunner()
+    started = await start(store, temp.dir, '', { meaningRunner: runner, meaningWaitMs: 40_000 })
+  }, 240_000)
+
+  afterAll(() => {
+    started?.stop()
+    runner?.stop()
+    temp.dispose()
+  })
+
+  test('no similar id and no cached position names a star the reply does not show (dangling 0)', async () => {
+    // The reply shows the newest GALAXY_LIMIT memories, vector or not: 1000 vector-less and
+    // 1000 of the older ones.
+    const first = await getJson(started, '/api/galaxy')
+    expect(first.status).toBe(200)
+    expect(first.body.total).toBe(total)
+    expect(first.body.shown).toBe(GALAXY_LIMIT)
+    let reply = first.body
+    for (let tries = 0; tries < 240 && !reply.meaning; tries++) {
+      await Bun.sleep(500)
+      reply = (await getJson(started, '/api/galaxy')).body
+    }
+    expect(reply.meaning).toBe(true)
+    const shown = new Set(reply.memories.map(star => star.id))
+    expect(shown.size).toBe(GALAXY_LIMIT)
+    // The vector-less stars carry nothing; the ones that have a vector are laid out.
+    expect(reply.memories.filter(star => star.position !== undefined)).toHaveLength(GALAXY_LIMIT - 1000)
+
+    let edges = 0
+    const dangling: string[] = []
+    for (const star of reply.memories) {
+      for (const similar of star.similar ?? []) {
+        edges++
+        if (!shown.has(similar.id)) dangling.push(`${star.id}->${similar.id}`)
+      }
+    }
+    expect({ edges, dangling: dangling.slice(0, 3) }).toEqual({ edges: expect.any(Number), dangling: [] })
+    expect(dangling).toHaveLength(0)
+
+    // The cached layout holds exactly the shown stars that have a vector, and no more.
+    const cached = JSON.parse(readFileSync(join(temp.dir, 'root', MEANING_CACHE), 'utf8')) as {
+      meaning: { positions: Record<string, number[]>; similar: Record<string, { id: string; score: number }[]> }
+    }
+    const laidOut = Object.keys(cached.meaning.positions)
+    expect(laidOut).toHaveLength(GALAXY_LIMIT - 1000)
+    for (const id of laidOut) expect({ id, shown: shown.has(id) }).toEqual({ id, shown: true })
+    for (const neighbours of Object.values(cached.meaning.similar)) {
+      for (const neighbour of neighbours) expect({ id: neighbour.id, shown: shown.has(neighbour.id) }).toEqual({ id: neighbour.id, shown: true })
+    }
+    // One layout for the whole store, not one per request.
+    expect(runner.runs).toBe(1)
+  }, 300_000)
 })
 
 describe('MEDIUM-3: the floor counts usable vectors, not rows', () => {
