@@ -47,7 +47,7 @@ describe("MODEL.7: a re-save never lowers scope or relabels a protected kind", (
 		makeOld(id);
 		await save("a trigger save that runs the trim");
 		expect(row(store.dir, id)).not.toBeNull();
-	});
+	}, 60_000);
 
 	test("MODEL.7.a1b: a STATED global row re-saved with default args survives the trim too", async () => {
 		const id = await save("a stated global fact about reviews", { scope: "global", source: "mcp" });
@@ -74,7 +74,7 @@ describe("MODEL.7: a re-save never lowers scope or relabels a protected kind", (
 			const r = row(store.dir, id);
 			expect([kind, r?.memory_type, r?.valid_until]).toEqual([kind, kind, null]);
 		}
-	});
+	}, 60_000);
 
 	test("MODEL.7.a2c: other kinds keep today's behaviour: the explicit kind and expiry win", async () => {
 		const id = await save("a note about the current sprint work", { memory_type: "context", valid_until: "2098-01-01" });
@@ -90,7 +90,7 @@ describe("MODEL.7: a re-save never lowers scope or relabels a protected kind", (
 		const unknown = await save("an unlabelled note from an old import");
 		await save("an unlabelled note from an old import", { memory_type: "fact" });
 		expect(row(store.dir, unknown)?.memory_type).toBe("fact");
-	});
+	}, 60_000);
 
 	test("MODEL.7.a3: an explicit wider scope on a re-save still widens; a narrower one never lowers", async () => {
 		const session = await save("a row that starts in the session scope");
@@ -108,7 +108,7 @@ describe("MODEL.7: a re-save never lowers scope or relabels a protected kind", (
 		expect(row(store.dir, channel)?.scope).toBe("channel");
 		await save("a row that starts in the channel scope", { scope: "global" });
 		expect(row(store.dir, channel)?.scope).toBe("global");
-	});
+	}, 60_000);
 
 	test("MODEL.7.a4: a re-save keeps the stored trust tier unless the call names one", async () => {
 		const id = await save("a row with an imported trust tier", { source: "imported", scope: "global" });

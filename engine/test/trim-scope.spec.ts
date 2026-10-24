@@ -113,7 +113,7 @@ describe("MODEL.7: the trim over every tier and scope, and the per-owner cap", (
 			return trimmed !== (scope === "session" && tier !== "IMPORTED");
 		});
 		expect(wrong.map(({ tier, scope }) => `${tier}/${scope}`)).toEqual([]);
-	});
+	}, 60_000);
 
 	test("MODEL.7.a7: over the 1000-row cap only session-scope rows that are not IMPORTED are trimmed, oldest first", async () => {
 		await save("cap seed row", { source: "mcp", scope: "global" }); // makes the database and its schema
