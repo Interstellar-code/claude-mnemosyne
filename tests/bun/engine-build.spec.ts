@@ -13,12 +13,15 @@ test('ENGINE_BUILD is engine/package.json version', () => {
 test('the build is the upstream base version plus a mnemosyne suffix, and the four @oh-my-pi deps stay pinned', () => {
   const pkg = JSON.parse(readFileSync(join(ROOT, 'engine', 'package.json'), 'utf8'))
   expect(ENGINE_BUILD).toMatch(/^18\.12\.3-mnemosyne\.\d+$/)
+  // EMB.2.a1: fastembed is a real dependency (not only a peer), with ORT overridden.
   expect(pkg.dependencies).toEqual({
     '@oh-my-pi/pi-ai': '18.12.3',
     '@oh-my-pi/pi-catalog': '18.12.3',
     '@oh-my-pi/pi-natives': '18.12.3',
     '@oh-my-pi/pi-utils': '18.12.3',
+    fastembed: '3.0.0',
   })
+  expect(pkg.overrides).toEqual({ 'onnxruntime-node': '1.26.0', '@anush008/tokenizers': '0.6.0' })
 })
 
 test('hooks/engine-build.ts and hooks/tags.ts import nothing', () => {

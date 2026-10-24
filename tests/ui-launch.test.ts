@@ -23,8 +23,8 @@ type Options = {
   openers?: string[]
   // What ui.json holds before any server of the test starts.
   state?: { port: number; token: string; pid: number }
-  // What ui-extraction.json holds before any server of the test starts (the setting the running dashboard started with).
-  startedWith?: { pid: number; extraction: string }
+  // What ui-extraction.json holds before any server of the test starts (the settings the running dashboard started with).
+  startedWith?: { pid: number; extraction: string; embeddings?: string }
   // Exit code of the health ping.
   ping?: number
   // What the spawned holder does: print a ready line (in two pieces) and run, or fail first.
@@ -61,7 +61,11 @@ function world(on: On, o: Options = {}) {
   on('env.get', () => ({ value: '/home/u' }))
   on('session.id', () => ({ value: seen.session }))
   on('session.repo', () => ({ value: { root: '/w' } }) as never)
-  on('fs.stat', () => (o.installed === false ? { deny: 'ENOENT' } : { value: { kind: 'file' } }) as never)
+  on('fs.stat', (_$, e) =>
+    o.installed === false || (e as { path: string }).path.endsWith('/embeddings.json') || (e as { path: string }).path.includes('/model-cache/')
+      ? ({ deny: 'ENOENT' } as never)
+      : ({ value: { kind: 'file' } } as never),
+  )
   on('fs.read', (_$, e) => {
     if (e.path === INSTALLED_PACKAGE && o.installed !== false) return { value: JSON.stringify({ version: o.build ?? ENGINE_BUILD }) } as never
     if (e.path === UI_JSON && seen.state) return { value: JSON.stringify(seen.state) } as never
@@ -180,6 +184,8 @@ test('the first call starts one server, reads the ready line in pieces and the t
     MNEMOSYNE_CLI: `${ROOT}/engine/node_modules/@oh-my-pi/pi-mnemopi/src/cli.ts`,
     MNEMOSYNE_ACTIVITY_LOG: `${ROOT}/activity.jsonl`,
     MNEMOSYNE_EXTRACTION: 'haiku',
+    // EMB.3.a2: this host is not macOS arm64, so the dashboard starts with embeddings off.
+    MNEMOSYNE_EMBEDDINGS: 'off',
   })
   expect(`${child.env?.MNEMOSYNE_PLUGIN_ROOT}/ui/server.ts`).toBe(child.argv[1]!)
   // No ui.json at first: nothing to ping.
@@ -396,10 +402,10 @@ test('a ready line that is not JSON fails the start and ends its loop, with no k
 
 // ---- KNOWX.2.a9 (R2 finding 11): a reused dashboard keeps the setting it started with ----
 
-test('a started dashboard records the extraction setting it started with, in a 0600 file written over a fresh temp', async ($, on) => {
+test('a started dashboard records the extraction and embeddings settings it started with, in a 0600 file written over a fresh temp', async ($, on) => {
   const seen = world(on)
   await openUi($)
-  expect(JSON.parse(seen.startedWith ?? 'null')).toEqual({ pid: 901, extraction: 'haiku' })
+  expect(JSON.parse(seen.startedWith ?? 'null')).toEqual({ pid: 901, extraction: 'haiku', embeddings: 'off' })
   // The temp file is removed first and written with mode 0600, as the other plugin files are.
   expect(seen.startedWithScript).toContain('rmSync')
   expect(seen.startedWithScript).toContain('0o600')
@@ -407,7 +413,7 @@ test('a started dashboard records the extraction setting it started with, in a 0
 })
 
 test('a reused dashboard that started with the same setting says nothing about a restart', async ($, on) => {
-  const seen = world(on, { state: { port: 5555, token: TOKEN_A, pid: 42 }, startedWith: { pid: 42, extraction: 'haiku' } })
+  const seen = world(on, { state: { port: 5555, token: TOKEN_A, pid: 42 }, startedWith: { pid: 42, extraction: 'haiku', embeddings: 'off' } })
   seen.session = 's2'
   const text = textOf(await openUi($))
   expect(text).toContain('Mnemosyne dashboard running')
@@ -415,12 +421,22 @@ test('a reused dashboard that started with the same setting says nothing about a
 })
 
 test('a reused dashboard that started with another extractionModel says it must be restarted, and still gives the link', async ($, on) => {
-  const seen = world(on, { state: { port: 5555, token: TOKEN_A, pid: 42 }, startedWith: { pid: 42, extraction: 'off' } })
+  const seen = world(on, { state: { port: 5555, token: TOKEN_A, pid: 42 }, startedWith: { pid: 42, extraction: 'off', embeddings: 'off' } })
   seen.session = 's2'
   const text = textOf(await openUi($))
   expect(text).toContain('started with extractionModel "off"')
   expect(text).toContain('extractionModel is "haiku" now')
   expect(text).toContain('end the session that started it, then run /mnemosyne-ui again')
+  expect(text).toContain(`Link: http://127.0.0.1:5555/#token=${TOKEN_A}`)
+})
+
+test('EMB.3.a2: a reused dashboard whose embeddings setting differs says it must be restarted', async ($, on) => {
+  const seen = world(on, { state: { port: 5555, token: TOKEN_A, pid: 42 }, startedWith: { pid: 42, extraction: 'haiku', embeddings: 'on' } })
+  seen.session = 's2'
+  const text = textOf(await openUi($))
+  // This test host is not macOS arm64, so the dashboard now starts with embeddings 'off'.
+  expect(text).toContain('embeddings')
+  expect(text).toContain('restart')
   expect(text).toContain(`Link: http://127.0.0.1:5555/#token=${TOKEN_A}`)
 })
 

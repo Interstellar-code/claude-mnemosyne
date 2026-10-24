@@ -72,6 +72,22 @@ Claude also saves and recalls on its own: lasting preferences, conventions, deci
 
 Recall matches words, not meaning: "deploy Fridays" finds the fact above, "release schedule" does not.
 
+## Embeddings (meaning-based recall)
+
+Since 0.7.0 the engine can also compare memories by meaning, using a small local model, BAAI/bge-small-en-v1.5 (384 dimensions, about 63 MB). It runs on your machine only: no memory text ever leaves it for an embedding API, and every embedding setting is pinned by the plugin (empty API URL and key, fixed model).
+
+- **Where it comes from.** `/mnemosyne-setup` downloads the model once from `huggingface.co` (the `Qdrant/bge-small-en-v1.5-onnx-Q` repository; setup prints the host and size first). The model is cached under `~/.claude/mnemosyne/model-cache/`, not the shared `~/.omp` cache, and is only ever downloaded during setup. After updating to this version, run `/mnemosyne-setup` once to install the engine build `18.12.3-mnemosyne.5` and fetch the model; until then embeddings stay off and recall is keyword-only. A later update also needs a fresh `/mnemosyne-setup`.
+- **The option.** `embeddings` in the plugin settings is `auto` by default: on only on macOS on Apple Silicon (the tested platform), off elsewhere unless you set it to `on`. `off` keeps recall keyword-only. Changing it needs `/mnemosyne-setup` (to download the model) and a dashboard restart.
+- **The cost.** Embedding a memory is about 0.3 s per engine call, and each engine process that embeds uses about 0.4 GB of memory. The engine install grows by about 280 MB (fastembed and its ONNX runtime, which overrides onnxruntime-node to 1.26.0 so the process no longer aborts on exit under Bun).
+- **How recall changes.** A memory's keyword score is blended with its meaning score: the working-memory tiers add `0.2 × similarity`, and a candidate with too little word overlap still surfaces when its similarity is at least 0.65. Recall still answers within its timeout.
+- **Older memories.** Memories saved before embeddings were on have no vector until you fill them:
+
+```
+/mnemosyne-embed
+```
+
+That is a dry run: it counts the memories with no vector. Then `/mnemosyne-embed apply` fills them, in one engine process, and changes no memory text (only its vector). Running it again adds nothing. If you changed the model the vectors are refused unless you pass `/mnemosyne-embed rebuild`, which wipes and rebuilds every vector.
+
 ## Dashboard
 
 ```
@@ -192,6 +208,7 @@ Change any time from `/plugin` → Mnemosyne → configure.
 | `memoryDir` | `~/.claude/mnemosyne/store` | Where memories are stored. |
 | `externalMcp` | off | Lets other MCP clients use the same memory (see below). |
 | `extractionModel` | `haiku` | The model that pulls facts, preferences, instructions, dated events and relations out of each saved memory in the background (an alias or a full model id). It also drives `/mnemosyne-tags`. `off` turns extraction off: no model call, and `/mnemosyne-tags` and `/mnemosyne-knowledge` say so. |
+| `embeddings` | `auto` | `auto`: meaning-based recall on only on macOS on Apple Silicon, off elsewhere. `on`: always on. `off`: keyword-only recall. Local only; `/mnemosyne-setup` downloads the model once (see [Embeddings](#embeddings-meaning-based-recall)). |
 
 ## Use the memory from other tools
 
