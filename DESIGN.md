@@ -90,19 +90,25 @@ returns real hits. Verified against the live `matrixkoder-mk-5` bank:
 Every call this plugin makes therefore carries both variables. This is not a
 tuning detail; it is the difference between working and silently empty.
 
-### 2.5 Embeddings must be off in a spawned process
+### 2.5 Embeddings in a spawned process (historical in 0.6.x; solved in 0.7.0)
 
-With fastembed enabled, both the CLI and the MCP server died repeatedly with a
-Bun C++ panic when spawned as a standalone process. With
-`MNEMOPI_NO_EMBEDDINGS=1` everything is stable.
+What was found (0.5.0 and 0.6.x): with fastembed enabled, both the CLI and the
+MCP server died repeatedly with a Bun C++ panic when spawned as a standalone
+process, and with `MNEMOPI_NO_EMBEDDINGS=1` everything was stable. So the
+plugin kept embeddings off, and recall from this plugin was FTS-only. Sessions
+of other hosts were unaffected: they attach to a detached embedding server at
+`~/.omp/run/mnemopi/`, which a spawned CLI does not, so it loads fastembed
+in-process.
 
-Sessions of other hosts are unaffected: they attach to a detached embedding server at
-`~/.omp/run/mnemopi/`. A spawned CLI does
-not, and loads fastembed in-process.
-
-**Consequence: recall from this plugin is FTS-only.** Vector recall stays with
-the other hosts. If that is unacceptable, the fix is to talk to their embed server, which is
-a larger piece of work and not in scope.
+What fixed it (0.7.0, §3.8): the panic is onnxruntime's abort in
+`process.exit()` after a model session (ORT #24579, fixed from 1.24). fastembed
+3.0.0 pins onnxruntime-node 1.21.0, so the engine build overrides it to 1.26.0
+(engine change 6), and the CLI now exits naturally on success instead of
+calling `process.exit(0)` (change 7), because the override alone is not enough
+on the fastembed path. Embeddings are now on by default on macOS arm64 once
+`/mnemosyne-setup` has downloaded the model; with the option `off`, or before
+setup, `MNEMOPI_NO_EMBEDDINGS=1` still keeps recall FTS-only. §2.6's note about
+768-dimension vectors predates this: the model the plugin pins is 384-dimension.
 
 ### 2.6 One engine only — keep the TypeScript one
 
@@ -657,9 +663,9 @@ v0.6.0 replaces the v0.5.0 map with a galaxy of every memory, adds live sparks
 for recalls and saves, a knowledge extraction that runs after each save, and
 the Knowledge and Health tabs. The activity log learns which app and session
 made each call. The numbers C1 to C12 are the contracts of the build plan
-(`mnemosyne-ui-v2`); C8 (embeddings and the waits for them) is v0.7.0 and
-described here only as coming. Where the plan and the code disagree, this
-section records the code.
+(`mnemosyne-ui-v2`); C8 (embeddings and the waits for them) shipped in v0.7.0
+and is recorded in §3.8. Where the plan and the code disagree, this section
+records the code as it was in 0.6.0.
 
 - C1, the activity line (`hooks/activity-log.ts`, which still imports
   nothing). Four optional fields join the line of §3.2: `client` (the app, at
@@ -688,9 +694,9 @@ section records the code.
   were cut. `label` is the first non-empty line, control characters removed, cut
   to 80 characters; knowledge text is cut the same way. A missing store, a
   missing memoria table or a legacy table without a needed column gives empty
-  lists or skips that table, never an error. In 0.6.0 `meaning` is always
-  `false` and a memory has no `position` or `similar` (the plan gives those to
-  the 0.7.0 SEMX phase).
+  lists or skips that table, never an error. In 0.6.0 `meaning` was always
+  `false` and a memory had no `position` or `similar`; 0.7.0 fills them
+  (§3.8, SEMX).
 - C3, the bloom passes: `ui/vendor/map-lib.js` exports `EffectComposer`,
   `RenderPass`, `UnrealBloomPass` and `OutputPass` besides `ForceGraph3D` and
   `SpriteText` (§3.5). `ui/map.ts` adds an `UnrealBloomPass` and then an
@@ -733,7 +739,7 @@ section records the code.
   and no three.js, tested by `tests/bun/map-state.spec.ts`): stars, cores, hubs
   and the Claude core as glow sprites; topic threads (core to hub, hub to star)
   and gold bridges as the library's links; the Galaxy and Timeline layouts
-  (Meaning is in the rail but disabled until 0.7.0) with the layout remembered
+  (Meaning was in the rail but disabled until 0.7.0; §3.8) with the layout remembered
   in `localStorage`; Find, the path bar, Colour by, project toggles, the
   inspector; knowledge moons (the selected memory's first 8 items on a circle
   of radius 18, flattened to 0.45, turning at 0.45 rad/s) and the Knowledge
@@ -791,7 +797,7 @@ section records the code.
   `<root>/ui-extraction.json` for the server it started, and `/mnemosyne-ui` on
   a reused server whose recorded value differs says so (a server with no
   record predates the setting). The plan's second option,
-  `MNEMOSYNE_EMBEDDINGS`, belongs to 0.7.0 and does not exist yet.
+  `MNEMOSYNE_EMBEDDINGS`, did not exist in 0.6.0; 0.7.0 adds it (§3.8).
 - C12, the extraction flow. The hooks cannot import engine code (it lives in
   the engine's `node_modules`, which an installed plugin's root does not have),
   so the engine has two tools and the plugin only carries text between them.
@@ -837,10 +843,10 @@ section records the code.
   channel, so they get no extraction until `/mnemosyne-knowledge apply`.
   `extractionModel` `off` stops all of it, and `/mnemosyne-tags` too (it shares
   the setting), with a message instead of a model call.
-- C8, coming in 0.7.0: embeddings (`memory_embeddings`, computed on this
+- C8, shipped in 0.7.0: embeddings (`memory_embeddings`, computed on this
   machine), the Meaning layout, similar-memory links, and the dashboard option
-  that turns them on. None of it exists in 0.6.0; `MNEMOPI_NO_EMBEDDINGS` stays
-  `1` (§2.5).
+  that turns them on. None of it existed in 0.6.0, where `MNEMOPI_NO_EMBEDDINGS`
+  stayed `1` (§2.5); §3.8 records what 0.7.0 built.
 
 The Knowledge tab (`ui/knowledge.ts`) and the Health tab (`ui/health.ts`) are
 page code over C7 with no server logic of their own; the Activity tab
@@ -853,7 +859,7 @@ record): under reduced motion the moons stand still; `rangeDays`, `ticks` and
 `timelinePosition` take a second argument the plan's C4 line leaves out;
 `bin/memories.ts pending` also has `remove-many`, which the plan's C12 does not
 list; the hook's `<root>/ui-extraction.json` is not in C11; and C11's
-`MNEMOSYNE_EMBEDDINGS` is not passed, because embeddings are 0.7.0.
+`MNEMOSYNE_EMBEDDINGS` was not passed in 0.6.0, because embeddings came in 0.7.0.
 
 Manual check of the v0.6.0 dashboard, in a browser, by the user, with the
 console open throughout (no error and no CSP violation):
@@ -864,7 +870,8 @@ console open throughout (no error and no CSP violation):
    opens it in the Memories tab.
 2. Switch to Timeline and the 7 days, 30 days and All ranges: stars move to
    their saved dates, older ones leave the axis, auto-rotate pauses. Reload:
-   the Timeline is still the layout. Meaning and Similar memories are disabled.
+   the Timeline is still the layout. Meaning and Similar memories are disabled (in 0.6.0; 0.7.0 enables them once
+   vectors exist, §3.8).
 3. Press Simulate a recall and Simulate a write: sparks fly from the Claude
    core and the live strip lists them; `~/.claude/mnemosyne/activity.jsonl`
    gains no line and the Memories tab's counts do not change.
@@ -875,7 +882,144 @@ console open throughout (no error and no CSP violation):
 5. Set `extractionModel` to `off` and run `/mnemosyne-ui` again: it says the
    dashboard must be restarted; after a restart the Knowledge tab says
    extraction is off, and `/mnemosyne-tags` and `/mnemosyne-knowledge` refuse.
-6. Health: the counts match the Memories tab, and the Embeddings bar reads 0.
+6. Health: the counts match the Memories tab, and the Embeddings bar reads 0
+   (in 0.6.0; in 0.7.0 it counts the memories with a vector, §3.8).
+
+### 3.8 v0.7.0: embeddings and the Meaning layout
+
+v0.7.0 turns local embeddings on (C8 of the build plan `mnemosyne-070`), adds
+`/mnemosyne-embed` to fill vectors for older memories, and gives the dashboard
+a Meaning layout and Similar memories links over those vectors (SEMX on the
+server, SEM in the page). The engine build is `18.12.3-mnemosyne.7`
+(`engine/UPSTREAM.md`, changes 6 to 11). The code is what these notes record.
+
+- C8, the runtime fix (engine changes 6 and 7, `engine/package.json`,
+  `bin/install-engine.ts`, `engine/src/cli.ts`). fastembed 3.0.0 moves from an
+  optional dependency to a real one. `overrides` pin `onnxruntime-node` to
+  1.26.0 (fastembed pins 1.21.0, whose abort after an ONNX session is ORT
+  #24579) and `@anush008/tokenizers` to 0.6.0; `trustedDependencies` lists
+  `onnxruntime-node` so its native postinstall runs. Bun applies `overrides`
+  only from the install root, so `install-engine.ts` restates them on the
+  `.next/package.json` it writes. The CLI no longer calls `process.exit(code)`
+  when a command succeeds: it sets `process.exitCode = 0` and lets the loop
+  drain, because an explicit `process.exit()` after a model session still
+  aborts. A failing command still exits non-zero. Change 8 removes the engine's
+  on-demand `bun install` of fastembed: a failed import means embeddings off,
+  never a package installed behind the user's back.
+- C8, the pins (`hooks/engine.ts` `engineEnv`, both wrapper scripts in
+  `hooks/register.ts`, the install-check env in `bin/install-engine.ts`). The
+  embedding settings are local-only and fixed: `MNEMOPI_EMBEDDING_API_URL`,
+  `MNEMOPI_EMBEDDINGS_VIA_API`, `MNEMOPI_EMBEDDING_API_KEY`,
+  `MNEMOPI_EMBEDDING_DIM`, `OPENROUTER_BASE_URL`, `OPENROUTER_API_KEY` and
+  `OPENAI_API_KEY` are empty; `MNEMOPI_EMBEDDING_MODEL` is `BAAI/bge-small-en-v1.5`,
+  `HF_ENDPOINT` is `https://huggingface.co`, `PI_CONFIG_DIR` is
+  `.claude/mnemosyne/model-cache` and `MNEMOPI_EMBEDDINGS_API_OPT_IN` is `0`.
+  Why an empty string is not a pin: pi-utils' dotenv pass refills every falsy
+  environment key from `~/.env`, `<configRoot>/.env`, `<agentDir>/.env` and
+  `<cwd>/.env`, so a key pinned to `''` can be set again by a `.env` line. The
+  pins that matter are therefore non-empty (`MNEMOPI_EMBEDDING_MODEL`,
+  `HF_ENDPOINT`, `PI_CONFIG_DIR`, `MNEMOPI_EMBEDDINGS_API_OPT_IN=0`), and the
+  empty ones are made harmless by the gate below.
+- C8, the engine-side API gate (change 10, `engine/src/core/embeddings.ts`
+  `isApiModel`). It returns `false` unless `MNEMOPI_EMBEDDINGS_API_OPT_IN` is a
+  truthy flag. The plugin pins that to `0`, so an empty
+  `MNEMOPI_EMBEDDING_API_URL` can no longer fall back to an inherited
+  `OPENROUTER_BASE_URL` (outside agents such as Codex usually carry one, with a
+  key) and route memory text to a remote API. Local is the only route.
+- C8, the cache folder (change 11). The engine resolves the fastembed cache as
+  `<home>/<PI_CONFIG_DIR>/cache/fastembed` directly, not through pi-utils'
+  `getFastembedCacheDir()`, which also reads `XDG_CACHE_HOME`, `OMP_PROFILE`,
+  `PI_PROFILE` and `PI_CODING_AGENT_DIR` and rebuilds after the dotenv files
+  load; there an `XDG_CACHE_HOME=''` pin was not a pin, and a `~/.env` line made
+  the engine download the model mid-call. With `PI_CONFIG_DIR` unset (an engine
+  run outside the plugin) the `~/.omp/cache/fastembed` default is kept. The
+  model lives in `~/.claude/mnemosyne/model-cache/cache/fastembed/`.
+- C8, `embeddings` and the setup marker (`hooks/register.ts`). The
+  `embeddings` option is `auto` (default), `on` or `off`. `auto` means on only
+  on macOS arm64 (`uname -s` is `Darwin` and `uname -m` is `arm64`, asked by the
+  hook because it cannot read `process.arch`); elsewhere it is off unless set to
+  `on`. `/mnemosyne-setup` downloads the model only when the option resolves to
+  on, then writes `<root>/embeddings.json` (0600, renamed over the old file). An
+  engine run turns embeddings on (`MNEMOPI_NO_EMBEDDINGS` empty instead of `1`)
+  only when the option is not `off`, the marker exists and all five model files
+  are present, so no run ever downloads the model outside setup.
+- C8, the install check (`bin/install-engine.ts` `check`). With embeddings on,
+  the check runs the new engine's `tools/list`, one remember and one recall in
+  a throwaway store inside `.next`, with the same pins, and requires a clean
+  exit with no onnxruntime panic on stderr and a `memory_embeddings` row for
+  the remembered memory (a model that fails to load still answers in full text,
+  so a clean exit alone proves nothing). Any failure refuses the swap, keeps the
+  old engine, writes no marker, and setup tells the user to set `embeddings` to
+  `off` or re-run setup online.
+- C8, `reembed` and `/mnemosyne-embed` (change 9, `engine/src/cli.ts`;
+  `hooks/register.ts`). The engine's `reembed` has three modes. No argument is
+  a dry run: it counts the live memories with no vector for the active model
+  and writes nothing (it prints the `apply` hint only when something is
+  missing). `apply` runs the engine's own `reconcileEmbeddingModel` backfill and
+  drains its background work in one process; it never edits or deletes a
+  `working_memory` row and only writes `memory_embeddings`. After the drain it
+  recounts and exits non-zero naming how many remain, so a model that failed to
+  load cannot report success. `rebuild` is required when the store holds
+  vectors from another model, because the reconcile wipes every vector on a
+  model mismatch; `reembed` refuses that without `rebuild`, and `rebuild` first
+  proves the model loads by embedding one probe text before the wipe.
+  `/mnemosyne-embed` runs `bun <cli> reembed [apply|rebuild]` with the same pins
+  and a 600 s limit, and answers the last six lines of its output; it refuses
+  when the engine is missing or out of date or embeddings are off.
+- SEMX, the additions to C2 (`ui/server.ts`, `ui/semantic-worker.ts`).
+  `GET /api/galaxy` carries `meaning` (true only when a layout was computed)
+  and, on each memory that has a vector, `position` (three numbers) and
+  `similar` (`[{ id, score }]`, at most 3, cosine at least 0.65). Below 10
+  vectors (`MIN_MEANING_VECTORS`) or with no `memory_embeddings` table the reply
+  is the 0.6.0 one with `meaning: false`. The positions are UMAP over the stored
+  vectors (3 components, 15 neighbours, minDist 0.1, a fixed seed so the same
+  vectors give the same layout), computed in a `Worker`, never on the server's
+  loop, one worker per server, restarted if it dies or hangs (30 s per run).
+  Concurrent cold requests for one cache key share one run (in-flight
+  de-duplication), and a request waits at most 8 s (`MEANING_WAIT_MS`, below
+  Bun's 10 s idle timeout): if the layout is not ready it answers the topic
+  layout (`meaning: false`) and the run still lands in the cache for the next
+  request. The cache is `<root>/meaning.json`, written 0600 by rename and keyed
+  by the layout version, the model, the newest vector `created_at` and the ids;
+  it is removed when there are too few vectors, so it cannot outlive the
+  memories it names. The vector read is bound to the reply's own rows (the same
+  `WHERE`, `ORDER` and `LIMIT`, defined once), so `similar` never names a star
+  the reply dropped, a memory without a vector does not push out an older one
+  that has one, and only the model most vectors carry is used. The database is
+  only read.
+- C11, the dashboard option. `hooks/ui-launch.ts` passes
+  `MNEMOSYNE_EMBEDDINGS` (`on` only when the model is downloaded and the option
+  is not `off`, as `engineEnv` would send it); the server fixes it for its life,
+  records `{ pid, extraction, embeddings }` in `<root>/ui-extraction.json`, and
+  `/mnemosyne-ui` on a reused server whose recorded value differs says it must
+  be restarted.
+- SEM, the page (`ui/map-state.ts` holds every rule, `ui/map.ts` draws). Meaning
+  is the third layout: a memory with a `position` moves to it, a memory without
+  one sits on a flat "Not embedded" ring at the edge (radius at least 220, or 1.25
+  times the farthest embedded star), and project colours are kept. It reuses
+  the Timeline morph (1.4 s, none under reduced motion). The Similar memories
+  switch draws faint links between neighbours, and the inspector lists a
+  memory's neighbours with their project and a percentage. The Meaning button,
+  the switch and the Health tab's "Embeddings (meaning search)" bar show the one
+  hint `EMBEDDINGS_HINT`, "Turn on embeddings, then run /mnemosyne-embed apply",
+  while the reply says `meaning: false`. The Health bar now counts memories with
+  a vector (`coverage.embeddings`, `ui/server.ts` `healthReport`).
+
+Known limits of 0.7.0, recorded as they are:
+
+1. Embeddings are verified on macOS on Apple Silicon only. Windows and Linux
+   are not verified; under `auto` they are off.
+2. HOME and USERPROFILE on Windows. The hooks resolve the data root from `HOME`
+   and, on Windows, `USERPROFILE` (`paths()`); the engine resolves the model
+   cache against Node's `os.homedir()`. If the two differ on a machine, the model
+   may be looked for in a folder other than the one setup wrote. Not verified.
+3. `MNEMOPI_MCP_BANK=''` is an empty-string pin, so a `.env` line can refill it
+   and move writes to `<store>/banks/<x>`. This is older than 0.7.0 (v3) and is
+   not fixed here; the non-empty pins above are not affected.
+4. The API gate is an engine change: an engine without change 10 (the plain
+   npm build) would take the API route from an inherited `OPENROUTER_BASE_URL`.
+   The plugin refuses to use an engine that is not its own build for features
+   that need the changes (`isCurrent`).
 
 ## 4. Why a plugin, and why mod tools rather than an MCP server
 
