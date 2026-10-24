@@ -11,8 +11,8 @@ import type { Started } from '../../ui/server'
 import { body, engineCall, ROOT, tempDir, toolCall } from './helpers'
 
 // ui/knowledge.ts is DOM code (checked by ui/tsconfig.json): loaded by a path tsc does not follow.
-const { agoText, countText, daysAgo, extractionState, itemHead, KINDS, kindTabs, kpis, summaryLine, filterItems, hasStatus, usedBar, ownersOf, notice, parseKnowledge, rowsOf, statusOf, tableRows, total, usedText } = (await import(join(ROOT, 'ui', 'knowledge.ts'))) as Record<string, any>
-type KnowledgeHost = { project: (owner: string) => unknown; showOnMap: (id: string) => void; now: () => number }
+const { agoText, countText, daysAgo, extractionState, itemHead, KINDS, kindTabs, kpis, summaryLine, neverUsedText, filterItems, hasStatus, usedBar, ownersOf, notice, parseKnowledge, rowsOf, statusOf, tableRows, total, usedText } = (await import(join(ROOT, 'ui', 'knowledge.ts'))) as Record<string, any>
+type KnowledgeHost = { project: (owner: string) => unknown; showOnMap: (id: string) => void; open: (id: string, row: unknown) => void; now: () => number }
 type KnowledgeData = any
 
 const CLI = join(ROOT, 'engine', 'src', 'cli.ts')
@@ -143,13 +143,14 @@ describe('VIEWS.1: the Knowledge tab on a real store', () => {
     temp.dispose()
   })
 
-  const host = (shown: string[] = []): KnowledgeHost => ({
+  const host = (shown: string[] = [], opened: string[] = []): KnowledgeHost => ({
     project: owner => {
       const span = fakeDocument.createElement('span')
       span.textContent = owner
       return span
     },
     showOnMap: id => void shown.push(id),
+    open: id => void opened.push(id),
     now: () => now,
   })
 
@@ -173,11 +174,9 @@ describe('VIEWS.1: the Knowledge tab on a real store', () => {
       const again = kindTabs(data, 'fact', (kind: string) => picked.push(kind)) as unknown as FakeNode[]
       again[3]!.fire('click')
       expect(picked).toEqual(['timeline'])
-      let never = 0
-      const line = summaryLine(data, now, () => never++) as unknown as FakeNode[]
-      expect(line.map(node => node.textContent).join('')).toBe('6 items · 4 from memories recalled this week · 0 never used')
-      line.find(node => node.tagName === 'button')!.fire('click')
-      expect(never).toBe(1)
+      const line = summaryLine(data, now) as unknown as FakeNode[]
+      expect(line.map(node => node.textContent)).toEqual(['6 items', '4 recalled this week'])
+      expect(neverUsedText(data, now)).toBe('Never used · 0')
     })
   })
 
@@ -200,7 +199,8 @@ describe('VIEWS.1: the Knowledge tab on a real store', () => {
     // The table: six cells a row (seven with a Status column), Show on map hands the source memory to the map.
     await withDocument(() => {
       const shown: string[] = []
-      const rows = tableRows(data, 'fact', host(shown)) as unknown as FakeNode[]
+      const opened: string[] = []
+      const rows = tableRows(data, 'fact', host(shown, opened)) as unknown as FakeNode[]
       expect(rows).toHaveLength(2)
       expect(rows[0]!.children).toHaveLength(6)
       const button = rows[0]!.all().find(n => n.tagName === 'button')!
@@ -208,6 +208,10 @@ describe('VIEWS.1: the Knowledge tab on a real store', () => {
       expect((button as unknown as { title: string }).title).toContain('Show on map')
       button.fire('click')
       expect(shown).toEqual([ids.m1])
+      // The row itself opens the source memory (the bottom sheet).
+      expect(rows[0]!.className).toBe('row')
+      rows[0]!.fire('click')
+      expect(opened).toEqual([ids.m1])
       expect(rows[0]!.texts().join('|')).toContain('7')
       const old = (tableRows(data, 'timeline', host()) as unknown as FakeNode[])[0]!
       expect((old.children[5] as FakeNode).className).toContain('is-stale')

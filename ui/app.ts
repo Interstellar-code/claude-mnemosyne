@@ -15,7 +15,7 @@
 // Styles live in style.css: the CSP refuses inline ones.
 
 import { createMap, type MapView } from './map'
-import { extractionState, hasStatus, itemHead, NO_FILTER, ownersOf, summaryLine, kindTabs, notice as knowledgeNotice, dotClass, ownerColour, ownerColours, parseKnowledge, tableRows, total as knowledgeTotal, type KnowledgeData, type KnowledgeFilter, type KnowledgeSort, type KnowledgeHost, type KnowledgeKind } from './knowledge'
+import { extractionState, hasStatus, itemHead, NO_FILTER, neverUsedText, ownersOf, summaryLine, kindTabs, notice as knowledgeNotice, dotClass, ownerColour, ownerColours, parseKnowledge, tableRows, total as knowledgeTotal, type KnowledgeData, type KnowledgeFilter, type KnowledgeSort, type KnowledgeHost, type KnowledgeKind } from './knowledge'
 import { chartBars, chartText, coverageRows, dayBars, kpiTiles as healthKpiTiles, parseHealth, projectRows as healthProjectRows, storageList, storageSummary, tableFilterButtons, type HealthData, type HealthHost, type TableFilter } from './health'
 import { filterButtons, parseReview, reviewCounts, reviewList, reviewRow, reviewText, type ReviewData, type ReviewFilter, type ReviewHost } from './review'
 import { isClaudeRecall } from './recalls'
@@ -559,7 +559,7 @@ export function activityItem(line: ActivityLine, pickSession: (session: string) 
 }
 
 /** One Search hit: rank, project, score, text with the query words marked, tags and Open. */
-export function searchHit(hit: Hit, rank: number, query: string, open: (id: string) => void) {
+export function searchHit(hit: Hit, rank: number, query: string, open: (id: string, from?: HTMLElement) => void) {
   const item = el('li', undefined, 'hit')
   const head = el('div', undefined, 'hit-head')
   const score = el('span', 'score ', 'score push-right muted small')
@@ -576,7 +576,12 @@ export function searchHit(hit: Hit, rank: number, query: string, open: (id: stri
   const foot = el('div', undefined, 'hit-foot')
   const openButton = el('button', 'Open', 'link push-right')
   openButton.type = 'button'
-  openButton.addEventListener('click', () => open(hit.id))
+  openButton.addEventListener('click', () => open(hit.id, openButton))
+  // The whole card opens the memory too; its tag chips keep their own job.
+  item.addEventListener('click', event => {
+    if ((event.target as HTMLElement | null)?.closest?.('button')) return
+    open(hit.id, openButton)
+  })
   foot.append(chips(tagsOfMemory(hit)), el('span', `${hit.recall_count} recalls`, 'muted small'), openButton)
   item.append(head, text, foot)
   return item
@@ -745,7 +750,7 @@ function tabStatus(name: 'know' | 'review' | 'health', text: string, error = fal
   line.hidden = text === ''
   byId(`${name}-retry`).hidden = !error
 }
-const knowledgeHost: KnowledgeHost = { project: owner => project(owner, 'project'), showOnMap, now: () => Date.now() }
+const knowledgeHost: KnowledgeHost = { project: owner => project(owner, 'project'), showOnMap, open: (id, row) => void openMemory(id, row), now: () => Date.now() }
 
 /** Only the table body: the find box redraws it per keystroke. */
 function drawKnowledgeRows() {
@@ -769,12 +774,8 @@ export function drawKnowledge() {
       drawKnowledge()
     }),
   )
-  byId('know-summary').replaceChildren(
-    ...summaryLine(data, Date.now(), () => {
-      knowledgeView.filter.neverUsed = true
-      drawKnowledge()
-    }),
-  )
+  byId('know-summary').replaceChildren(...summaryLine(data, Date.now()))
+  byId('know-never').textContent = neverUsedText(data, Date.now())
   // The toolbar: the project select lists the owners present (the choice is kept while it is still there).
   const filter = knowledgeView.filter
   const ownerSelect = byId<HTMLSelectElement>('know-owner')
@@ -830,6 +831,12 @@ export function forgetById(id: string, done: (error?: string) => void) {
       else setStatus(`Memory ${id} is already gone; nothing was deleted.`, 'error')
       if (deleted) void loadHealth().catch(() => undefined)
       if (opened.has('memories')) void loadMemories()
+      if (opened.has('knowledge')) void loadKnowledge()
+      // Search: the forgotten hit leaves the list.
+      if (searchHits.some(hit => hit.id === id)) {
+        searchHits = searchHits.filter(hit => hit.id !== id)
+        drawHits(false)
+      }
       done()
     } catch (err) {
       if (!(err instanceof Expired)) done(`Forget failed: ${failure(err)}`)
@@ -1074,13 +1081,14 @@ function markSelected() {
 }
 
 /** Opens one memory in the bottom sheet: the sheet comes up at once, with the memory filled in when it arrives. */
-async function openMemory(id: string) {
+async function openMemory(id: string, from?: HTMLElement) {
   memories.selected = id
   markSelected()
-  // Focus goes back to the row on close (looked up then: the rows get redrawn).
+  // Focus goes back on close to the element that opened it (Knowledge, Search), else the
+  // Memories row (looked up then: the rows get redrawn).
   const sheet = {
     title: 'Memory',
-    returnFocus: () => [...byId('mem-rows').querySelectorAll<HTMLElement>('tr.row')].find(row => row.dataset.id === id) ?? null,
+    returnFocus: from ?? (() => [...byId('mem-rows').querySelectorAll<HTMLElement>('tr.row')].find(row => row.dataset.id === id) ?? null),
     onClose: () => {
       if (memories.selected === id) memories.selected = ''
       markSelected()
@@ -1100,7 +1108,7 @@ async function openMemory(id: string) {
     const memory = await readJson<Memory & { error?: string }>(response)
     if (!response.ok) throw new Error(memory.error ?? `the server answered ${response.status}`)
     if (memories.selected !== id) return
-    openSheet({ ...sheet, body: memoryDetail(memory, forgetMemory, setTagFilter) })
+    openSheet({ ...sheet, body: memoryDetail(memory, forgetMemory, pickTagFromSheet) })
   } catch (err) {
     if (memories.selected === id) closeSheet()
     if (!(err instanceof Expired)) setStatus(`Could not open the memory: ${failure(err)}`, 'error')
@@ -1109,6 +1117,12 @@ async function openMemory(id: string) {
 
 /** The memory panel's Forget: the shared guarded forget. */
 export const forgetMemory = (memory: Memory, done: (error?: string) => void) => forgetById(memory.id, done)
+
+/** A tag in the sheet: the Memories list filtered by it, from whichever tab the sheet is on. */
+function pickTagFromSheet(tag: string) {
+  if (current !== 'memories') show('memories')
+  setTagFilter(tag)
+}
 
 function wireMemories() {
   byId('mem-owner').addEventListener('change', () => void loadMemories())
@@ -1533,10 +1547,8 @@ function setEmbeddings(on: boolean) {
 // The first SHOW_FIRST hits, then SHOW_FIRST more for each press of Show more.
 function drawHits(more: boolean) {
   const results = byId('search-results')
-  const open = (id: string) => {
-    show('memories')
-    void openMemory(id)
-  }
+  // A hit opens in the bottom sheet, on this tab.
+  const open = (id: string, from?: HTMLElement) => void openMemory(id, from)
   const from = more ? searchShown : 0
   searchShown = Math.min(searchHits.length, more ? searchShown + SHOW_FIRST : SHOW_FIRST)
   const rows = searchHits.slice(from, searchShown).map((hit, i) => searchHit(hit, from + i + 1, searchQuery, open))

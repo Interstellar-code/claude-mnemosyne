@@ -260,6 +260,8 @@ export type KnowledgeHost = {
   project: (owner: string) => HTMLElement
   /** Show on map: select the source star (MapView.show, C10). */
   showOnMap: (memoryId: string) => void
+  /** A row picked: its source memory in the bottom sheet; focus goes back to the row on close. */
+  open: (memoryId: string, row: HTMLElement) => void
   now: () => number
 }
 
@@ -279,16 +281,23 @@ export function kindTabs(data: KnowledgeData, selected: KnowledgeKind, pick: (ki
   })
 }
 
-/** The one-line summary: '257 items · 193 from memories recalled this week · 64 never used'; the last part is a button that turns on the Never used filter. */
-export function summaryLine(data: KnowledgeData, now: number, showNeverUsed: () => void): HTMLElement[] {
-  const [all, recent, never] = kpis(data, now)
-  const sep = () => el('span', ' · ', 'muted')
-  const button = el('button', `${never!.value} never used`, 'link')
-  button.type = 'button'
-  button.title = 'Show only the items whose memory was never recalled'
-  button.addEventListener('click', showNeverUsed)
-  return [el('span', `${all!.value} items`), sep(), el('span', `${recent!.value} from memories recalled this week`), sep(), button]
+/** The summary as stats: '257 items', '193 recalled this week'; the never-used count rides on the Never used toggle (neverUsedText). */
+export function summaryLine(data: KnowledgeData, now: number): HTMLElement[] {
+  const [all, recent] = kpis(data, now)
+  const stat = (value: string, words: string, title: string) => {
+    const span = el('span', undefined, 'k-stat')
+    span.title = title
+    span.append(el('strong', value), document.createTextNode(` ${words}`))
+    return span
+  }
+  return [
+    stat(all!.value, 'items', 'Items of every kind the engine mined'),
+    stat(recent!.value, 'recalled this week', 'Items whose memory was recalled in the last 7 days'),
+  ]
 }
+
+/** The Never used toggle's words, with its count: 'Never used · 64'. */
+export const neverUsedText = (data: KnowledgeData, now: number) => `Never used · ${kpis(data, now)[2]!.value}`
 
 /** The table rows of one kind; an empty kind (or a filter that matches nothing) says so in one row. */
 export function tableRows(data: KnowledgeData, kind: KnowledgeKind, host: KnowledgeHost, filter: KnowledgeFilter = NO_FILTER): HTMLElement[] {
@@ -305,6 +314,22 @@ export function tableRows(data: KnowledgeData, kind: KnowledgeKind, host: Knowle
   const most = Math.max(...rows.map(row => row.recalls))
   return rows.map(row => {
     const tr = el('tr')
+    // The whole row opens its source memory; the Map link inside it keeps its own job.
+    if (row.memory !== '') {
+      tr.className = 'row'
+      tr.tabIndex = 0
+      tr.title = 'Open the memory this item came from'
+      tr.addEventListener('click', event => {
+        if ((event.target as HTMLElement | null)?.closest?.('button')) return
+        host.open(row.memory, tr)
+      })
+      tr.addEventListener('keydown', event => {
+        if (event.target === tr && (event.key === 'Enter' || event.key === ' ')) {
+          event.preventDefault()
+          host.open(row.memory, tr)
+        }
+      })
+    }
     const open = el('button', 'Map \u2197', 'link')
     open.type = 'button'
     open.title = 'Show on map: select the star of the memory this item came from'

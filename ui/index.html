@@ -295,12 +295,13 @@
     <div id="know-notice" class="notice" role="status" hidden></div>
     <div id="know-body" hidden>
       <div id="know-tabs" class="chips" role="group" aria-label="Knowledge kind"></div>
-      <p id="know-summary" class="small know-summary"></p>
+      <div class="know-bar">
+      <p id="know-summary" class="know-summary"></p>
       <div class="toolbar know-toolbar">
-        <label class="field">Project
+        <label class="field"><span class="sr-only">Project</span>
           <select id="know-owner" class="input"><option value="">All projects</option></select>
         </label>
-        <label class="field">Sort
+        <label class="field"><span class="sr-only">Sort</span>
           <select id="know-sort" class="input">
             <option value="newest">Newest</option>
             <option value="most">Most used</option>
@@ -308,10 +309,11 @@
             <option value="last">Last used</option>
           </select>
         </label>
-        <label class="field">Find
-          <input id="know-find" class="input filter" type="search" placeholder="Text or topic" maxlength="200" autocomplete="off">
+        <label class="field"><span class="sr-only">Find</span>
+          <input id="know-find" class="input filter" type="search" placeholder="Find text or topic" maxlength="200" autocomplete="off">
         </label>
         <button id="know-never" type="button" class="chip-btn" aria-pressed="false" title="Show only the items whose memory was never recalled">Never used</button>
+      </div>
       </div>
       <div class="table-wrap">
         <table class="table know-table">
