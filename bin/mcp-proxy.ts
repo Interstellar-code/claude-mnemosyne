@@ -19,6 +19,7 @@ import { dirname, join } from 'node:path'
 import { activityLine, callOutcome, callText, TOOL_ACTIONS } from '../hooks/activity-log'
 import type { ActivityAction } from '../hooks/activity-log'
 import { ENGINE_BUILD } from '../hooks/engine-build'
+import { admit } from '../hooks/guard'
 import { engineTool, mnemosyneStats, publicTool } from '../hooks/surface'
 import { cleanTags } from '../hooks/tags'
 import { appendActivity } from './activity'
@@ -61,7 +62,7 @@ const statsIds = new Set<unknown>()
 const send = (message: unknown) => process.stdout.write(`${JSON.stringify(message)}\n`)
 
 // The calls on their way to the engine, by JSON-RPC id: what to log once the reply comes back.
-type Pending = { action: ActivityAction; text: string; args: Record<string, unknown> }
+type Pending = { action: ActivityAction; text: string; args: Record<string, unknown>; warnings?: string[] }
 const pending = new Map<unknown, Pending>()
 
 // One activity line, written synchronously (so it is on disk before the proxy
@@ -76,11 +77,12 @@ function log(call: Pending, outcome: { ok: boolean; ids?: readonly string[]; cou
 }
 
 // A refused call of one of the five tools: logged now, as the engine never sees it.
-function refuse(id: unknown, action: ActivityAction | undefined, args: Record<string, unknown>, error: { code: number; message: string }) {
+// `logged` replaces the error text in the line (a guard block logs rule ids only).
+function refuse(id: unknown, action: ActivityAction | undefined, args: Record<string, unknown>, error: { code: number; message: string; data?: unknown }, logged?: string) {
   send({ jsonrpc: '2.0', id, error })
   if (!action) return
   try {
-    log({ action, text: callText(action, args), args }, { ok: false, error: error.message })
+    log({ action, text: callText(action, args), args }, { ok: false, error: logged ?? error.message })
   } catch {
     // as in log(): never reaches the client
   }
@@ -138,6 +140,24 @@ void (async () => {
         refuse(message.id, action, given, { code: -32000, message: reason })
         continue
       }
+      // GUARD.2: the same admission check as the plugin's own tools, before anything reaches the engine.
+      // A block is refused with the rule ids; the line holds the ids only, never the text.
+      let warned: ReturnType<typeof admit>['hits'] = []
+      if (name === 'memory_remember' || (name === 'memory_update' && typeof given.content === 'string')) {
+        const guard = admit({ content: given.content as string, kind: typeof given.kind === 'string' ? given.kind : undefined, origin: 'proxy' })
+        const ids = [...new Set(guard.hits.map(hit => hit.rule))]
+        if (guard.verdict === 'block') {
+          refuse(
+            message.id,
+            action,
+            {},
+            { code: -32602, message: `The save guard blocked this save (${ids.join(', ')}). ${guard.hits.map(hit => hit.message).join(' ')}`, data: { rules: ids } },
+            `guard:${ids.join(',')}`,
+          )
+          continue
+        }
+        if (guard.verdict === 'warn') warned = guard.hits
+      }
       const { bank: _bank, metadata: _metadata, tags, ...args } = given
       if (TAGGED.has(name) && tags !== undefined) {
         if (!Array.isArray(tags)) {
@@ -155,7 +175,16 @@ void (async () => {
         if (typeof importance === 'number' && Number.isFinite(importance)) args.importance = Math.min(1, Math.max(0, importance))
         else delete args.importance
       }
-      if (action && message.id !== undefined) pending.set(message.id, { action, text: callText(action, { ...args, tags: Array.isArray(tags) ? cleanTags(tags) : undefined }), args: { ...args } })
+      // A warned save is stored, flagged with the rule ids in metadata.guard.
+      if (warned.length > 0) args.metadata = { ...(args.metadata as object | undefined), guard: [...new Set(warned.map(hit => hit.rule))] }
+      if (action && message.id !== undefined) {
+        pending.set(message.id, {
+          action,
+          text: callText(action, { ...args, tags: Array.isArray(tags) ? cleanTags(tags) : undefined }),
+          args: { ...args },
+          ...(warned.length > 0 ? { warnings: warned.map(hit => `Mnemosyne guard warning: ${hit.message}`) } : {}),
+        })
+      }
       message.params.name = engineTool(name)
       message.params.arguments = args
       if (name === 'memory_stats') statsIds.add(message.id)
@@ -214,10 +243,13 @@ for await (const line of lines(engine.stdout)) {
   const call = pending.get(message?.id)
   pending.delete(message?.id)
   if (statsIds.delete(message?.id) && typeof text?.text === 'string') text.text = mnemosyneStats(text.text)
+  const replyText = String(text?.text ?? '')
+  const failure = message?.error?.message ?? (message?.result?.isError ? String(text?.text ?? 'failed') : undefined)
+  // One warning line per hit, after the engine's reply.
+  if (call?.warnings && failure === undefined && typeof text?.text === 'string') text.text = `${text.text}\n${call.warnings.join('\n')}`
   send(message)
   if (call) {
-    const failure = message?.error?.message ?? (message?.result?.isError ? String(text?.text ?? 'failed') : undefined)
-    log(call, failure !== undefined ? { ok: false, error: failure } : callOutcome(call.action, call.args, String(text?.text ?? '')))
+    log(call, failure !== undefined ? { ok: false, error: failure } : callOutcome(call.action, call.args, replyText))
   }
 }
 // A call the engine never answered still gets its line before the proxy exits.

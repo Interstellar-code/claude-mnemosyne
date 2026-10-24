@@ -41,6 +41,8 @@ import { buildRequests, EMBEDDINGS_CACHE_DIR, EMBEDDINGS_MODEL, engineEnv, parse
 import type { EngineRequest } from './engine'
 import { ENGINE_BUILD, SETUP_TIMEOUT_MS } from './engine-build'
 import { mnemosyneStats } from './surface'
+import { admit } from './guard'
+import type { GuardResult } from './guard'
 import { cleanTags } from './tags'
 import { openDashboard, stopDashboard } from './ui-launch'
 
@@ -1253,10 +1255,18 @@ export const register: Register = (on, options) => {
     const as = ownsRow && typeof input.owner === 'string' && input.owner ? input.owner : undefined
     // A memory_* name outside the five is not a memory call: not logged.
     const action = TOOL_ACTIONS[tool]
+    // GUARD.2: the text of a save is checked before anything else. A block never starts an
+    // engine process and never consumes the remember trigger, so the retry is still the human's.
+    const saves = tool === 'memory_remember' || (tool === 'memory_update' && typeof input.content === 'string')
+    const guard: GuardResult | undefined = saves
+      ? admit({ content: input.content as string, kind: typeof input.kind === 'string' ? input.kind : undefined, origin: 'tool' })
+      : undefined
+    const guardIds = guard === undefined ? [] : [...new Set(guard.hits.map(hit => hit.rule))]
+    const warnIds = guard?.verdict === 'warn' ? guardIds : []
     // KNOWX.1: only the main thread's first save after a remember phrase is the
     // human's. A subagent's event carries an agentId and never consumes the trigger.
     let provenance: { author_type: 'human'; veracity: 'stated' } | undefined
-    if (tool === 'memory_remember' && e.agentId === undefined) {
+    if (tool === 'memory_remember' && e.agentId === undefined && guard?.verdict !== 'block') {
       const session = await $.session.id().catch(() => undefined)
       if (session !== undefined) {
         // Consumed inside the updater, which sees the value as it is when the update lands: of two saves at once only one takes it.
@@ -1272,6 +1282,9 @@ export const register: Register = (on, options) => {
     }
     const answer = await (async (): Promise<{ result: string; reply: string } | { deny: string }> => {
       try {
+        if (guard?.verdict === 'block') {
+          return { deny: `Mnemosyne: the save guard blocked this save (${guardIds.join(', ')}). ${guard.hits.map(hit => hit.message).join(' ')}` }
+        }
         if (tool === 'memory_update') {
           const refused = updateArgs(input)
           if (typeof refused === 'string') return { deny: `Mnemosyne: ${refused}` }
@@ -1284,17 +1297,26 @@ export const register: Register = (on, options) => {
         const [name, args] = engineArgs(tool, input)
         // The trigger save is the person's: human, with veracity 'stated'.
         const withProvenance = provenance === undefined ? args : { ...args, ...provenance }
-        const text = await call($, options, name, withProvenance, as)
-        return { reply: text, result: name === 'mnemopi_recall' ? JSON.stringify(compact(text)) : name === 'mnemopi_stats' ? mnemosyneStats(text) : text }
+        // A warned save is stored, flagged with the rule ids in metadata.guard.
+        const sent: Record<string, unknown> =
+          warnIds.length > 0
+            ? { ...withProvenance, metadata: { ...(withProvenance as { metadata?: object }).metadata, guard: warnIds } }
+            : withProvenance
+        const text = await call($, options, name, sent, as)
+        // One warning line per hit, after the engine's reply; `reply` stays the engine's own text.
+        const warnings = warnIds.length > 0 ? guard!.hits.map(hit => `\nMnemosyne guard warning: ${hit.message}`).join('') : ''
+        return { reply: text, result: name === 'mnemopi_recall' ? JSON.stringify(compact(text)) : name === 'mnemopi_stats' ? mnemosyneStats(text) : `${text}${warnings}` }
       } catch (err) {
         return { deny: `Mnemosyne: ${(err as Error).message}` }
       }
     })()
     if (action !== undefined) {
-      const outcome = 'deny' in answer ? { ok: false, error: answer.deny } : callOutcome(action, input, answer.reply)
+      const blocked = guard?.verdict === 'block'
+      // A blocked call logs its rule ids only: no content text, in the line or the error.
+      const outcome = blocked ? { ok: false, error: `guard:${guardIds.join(',')}` } : 'deny' in answer ? { ok: false, error: answer.deny } : callOutcome(action, input, answer.reply)
       // Tags as the engine gets them, cleaned, as the proxy logs them.
       const shown = Array.isArray(input.tags) ? { ...input, tags: cleanTags(input.tags) } : input
-      await record($, options, [{ action, origin: 'tool', owner: as, text: callText(action, shown), ...outcome, ...(provenance ?? {}) }])
+      await record($, options, [{ action, origin: 'tool', owner: as, text: blocked ? '' : callText(action, shown), ...outcome, ...(provenance ?? {}) }])
     }
     // A successful save (or a content update) starts extraction after the reply.
     // A tags-only or importance-only update changes no text, so it extracts nothing.

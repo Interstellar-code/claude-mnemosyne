@@ -212,6 +212,64 @@ describe('the proxy against a real installed engine', () => {
     ])
   })
 
+  // GUARD.2: the same admission check as the plugin's own tools, before anything reaches the engine.
+  const rowCount = () => {
+    if (!existsSync(join(store, 'mnemopi.db'))) return 0
+    const db = new Database(join(store, 'mnemopi.db'), { readonly: true })
+    try {
+      return (db.query('SELECT COUNT(*) AS n FROM working_memory').get() as { n: number }).n
+    } finally {
+      db.close()
+    }
+  }
+  const AWS_KEY = 'AKIA' + 'IOSFODNN7EXAMPLE'
+
+  test('GUARD.2: a blocked remember or content update is a -32602 error with the rule ids, nothing is stored, and the line holds ids only', async () => {
+    const log = join(temp.dir, 'logs-guard-block', 'activity.jsonl')
+    const before = rowCount()
+    const replies = await proxy(cli, store, [
+      toolCall(1, 'memory_remember', { content: `the bucket key is ${AWS_KEY} for the deploy` }),
+      toolCall(2, 'memory_remember', { content: 'tiny' }),
+      toolCall(3, 'memory_update', { memory_id: 'm1', content: `password=hunter2hunter2hunter2 for the deploy` }),
+      toolCall(4, 'memory_stats', {}),
+    ], 'global', log)
+    for (const [id, rule] of [[1, 'G1'], [2, 'G2'], [3, 'G1']] as const) {
+      expect(replies.get(id).error.code).toBe(-32602)
+      expect(replies.get(id).error.message).toContain(rule)
+      expect(replies.get(id).error.data).toEqual({ rules: [rule] })
+      expect(replies.get(id).result).toBeUndefined()
+    }
+    expect(JSON.stringify([...replies.values()]).includes(AWS_KEY)).toBe(false)
+    expect(text(replies.get(4)).status).toBe('ok') // other calls still work
+    expect(rowCount()).toBe(before)
+    const lines = logLines(log)
+    expect(lines.map(l => [l.action, l.origin, l.ok, l.error, l.text])).toEqual([
+      ['remember', 'external', false, 'guard:G1', ''],
+      ['remember', 'external', false, 'guard:G2', ''],
+      ['update', 'external', false, 'guard:G1', ''],
+      ['stats', 'external', true, undefined, ''],
+    ])
+    const written = readFileSync(log, 'utf8')
+    for (const piece of [AWS_KEY, 'hunter2', 'bucket', 'tiny']) expect(written.includes(piece)).toBe(false)
+  })
+
+  test('GUARD.2: a warned remember is stored with metadata.guard beside its tags, and the reply carries one warning line per hit', async () => {
+    const log = join(temp.dir, 'logs-guard-warn', 'activity.jsonl')
+    const replies = await proxy(cli, store, [
+      toolCall(1, 'memory_remember', { content: 'Today the importer was rewired to use the guard module', tags: ['Ops'] }),
+      toolCall(2, 'memory_remember', { content: 'The plugin keeps its memories in one local SQLite file.' }),
+    ], 'global', log)
+    const [reply, ...warnings] = String(replies.get(1).result.content[0].text).split('\nMnemosyne guard warning: ')
+    const id = JSON.parse(reply!).memory_id
+    expect(warnings.length).toBe(1)
+    expect(warnings[0]).toContain('G4')
+    expect(metadataOf(id)).toEqual({ tags: ['ops'], guard: ['G4'] })
+    // a clean save: no extra lines, no guard key
+    expect(replies.get(2).result.content[0].text.includes('guard warning')).toBe(false)
+    expect(metadataOf(text(replies.get(2)).memory_id)).toBeNull()
+    expect(logLines(log).map(l => [l.action, l.ok])).toEqual([['remember', true], ['remember', true]])
+  })
+
   test('memory_update refused on a stale engine logs ok false', async () => {
     const log = join(temp.dir, 'logs-3', 'activity.jsonl')
     const pkgPath = join(engine, 'node_modules', '@oh-my-pi', 'pi-mnemopi', 'package.json')
