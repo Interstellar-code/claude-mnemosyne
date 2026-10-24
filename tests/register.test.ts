@@ -1005,6 +1005,29 @@ for (const activityLog of ['on', 'off']) {
   })
 }
 
+test('META.2 (HARDEN NB2): both mnemosyne-mcp wrappers pin MNEMOPI_MCP_BANK=default, never empty', { options: { externalMcp: true } }, async ($, on) => {
+  const sh = await wrapperText($, on)
+  expect(sh).toContain('export MNEMOPI_MCP_BANK=default\n')
+  expect(sh).not.toMatch(/MNEMOPI_MCP_BANK=\s*$/m)
+})
+
+test('META.2 (HARDEN NB2): the Windows cmd wrapper pins MNEMOPI_MCP_BANK=default, never empty', { options: { externalMcp: true } }, async ($, on) => {
+  const runs: { argv: readonly string[] }[] = []
+  on('env.get', (_$, e) => ({ value: ({ OS: 'Windows_NT', USERPROFILE: 'C:\\Users\\u' } as Record<string, string>)[(e as { name: string }).name] }))
+  on('fs.stat', () => ({ value: { kind: 'file' } }) as never)
+  on('process.run', (_$, e) => {
+    runs.push(e)
+    return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
+  })
+  on('command.register', () => ({ value: {} }) as never)
+  on('tool.register', () => ({ value: {} }) as never)
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: 'C:\\w', surface: null, isInteractive: false } as never)
+  const text = runs.find(r => r.argv[2]?.includes('writeFileSync'))?.argv[4] ?? ''
+  expect(text).toContain('set "MNEMOPI_MCP_BANK=default"\r\n')
+  expect(text).not.toContain('set "MNEMOPI_MCP_BANK="\r\n')
+})
+
 // ---- TAGS.1: Claude passes tags when it remembers ----
 
 test('TAGS.1.a1: the rules text asks for 2 to 5 short lowercase topic tags per saved fact, and is the same fixed text every time', async ($, on) => {
