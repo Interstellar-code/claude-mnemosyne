@@ -10,8 +10,7 @@ import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { GOOD_REPLY, makeHost, until } from './knowledge-host'
 import type { Host, ModelAnswer, Ran } from './knowledge-host'
-import { body, engineCall, engineEnv, ROOT, tempDir, toolCall } from './helpers'
-import { isolatedEnv } from './helpers'
+import { body, engineCall, engineEnv, isolatedEnv, ROOT, tempDir, toolCall } from './helpers'
 
 setDefaultTimeout(30_000)
 const hosts: Host[] = []

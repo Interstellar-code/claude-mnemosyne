@@ -8,8 +8,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { engineEnv, EMBEDDINGS_CACHE_DIR, EMBEDDINGS_MODEL } from '../../hooks/engine'
-import { ROOT, toolCall } from './helpers'
-import { isolatedEnv } from './helpers'
+import { isolatedEnv, ROOT, toolCall } from './helpers'
 
 const CLI = join(ROOT, 'engine', 'src', 'cli.ts')
 const dirs: string[] = []

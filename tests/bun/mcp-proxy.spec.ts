@@ -8,8 +8,7 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'no
 import { join } from 'node:path'
 import { cliOf } from '../../bin/install-engine'
 import { ENGINE_BUILD } from '../../hooks/engine-build'
-import { engineEnv, ROOT, runInstaller, tempDir, toolCall } from './helpers'
-import { isolatedEnv } from './helpers'
+import { engineEnv, isolatedEnv, ROOT, runInstaller, tempDir, toolCall } from './helpers'
 
 const PROXY = join(ROOT, 'bin', 'mcp-proxy.ts')
 

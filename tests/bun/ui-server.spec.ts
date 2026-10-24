@@ -119,7 +119,7 @@ const HOOK_PING_ENV = {
 
 /** The hook's health check, as it runs it: `bun ui/server.ts --ping <port> <pid>`, the token on stdin. */
 async function runPing(port: number, pid: number, token: string, env: Record<string, string> = {}) {
-  const child = Bun.spawn([process.execPath, SERVER, '--ping', String(port), String(pid)], { env: { ...isolatedEnv(), ...(process.env as Record<string, string>), ...env },
+  const child = Bun.spawn([process.execPath, SERVER, '--ping', String(port), String(pid)], { env: { ...(process.env as Record<string, string>), ...isolatedEnv(), ...env },
     stdin: new Blob([token]),
     stdout: 'ignore',
     stderr: 'ignore',

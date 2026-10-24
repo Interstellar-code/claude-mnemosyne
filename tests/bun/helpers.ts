@@ -32,8 +32,16 @@ export function isolatedEnv(prefix = 'isolated') {
   // tests offline-fast and writes no logs to the real home.
   return { HOME: home, PI_CONFIG_DIR: piConfig, BUN_INSTALL_CACHE_DIR: process.env.BUN_INSTALL_CACHE_DIR || join(REAL_HOME, '.bun', 'install', 'cache') }
 }
-function _cleanupIsolated() { for (const h of _isolatedHomes) { try { rmSync(h, { recursive: true, force: true }) } catch {} } } // rmSync removes the cache symlink, not its target
-process.on('exit', _cleanupIsolated)
+// Removes every temp home isolatedEnv() made (rmSync removes the cache symlink, not its target).
+// `bun test` never fires process 'exit', so tests/bun/cleanup-preload.ts (bunfig.toml) calls this
+// from an afterAll once the whole run is done; a plain script still gets it from 'exit'.
+export function cleanupIsolated() {
+  for (const home of _isolatedHomes) {
+    try { rmSync(home, { recursive: true, force: true }) } catch {}
+  }
+  _isolatedHomes.clear()
+}
+process.on('exit', cleanupIsolated)
 
 export async function runInstaller(engineDir: string, storeDir: string, env: Record<string, string> = {}) {
   const child = Bun.spawn([process.execPath, INSTALLER, ROOT, engineDir, storeDir], {
@@ -48,12 +56,10 @@ export async function runInstaller(engineDir: string, storeDir: string, env: Rec
 // The engine variables, from the one place the hooks and the server take them (SRV.1).
 export { engineEnv } from '../../hooks/engine'
 
+/** One engine process answering raw JSON-RPC messages; the parsed replies by id. */
 export async function engineCall(cli: string, store: string, owner: string, messages: readonly object[]) {
-  const home = mkdtempSync(join(tmpdir(), 'mnemosyne-enginehome-'))
-  const piConfig = join(home, '.claude', 'mnemosyne', 'model-cache')
-  mkdirSync(piConfig, { recursive: true })
   const child = Bun.spawn([process.execPath, cli, 'mcp'], {
-    env: { ...(process.env as Record<string, string>), ...engineEnv(store, owner), HOME: home, PI_CONFIG_DIR: piConfig },
+    env: { ...(process.env as Record<string, string>), ...engineEnv(store, owner), ...isolatedEnv('enginehome') },
     stdin: 'pipe',
     stdout: 'pipe',
     stderr: 'pipe',
