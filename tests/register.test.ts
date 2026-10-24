@@ -208,7 +208,8 @@ test('META.1.a3: the rules text asks for a kind and says to update or replace ra
   expect(rules).toContain('pass kind:')
   for (const name of ['fact', 'preference', 'instruction', 'decision', 'context', 'error', 'artifact', 'event']) expect(rules).toContain(name)
   expect(rules).toContain('near-duplicate')
-  expect(rules).toMatch(/update it \(or replace it/)
+  // META.4: replacing is saving the new fact with replaces: the old id.
+  expect(rules).toMatch(/update it \(or save the new fact with replaces: the old id/)
 })
 
 // ---- META.3: G3, a save warns about near-duplicates ----
@@ -342,6 +343,141 @@ test('META.3: a stale engine skips the check (mnemopi_similar needs this build) 
   const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: NEAR_TEXT, kind: 'fact' })
   expect(ran.deny).toBeUndefined()
   expect(names(runs)).toEqual(['mnemopi_remember'])
+})
+
+// ---- META.4: replaces retires the superseded row ----
+
+const OLD_ID = '0123456789abcdef'
+const NEW_ID = 'a1b2c3d4e5f60718'
+const retireWorld = (on: On, invalidateReply: string = '{"status":"invalidated","memory_id":"0123456789abcdef"}', extra: Extra = {}) =>
+  world(on, STORED_REPLY, true, 0, ENGINE_BUILD, {
+    replyFor: name => (name === 'mnemopi_invalidate' ? invalidateReply : undefined),
+    ...extra,
+  })
+const REPLACING = 'We now deploy the service on Mondays and Thursdays.'
+
+test('META.4.a1: replaces retires the old row after the save, as claude-code, pointing at the new id', async ($, on) => {
+  const runs = retireWorld(on)
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: REPLACING, kind: 'fact', replaces: OLD_ID })
+  expect(ran.deny).toBeUndefined()
+  expect(names(runs)).toEqual(['mnemopi_remember', 'mnemopi_invalidate'])
+  expect(request(runs[1]!).arguments).toEqual({ memory_id: OLD_ID, replacement_id: NEW_ID, validator: 'claude-code' })
+  // The save itself carries no replaces and no owner: the new row is this project's.
+  expect(request(runs[0]!).arguments.replaces).toBeUndefined()
+  expect(request(runs[0]!).arguments.owner).toBeUndefined()
+  expect(runs[1]!.init?.env?.MNEMOPI_SESSION_ID).toBe('global')
+  const [reply, line] = String(ran.result).split('\n')
+  expect(reply).toBe(STORED_REPLY)
+  expect(line).toContain(`retired ${OLD_ID}, replaced by ${NEW_ID}`)
+  expect(line).toContain('can be restored')
+})
+
+test('META.4.a1: with owner the old row is retired as that owner, while the save stays this project\'s', async ($, on) => {
+  const runs = retireWorld(on)
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: REPLACING, kind: 'fact', replaces: OLD_ID, owner: 'project-Other-abc' })
+  expect(runs[0]!.init?.env?.MNEMOPI_SESSION_ID).toBe('global')
+  expect(runs[1]!.init?.env?.MNEMOPI_SESSION_ID).toBe('project-Other-abc')
+})
+
+test('META.4.a4: the activity log gets a retire line with both ids, the owner and no memory text', async ($, on) => {
+  const runs = retireWorld(on)
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: REPLACING, kind: 'fact', replaces: OLD_ID, owner: 'project-Other-abc' })
+  const got = lines(runs)
+  expect(got.map(entry => [entry.action, entry.ok])).toEqual([['remember', true], ['retire', true]])
+  expect(got[1]).toMatchObject({ action: 'retire', origin: 'tool', owner: 'project-Other-abc', ids: [OLD_ID, NEW_ID], count: 1, ok: true })
+  expect(JSON.stringify(got[1])).not.toContain('Mondays')
+})
+
+test('META.4.a2: an unknown id, or a row of another owner, fails that step with a clear line; the new memory stays saved', async ($, on) => {
+  const runs = retireWorld(on, '{"status":"not_found","memory_id":"0123456789abcdef"}')
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: REPLACING, kind: 'fact', replaces: OLD_ID, owner: 'project-Other-abc' })
+  expect(ran.deny).toBeUndefined()
+  const [reply, line] = String(ran.result).split('\n')
+  expect(reply).toBe(STORED_REPLY)
+  expect(line).toContain(`replaces ${OLD_ID} did not retire it`)
+  expect(line).toContain(`no memory ${OLD_ID} found for owner project-Other-abc`)
+  expect(line).toContain(`The new memory is saved (${NEW_ID})`)
+  expect(lines(runs).map(entry => [entry.action, entry.ok])).toEqual([['remember', true], ['retire', false]])
+  expect(lines(runs)[1]!.error).toContain('no memory')
+})
+
+test('META.4.a2: an engine answer that cannot be read is a line too, never a failed save', async ($, on) => {
+  retireWorld(on, 'not json')
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: REPLACING, kind: 'fact', replaces: OLD_ID })
+  expect(ran.deny).toBeUndefined()
+  expect(String(ran.result)).toContain(`replaces ${OLD_ID} did not retire it`)
+  expect(String(ran.result).split('\n')[0]).toBe(STORED_REPLY)
+})
+
+test('META.4: replaces naming the memory just saved (the same text again) retires nothing', async ($, on) => {
+  const runs = retireWorld(on)
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: REPLACING, kind: 'fact', replaces: NEW_ID })
+  expect(names(runs)).toEqual(['mnemopi_remember'])
+  expect(String(ran.result)).toContain('nothing to retire')
+  expect(String(ran.result).split('\n')[0]).toBe(STORED_REPLY)
+})
+
+test('META.4: a bad replaces or owner is refused before anything runs', async ($, on) => {
+  const runs = retireWorld(on)
+  for (const extra of [{ replaces: 'a b; c' }, { replaces: 7 }, { replaces: 'x'.repeat(65) }, { replaces: OLD_ID, owner: '../x' }, { replaces: OLD_ID, owner: 5 }]) {
+    const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: REPLACING, kind: 'fact', ...extra } as never)
+    expect(ran.deny).toMatch(/replaces must be the id|owner must be the owner/)
+  }
+  expect(runs.length).toBe(0)
+})
+
+test('META.4: a save the guard refuses retires nothing', async ($, on) => {
+  const runs = retireWorld(on)
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'Today the importer was rewired to use the guard module', kind: 'fact', replaces: OLD_ID })
+  expect(ran.deny).toContain('G4')
+  expect(runs.length).toBe(0)
+})
+
+test('META.4: the row named in replaces is not warned about as a near-duplicate; another close row still is', async ($, on) => {
+  const similar = (id: string) => JSON.stringify({ embeddings: true, matches: [{ id, owner: 'global', score: 0.95, preview: 'We deploy the service on Mondays only' }] })
+  const own = world(on, STORED_REPLY, true, 0, ENGINE_BUILD, {
+    embeddingsReady: true,
+    replyFor: name => (name === 'mnemopi_similar' ? similar(OLD_ID) : name === 'mnemopi_invalidate' ? '{"status":"invalidated"}' : undefined),
+  })
+  const replaced = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: REPLACING, kind: 'fact', replaces: OLD_ID })
+  expect(replaced.deny).toBeUndefined()
+  expect(names(own)).toEqual(['mnemopi_similar', 'mnemopi_remember', 'mnemopi_invalidate'])
+  // The remember request has no near-duplicate flag for the replaced row.
+  expect('metadata' in request(own[1]!).arguments).toBe(false)
+})
+
+test('META.4: another close row is still a near-duplicate when replaces names a different one', async ($, on) => {
+  const runs = world(on, STORED_REPLY, true, 0, ENGINE_BUILD, {
+    embeddingsReady: true,
+    replyFor: name => (name === 'mnemopi_similar' ? JSON.stringify({ embeddings: true, matches: [{ id: 'ffffffffffffffff', owner: 'global', score: 0.95, preview: 'We deploy the service on Mondays only' }] }) : undefined),
+  })
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: REPLACING, kind: 'fact', replaces: OLD_ID })
+  expect(ran.deny).toContain('ffffffffffffffff')
+  expect(names(runs)).toEqual(['mnemopi_similar'])
+})
+
+test('META.4: no replaces, no retire: a plain save runs one engine request', async ($, on) => {
+  const runs = retireWorld(on)
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: REPLACING, kind: 'fact' })
+  expect(names(runs)).toEqual(['mnemopi_remember'])
+  expect(ran.result).toBe(STORED_REPLY)
+  expect(lines(runs).map(entry => entry.action)).toEqual(['remember'])
+})
+
+test('META.4: both tools list replaces and owner is described as the replaced row\'s owner', async ($, on) => {
+  world(on, '{}')
+  const registered: { name: string; inputSchema: { properties: Record<string, { description?: string }> } }[] = []
+  on('tool.register', (_$, e) => {
+    registered.push(e as never)
+    return { value: {} } as never
+  })
+  on('command.register', () => ({ value: {} }) as never)
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/w', surface: null, isInteractive: false } as never)
+  const remember = registered.find(t => t.name === 'memory_remember')!
+  expect(remember.inputSchema.properties.replaces?.description).toContain('retired')
+  expect(remember.inputSchema.properties.owner?.description).toContain('With replaces')
 })
 
 test('per-project keeps a repo bank and still writes global on request', { options: { scope: 'per-project' } }, async ($, on) => {

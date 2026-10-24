@@ -696,3 +696,117 @@ describe('META.2: the save paths write honest source, trust tier and veracity', 
     expect(files.length).toBeGreaterThan(10)
   })
 })
+
+// META.4: replaces retires the row a save supersedes, through the real hooks/register.ts over the real engine.
+describe('META.4: replaces retires, never deletes', () => {
+  const hosts: Host[] = []
+  const open = async (options: Record<string, unknown> = {}) => {
+    const host = await makeHost({ options: { extractionModel: 'off', ...options } })
+    hosts.push(host)
+    return host
+  }
+  afterAll(() => {
+    for (const host of hosts.splice(0)) host.dispose()
+  })
+  const CLI = join(ROOT, 'engine', 'src', 'cli.ts')
+  type Row = { id: string; content: string; session_id: string; scope: string; valid_until: string | null; superseded_by: string | null }
+  const rowOf = (host: Host, id: string) => {
+    const db = new Database(join(host.store, 'mnemopi.db'), { readonly: true })
+    try {
+      return db.query('SELECT id, content, session_id, scope, valid_until, superseded_by FROM working_memory WHERE id = ?').get(id) as Row | null
+    } finally {
+      db.close()
+    }
+  }
+  const auditOf = (host: Host, id: string) => {
+    const db = new Database(join(host.store, 'mnemopi.db'), { readonly: true })
+    try {
+      return db.query('SELECT validator, action FROM memory_validations WHERE memory_id = ? ORDER BY validation_id').all(id) as { validator: string; action: string }[]
+    } finally {
+      db.close()
+    }
+  }
+  const first = (reply: { result?: string }) => JSON.parse(String(reply.result).split('\nMnemosyne')[0]!)
+  const recalled = async (host: Host, query: string) => (JSON.parse((await host.tool('memory_recall', { query })).result!) as { id: string }[]).map(row => row.id)
+  /** A row written straight through the engine as another owner, the way an older project's memory sits in the store. */
+  const seed = async (host: Host, owner: string, content: string, scope: string) =>
+    (body((await engineCall(CLI, host.store, owner, [toolCall(1, 'mnemopi_remember', { content, scope, source: 'claude-code', trust_tier: 'DERIVED' })])).get(1))!.memory_id as string)
+
+  test('META.4.a1/a3/a4: the old row is retired as claude-code, recall stops returning it, nothing is deleted, restore brings it back, and the log has a retire line', async () => {
+    const host = await open()
+    const old = first(await host.tool('memory_remember', { content: 'The staging cluster runs on the blue network segment.', kind: 'fact' })).memory_id as string
+    expect(await recalled(host, 'staging cluster blue network')).toContain(old)
+    const saved = await host.tool('memory_remember', { content: 'The staging cluster now runs on the green network segment.', kind: 'fact', replaces: old })
+    expect(saved.deny).toBeUndefined()
+    const fresh = first(saved).memory_id as string
+    expect(String(saved.result)).toContain(`retired ${old}, replaced by ${fresh}`)
+
+    // Retired, not deleted.
+    const retired = rowOf(host, old)!
+    expect(retired.content).toBe('The staging cluster runs on the blue network segment.')
+    expect(retired.superseded_by).toBe(fresh)
+    expect(retired.valid_until).not.toBeNull()
+    expect(rowOf(host, fresh)).toMatchObject({ superseded_by: null, valid_until: null })
+    // Recall no longer returns it; the new row is found.
+    const after = await recalled(host, 'staging cluster network segment')
+    expect(after).toContain(fresh)
+    expect(after).not.toContain(old)
+    // The audit trail names who retired it.
+    expect(auditOf(host, old)).toEqual([{ validator: 'claude-code', action: 'retire' }])
+    // The activity log has a retire line with both ids and no memory text.
+    const retireLine = host.activity().find(line => line.action === 'retire')!
+    expect(retireLine).toMatchObject({ action: 'retire', origin: 'tool', ok: true, ids: [old, fresh], count: 1 })
+    expect(JSON.stringify(retireLine)).not.toContain('staging')
+
+    // Restore (MODEL.2) brings it back, as its owner: recall returns it again.
+    const restored = body((await engineCall(CLI, host.store, 'global', [toolCall(1, 'mnemopi_update', { memory_id: old, restore: true, validator: 'rohit' })])).get(1))
+    expect(restored?.status).toBe('restored')
+    expect(rowOf(host, old)).toMatchObject({ valid_until: null, superseded_by: null })
+    expect(await recalled(host, 'staging cluster blue network')).toContain(old)
+    expect(auditOf(host, old)).toEqual([{ validator: 'claude-code', action: 'retire' }, { validator: 'rohit', action: 'restore' }])
+  })
+
+  test('META.4.a2: an unknown id leaves the new memory saved and names the failure; nothing else changes', async () => {
+    const host = await open()
+    const bystander = first(await host.tool('memory_remember', { content: 'The bystander memory must stay exactly as it is.', kind: 'fact' })).memory_id as string
+    const before = rowOf(host, bystander)
+    const saved = await host.tool('memory_remember', { content: 'A fresh memory that claims to replace a missing one.', kind: 'fact', replaces: 'deadbeefdeadbeef' })
+    expect(saved.deny).toBeUndefined()
+    expect(rowOf(host, first(saved).memory_id)).not.toBeNull()
+    expect(String(saved.result)).toContain('replaces deadbeefdeadbeef did not retire it')
+    expect(String(saved.result)).toContain('no memory deadbeefdeadbeef found for this project')
+    expect(rowOf(host, bystander)).toEqual(before)
+    expect(host.activity().find(line => line.action === 'retire')).toMatchObject({ ok: false, ids: ['deadbeefdeadbeef', first(saved).memory_id] })
+  })
+
+  test('META.4.a2: a project-only row of another owner is not retired unless its owner is named; a global row is', async () => {
+    const host = await open({ scope: 'per-project' })
+    const theirs = await seed(host, 'project-other-9z', 'The other project keeps its release notes in the wiki.', 'channel')
+    const theirsGlobal = await seed(host, 'project-other-9z', 'The other project shares its style guide with everyone.', 'global')
+    // Without the owner, the row is not this project's to retire: the step fails, the new memory stays.
+    const miss = await host.tool('memory_remember', { content: 'This project keeps its release notes in the repository.', kind: 'fact', replaces: theirs })
+    expect(String(miss.result)).toContain(`no memory ${theirs} found for this project`)
+    expect(rowOf(host, theirs)).toMatchObject({ valid_until: null, superseded_by: null })
+    // A global row is another project's too, but visible to all.
+    const shared = await host.tool('memory_remember', { content: 'This project follows the shared style guide in its own wiki.', kind: 'fact', replaces: theirsGlobal })
+    expect(String(shared.result)).toContain(`retired ${theirsGlobal}`)
+    expect(rowOf(host, theirsGlobal)!.superseded_by).toBe(first(shared).memory_id)
+    // With the owner named (as memory_recall shows it), the project-only row is retired as that owner.
+    const named = await host.tool('memory_remember', { content: 'This project keeps its release notes in the repository wiki.', kind: 'fact', replaces: theirs, owner: 'project-other-9z' })
+    expect(String(named.result)).toContain(`retired ${theirs}`)
+    expect(rowOf(host, theirs)!.superseded_by).toBe(first(named).memory_id)
+    const retireLines = host.activity().filter(line => line.action === 'retire')
+    expect(retireLines.map(line => line.ok)).toEqual([false, true, true])
+    expect(retireLines[2]!.owner).toBe('project-other-9z')
+  })
+
+  test('META.4: saving the same text again with replaces naming its own id retires nothing', async () => {
+    const host = await open()
+    const text = { content: 'The nightly job runs at three in the morning.', kind: 'fact' }
+    const id = first(await host.tool('memory_remember', text)).memory_id as string
+    const again = await host.tool('memory_remember', { ...text, replaces: id })
+    expect(first(again).memory_id).toBe(id)
+    expect(String(again.result)).toContain('nothing to retire')
+    expect(rowOf(host, id)).toMatchObject({ valid_until: null, superseded_by: null })
+  })
+})
