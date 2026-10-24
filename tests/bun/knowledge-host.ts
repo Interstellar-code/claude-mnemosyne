@@ -14,7 +14,7 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, sy
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ENGINE_BUILD } from '../../hooks/engine-build'
-import { ROOT } from './helpers'
+import { isolatedEnv, ROOT } from './helpers'
 
 // ---- the 'claude-code' runtime: only atom/read/update, kept per host ($) ----
 type AtomKey = { plugin: string; key: string; initial: unknown }
