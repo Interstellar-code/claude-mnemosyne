@@ -3,12 +3,12 @@ import { logger, withLoopPhase } from "@oh-my-pi/pi-utils";
 import { transaction } from "../../db";
 import { toUtcIso } from "../../util/datetime";
 import { generateId } from "../../util/ids";
-import { currentEmbeddingModel, embeddingsDisabled } from "../embeddings";
+import { cosineSimilarity, currentEmbeddingModel, embeddingsDisabled } from "../embeddings";
 import { EpisodicGraph } from "../episodic-graph";
 import { countExtractedFactCategories, extractFactCategoriesSafe } from "../extraction";
 import { getMnemopiRuntimeOptions, withMnemopiRuntimeOptions } from "../runtime-options";
 import { storeExtractedFactCategories } from "./consolidate";
-import { type EmbedItem, scheduleEmbedding, vecAvailable, vecInsert } from "./helpers";
+import { decodeVector, type EmbedItem, scheduleEmbedding, vecAvailable, vecInsert } from "./helpers";
 import type {
 	BeamEvent,
 	BeamMemoryState,
@@ -201,6 +201,9 @@ function purgeWorkingMemoryArtifacts(db: BeamMemoryState["db"], ids: readonly st
 	}
 
 	db.run(`DELETE FROM annotations WHERE memory_id IN (${placeholders})`, [...ids]);
+	if (tableExists(db, "memory_validations")) {
+		db.run(`DELETE FROM memory_validations WHERE memory_id IN (${placeholders})`, [...ids]);
+	}
 	db.run(`DELETE FROM memory_embeddings WHERE memory_id IN (${placeholders})`, [...ids]);
 	for (const table of MEMORIA_SOURCE_TABLES) {
 		db.run(`DELETE FROM ${table} WHERE source_memory_id IN (${placeholders})`, [...ids]);
@@ -224,7 +227,8 @@ function purgeWorkingMemoryArtifacts(db: BeamMemoryState["db"], ids: readonly st
  * eligible: `consolidated_at IS NULL` no longer suffices on its own, since
  * restored or imported durable rows legitimately carry a NULL consolidation
  * marker with an old event timestamp (issue #4819). Rows flagged `IMPORTED`
- * are treated as durable and never trimmed, and trimmed rows cascade all linked
+ * are treated as durable and never trimmed, as is any row whose scope is not
+ * 'session' (channel, global, NULL: engine/UPSTREAM.md change 12), and trimmed rows cascade all linked
  * artifacts via `purgeWorkingMemoryArtifacts`.
  */
 function trimWorkingMemory(beam: BeamMemoryState): void {
@@ -238,11 +242,13 @@ function trimWorkingMemory(beam: BeamMemoryState): void {
 			WHERE session_id = ?
 			  AND consolidated_at IS NULL
 			  AND trust_tier IS NOT 'IMPORTED'
+			  AND scope = 'session'
 			  AND (
 				timestamp < ? OR
 				id NOT IN (
 					SELECT id FROM working_memory
 					WHERE session_id = ? AND consolidated_at IS NULL AND trust_tier IS NOT 'IMPORTED'
+					  AND scope = 'session'
 					ORDER BY timestamp DESC
 					LIMIT ?
 				)
@@ -440,6 +446,8 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 	const veracity = clampVeracity(options.veracity);
 	const trustTier = normalizeTrustTier(options.trustTier, source);
 	const memoryType = options.memoryType ?? "unknown";
+	// A re-save that names no kind must not overwrite the stored one with 'unknown'.
+	const resaveMemoryType = options.memoryType === undefined || options.memoryType === "unknown" ? null : memoryType;
 	const validUntil = options.validUntil ?? options.valid_until ?? null;
 	const authorId = options.authorId ?? options.author_id ?? beam.authorId;
 	const authorType = options.authorType ?? options.author_type ?? beam.authorType;
@@ -474,7 +482,7 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 				authorId,
 				authorType,
 				channelId,
-				memoryType,
+				resaveMemoryType,
 				veracity,
 				veracity,
 				trustTier,
@@ -640,7 +648,53 @@ export function getContext(beam: BeamMemoryState, limit = 10): Row[] {
 	return (statement.all(beam.sessionId, now, limit) as Row[]).map(rowToDict);
 }
 
-export function invalidate(beam: BeamMemoryState, memoryId: string, replacementId: string | null = null): boolean {
+/** The actions the audit trail records (mnemosyne change 16). */
+export type AuditAction = "retire" | "restore" | "update" | "attest" | "expire";
+
+/**
+ * Inserts one `memory_validations` row `{ memory_id, validator, action }` (mnemosyne change 16).
+ * `new_content` and `note` stay NULL, so the trail never holds memory text. The table's
+ * `trim_validations_to_3` trigger keeps the last three rows per memory. Callers run it inside the
+ * transaction of the change it records, and only after a row actually changed.
+ */
+function recordValidation(beam: BeamMemoryState, memoryId: string, validator: string, action: AuditAction): void {
+	beam.db.run("INSERT INTO memory_validations (memory_id, validator, action) VALUES (?, ?, ?)", [
+		memoryId,
+		validator,
+		action,
+	]);
+}
+
+/**
+ * Attests the caller's own working memory: writes the audit row `attest` and changes nothing else.
+ * Returns false (and writes nothing) when no such row belongs to `MNEMOPI_SESSION_ID`.
+ */
+export function attestWorking(beam: BeamMemoryState, memoryId: string, validator: string): boolean {
+	return immediateTransaction(beam.db, () => {
+		using statement = beam.db.prepare("SELECT 1 AS found FROM working_memory WHERE id = ? AND session_id = ?");
+		if (statement.get(memoryId, beam.sessionId) == null) return false;
+		recordValidation(beam, memoryId, validator, "attest");
+		return true;
+	});
+}
+
+export function invalidate(
+	beam: BeamMemoryState,
+	memoryId: string,
+	replacementId: string | null = null,
+	validator: string | null = null,
+): boolean {
+	const changed = immediateTransaction(beam.db, () => invalidateRows(beam, memoryId, replacementId, validator));
+	if (changed) invalidateCaches(beam);
+	return changed;
+}
+
+function invalidateRows(
+	beam: BeamMemoryState,
+	memoryId: string,
+	replacementId: string | null,
+	validator: string | null,
+): boolean {
 	const now = toUtcIso();
 	const working = beam.db.run(
 		`
@@ -651,6 +705,7 @@ export function invalidate(beam: BeamMemoryState, memoryId: string, replacementI
 		[now, replacementId, memoryId, beam.sessionId],
 	);
 	if (working.changes > 0) {
+		if (validator !== null) recordValidation(beam, memoryId, validator, "retire");
 		// Recall filters `valid_until`/`superseded_by` in SQL, but the enhanced path consults the
 		// query cache BEFORE it reaches SQL. Without this the row a caller just retired keeps being
 		// served to an identical query for the rest of the cache TTL -- the one thing an explicit
@@ -669,6 +724,7 @@ export function invalidate(beam: BeamMemoryState, memoryId: string, replacementI
 		[now, replacementId, memoryId, beam.sessionId],
 	);
 	if (episodic.changes > 0) {
+		if (validator !== null) recordValidation(beam, memoryId, validator, "retire");
 		invalidateCaches(beam);
 		return true;
 	}
@@ -759,15 +815,33 @@ export function immediateTransaction<T>(db: Database, fn: () => T): T {
 	}
 }
 
+/** Fields `updateWorking` can set besides content, importance and metadata (mnemosyne change 13). */
+export interface WorkingFieldPatch {
+	/** The kind to store. Unset leaves it as it is. */
+	memoryType?: string;
+	/** An expiry timestamp to store; `null` clears it; unset leaves it as it is. */
+	validUntil?: string | null;
+}
+
 export function updateWorking(
 	beam: BeamMemoryState,
 	memoryId: string,
 	content: string | null = null,
 	importance: number | null = null,
 	metadata: MetadataPatch | null = null,
+	fields: WorkingFieldPatch = {},
+	validator: string | null = null,
 ): boolean {
 	const assignments: string[] = [];
 	const params: SQLQueryBindings[] = [];
+	if (fields.memoryType !== undefined) {
+		assignments.push("memory_type = ?");
+		params.push(fields.memoryType);
+	}
+	if (fields.validUntil !== undefined) {
+		assignments.push("valid_until = ?");
+		params.push(fields.validUntil);
+	}
 	if (content !== null) {
 		assignments.push("content = ?", "embed_text = NULL");
 		params.push(content);
@@ -795,12 +869,222 @@ export function updateWorking(
 			params,
 		).changes;
 	};
-	const changes = metadata === null ? write() : immediateTransaction(beam.db, write);
+	// A content change leaves one 'update' audit row, in the same transaction as the write.
+	const auditBy = content !== null ? validator : null;
+	const changes =
+		metadata === null && auditBy === null
+			? write()
+			: immediateTransaction(beam.db, () => {
+					const written = write();
+					if (written > 0 && auditBy !== null) recordValidation(beam, memoryId, auditBy, "update");
+					return written;
+				});
 	if (changes > 0) {
 		invalidateCaches(beam);
 		if (content !== null) scheduleEmbedding(beam, [{ memoryId, content }]);
 	}
 	return changes > 0;
+}
+
+/**
+ * Restores a retired row of the caller's own session (mnemosyne change 13): clears
+ * `valid_until` and `superseded_by`. A row is retired when it names a replacement or
+ * its expiry has passed. A live row (no replacement, no expiry or one still ahead) is
+ * left exactly as it is, and another owner's row is never touched, even a global one.
+ */
+export function restoreWorking(
+	beam: BeamMemoryState,
+	memoryId: string,
+	validator: string | null = null,
+): "restored" | "unchanged" | "not_found" {
+	const result = immediateTransaction(beam.db, () => {
+		using statement = beam.db.prepare(
+			"SELECT valid_until, superseded_by FROM working_memory WHERE id = ? AND session_id = ?",
+		);
+		const row = statement.get(memoryId, beam.sessionId) as {
+			valid_until: string | null;
+			superseded_by: string | null;
+		} | null;
+		if (row == null) return "not_found" as const;
+		const expired = row.valid_until != null && row.valid_until <= toUtcIso();
+		if (row.superseded_by == null && !expired) return "unchanged" as const;
+		beam.db.run(
+			"UPDATE working_memory SET valid_until = NULL, superseded_by = NULL WHERE id = ? AND session_id = ?",
+			[memoryId, beam.sessionId],
+		);
+		if (validator !== null) recordValidation(beam, memoryId, validator, "restore");
+		return "restored" as const;
+	});
+	if (result === "restored") invalidateCaches(beam);
+	return result;
+}
+
+/** One near-duplicate candidate found by `similarWorking`. */
+export interface SimilarMatch {
+	readonly id: string;
+	readonly owner: string;
+	readonly score: number;
+	readonly preview: string;
+}
+
+/**
+ * The live working memories closest to `queryVector` by cosine (mnemosyne change 14).
+ * Read-only: one SELECT, no write, no recall-count touch. Candidates are the caller's own
+ * rows plus global ones that have a vector of the active model, minus superseded and
+ * expired rows. Returns at most `topK` rows scoring at least `minScore`, best first.
+ */
+export function similarWorking(
+	beam: BeamMemoryState,
+	queryVector: ArrayLike<number>,
+	topK: number,
+	minScore: number,
+): SimilarMatch[] {
+	const rows = beam.db
+		.query(`
+			SELECT wm.id, wm.session_id, wm.content, me.embedding_json
+			FROM memory_embeddings me
+			JOIN working_memory wm ON me.memory_id = wm.id
+			WHERE me.model IS ?
+			  AND (wm.session_id = ? OR wm.scope = 'global')
+			  AND wm.superseded_by IS NULL
+			  AND (wm.valid_until IS NULL OR wm.valid_until > ?)
+			LIMIT 50000
+		`)
+		.all(currentEmbeddingModel(), beam.sessionId, toUtcIso()) as {
+		id: string;
+		session_id: string;
+		content: string;
+		embedding_json: string;
+	}[];
+	const matches: SimilarMatch[] = [];
+	for (const row of rows) {
+		const vector = decodeVector(row.embedding_json);
+		if (vector === null || vector.length !== queryVector.length) continue;
+		const score = cosineSimilarity(queryVector, vector);
+		if (score >= minScore) {
+			matches.push({ id: row.id, owner: row.session_id, score, preview: String(row.content).slice(0, 80) });
+		}
+	}
+	matches.sort((a, b) => b.score - a.score || (a.id < b.id ? -1 : 1));
+	return matches.slice(0, topK);
+}
+
+/** Kinds `expireUnused` never touches, whatever the caller passes (mnemosyne change 15). */
+export const PROTECTED_KINDS: readonly string[] = ["fact", "preference", "instruction", "decision", "unknown"];
+
+export interface ExpireUnusedOptions {
+	/** Idle days before a row is a candidate. */
+	readonly days: number;
+	/** Kinds (`memory_type`) that may expire. */
+	readonly kinds: readonly string[];
+	/** True lists the candidates and writes nothing. */
+	readonly dryRun: boolean;
+	/** At most this many rows, longest unused first. */
+	readonly limit: number;
+	/** The clock, for tests. */
+	readonly now?: Date;
+	/** Who runs the sweep, for the audit trail (one 'expire' row per expired memory). */
+	readonly validator?: string | null;
+}
+
+export interface ExpiredRow {
+	readonly id: string;
+	readonly kind: string;
+	readonly last_used: string;
+	readonly preview: string;
+}
+
+/** SQLite's `CURRENT_TIMESTAMP` is 'YYYY-MM-DD HH:MM:SS' in UTC; recall writes ISO. Both read as UTC. */
+function utcMillis(value: unknown): number | null {
+	if (typeof value !== "string" || value === "") return null;
+	const text = /(?:Z|[+-]\d\d:?\d\d)$/.test(value) ? value : `${value.replace(" ", "T")}Z`;
+	const ms = Date.parse(text);
+	return Number.isNaN(ms) ? null : ms;
+}
+
+/** True unless the metadata is readable JSON that does not pin the row: unreadable metadata is spared. */
+function isPinnedOrUnreadable(metadataJson: unknown): boolean {
+	if (metadataJson == null || metadataJson === "") return false;
+	try {
+		const parsed = JSON.parse(String(metadataJson)) as unknown;
+		if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return true;
+		const pinned = (parsed as Record<string, unknown>).pinned;
+		return pinned === true || pinned === 1 || pinned === "true";
+	} catch {
+		return true;
+	}
+}
+
+/**
+ * Expires working memories nobody has recalled for `days` (mnemosyne change 15). The caller's own
+ * rows only (`session_id`); a row is a candidate when its scope is not 'session', it has no
+ * `valid_until` and no `superseded_by`, its `memory_type` is in `kinds` (never a protected kind),
+ * it is not pinned (`metadata.pinned`), and `max(last_recalled, created_at)` is older than `days`.
+ * A real run sets `valid_until` to now on each, in one transaction, and writes nothing else:
+ * nothing is deleted and `restoreWorking` brings each row back.
+ */
+export function expireUnused(beam: BeamMemoryState, options: ExpireUnusedOptions): ExpiredRow[] {
+	const kinds = options.kinds.filter(kind => !PROTECTED_KINDS.includes(kind));
+	if (kinds.length === 0 || options.limit <= 0) return [];
+	const now = options.now ?? new Date();
+	const cutoff = now.getTime() - options.days * 86_400_000;
+	const select = (): ExpiredRow[] => {
+		const rows = beam.db
+			.query(`
+				SELECT id, memory_type, content, metadata_json, created_at, last_recalled
+				FROM working_memory
+				WHERE session_id = ?
+				  AND scope IS NOT NULL AND scope != 'session'
+				  AND valid_until IS NULL
+				  AND superseded_by IS NULL
+				  AND memory_type IN (${kinds.map(() => "?").join(", ")})
+			`)
+			.all(beam.sessionId, ...kinds) as {
+			id: string;
+			memory_type: string;
+			content: string;
+			metadata_json: unknown;
+			created_at: unknown;
+			last_recalled: unknown;
+		}[];
+		const candidates: (ExpiredRow & { ms: number })[] = [];
+		for (const row of rows) {
+			const created = utcMillis(row.created_at);
+			const recalled = utcMillis(row.last_recalled);
+			// No readable clock at all: spare the row.
+			const used = Math.max(created ?? Number.NEGATIVE_INFINITY, recalled ?? Number.NEGATIVE_INFINITY);
+			if (!Number.isFinite(used) || used >= cutoff) continue;
+			if (isPinnedOrUnreadable(row.metadata_json)) continue;
+			candidates.push({
+				id: row.id,
+				kind: row.memory_type,
+				last_used: toUtcIso(new Date(used)),
+				preview: String(row.content).slice(0, 80),
+				ms: used,
+			});
+		}
+		candidates.sort((a, b) => a.ms - b.ms || (a.id < b.id ? -1 : 1));
+		return candidates.slice(0, options.limit).map(({ ms: _ms, ...row }) => row);
+	};
+	if (options.dryRun) return select();
+	const expired = immediateTransaction(beam.db, () => {
+		const chosen = select();
+		const stamp = toUtcIso(now);
+		const kept: ExpiredRow[] = [];
+		for (const row of chosen) {
+			const changes = beam.db.run(
+				"UPDATE working_memory SET valid_until = ? WHERE id = ? AND session_id = ? AND valid_until IS NULL AND superseded_by IS NULL",
+				[stamp, row.id, beam.sessionId],
+			).changes;
+			if (changes > 0) {
+				if (options.validator != null) recordValidation(beam, row.id, options.validator, "expire");
+				kept.push(row);
+			}
+		}
+		return kept;
+	});
+	if (expired.length > 0) invalidateCaches(beam);
+	return expired;
 }
 
 export function get(beam: BeamMemoryState, memoryId: string): Row | null {
