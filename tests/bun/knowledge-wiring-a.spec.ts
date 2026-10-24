@@ -7,7 +7,7 @@ import { afterEach, describe, expect, setDefaultTimeout, test } from 'bun:test'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { body, engineCall, ROOT, toolCall } from './helpers'
+import { body, engineCall, isolatedEnv, ROOT, toolCall } from './helpers'
 import { ENGINE_BUILD, GOOD_REPLY, makeHost, until } from './knowledge-host'
 import type { Host, ModelAnswer } from './knowledge-host'
 
@@ -218,7 +218,7 @@ describe('non-ASCII text through the whole path', () => {
     // The prompt the model saw carries the text.
     expect(host.model[0]!.request.prompt).toContain('日本語')
 
-    const child = Bun.spawn([process.execPath, MEMORIES, '--store', host.store, 'get', id], { env: process.env as Record<string, string>, stdout: 'pipe', stderr: 'pipe' })
+    const child = Bun.spawn([process.execPath, MEMORIES, '--store', host.store, 'get', id], { env: { ...(process.env as Record<string,string>), ...isolatedEnv() }, stdout: 'pipe', stderr: 'pipe' })
     const [stdout, , exitCode] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
     expect(exitCode).toBe(0)
     const [row] = JSON.parse(stdout) as { id: string; content: string; sha256: string }[]

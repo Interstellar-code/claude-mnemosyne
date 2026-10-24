@@ -8,14 +8,14 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'no
 import { join } from 'node:path'
 import { cliOf } from '../../bin/install-engine'
 import { ENGINE_BUILD } from '../../hooks/engine-build'
-import { engineEnv, ROOT, runInstaller, tempDir, toolCall } from './helpers'
+import { engineEnv, isolatedEnv, ROOT, runInstaller, tempDir, toolCall } from './helpers'
 
 const PROXY = join(ROOT, 'bin', 'mcp-proxy.ts')
 
 /** One proxy process: sends `messages`, closes stdin, returns its replies by id. `log` is MNEMOSYNE_ACTIVITY_LOG; `extraEnv` adds variables such as MNEMOSYNE_GUARD_MODE. */
 async function proxy(cli: string, store: string, messages: readonly object[], owner = 'global', log = '', extraEnv: Record<string, string> = {}) {
   const child = Bun.spawn([process.execPath, PROXY], {
-    env: { ...(process.env as Record<string, string>), ...engineEnv(store, owner), MNEMOSYNE_CLI: cli, MNEMOSYNE_ACTIVITY_LOG: log, ...extraEnv },
+    env: { ...(process.env as Record<string, string>), ...isolatedEnv(), ...engineEnv(store, owner), MNEMOSYNE_CLI: cli, MNEMOSYNE_ACTIVITY_LOG: log, ...extraEnv },
     stdin: 'pipe',
     stdout: 'pipe',
     stderr: 'pipe',
@@ -565,6 +565,7 @@ for await (const chunk of Bun.stdin.stream()) {
     const child = Bun.spawn([process.execPath, PROXY], {
       env: {
         ...(process.env as Record<string, string>),
+        ...isolatedEnv(),
         ...engineEnv(join(temp.dir, 'store'), 'global'),
         MNEMOSYNE_CLI: fakeEngine,
         MNEMOSYNE_ACTIVITY_LOG: log,

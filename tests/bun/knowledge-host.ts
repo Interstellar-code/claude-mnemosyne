@@ -14,7 +14,7 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, sy
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ENGINE_BUILD } from '../../hooks/engine-build'
-import { ROOT } from './helpers'
+import { isolatedEnv, ROOT } from './helpers'
 
 // ---- the 'claude-code' runtime: only atom/read/update, kept per host ($) ----
 type AtomKey = { plugin: string; key: string; initial: unknown }
@@ -86,7 +86,7 @@ export async function makeHost(opts: HostOptions = {}) {
     runs.push(record)
     // The host lays init.env over its own environment.
     const child = Bun.spawn([...argv], {
-      env: { ...(process.env as Record<string, string>), ...(opts.parentEnv ?? {}), ...(init?.env ?? {}) },
+      env: { ...(process.env as Record<string, string>), ...isolatedEnv(), ...(opts.parentEnv ?? {}), ...(init?.env ?? {}) },
       stdin: init?.stdin === undefined ? 'ignore' : new Blob([init.stdin]),
       stdout: 'pipe',
       stderr: 'pipe',

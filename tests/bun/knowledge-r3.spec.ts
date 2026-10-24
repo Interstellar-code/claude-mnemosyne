@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { GOOD_REPLY, makeHost, until } from './knowledge-host'
 import type { Host, ModelAnswer } from './knowledge-host'
-import { body, engineCall, ROOT, tempDir, toolCall } from './helpers'
+import { body, engineCall, isolatedEnv, ROOT, tempDir, toolCall } from './helpers'
 
 setDefaultTimeout(30_000)
 const hosts: Host[] = []
@@ -39,7 +39,7 @@ async function seed(host: Host, contents: readonly string[]) {
 /** Runs the real bin/memories.ts; the exit code and stderr. */
 async function memories(args: string[], stdin?: string) {
   const child = Bun.spawn([process.execPath, MEMORIES, ...args], {
-    env: process.env as Record<string, string>,
+    env: { ...(process.env as Record<string,string>), ...isolatedEnv() },
     stdin: stdin === undefined ? 'ignore' : new Blob([stdin]),
     stdout: 'pipe',
     stderr: 'pipe',

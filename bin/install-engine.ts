@@ -129,7 +129,7 @@ async function check(next: string, build: string, embeddings: boolean) {
     MNEMOPI_DATA_DIR: data,
     MNEMOPI_SESSION_ID: 'install-check',
     MNEMOPI_NO_EMBEDDINGS: embeddings ? '' : '1',
-    MNEMOPI_MCP_BANK: '',
+    MNEMOPI_MCP_BANK: 'default',
     MNEMOPI_LLM_BASE_URL: '',
     MNEMOPI_HOST_LLM_ENABLED: '',
     MNEMOPI_EMBEDDING_API_URL: '',

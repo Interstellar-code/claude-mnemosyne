@@ -39,7 +39,7 @@ export function engineEnv(store: string, owner: string, options: EngineEnvOption
     MNEMOPI_SESSION_ID: owner,
     MNEMOPI_CHANNEL_ID: owner,
     // Inherited from the shell this would move writes to <store>/banks/<x>; empty falls back to `default`.
-    MNEMOPI_MCP_BANK: '',
+    MNEMOPI_MCP_BANK: 'default',
     // The env is layered over the caller's: an exported LLM URL would let the engine call out.
     MNEMOPI_LLM_BASE_URL: '',
     MNEMOPI_HOST_LLM_ENABLED: '',

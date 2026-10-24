@@ -6,7 +6,7 @@ import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, 
 import { join } from 'node:path'
 import { appendActivity, LOCK_STALE_MS, MAX_BYTES, rotate } from '../../bin/activity'
 import { activityLine } from '../../hooks/activity-log'
-import { ROOT, tempDir } from './helpers'
+import { ROOT, tempDir, isolatedEnv } from './helpers'
 
 const SCRIPT = join(ROOT, 'bin', 'activity.ts')
 const isPosix = process.platform !== 'win32'
@@ -20,7 +20,7 @@ const readLines = (path: string) => (existsSync(path) ? readFileSync(path, 'utf8
 
 /** Runs the writer as the hooks do: `bun bin/activity.ts <path>`, lines on stdin. */
 async function script(path: string, stdin: string) {
-  const child = Bun.spawn([process.execPath, SCRIPT, path], { stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' })
+  const child = Bun.spawn([process.execPath, SCRIPT, path], { env: { ...(process.env as Record<string,string>), ...isolatedEnv() }, stdin: 'pipe', stdout: 'pipe', stderr: 'pipe' })
   child.stdin.write(stdin)
   child.stdin.end()
   const [stderr, exitCode] = await Promise.all([new Response(child.stderr).text(), child.exited])

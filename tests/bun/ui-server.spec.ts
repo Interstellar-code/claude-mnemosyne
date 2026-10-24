@@ -10,7 +10,7 @@ import { networkInterfaces } from 'node:os'
 import { join } from 'node:path'
 import { engineEnv } from '../../hooks/engine'
 import { buildApp, CSP, DEFAULT_PARENT_CHECK_MS, openStore, parentCheckMs, runEngine, startServer } from '../../ui/server'
-import { engineCall, ROOT, tempDir, toolCall } from './helpers'
+import { engineCall, ROOT, tempDir, toolCall, isolatedEnv } from './helpers'
 
 const SERVER = join(ROOT, 'ui', 'server.ts')
 const CLI = join(ROOT, 'engine', 'src', 'cli.ts')
@@ -21,6 +21,7 @@ type Child = ReturnType<typeof Bun.spawn>
 
 const serverEnv = (root: string, store: string, extra: Record<string, string> = {}) => ({
   ...(process.env as Record<string, string>),
+  ...isolatedEnv(),
   MNEMOSYNE_ROOT: root,
   MNEMOSYNE_STORE: store,
   MNEMOSYNE_CLI: CLI,
@@ -118,8 +119,7 @@ const HOOK_PING_ENV = {
 
 /** The hook's health check, as it runs it: `bun ui/server.ts --ping <port> <pid>`, the token on stdin. */
 async function runPing(port: number, pid: number, token: string, env: Record<string, string> = {}) {
-  const child = Bun.spawn([process.execPath, SERVER, '--ping', String(port), String(pid)], {
-    env: { ...(process.env as Record<string, string>), ...env },
+  const child = Bun.spawn([process.execPath, SERVER, '--ping', String(port), String(pid)], { env: { ...(process.env as Record<string, string>), ...isolatedEnv(), ...env },
     stdin: new Blob([token]),
     stdout: 'ignore',
     stderr: 'ignore',
@@ -563,7 +563,7 @@ describe('SRV.1: the server runs the engine as the hooks do', () => {
     MNEMOPI_SESSION_ID: 'global',
     MNEMOPI_CHANNEL_ID: 'global',
     MNEMOPI_NO_EMBEDDINGS: '1',
-    MNEMOPI_MCP_BANK: '',
+    MNEMOPI_MCP_BANK: 'default',
     MNEMOPI_LLM_BASE_URL: '',
     MNEMOPI_HOST_LLM_ENABLED: '',
     MNEMOPI_AUTHOR_ID: '',

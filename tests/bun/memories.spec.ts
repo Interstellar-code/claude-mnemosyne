@@ -12,14 +12,14 @@ import { BACKFILL_TEXT_LIMIT, hasTags, judge, parseProposals, parseRows, PROPOSA
 import type { Proposal } from '../../hooks/backfill'
 import { makeHost } from './knowledge-host'
 import type { Host } from './knowledge-host'
-import { body, engineCall, ROOT, tempDir, toolCall } from './helpers'
+import { body, engineCall, isolatedEnv, ROOT, tempDir, toolCall } from './helpers'
 
 const CLI = join(ROOT, 'engine', 'src', 'cli.ts')
 const SCRIPT = join(ROOT, 'bin', 'memories.ts')
 
 /** Runs bin/memories.ts as the hook does. */
 async function memories(args: readonly string[], stdin?: string) {
-  const child = Bun.spawn([process.execPath, SCRIPT, ...args], { stdin: stdin === undefined ? 'ignore' : new Blob([stdin]), stdout: 'pipe', stderr: 'pipe' })
+  const child = Bun.spawn([process.execPath, SCRIPT, ...args], { env: { ...(process.env as Record<string,string>), ...isolatedEnv() }, stdin: stdin === undefined ? 'ignore' : new Blob([stdin]), stdout: 'pipe', stderr: 'pipe' })
   const [stdout, stderr, exitCode] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
   return { stdout, stderr, exitCode }
 }
