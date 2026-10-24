@@ -7,6 +7,26 @@ import { join } from "node:path";
 
 export const CLI = join(import.meta.dir, "..", "src", "cli.ts");
 
+let home: string | undefined;
+
+/**
+ * A fresh HOME for the engine processes a spec spawns, removed when the test process exits. Without it the
+ * engine writes its omp.*.log files under the real ~/.claude/mnemosyne/model-cache/logs.
+ */
+export function testHome(): string {
+	if (home === undefined) {
+		const dir = mkdtempSync(join(tmpdir(), "mnemosyne-engine-home-"));
+		home = dir;
+		process.on("exit", () => rmSync(dir, { recursive: true, force: true }));
+	}
+	return home;
+}
+
+/** HOME and PI_CONFIG_DIR (a path under HOME, as the plugin sets it) for a spawned engine process. */
+export function homeEnv(): Record<string, string> {
+	return { HOME: testHome(), PI_CONFIG_DIR: ".claude/mnemosyne/model-cache" };
+}
+
 export type Reply = { isError: boolean; body: Record<string, unknown>; text: string };
 
 export function tempStore(): { dir: string; dispose(): void } {
@@ -24,6 +44,7 @@ export function engineEnv(dir: string, owner: string): Record<string, string> {
 		MNEMOPI_MCP_BANK: "",
 		MNEMOPI_LLM_BASE_URL: "",
 		MNEMOPI_HOST_LLM_ENABLED: "",
+		...homeEnv(),
 	};
 }
 
