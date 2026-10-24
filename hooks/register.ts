@@ -43,6 +43,7 @@ import { ENGINE_BUILD, SETUP_TIMEOUT_MS } from './engine-build'
 import { mnemosyneStats } from './surface'
 import { admit } from './guard'
 import type { GuardResult } from './guard'
+import { KIND_NAMES, kindProblem, withNoKindWarning } from './kinds'
 import { cleanTags } from './tags'
 import { openDashboard, stopDashboard } from './ui-launch'
 
@@ -64,10 +65,11 @@ const RULES_SECTION = {
   text: `# Long-term memory (Mnemosyne)
 mcp__mnemosyne__memory_remember / _recall / _update / _forget keep facts across sessions and repos.
 - Remember: lasting preferences, conventions, decisions, runbooks the user states. One self-contained fact per call.
+- With each fact, pass kind: fact, preference, instruction (a rule or runbook), decision, context (project state), error (a bug note), artifact (a reference) or event (a session summary).
 - With each fact, pass tags: 2 to 5 short lowercase topic words (for example ["git", "ci"]).
 - Never remember secrets, credentials, or one-off task details.
 - Recall before answering about past decisions or preferences ("what did we…", "how do I usually…").
-- To change or tag a fact, update it by id and owner with memory_update. Use memory_forget only to delete. Never save a duplicate.`,
+- To change or tag a fact, update it by id and owner with memory_update. Use memory_forget only to delete. Never save a near-duplicate: recall first, and if a close memory exists, update it (or replace it with the new fact) instead of saving another.`,
 } as const
 
 const recalled = atom({ plugin: 'mnemosyne', key: 'recalled' } as const, {} as Recalled)
@@ -82,6 +84,12 @@ const CONFIRM_PROPERTY = {
 
 // The guardMode option: strict (the default) refuses a warned save unless the call passes confirm: true; warn saves it with the warnings.
 export const guardModeOf = (options: PluginOptions): 'strict' | 'warn' => (typeof options.guardMode === 'string' && options.guardMode.trim().toLowerCase() === 'warn' ? 'warn' : 'strict')
+
+const KIND_PROPERTY = {
+  type: 'string',
+  enum: KIND_NAMES,
+  description: 'What kind of memory this is. Without it the memory is saved as unknown.',
+} as const
 
 const TOOLS = [
   {
@@ -102,6 +110,7 @@ const TOOLS = [
           items: { type: 'string' },
           description: '2 to 5 short lowercase topic tags for the fact, e.g. ["git", "ci"].',
         },
+        kind: KIND_PROPERTY,
         confirm: CONFIRM_PROPERTY,
       },
       required: ['content'],
@@ -122,7 +131,7 @@ const TOOLS = [
   {
     name: 'memory_update',
     description:
-      'Change a memory in place, by the id and owner memory_recall returned: its content, importance or topic tags. Keeps its id and recall history. Use this rather than forgetting and saving again.',
+      'Change a memory in place, by the id and owner memory_recall returned: its content, importance, kind or topic tags. Keeps its id and recall history. Use this rather than forgetting and saving again.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -134,6 +143,7 @@ const TOOLS = [
           items: { type: 'string' },
           description: 'Short lowercase topic tags (at most 5); replaces the old ones. [] removes them.',
         },
+        kind: { ...KIND_PROPERTY, description: 'Change what kind of memory this is.' },
         confirm: CONFIRM_PROPERTY,
         owner: { type: 'string', description: "The row's owner from memory_recall; default this project's." },
       },
@@ -457,14 +467,21 @@ function updateArgs(input: Record<string, unknown>): Record<string, unknown> | s
   const hasContent = typeof input.content === 'string'
   const hasImportance = typeof input.importance === 'number' && Number.isFinite(input.importance)
   if (input.tags !== undefined && !Array.isArray(input.tags)) return 'tags must be an array of strings.'
-  if (!hasContent && !hasImportance && input.tags === undefined) return 'memory_update needs content, importance or tags.'
+  const hasKind = input.kind !== undefined && input.kind !== null
+  const refused = kindProblem(input.kind)
+  if (refused !== undefined) return refused
+  if (!hasContent && !hasImportance && input.tags === undefined && !hasKind) return 'memory_update needs content, importance, tags or kind.'
   const tags = Array.isArray(input.tags) ? cleanTags(input.tags) : undefined
   return {
     memory_id: input.memory_id,
     ...(hasContent ? { content: input.content } : {}),
     ...(hasImportance ? { importance: clamp(input.importance, 0, 1, 0.5) } : {}),
+    // The kind goes to the engine as memory_type.
+    ...(hasKind ? { memory_type: input.kind } : {}),
     // An empty list removes the key (C7).
     ...(tags !== undefined ? { metadata: { tags: tags.length > 0 ? tags : null } } : {}),
+    // C10.2: a content change names Claude in the audit trail.
+    ...(hasContent ? { validator: 'claude-code' } : {}),
   }
 }
 
@@ -1092,6 +1109,8 @@ export const register: Register = (on, options) => {
             // overrides this with human + 'stated' in tool.call.
             author_id: 'claude-code',
             author_type: 'agent',
+            // The kind goes to the engine as memory_type; none given, the engine stores 'unknown'.
+            ...(typeof input.kind === 'string' ? { memory_type: input.kind } : {}),
             ...(tags.length > 0 ? { metadata: { tags } } : {}),
           },
         ] as const
@@ -1326,6 +1345,10 @@ export const register: Register = (on, options) => {
         if (needsConfirm) {
           return { deny: `Mnemosyne: the save guard warns about this save (${guardIds.join(', ')}). ${guard!.hits.map(hit => hit.message).join(' ')} Resend with confirm: true if the save is wanted.` }
         }
+        if (tool === 'memory_remember') {
+          const badKind = kindProblem(input.kind)
+          if (badKind !== undefined) return { deny: `Mnemosyne: ${badKind}` }
+        }
         if (tool === 'memory_update') {
           const refused = updateArgs(input)
           if (typeof refused === 'string') return { deny: `Mnemosyne: ${refused}` }
@@ -1346,7 +1369,9 @@ export const register: Register = (on, options) => {
         const text = await call($, options, name, sent, as)
         // One warning line per hit, after the engine's reply; `reply` stays the engine's own text.
         const warnings = warnIds.length > 0 ? guard!.hits.map(hit => `\nMnemosyne guard warning: ${hit.message}`).join('') : ''
-        return { reply: text, result: name === 'mnemopi_recall' ? JSON.stringify(compact(text)) : name === 'mnemopi_stats' ? mnemosyneStats(text) : `${text}${warnings}` }
+        // A remember that named no kind is saved as 'unknown', with one warning in the reply; never a refusal.
+        const noKind = tool === 'memory_remember' && (input.kind === undefined || input.kind === null)
+        return { reply: text, result: name === 'mnemopi_recall' ? JSON.stringify(compact(text)) : name === 'mnemopi_stats' ? mnemosyneStats(text) : `${noKind ? withNoKindWarning(text) : text}${warnings}` }
       } catch (err) {
         return { deny: `Mnemosyne: ${(err as Error).message}` }
       }

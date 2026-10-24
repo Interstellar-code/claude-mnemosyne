@@ -136,6 +136,92 @@ describe('the proxy against a real installed engine', () => {
     expect(importance()).toBe(1)
   })
 
+  // META.1: `kind` is the client's word for the engine's memory_type.
+  const rowOf = (id: string) => {
+    const db = new Database(join(store, 'mnemopi.db'), { readonly: true })
+    try {
+      return db.query('SELECT memory_type FROM working_memory WHERE id = ?').get(id) as { memory_type: string } | null
+    } finally {
+      db.close()
+    }
+  }
+  const auditOf = (id: string) => {
+    const db = new Database(join(store, 'mnemopi.db'), { readonly: true })
+    try {
+      return db.query('SELECT validator, action FROM memory_validations WHERE memory_id = ? ORDER BY validation_id').all(id) as { validator: string; action: string }[]
+    } finally {
+      db.close()
+    }
+  }
+
+  test('META.1.a4: tools/list shows kind (the eight names) on remember and update, and never memory_type', async () => {
+    const replies = await proxy(cli, store, [{ jsonrpc: '2.0', id: 1, method: 'tools/list' }])
+    const tools = replies.get(1).result.tools as { name: string; inputSchema: { properties: Record<string, any> } }[]
+    for (const name of ['memory_remember', 'memory_update']) {
+      const properties = tools.find(tool => tool.name === name)!.inputSchema.properties
+      expect(properties.kind.enum).toEqual(['fact', 'preference', 'instruction', 'decision', 'context', 'error', 'artifact', 'event'])
+      expect(properties.memory_type).toBeUndefined()
+    }
+  })
+
+  test('META.1.a4: remember with a kind stores it as memory_type; none saves as unknown with a warning in the reply; a client memory_type is dropped', async () => {
+    const replies = await proxy(cli, store, [
+      toolCall(1, 'memory_remember', { content: 'the proxy saves a decision here', kind: 'decision', tags: ['d'] }),
+      toolCall(2, 'memory_remember', { content: 'the proxy saves a note with no kind' }),
+      toolCall(3, 'memory_remember', { content: 'the proxy ignores a memory_type of its own', memory_type: 'decision' }),
+    ])
+    expect(rowOf(text(replies.get(1)).memory_id)?.memory_type).toBe('decision')
+    expect(text(replies.get(1)).warning).toBeUndefined()
+    expect(rowOf(text(replies.get(2)).memory_id)?.memory_type).toBe('unknown')
+    const noKind = text(replies.get(2))
+    expect(noKind.warning).toContain("no kind given, saved as 'unknown'")
+    expect(noKind.warning).not.toContain('\n')
+    expect(rowOf(text(replies.get(3)).memory_id)?.memory_type).toBe('unknown')
+  })
+
+  test('META.1.a4: an unknown kind is a -32602 error naming the choices, and nothing is stored', async () => {
+    const before = (() => {
+      const db = new Database(join(store, 'mnemopi.db'), { readonly: true })
+      try {
+        return (db.query('SELECT COUNT(*) AS n FROM working_memory').get() as { n: number }).n
+      } finally {
+        db.close()
+      }
+    })()
+    const replies = await proxy(cli, store, [
+      toolCall(1, 'memory_remember', { content: 'the proxy refuses a bad kind', kind: 'unknown' }),
+      toolCall(2, 'memory_remember', { content: 'the proxy refuses another bad kind', kind: 'note' }),
+      toolCall(3, 'memory_update', { memory_id: 'x', kind: 'nope' }),
+    ])
+    for (const id of [1, 2, 3]) {
+      expect(replies.get(id).error.code).toBe(-32602)
+      expect(replies.get(id).error.message).toContain('unknown kind')
+      expect(replies.get(id).error.message).toContain('fact, preference, instruction (rule or runbook)')
+    }
+    const db = new Database(join(store, 'mnemopi.db'), { readonly: true })
+    try {
+      expect((db.query('SELECT COUNT(*) AS n FROM working_memory').get() as { n: number }).n).toBe(before)
+    } finally {
+      db.close()
+    }
+  })
+
+  test('META.1.a4: update takes kind as memory_type, alone or with content; a content change names the client as validator, whatever the client sends', async () => {
+    const saved = await proxy(cli, store, [toolCall(1, 'memory_remember', { content: 'the proxy updates the kind of this', kind: 'fact' })])
+    const id = text(saved.get(1)).memory_id
+    const kindOnly = await proxy(cli, store, [toolCall(1, 'memory_update', { memory_id: id, kind: 'context' })])
+    expect(text(kindOnly.get(1))).toMatchObject({ status: 'updated' })
+    expect(rowOf(id)?.memory_type).toBe('context')
+    expect(auditOf(id)).toEqual([])
+    const withContent = await proxy(cli, store, [
+      { jsonrpc: '2.0', id: 0, method: 'initialize', params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'codex', version: '1' } } },
+      toolCall(1, 'memory_update', { memory_id: id, content: 'the proxy updates the kind of this, edited', kind: 'event', validator: 'claude-code' }),
+    ])
+    expect(text(withContent.get(1))).toMatchObject({ status: 'updated' })
+    expect(rowOf(id)?.memory_type).toBe('event')
+    expect(auditOf(id)).toEqual([{ validator: 'mcp:codex', action: 'update' }])
+  })
+
   test('remember without tags sends no metadata', async () => {
     const saved = await proxy(cli, store, [toolCall(1, 'memory_remember', { content: 'an untagged proxy fact', metadata: { x: 1 } })])
     expect(metadataOf(text(saved.get(1)).memory_id)).toBeNull()
@@ -544,5 +630,17 @@ for await (const chunk of Bun.stdin.stream()) {
     // A name of only control characters names nothing: the client stays unknown.
     const empty = await rawProxy(`${initialize({ name: '\u0000\u202e ' })}\n${remember()}\n`, join(temp.dir, 'logs-final-empty', 'activity.jsonl'))
     expect(forwardedCall(empty.forwarded, 2).author_id).toBe('unknown')
+  })
+})
+
+// META.1: hooks/kinds.ts is import-free and names engine memory types.
+describe('hooks/kinds.ts', () => {
+  test('META.1.a1: it imports nothing, and every kind is one of the engine\'s own memory types', async () => {
+    const source = readFileSync(join(ROOT, 'hooks', 'kinds.ts'), 'utf8')
+    expect(source).not.toMatch(/^\s*import|^\s*export.*\sfrom\s|require\(/m)
+    const { KIND_NAMES } = await import('../../hooks/kinds')
+    const engine = readFileSync(join(ROOT, 'engine', 'src', 'core', 'typed-memory.ts'), 'utf8')
+    for (const name of KIND_NAMES) expect(engine).toContain(`"${name}"`)
+    expect(KIND_NAMES.length).toBe(8)
   })
 })

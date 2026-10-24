@@ -7,6 +7,7 @@ import { engineTool, mnemosyneStats, publicTool } from '../hooks/surface'
 import { extractionModelOf, extractionOff, parseProposals, parseTags, pool, SYSTEM_PROMPT } from '../hooks/backfill'
 import type { Row } from '../hooks/backfill'
 import { cleanTags } from '../hooks/tags'
+import { NO_KIND_WARNING } from '../hooks/kinds'
 
 type Run = { argv: readonly string[]; init?: ProcessRunInit; via?: 'run' | 'spawn' }
 
@@ -96,7 +97,8 @@ test('remember runs the private engine against the private store, global bank', 
   const runs = world(on, '{"status":"stored"}')
   const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'a durable test fact' })
 
-  expect(ran.result).toBe('{"status":"stored"}')
+  // META.1: with no kind the reply carries a warning key; the engine request has no memory_type.
+  expect(JSON.parse(String(ran.result))).toEqual({ status: 'stored', warning: NO_KIND_WARNING })
   const run = runs[0]!
   expect(run.argv).toEqual(['bun', '/home/u/.claude/mnemosyne/engine/node_modules/@oh-my-pi/pi-mnemopi/src/cli.ts', 'mcp'])
   expect(run.init?.env).toEqual({
@@ -129,6 +131,82 @@ test('remember runs the private engine against the private store, global bank', 
     name: 'mnemopi_remember',
     arguments: { content: 'a durable test fact', importance: 0.5, source: 'imported', scope: 'global', author_id: 'claude-code', author_type: 'agent' },
   })
+})
+
+test('META.1.a2: remember forwards kind as memory_type, and a kind-less save has none and warns in the reply', async ($, on) => {
+  const runs = world(on, '{"status":"stored","memory_id":"m1"}')
+  const kinded = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'we chose bun for the hooks', kind: 'decision' })
+  expect(request(runs[0]!).arguments.memory_type).toBe('decision')
+  expect('kind' in request(runs[0]!).arguments).toBe(false)
+  expect(kinded.result).toBe('{"status":"stored","memory_id":"m1"}')
+
+  const bare = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'a note with no kind given' })
+  expect(bare.deny).toBeUndefined()
+  expect('memory_type' in request(runs[1]!).arguments).toBe(false)
+  // The reply stays JSON; the warning is one key and one line.
+  const reply = JSON.parse(String(bare.result))
+  expect(reply).toEqual({ status: 'stored', memory_id: 'm1', warning: NO_KIND_WARNING })
+  expect(reply.warning).toContain("no kind given, saved as 'unknown'")
+  expect(reply.warning).not.toContain('\n')
+})
+
+test('META.1.a2: remember with an unknown kind is refused before any engine run', async ($, on) => {
+  const runs = world(on, '{"status":"stored"}')
+  for (const kind of ['unknown', 'note', 7]) {
+    const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'a note with a bad kind', kind })
+    expect(ran.deny).toContain('Mnemosyne: unknown kind')
+    expect(ran.deny).toContain('fact, preference, instruction (rule or runbook)')
+  }
+  expect(runs.length).toBe(0)
+})
+
+test('META.1.a2: update takes kind as memory_type, alone or with content; an unknown kind is refused', async ($, on) => {
+  const runs = world(on, '{"status":"updated"}')
+  const alone = await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1', kind: 'context' })
+  expect(alone.deny).toBeUndefined()
+  expect(request(runs[0]!).arguments).toEqual({ memory_id: 'm1', memory_type: 'context' })
+  const both = await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1', content: 'the new text of it', kind: 'event' })
+  expect(both.result).toBe('{"status":"updated"}')
+  expect(request(runs[1]!).arguments).toEqual({ memory_id: 'm1', content: 'the new text of it', memory_type: 'event', validator: 'claude-code' })
+  const bad = await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1', kind: 'unknown' })
+  expect(bad.deny).toContain('Mnemosyne: unknown kind')
+  expect(runs.length).toBe(2)
+})
+
+test('META.1.a2: a content update names claude-code as the validator; a tags-only or kind-only update does not', async ($, on) => {
+  const runs = world(on, '{"status":"updated"}')
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1', content: 'the text changed here' })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1', tags: ['a'] })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1', kind: 'fact' })
+  expect(runs.map(run => request(run).arguments.validator)).toEqual(['claude-code', undefined, undefined])
+})
+
+test('META.1.a2: both tools declare kind as an enum of the eight kinds', async ($, on) => {
+  world(on, '{}')
+  const registered: { name: string; inputSchema: { properties: Record<string, { enum?: string[] }> } }[] = []
+  on('tool.register', (_$, e) => {
+    registered.push(e as never)
+    return { value: {} } as never
+  })
+  on('command.register', () => ({ value: {} }) as never)
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/w', surface: null, isInteractive: false } as never)
+  for (const name of ['memory_remember', 'memory_update']) {
+    const tool = registered.find(t => t.name === name)!
+    expect(tool.inputSchema.properties.kind?.enum).toEqual(['fact', 'preference', 'instruction', 'decision', 'context', 'error', 'artifact', 'event'])
+  }
+})
+
+test('META.1.a3: the rules text asks for a kind and says to update or replace rather than save a near-duplicate', async ($, on) => {
+  const base = { model: 'm', promptModel: 'm', surfaces: [], outputStyle: null }
+  on('prompt.compose', () => ({ sections: [] }))
+  const composed = await $.prompt.compose({ ...base, tools: ['mcp__mnemosyne__memory_remember'], traits: [] } as never)
+  const rules = composed.sections.find(s => s.id === 'mnemosyne:rules')?.text ?? ''
+  expect(rules).toContain('pass kind:')
+  for (const name of ['fact', 'preference', 'instruction', 'decision', 'context', 'error', 'artifact', 'event']) expect(rules).toContain(name)
+  expect(rules).toContain('near-duplicate')
+  expect(rules).toMatch(/update it \(or replace it/)
 })
 
 test('per-project keeps a repo bank and still writes global on request', { options: { scope: 'per-project' } }, async ($, on) => {
@@ -489,6 +567,7 @@ test('memory_update runs mnemopi_update as the given owner, tags cleaned into me
       content: 'new text of the fact',
       importance: 1,
       metadata: { tags: ['build', 'ci', 'a-very-long-tag-name-tha', 'x', 'y'] },
+      validator: 'claude-code',
     },
   })
 })
@@ -498,7 +577,7 @@ test('memory_update without tags sends no metadata; tags [] sends tags null', as
   await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1', content: 'only the text changes' })
   await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1', tags: [] })
 
-  expect(request(runs[0]!).arguments).toEqual({ memory_id: 'm1', content: 'only the text changes' })
+  expect(request(runs[0]!).arguments).toEqual({ memory_id: 'm1', content: 'only the text changes', validator: 'claude-code' })
   expect(request(runs[1]!).arguments).toEqual({ memory_id: 'm1', metadata: { tags: null } })
   // no owner given: this project's (global here)
   expect(runs[0]!.init?.env?.MNEMOPI_SESSION_ID).toBe('global')
@@ -509,7 +588,7 @@ test('memory_update with nothing to change, or tags that are not an array, is de
   const empty = await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1' })
   const bad = await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1', tags: 'build' })
 
-  expect(empty.deny).toBe('Mnemosyne: memory_update needs content, importance or tags.')
+  expect(empty.deny).toBe('Mnemosyne: memory_update needs content, importance, tags or kind.')
   expect(bad.deny).toBe('Mnemosyne: tags must be an array of strings.')
   expect(runs.length).toBe(0)
 })
@@ -599,7 +678,7 @@ test('the rules text names memory_update: update by id and owner, forget only to
   expect(rules).toContain('memory_update')
   expect(rules).toContain('To change or tag a fact, update it by id and owner')
   expect(rules).toContain('memory_forget only to delete')
-  expect(rules).toContain('Never save a duplicate')
+  expect(rules).toContain('Never save a near-duplicate')
   expect(rules).not.toContain('forget the old id and owner, then remember')
 })
 
@@ -771,7 +850,7 @@ test('a refused tool call logs ok false with the refusal', async ($, on) => {
     ['update', 'tool', false],
   ])
   expect(got[0].error).toContain('Mnemosyne Memory engine is out of date')
-  expect(got[1].error).toBe('Mnemosyne: memory_update needs content, importance or tags.')
+  expect(got[1].error).toBe('Mnemosyne: memory_update needs content, importance, tags or kind.')
 })
 
 test('a compaction logs action rearm, origin hook', async ($, on) => {
@@ -871,7 +950,7 @@ test('MNEMOSYNE_ACTIVITY_APPEND=run starts an un-awaited $.process.run with a 5 
   const runs = world(on, '{"status":"stored","memory_id":"m7"}', true, 0, ENGINE_BUILD, { env: { MNEMOSYNE_ACTIVITY_APPEND: 'run' } })
   const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'a durable test fact' })
 
-  expect(ran.result).toBe('{"status":"stored","memory_id":"m7"}')
+  expect(JSON.parse(String(ran.result))).toEqual({ status: 'stored', memory_id: 'm7', warning: NO_KIND_WARNING })
   expect(runs.appends.map(a => a.via)).toEqual(['run'])
   expect(runs.appends[0]!.argv[2]).toBe(ACTIVITY_LOG)
   expect(runs.appends[0]!.init?.timeoutMs).toBe(5000)
@@ -1724,7 +1803,7 @@ test('KNOWX.1.a3 and a7: a save line carries author_type and veracity; memory_up
   expect(line).toMatchObject({ author_type: 'human', veracity: 'stated' })
   // An update sends no provenance at all.
   const update = runs.flatMap(run => (run.init?.stdin ?? '').split('\n').filter(Boolean).map(text => JSON.parse(text))).find(call => call.params?.name === 'mnemopi_update')
-  expect(Object.keys(update.params.arguments).sort()).toEqual(['content', 'memory_id'])
+  expect(Object.keys(update.params.arguments).sort()).toEqual(['content', 'memory_id', 'validator'])
 })
 
 test('KNOWX.2.a1: extractionModelOf defaults to haiku, takes a model id, and off turns it off', () => {
@@ -1916,7 +1995,7 @@ test('GUARD.2: the activity line of a blocked call is ok false, error guard:<rul
 
 test('GUARD.2: in warn mode a warned remember is stored with metadata.guard and the reply has one warning line per hit', { options: { guardMode: 'warn' } }, async ($, on) => {
   const runs = world(on, '{"status":"stored","memory_id":"a1b2c3d4e5f60718"}')
-  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'Today the importer was rewired to use the guard module', tags: ['Ops'] })
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'Today the importer was rewired to use the guard module', tags: ['Ops'], kind: 'fact' })
   expect(runs.length).toBeGreaterThanOrEqual(1)
   expect(request(runs[0]!).arguments.metadata).toEqual({ tags: ['ops'], guard: ['G4'] })
   const [reply, ...warnings] = String(ran.result).split('\n')
@@ -1924,7 +2003,7 @@ test('GUARD.2: in warn mode a warned remember is stored with metadata.guard and 
   expect(warnings.length).toBe(1)
   expect(warnings[0]).toContain('G4')
   // a clean save carries no guard key and no extra lines
-  const clean = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'The plugin keeps its memories in one local SQLite file.' })
+  const clean = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'The plugin keeps its memories in one local SQLite file.', kind: 'fact' })
   expect(clean.result).toBe('{"status":"stored","memory_id":"a1b2c3d4e5f60718"}')
   expect(request(runs[runs.length - 1]!).arguments.metadata).toBeUndefined()
 })
@@ -1976,7 +2055,7 @@ test('GUARD.3: a refused warned save logs ok false, guard:<rule ids> and no cont
 
 test('GUARD.3: confirm: true saves a warned save with metadata.guard and the warning lines; confirm never reaches the engine', async ($, on) => {
   const runs = world(on, STORED)
-  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: WARNED_TEXT, confirm: true })
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: WARNED_TEXT, confirm: true, kind: 'fact' })
   expect(ran.deny).toBeUndefined()
   expect(runs.length).toBeGreaterThanOrEqual(1)
   expect(request(runs[0]!).arguments.metadata).toEqual({ guard: ['G4'] })
