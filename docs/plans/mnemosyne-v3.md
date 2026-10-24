@@ -1,12 +1,12 @@
 # mnemosyne-v3: Guardrails on what enters memory, honest kinds and provenance, a shared tag vocabulary, dashboard writes and review, and importers
 
-Status: draft. Created 2026-10-24. Baseline: `main` at `5824f3d` (0.7.0), clean, not pushed past 0.7.0. Delivery: on `main`, not pushed.
+Status: decided, ready to build (Rohit's decisions 2026-10-24, see Decisions). Created 2026-10-24. Baseline: `main` at `247ea75` (0.7.6). Delivery: each phase on a short branch off `main`, merged straight into `main` after its review; nothing is pushed. Two releases: 0.8.0 after wave 3 (REL8), 0.9.0 at the end (REL9).
 
 ## Summary
 
 Version 3 of the Mnemosyne plugin: control what goes into memory, and organise what is there. Every save, from Claude, outside agents, the dashboard or an importer, passes one guard that blocks secrets and oversize text and warns about near-duplicates and task chatter. Saves then record honest provenance and a kind instead of 'imported' and 'unknown'. Tags come from a small shared vocabulary with entity, agent and asset namespaces. The dashboard gains create, edit, retire and a review queue, and documents and session logs can be imported through the same guard. It matters because the store today holds 447 tags for 140 memories (407 used once), five rows marked SUPERSEDED that are still recalled, and no usable provenance at all.
 
-The plan has 11 phases (MODEL, GUARD, META, VOCAB, CRUDX, IMPORT, CRUD, SESSION, HARDEN, REL8, LATER) holding 41 tasks, in 8 waves. Waves 1-7 are release 0.8.0. Wave 8 (LATER) is parked and starts only on Rohit's go.
+The plan has 12 phases (MODEL, GUARD, META, VOCAB, REL8, CRUDX, IMPORT, CRUD, SESSION, HARDEN, REL9, LATER) holding 45 tasks, in 9 waves. Waves 1-3 plus REL8 (wave 3b) are release 0.8.0: the guard, kinds and provenance, the audit trail and the vocabulary. Waves 4-7 are release 0.9.0: dashboard writes and review, the importers, session summaries and the expiry sweep. Wave 8 (LATER) is parked and starts only on Rohit's go.
 
 ## How to use this plan (for the coordinator)
 
@@ -40,17 +40,19 @@ From: Rohit's v3 requirement list (2026-10-23/24), the earlier shortlist, the 0.
 5. 447 distinct tags for 140 memories, 407 used once; the top tag repeats the owner name. The tagger gets no vocabulary (`hooks/backfill.ts:51-59`).
 6. The dashboard can only forget (`ui/server.ts:1584-1630`), and its body cap is 4096 bytes (`ui/server.ts:105`).
 7. Baseline: main at `5824f3d` (0.7.0), clean, not pushed past 0.7.0.
+8. Eight engine tables are always empty, and the Health tab lists them as plain "empty", which reads like a fault (Rohit, 2026-10-24). Seven are empty by design: `episodic_memory`, `consolidation_log`, `gists`, `facts`, `graph_edges`, `triples` and `scratchpad` are written only by engine tools the plugin never exposes (`mnemopi_sleep`, `mnemopi_graph_link`, `mnemopi_triple_add`, `mnemopi_scratchpad_*`; DESIGN.md §5 and `research/v3-research.md` §1.2 item 8 and §2 items 9-12), and the `fts_episodes*` / `fts_facts*` tables are their search indexes. The eighth, `memory_validations`, is dead schema: `handleValidate` returns a `validator` but never inserts a row (`engine/src/mcp-tools.ts:853-880`), and nothing else writes it.
 
 ### Shape of the change
 
-The vendored engine gets three small changes, all in MODEL:
+The vendored engine gets five small changes, all in MODEL:
 
 1. the trim spares rows whose scope is not 'session';
 2. remember and update store memory_type, trust_tier and valid_until, with a restore;
 3. a read-only `mnemopi_similar` tool;
-4. an owner-checked `mnemopi_expire_unused` tool that sets `valid_until` on unused, unpinned memories of the expirable kinds (dry run by default).
+4. an owner-checked `mnemopi_expire_unused` tool that sets `valid_until` on unused, unpinned memories of the expirable kinds (dry run by default);
+5. an audit trail: retire, restore, update, attest and expire each write one `memory_validations` row (who, what, when; never the text), and forget purges a memory's rows (C10).
 
-Everything else is plugin code. One import-free module, `hooks/guard.ts`, is called by every write path before the engine:
+Everything else is plugin code. The dashboard also labels the tables that are empty by design, with the reason, so they stop reading as gaps (C10). One import-free module, `hooks/guard.ts`, is called by every write path before the engine:
 
 1. Claude's tool calls (`hooks/register.ts`);
 2. outside agents (`bin/mcp-proxy.ts`);
@@ -96,6 +98,7 @@ File map:
    2. `mnemopi_update` takes `memory_type`, `valid_until` and `restore: true`;
    3. `mnemopi_similar { content, top_k, min_score }` returns `{ matches, embeddings }`, read-only;
    3a. `mnemopi_expire_unused { days, kinds, dry_run (default true), limit }` returns `{ expired|candidates: [{ id, kind, last_used, preview }], count }` (MODEL.5);
+   3b. `mnemopi_invalidate`, `mnemopi_update`, `mnemopi_validate` and `mnemopi_expire_unused` take an optional `validator` string (default 'unknown') and record it in the audit trail (MODEL.6, C10);
    4. the trim spares any row whose scope is not 'session'.
    None of these is added to the proxy's allow-list.
 3. C3: kinds are the engine's names: fact, preference, instruction, decision, context, error, artifact, event, plus 'unknown' for old rows. `hooks/kinds.ts` holds the plain labels. META writes it; VOCAB, CRUD and IMPORT read it.
@@ -110,7 +113,7 @@ File map:
    | Doc import | import:doc | IMPORTED | imported |
    | Session import | import:session | IMPORTED | imported |
 
-   Rows written before v3 keep 'imported' (see Open decisions). META writes the save paths; CRUDX and IMPORT follow the table.
+   Rows written before v3 keep 'imported' (see Decisions). META writes the save paths; CRUDX and IMPORT follow the table.
 5. C5: `<root>/vocabulary.json`, mode 0600, shape `{ version, tags, candidates }` (VOCAB.1). It is written only by `bin/vocab.ts`. VOCAB writes it; CRUDX and CRUD read it.
 6. C6: tag format `ns:value` or `value`:
    1. `ns` is one of `entity`, `agent`, `asset`;
@@ -124,6 +127,13 @@ File map:
    4. answers: 422 means blocked, 409 means warned and needs `confirm: true`.
 8. C8: proposal files `tags-proposed.json` and `import-proposed.json` hold ids, sha256 and verdicts, never memory text, mode 0600. VOCAB and IMPORT write them.
 9. C9: `bin/memories.ts backup` (VACUUM INTO `<root>/backups/`, 0600, keeps 10). Every apply command runs it first and stops if it fails. META writes it; VOCAB, IMPORT and SESSION call it.
+10. C10: the audit trail and the unused tables (Rohit, 2026-10-24):
+   1. a `memory_validations` row is `{ memory_id, validator, action, validated_at }` with `action` one of retire, restore, update, attest, expire; `new_content` and `note` stay NULL, so memory text never enters the trail;
+   2. validator values: 'dashboard' (CRUDX), 'claude-code' (Claude's own update), 'expire-sweep' (SESSION.4), else 'unknown';
+   3. the engine's existing trigger `trim_validations_to_3` (`engine/src/core/beam/schema.ts:330-341`) keeps only the newest 3 rows per memory; that is kept as is, so the trail is "the last 3 actions", not a full history;
+   4. forget deletes the memory's trail rows in the same transaction as the row (`purgeWorkingMemoryArtifacts`);
+   5. `GET /api/health-report` gains `unusedByDesign: { <table>: <reason> }` for `episodic_memory`, `consolidation_log`, `gists`, `facts`, `graph_edges`, `triples`, `scratchpad` and the `fts_episodes*` and `fts_facts*` tables; the Health tab shows each as "unused by design" with its reason instead of "empty".
+   MODEL writes 1-4; CRUDX writes 5 and the review history; CRUD shows both; SESSION passes 'expire-sweep'.
 
 ### Out of scope
 
@@ -134,6 +144,7 @@ File map:
 5. No automatic retiring of any memory, with one decided exception (Rohit chose auto-expire, 2026-10-24): the unused-expiry sweep (MODEL.5, SESSION.4). It only expires memories of the kinds context, event, error and artifact that nobody has recalled for 90 days, never a pinned one and never kinds fact, preference, instruction, decision or unknown. It sets `valid_until` (it deletes nothing), backs the store up first, and every expired row can be restored from the Review tab.
 6. No CI matrix for Linux or Windows; they are stated as untested.
 7. Also cut during drafting: the engine's regex classifier (29 of 140 rows wrongly typed 'relationship'), and PII blocking (warn later, see LATER.3).
+8. No use of the engine's sleep/consolidation, triples, graph links or scratchpad. They stay unexposed and their tables stay empty; v3 only labels them (C10.5). Making them safe would need owners and forget-purge on episodes and triples, and stopping sleep from widening channel rows to global, all engine changes.
 
 ### Risks
 
@@ -152,34 +163,35 @@ Phase-level dependencies ("Needs first" means every task of the listed phase is 
 
 | Wave | Phase | Needs first | Tasks in order |
 |---|---|---|---|
-| 1 | MODEL | nothing | MODEL.1, MODEL.2, MODEL.3, MODEL.5, MODEL.4 |
+| 1 | MODEL | nothing | MODEL.1, MODEL.2, MODEL.3, MODEL.5, MODEL.6, MODEL.4 |
 | 1 | GUARD | nothing | GUARD.1, GUARD.2, GUARD.3, then GUARD.4 (Rohit) |
 | 1 | HARDEN part A | nothing | HARDEN.1, HARDEN.2 |
 | 2 | META | MODEL, GUARD | META.5, META.1, META.2, META.3, META.4 |
 | 3 | VOCAB | META | VOCAB.1, VOCAB.2, VOCAB.3, VOCAB.4 |
-| 4 | CRUDX | META, VOCAB | CRUDX.1, CRUDX.2, CRUDX.3, CRUDX.4 |
-| 4 | IMPORT | META, VOCAB | IMPORT.0, IMPORT.1, IMPORT.2, IMPORT.3 |
-| 5 | CRUD | CRUDX | CRUD.1, CRUD.2, CRUD.3 |
+| 3b | REL8 (0.8.0) | VOCAB, HARDEN part A | REL8.1 |
+| 4 | CRUDX | REL8 | CRUDX.1, CRUDX.2, CRUDX.3, CRUDX.4, CRUDX.5 |
+| 4 | IMPORT | REL8 | IMPORT.0, IMPORT.1, IMPORT.2, IMPORT.3 |
+| 5 | CRUD | CRUDX | CRUD.1, CRUD.2, CRUD.3, CRUD.4 |
 | 5 | SESSION | IMPORT | SESSION.1, SESSION.2, SESSION.4 |
 | 6 | HARDEN part B | CRUD, SESSION | HARDEN.3, then HARDEN.4 (Rohit), then HARDEN.5 (Rohit) |
-| 7 | REL8 | HARDEN | REL8.1 |
-| 8 | LATER | REL8 (parked) | LATER.1, LATER.2, LATER.3 (all manual until Rohit says go) |
+| 7 | REL9 (0.9.0) | HARDEN | REL9.1 |
+| 8 | LATER | REL9 (parked) | LATER.1, LATER.2, LATER.3 (all manual until Rohit says go) |
 
 Task-level dependencies beyond the in-phase order: IMPORT.2 depends on IMPORT.0 (the spike). SESSION.2 reads the transcript reader built in IMPORT. CRUDX.3 reads the `pinned` flag written by IMPORT.3 (both are wave 4 now; CRUDX.3 uses a fixture, so neither waits; see Notes for the reviewer, item 2).
 
-Task counts: MODEL 5, GUARD 4, META 5, VOCAB 4, CRUDX 4, IMPORT 4, CRUD 3, SESSION 3, HARDEN 5, REL8 1, LATER 3 = 41 tasks in 11 phases.
+Task counts: MODEL 6, GUARD 4, META 5, VOCAB 4, REL8 1, CRUDX 5, IMPORT 4, CRUD 4, SESSION 3, HARDEN 5, REL9 1, LATER 3 = 45 tasks in 12 phases.
 
 ---
 
 ## Lanes, workers and models (Rohit's decision, 2026-10-24)
 
-Three lanes, using the three existing worktrees. Each is already registered in Orca. They are stale (detached HEADs on old 0.7.0 merge commits, all clean), so before the first dispatch the coordinator creates one integration branch off `main` and resets each lane to it, and each phase gets its own short branch off that integration branch. Nothing is pushed.
+Three lanes, each a fresh Orca worktree created off `main` on 2026-10-24 (the old 0.7.0 worktrees `-int`, `-mk-1`, `-mk-2`, `-mk-3` were removed; all were clean with nothing unmerged). Each phase gets its own short branch off `main`; after its review it merges straight into `main` (Rohit's decision), and the other lanes rebase onto `main` at the next wave boundary. Nothing is pushed.
 
 | Lane | Worktree | Worker |
 |---|---|---|
-| A | `~/Development/claude-mnemosyne-mk-1` | Claude Sonnet, high effort |
-| B | `~/Development/claude-mnemosyne-mk-2` | Claude Sonnet, medium effort (high for the data-loss phases below) |
-| C | `~/Development/claude-mnemosyne-mk-3` | OMP; Rohit sets the model in OMP himself, probably DeepSeek's flash model (he gave "4.1 flash 1017"; unconfirmed) |
+| A | Orca worktree `v3-lane-a` | Claude Sonnet, high effort |
+| B | Orca worktree `v3-lane-b` | Claude Sonnet, medium effort (high for the data-loss phases below) |
+| C | Orca worktree `v3-lane-c` | OMP; Rohit sets the model in OMP himself, probably DeepSeek's flash model (he gave "4.1 flash 1017"; unconfirmed) |
 
 Who builds what (a proposal; the coordinator may swap lanes A and B between phases, never lane C onto a data-loss phase):
 
@@ -188,14 +200,15 @@ Who builds what (a proposal; the coordinator may swap lanes A and B between phas
 | 1 | MODEL | GUARD | HARDEN.1, HARDEN.2 |
 | 2 | META | reviews META | idle |
 | 3 | VOCAB | reviews VOCAB | idle |
+| 3b | reviews REL8 | idle | REL8.1 (docs and version 0.8.0) |
 | 4 | CRUDX | IMPORT (high) | idle (reviews IMPORT.3 only if a second reader is wanted) |
 | 5 | CRUD | SESSION (high, it holds the expiry sweep) | idle |
 | 6 | reviews HARDEN.3 | idle | HARDEN.3, then Rohit's HARDEN.4 and HARDEN.5 |
-| 7 | reviews REL8 | idle | REL8.1 (docs and version) |
+| 7 | reviews REL9 | idle | REL9.1 (docs and version 0.9.0) |
 
 Rules:
 1. Three lanes run at once only in wave 1, and two in waves 4 and 5. Waves 2, 3, 6 and 7 have one build phase, because their file scopes overlap. The idle lane does reviews, not extra builds.
-2. The data-loss phases (MODEL, VOCAB, CRUDX, IMPORT, CRUD) and MODEL.5 and SESSION.4 (the expiry sweep) never go to lane C. Lane C builds only standard-risk, reversible work: HARDEN, REL8.
+2. The data-loss phases (MODEL, VOCAB, CRUDX, IMPORT, CRUD) and MODEL.5 and SESSION.4 (the expiry sweep) never go to lane C. Lane C builds only standard-risk, reversible work: HARDEN, REL8, REL9.
 3. A phase is reviewed by a different lane and worker than the one that built it. Data-loss reviews are done by Sonnet at high effort; lane C never gives the approving review of a data-loss phase.
 4. HARDEN.2's gate counts files in the real home's engine log folder before and after the test run. While other lanes run `bun run test:bun` at the same time that count can move for reasons that are not HARDEN.2's, so run that one gate when the other lanes are not running tests, or read a changed count as inconclusive and rerun.
 5. Workers do not choose models, efforts or agents and do not dispatch other workers; the coordinator alone does that.
@@ -208,7 +221,7 @@ Rules:
 
 Today the plugin must label every save 'imported', because the engine's 24-hour trim spares only IMPORTED rows; that one label hides where every memory came from. This phase makes the trim spare any row whose scope is not 'session', lets remember and update store memory_type, trust_tier and valid_until, adds a restore for retired rows, and adds a read-only near-duplicate tool. It is the only phase that changes the vendored engine.
 
-1. Delivers: C2, with UPSTREAM changes 12-15 and build `18.12.3-mnemosyne.8`.
+1. Delivers: C2 and C10.1-4, with UPSTREAM changes 12-16 and build `18.12.3-mnemosyne.8`.
 2. Needs first: nothing.
 3. Read first: `engine/src/core/beam/store.ts:222-262`, `:435-548`, `:643-672`, `engine/src/mcp-tools.ts:552-567`, `:674-693` and `engine/UPSTREAM.md`.
 4. May touch: `engine/`, `scripts/engine-diff.ts`, `hooks/engine-build.ts`, `tests/bun/engine-build.spec.ts`, `tests/embed/`.
@@ -265,13 +278,27 @@ Today the plugin must label every save 'imported', because the engine's 24-hour 
    5. it is not in `bin/mcp-proxy.ts`'s allow-list.
 3. Refs: `engine/src/core/beam/store.ts:643-672`, `engine/src/mcp-tools.ts:674-693`; the `recall_count` and `last_recalled` columns.
 4. Gate: `bun run test:bun && bun scripts/engine-diff.ts && bun run typecheck` (timeout 900 s, must exit 0).
-5. Scope: phase MODEL. Do after MODEL.3 and before MODEL.4. Review level: data-loss.
+5. Scope: phase MODEL. Do after MODEL.3 and before MODEL.6. Review level: data-loss.
 
-#### MODEL.4: UPSTREAM.md lists changes 12-15 and the build moves to 18.12.3-mnemosyne.8
+#### MODEL.6: Retire, restore, update, attest and expire leave an audit row; forget purges it (C10.1-4)
+
+1. Goal: `memory_validations` gets a real writer. Today the table exists (`engine/src/core/beam/schema.ts:316-341`) but nothing inserts into it, and `handleValidate` returns a `validator` it never stores (`engine/src/mcp-tools.ts:853-880`).
+2. Acceptance:
+   1. `mnemopi_invalidate` (action retire), `mnemopi_update` with `restore: true` (restore), `mnemopi_update` with new content (update), `mnemopi_validate` attest (attest) and `mnemopi_expire_unused` with `dry_run` false (expire, one row per expired memory) each insert one row `{ memory_id, validator, action }`, only when the engine call actually changed or attested a row; a no-op or refused call writes nothing;
+   2. each of these tools takes an optional `validator` string (default 'unknown', at most 64 characters, else 400-style error); `new_content` and `note` are always NULL;
+   3. `forgetWorking` deletes the memory's `memory_validations` rows in the same transaction (`purgeWorkingMemoryArtifacts`, `engine/src/core/beam/store.ts:866-880`);
+   4. the trigger `trim_validations_to_3` is unchanged;
+   5. `engine/test/audit-trail.spec.ts` covers each action, a no-op writing nothing, the 3-row cap, forget purging, and that no column holds memory text;
+   6. none of the tools is added to `bin/mcp-proxy.ts`'s allow-list.
+3. Refs: `engine/src/core/beam/store.ts:643-672` (invalidate), `:762` (updateWorking), `:866-880` (forget); `engine/src/mcp-tools.ts:853-880`.
+4. Gate: `bun run test:bun && bun scripts/engine-diff.ts && bun run typecheck` (timeout 900 s, must exit 0).
+5. Scope: phase MODEL. Do after MODEL.5 and before MODEL.4. Review level: data-loss (forget path).
+
+#### MODEL.4: UPSTREAM.md lists changes 12-16 and the build moves to 18.12.3-mnemosyne.8
 
 1. Goal: record the engine changes and bump the build id.
 2. Acceptance:
-   1. `engine/UPSTREAM.md` has entries 12 (trim by scope), 13 (fields on remember/update, restore), 14 (`mnemopi_similar`), 15 (`mnemopi_expire_unused`), each with What, Why, Files, Tests;
+   1. `engine/UPSTREAM.md` has entries 12 (trim by scope), 13 (fields on remember/update, restore), 14 (`mnemopi_similar`), 15 (`mnemopi_expire_unused`), 16 (the audit trail), each with What, Why, Files, Tests;
    2. `hooks/engine-build.ts` `ENGINE_BUILD` and `engine/package.json` version are `18.12.3-mnemosyne.8`;
    3. `bun scripts/engine-diff.ts` exits 0.
 3. Gate: `bun scripts/engine-diff.ts && grep -q 'mnemosyne.8' hooks/engine-build.ts` (timeout 300 s, must exit 0).
@@ -318,7 +345,7 @@ An import-free module, `hooks/guard.ts`, that the hooks, the outside-agent proxy
 
 1. Goal: add the `guardMode` option and a read-only audit command.
 2. Acceptance:
-   1. a plugin option `guardMode`: 'warn' (default) or 'strict'; strict refuses a warned save unless the call passes `confirm: true`; secret and size blocks have no override in either mode;
+   1. a plugin option `guardMode`: 'strict' (default, Rohit's decision) or 'warn'; strict refuses a warned save unless the call passes `confirm: true`, and the refusal names each rule and says to resend with `confirm: true` if the save is wanted; secret and size blocks have no override in either mode;
    2. `bun bin/guard-audit.ts --store <dir>` opens the store read-only and prints only counts per rule and verdict, never memory text (`tests/bun/guard-audit.spec.ts` with a temp store);
    3. `claude plugin validate .` passes with the new option.
 3. Gate: `claude plugin test . && bun run test:bun && claude plugin validate .` (timeout 900 s, must exit 0).
@@ -463,7 +490,34 @@ Tags today are free-form Haiku wording: 447 tags for 140 memories, 407 used once
    3. apply never changes content, importance, source or any knowledge table (spec compares before and after).
 3. Refs: `hooks/backfill.ts:9-30`; `hooks/register.ts:940-1025`.
 4. Gate: `claude plugin test . && bun run test:bun` (timeout 900 s, must exit 0).
-5. Scope: phase VOCAB. Do after VOCAB.3. The batch size (20) is an open decision, see Open decisions (d).
+5. Scope: phase VOCAB. Do after VOCAB.3. The batch size (20) is decided, see Decisions item 8.
+
+---
+
+## Wave 3b: REL8 (release 0.8.0)
+
+### Phase REL8: Docs for the 0.8.0 half and version 0.8.0
+
+README and DESIGN describe what 0.8.0 ships: the guard (strict by default), kinds and provenance, the trim-by-scope change, the audit trail, near-duplicates and `replaces`, the backup command and the vocabulary; the version moves to 0.8.0. Dashboard writes, the importers, session summaries and the expiry sweep are not in 0.8.0 and are not described as shipped.
+
+1. Needs first: VOCAB and HARDEN part A (HARDEN.1, HARDEN.2).
+2. May touch: `README.md`, `DESIGN.md`, `.claude-plugin/plugin.json`.
+3. Must not touch: `ui/`, `hooks/`, `engine/`, `bin/`.
+4. Review level: light. Hazard: `DESIGN.md` section 5 still describing the IMPORTED workaround (guard: REL8.1 acceptance 2).
+5. Suggested commit message: `docs: guardrails, kinds, provenance, audit trail, vocabulary; v0.8.0`
+6. After the phase: Rohit tags and pushes 0.8.0 with the release skill; wave 4 starts after that.
+
+#### REL8.1: README, DESIGN and version 0.8.0
+
+1. Goal: document the 0.8.0 half and set the version.
+2. Acceptance:
+   1. README has sections for the guard (rules, `guardMode` with 'strict' as the default, what is blocked and how to confirm a warned save), kinds, provenance, the vocabulary and namespaces, and says this update needs `/mnemosyne-setup`;
+   2. `DESIGN.md` gains a v0.8.0 section recording the trim-by-scope decision that replaces section 5's IMPORTED note, contracts C1-C6, C9 and C10.1-4, and why the seven engine tables stay unused;
+   3. `.claude-plugin/plugin.json` version is 0.8.0.
+3. Gate (two commands, both must exit 0):
+   1. `claude plugin validate . && claude plugin test .` (timeout 600 s);
+   2. `grep -q 'guardMode' README.md && grep -q 'v0.8.0' DESIGN.md && grep -q '"version": "0.8.0"' .claude-plugin/plugin.json` (timeout 60 s).
+4. Scope: phase REL8.
 
 ---
 
@@ -474,7 +528,7 @@ Tags today are free-form Haiku wording: 447 tags for 140 memories, 407 used once
 The dashboard can only forget today. This phase adds write routes behind the existing token, Host and Origin guards. Each runs the guard and goes through the engine as the row's owner. A read-only review route lists retirement candidates with a reason per row.
 
 1. Delivers: C7 on the server.
-2. Needs first: META (engine args, backup) and VOCAB (vocabulary helper).
+2. Needs first: REL8 (so META's engine args and backup and VOCAB's vocabulary helper are in, and 0.8.0 is out).
 3. Read first: `ui/server.ts:1584-1689`.
 4. May touch: `ui/server.ts`, `tests/bun/ui-server.spec.ts`, `tests/bun/crud-api.spec.ts`, `tests/bun/review-api.spec.ts`.
 5. Must not touch: `engine/`, `hooks/`, `ui/app.ts`, `tests/bun/helpers.ts`.
@@ -498,7 +552,7 @@ The dashboard can only forget today. This phase adds write routes behind the exi
 
 1. Goal: retire and restore routes.
 2. Acceptance:
-   1. `retire { memory_id, replaced_by? }` runs `mnemopi_invalidate` as the row's owner; `restore { memory_id }` runs `mnemopi_update` restore; neither deletes a row (spec counts rows);
+   1. `retire { memory_id, replaced_by? }` runs `mnemopi_invalidate` as the row's owner; `restore { memory_id }` runs `mnemopi_update` restore; neither deletes a row (spec counts rows); both pass `validator: 'dashboard'`, as does CRUDX.1's update (C10);
    2. a missing row is 404, a row with no owner 409, one write at a time (the forgets limiter);
    3. each logs one line, origin ui, with the ids.
 3. Gate: `bun run test:bun` (timeout 900 s, must exit 0).
@@ -525,12 +579,22 @@ The dashboard can only forget today. This phase adds write routes behind the exi
 3. Gate: `bun run test:bun` (timeout 900 s, must exit 0).
 4. Scope: phase CRUDX. Do after CRUDX.3.
 
+#### CRUDX.5: Health labels the unused tables; Review shows each retired row's audit trail (C10)
+
+1. Goal: the server side of C10.5 and the history read.
+2. Acceptance:
+   1. `GET /api/health-report` adds `unusedByDesign: { <table>: <reason> }` (C10.5) as a fixed map in `ui/server.ts`; `tables` is unchanged; a table in the map that does not exist in the store is left out;
+   2. `GET /api/review`'s retired rows carry `history: [{ action, validator, at }]` from `memory_validations`, newest first, read-only; empty when there is none;
+   3. `tests/bun/review-api.spec.ts` and `tests/bun/ui-server.spec.ts` cover both, including a store without `memory_validations` (history empty, no error).
+3. Gate: `bun run test:bun && bun run typecheck` (timeout 900 s, must exit 0).
+4. Scope: phase CRUDX. Do after CRUDX.4.
+
 ### Phase IMPORT: Importing documents and session logs through the guard
 
 Two importers, both with a dry run and an apply after a backup: markdown or text documents split into chunks, and Claude Code session transcripts boiled down by Haiku into a few durable memories. Every candidate passes the guard and the near-duplicate check, and lands with source 'import:doc' or 'import:session'.
 
 1. Delivers: `/mnemosyne-import doc` and `/mnemosyne-import session`, and the `pinned` flag on `memory_update` (IMPORT.3).
-2. Needs first: META and VOCAB.
+2. Needs first: REL8 (META and VOCAB included).
 3. May touch: `hooks/import.ts`, `bin/import.ts`, `hooks/register.ts`, `tests/import.test.ts`, `tests/register.test.ts`, `tests/bun/import.spec.ts`, `tests/bun/pinned.spec.ts`, `tsconfig.bun.json`.
 4. Must not touch: `engine/`, `ui/`, `tests/bun/helpers.ts`.
 5. Review level: data-loss. Hazard: a big document floods the store (guard: the dry run shows the count, plus the guard size caps and near-duplicate check). Session text leaves the machine to Haiku, as tags already do; it is named in the README.
@@ -585,7 +649,7 @@ The UI half of CRUDX. Rohit can write and edit memories with a kind and vocabula
 1. Delivers: the UI for C7.
 2. Needs first: CRUDX.
 3. Read first: `ui/app.ts:310-373`.
-4. May touch: `ui/app.ts`, `ui/index.html`, `ui/style.css`, `ui/review.ts`, `ui/tsconfig.json`, `tests/bun/ui-views.spec.ts`, `tests/bun/review-view.spec.ts`.
+4. May touch: `ui/app.ts`, `ui/index.html`, `ui/style.css`, `ui/review.ts`, `ui/health.ts`, `ui/tsconfig.json`, `tests/bun/ui-views.spec.ts`, `tests/bun/review-view.spec.ts`, `tests/bun/health-view.spec.ts`.
 5. Must not touch: `ui/server.ts`, `engine/`, `hooks/`, `tests/bun/helpers.ts`.
 6. Review level: standard. Hazard: a bulk retire creeping in (guard: CRUD.2 acceptance 2 and its spec).
 7. Manual QA steps (Rohit, in the dashboard, after the phase merges):
@@ -625,6 +689,16 @@ The UI half of CRUDX. Rohit can write and edit memories with a kind and vocabula
 3. Gate: `bun run test:bun` (timeout 900 s, must exit 0).
 4. Scope: phase CRUD. Do after CRUD.2.
 
+#### CRUD.4: Health shows "unused by design"; Retired rows show their last actions (C10)
+
+1. Goal: the UI side of C10.
+2. Acceptance:
+   1. in the Health tab's storage list (`ui/health.ts:188`, `:206`), a table named in `unusedByDesign` shows "unused by design" and its reason instead of "empty", and is not counted in the summary line's "N empty"; the Empty filter still lists it, marked;
+   2. each row in the Review tab's Retired list shows its `history` as one line per action ("retired by dashboard, 2026-10-25"); no line when the history is empty;
+   3. all text goes through `textContent`; `tests/bun/health-view.spec.ts` and `tests/bun/review-view.spec.ts` cover both, and an older server answer without `unusedByDesign` or `history` still renders.
+3. Gate: `bun run test:bun && bun run typecheck` (timeout 900 s, must exit 0).
+4. Scope: phase CRUD. Do after CRUD.3.
+
 ### Phase SESSION: What were we doing last time: session summaries and pinned memories at session start
 
 At session start the plugin summarises the owner's previous session once, in the background, into one 'event' memory that expires after 30 days, using IMPORT's transcript reader. It then puts that summary and any pinned memories into context. Pinning is a flag on the memory (Python Mnemosyne's pinned, as metadata), and unpinned project-state notes fade out through their expiry.
@@ -640,7 +714,7 @@ At session start the plugin summarises the owner's previous session once, in the
 
 1. Goal: background summary of the previous session.
 2. Acceptance:
-   1. a plugin option `sessionSummary`: 'off' (default, see Open decisions) or 'on'; when on, `session.start` finds the owner's previous session and, if it has no summary yet, asks Haiku for one of at most 600 characters, after the start reply, with a pending file like knowledge extraction;
+   1. a plugin option `sessionSummary`: 'off' (default, see Decisions) or 'on'; when on, `session.start` finds the owner's previous session and, if it has no summary yet, asks Haiku for one of at most 600 characters, after the start reply, with a pending file like knowledge extraction;
    2. the summary goes through `admit()` and is saved as kind 'event', source 'import:session', `valid_until` 30 days, `metadata.session = <session id>`;
    3. a lost call leaves its pending file and the next start finishes it; a session with no transcript is skipped;
    4. `tests/session.test.ts` covers each with a stub model.
@@ -652,7 +726,7 @@ At session start the plugin summarises the owner's previous session once, in the
 1. Goal: the plugin side of auto-expire. Needs MODEL.5 and IMPORT.3 (the pinned flag).
 2. Acceptance:
    1. a plugin option `expireUnusedDays`: 90 (default), or 0 to turn the sweep off; values 1-29 are refused;
-   2. `session.start` runs the sweep at most once per 24 hours (a marker file, mode 0600), after the start reply, in the background: the C9 backup first (stop if it fails), then `mnemopi_expire_unused` with `dry_run` false, for the owner's own rows only; the activity log line holds counts and ids, never memory text;
+   2. `session.start` runs the sweep at most once per 24 hours (a marker file, mode 0600), after the start reply, in the background: the C9 backup first (stop if it fails), then `mnemopi_expire_unused` with `dry_run` false and `validator: 'expire-sweep'` (C10), for the owner's own rows only; the activity log line holds counts and ids, never memory text;
    3. `bun bin/memories.ts expire` is a dry run that prints the candidates (id, kind, last used, first 80 characters) and `bun bin/memories.ts expire --apply` runs it for real after a backup, so Rohit can preview the first run on his store;
    4. rows with a pinned flag, other kinds or an existing expiry are never touched (the engine enforces this; a spec checks the plugin does not pass wider kinds than the option allows);
    5. `tests/session.test.ts` and `tests/bun/` specs cover the daily marker, the off setting, a failed backup stopping the sweep, and the dry run, all on a temp store.
@@ -725,30 +799,30 @@ The leftovers from 0.7.0 that touch safety and housekeeping, plus the two runs R
 
 ---
 
-## Wave 7: REL8
+## Wave 7: REL9 (release 0.9.0)
 
-### Phase REL8: Docs for v3 and version 0.8.0
+### Phase REL9: Docs for the 0.9.0 half and version 0.9.0
 
-README and DESIGN describe the guard, kinds and provenance, the vocabulary, the dashboard writes and the review queue, the importers and session summaries; the version moves to 0.8.0.
+README and DESIGN describe the dashboard writes and the Review tab (with the audit trail and the "unused by design" Health labels), `/mnemosyne-import`, session summaries, pinned memories and the unused-expiry sweep; the version moves to 0.9.0.
 
 1. Needs first: HARDEN.
 2. May touch: `README.md`, `DESIGN.md`, `.claude-plugin/plugin.json`.
 3. Must not touch: `ui/`, `hooks/`, `engine/`, `bin/`.
-4. Review level: light. Hazard: `DESIGN.md` section 5 still describing the IMPORTED workaround (guard: REL8.1 acceptance 2).
-5. Suggested commit message: `docs: guardrails, kinds, vocabulary, dashboard writes, importers; v0.8.0`
-6. After the phase: Rohit tags and pushes with the release skill.
+4. Review level: light.
+5. Suggested commit message: `docs: dashboard writes and review, importers, session summaries; v0.9.0`
+6. After the phase: Rohit tags and pushes 0.9.0 with the release skill.
 
-#### REL8.1: README, DESIGN and version 0.8.0
+#### REL9.1: README, DESIGN and version 0.9.0
 
-1. Goal: document v3 and set the version.
+1. Goal: document the 0.9.0 half and set the version.
 2. Acceptance:
-   1. README has sections for the guard (rules, guardMode, what is blocked), kinds, the vocabulary and namespaces, dashboard writes and Review, `/mnemosyne-import` and session summaries, and says this update needs `/mnemosyne-setup`;
-   2. `DESIGN.md` gains a v0.8.0 section recording the trim-by-scope decision that replaces section 5's IMPORTED note, and contracts C1-C9;
-   3. `.claude-plugin/plugin.json` version is 0.8.0.
+   1. README has sections for dashboard writes and Review, `/mnemosyne-import`, session summaries (off by default), pinned memories and `expireUnusedDays`, and names what leaves the machine to Haiku;
+   2. `DESIGN.md` gains a v0.9.0 section with contracts C7, C8 and C10.5, the review history, and the expiry sweep's limits;
+   3. `.claude-plugin/plugin.json` version is 0.9.0.
 3. Gate (two commands, both must exit 0):
    1. `claude plugin validate . && claude plugin test .` (timeout 600 s);
-   2. `grep -q 'guardMode' README.md && grep -q 'v0.8.0' DESIGN.md && grep -q '"version": "0.8.0"' .claude-plugin/plugin.json` (timeout 60 s).
-4. Scope: phase REL8.
+   2. `grep -q 'expireUnusedDays' README.md && grep -q 'v0.9.0' DESIGN.md && grep -q '"version": "0.9.0"' .claude-plugin/plugin.json` (timeout 60 s).
+4. Scope: phase REL9.
 
 ---
 
@@ -756,9 +830,9 @@ README and DESIGN describe the guard, kinds and provenance, the vocabulary, the 
 
 ### Phase LATER: Later: persona and canonical facts, agent-aware recall, PII and injection warnings
 
-Nice-to-haves kept out of 0.8.0. Persona (always-on rules) and canonical facts (one live value per key) port ideas from the Python Mnemosyne on top of pinned memories and replaces. Agent-aware recall boosts memories tagged `agent:<client>`. PII and prompt-injection text get warnings. None starts without Rohit's go; each gets its own acceptance review before build.
+Nice-to-haves kept out of 0.8.0 and 0.9.0. Persona (always-on rules) and canonical facts (one live value per key) port ideas from the Python Mnemosyne on top of pinned memories and replaces. Agent-aware recall boosts memories tagged `agent:<client>`. PII and prompt-injection text get warnings. None starts without Rohit's go; each gets its own acceptance review before build.
 
-1. Needs first: REL8.
+1. Needs first: REL9.
 2. May touch: `hooks/register.ts`, `hooks/guard.ts`, `bin/mcp-proxy.ts`, `tests/register.test.ts`, `tests/guard.test.ts`, `tests/bun/mcp-proxy.spec.ts`.
 3. Must not touch: `engine/`, `tests/bun/helpers.ts`.
 4. Review level: standard. Hazard: scope creep into 0.8.0 (guard: wave 8 and manual tasks only).
@@ -795,7 +869,7 @@ Run from the repository root. All must exit 0.
    claude plugin test . && bun run typecheck && bun run test:bun && claude plugin validate . && bun scripts/engine-diff.ts && bun scripts/vendor-map.ts --check
    ```
 
-   SUITE covers every task from MODEL.1 to REL8.1 except MODEL.3 and META.3's embedding parts.
+   SUITE covers every task from MODEL.1 to REL9.1 except MODEL.3 and META.3's embedding parts.
 2. EMBED: run once at the end of the whole plan (timeout 900 s), plus MODEL.3's and META.3's own gate. The near-duplicate tool needs real vectors, so its proof needs the model download:
 
    ```
@@ -816,7 +890,7 @@ Run from the repository root. All must exit 0.
 ### Review rule
 
 1. The review of each phase is done by a different worker than the one who built it. The builder never approves its own work.
-2. Review depth is set per phase: data-loss (MODEL, META, VOCAB, CRUDX, IMPORT) means the reviewer checks specifically for deleted, kept, relabelled or overwritten rows, secrets in logs, and that every apply backs up first; standard (GUARD, CRUD, SESSION, HARDEN, LATER); light (REL8).
+2. Review depth is set per phase: data-loss (MODEL, META, VOCAB, CRUDX, IMPORT) means the reviewer checks specifically for deleted, kept, relabelled or overwritten rows, secrets in logs, and that every apply backs up first; standard (GUARD, CRUD, SESSION, HARDEN, LATER); light (REL8, REL9).
 3. A reviewer reruns the gate commands itself and does not trust "tests pass" from the builder.
 4. A task whose review finds a defect goes back to a worker with the finding written into the task; do not widen the task's file scope to make it pass.
 
@@ -824,7 +898,7 @@ Run from the repository root. All must exit 0.
 
 ## Standing constraints for every worker
 
-1. Only MODEL touches `engine/` (UPSTREAM.md changes 12-15, `ENGINE_BUILD` `18.12.3-mnemosyne.8`). Every other phase forbids `engine/`.
+1. Only MODEL touches `engine/` (UPSTREAM.md changes 12-16, `ENGINE_BUILD` `18.12.3-mnemosyne.8`). Every other phase forbids `engine/`.
 2. Nothing touches the real store `~/.claude/mnemosyne/store`. Tests and audits use temp stores. The only tasks that point at it are Rohit's manual ones (GUARD.4, HARDEN.4, HARDEN.5).
 3. Every 'apply' command backs the store up first (C9) and stops if the backup fails. Rohit runs each apply himself, on a copy of the store first.
 4. Retiring a memory by hand needs Rohit's OK, per memory. No agent retires, and there is no bulk retire. The one exception is the unused-expiry sweep (MODEL.5, SESSION.4), which Rohit chose: restorable, limited to expirable kinds, never on a real store from a build worker.
@@ -837,24 +911,24 @@ Run from the repository root. All must exit 0.
 
 ---
 
-## Open decisions (awaiting Rohit; not tasks, not decided here)
+## Decisions (Rohit, 2026-10-24) and what is still open
 
-1. (a) DECIDED by Rohit, 2026-10-24: auto-expire. Now tasks MODEL.5 and SESSION.4, plus the Review mark in CRUD.2. Defaults I chose, still open to change: 90 days unused (never under 30), expirable kinds context, event, error and artifact only (fact, preference, instruction, decision and 'unknown' are never swept), pinned rows exempt, on by default with `expireUnusedDays: 0` to turn it off. No rank decay in 0.8.0.
-2. (b) Pinning `MNEMOPI_HOST_LLM_ENABLED`.
-3. (c) A real-session extraction test.
-4. (d) Backfill batch size: 40 today (`hooks/backfill.ts` `GET_BATCH`); VOCAB.4 lowers it to 20 and concurrency from 4 to 2. Also, the README 3 GB peak note is to be referenced.
-5. (e) A 'second brain' line in the Goal.
-6. (f) `triple_end` stays cut (see Out of scope) unless Rohit wants it back.
+Decided:
 
-Carried from the source plan's own open questions:
+1. (a) Auto-expire: yes. Tasks MODEL.5 and SESSION.4, plus the Review mark in CRUD.2. Defaults: 90 days unused (never under 30), expirable kinds context, event, error and artifact only (fact, preference, instruction, decision and 'unknown' are never swept), pinned rows exempt, on by default with `expireUnusedDays: 0` to turn it off. No rank decay.
+2. Item 7, `guardMode`: 'strict' is the default (GUARD.3). A warned save is refused unless resent with `confirm: true`; secrets and size are blocked in both modes.
+3. Item 8: rows saved before v3 keep `source = 'imported'`; no relabel.
+4. Item 9: session summaries are off by default (SESSION.1).
+5. Item 12: two releases, 0.8.0 after wave 3 (REL8: guard, kinds, provenance, audit trail, vocabulary) and 0.9.0 for the dashboard writes and review, the importers and session work (REL9).
+6. Item 13: no integration branch; each phase merges straight into `main` after its review.
+7. Upstream: the engine stays on 18.12.3 and is not compared against 18.12.4-18.12.6 before MODEL. Upstream fixes or features are imported selectively later, each as its own UPSTREAM.md change.
+8. Taken as the coordinator's defaults: (d) VOCAB.4 lowers the backfill batch to 20 and concurrency to 2; (f) `triple_end` stays cut; item 11 keeps the 0.88 near-duplicate threshold; item 10, the five SUPERSEDED or HISTORICAL rows (`da54d924…`, `ce61a767…`, `72d4c387…`, `412c7317…`, `f485b1bd…`), are handled by Rohit's own clicks in HARDEN.4.
 
-7. Default `guardMode`: 'warn' (recommended) or 'strict'? Decides whether near-duplicates and chatter are refused or only flagged.
-8. Rows saved before v3: leave `source = 'imported'`, or relabel all 140 to 'legacy' (needs MODEL.2 to accept source on update)?
-9. Session summaries: default off (recommended, one Haiku call per session) or on? Decides SESSION.1's default.
-10. The five rows marked SUPERSEDED or HISTORICAL (`da54d924…`, `ce61a767…`, `72d4c387…`, `412c7317…`, `f485b1bd…`): retire them first in HARDEN.4? Each still needs Rohit's click.
-11. Near-duplicate threshold 0.88 (this store's p99.9 pair score): keep, or lower once there are more memories? Decides G3's sensitivity.
-12. Release as one 0.8.0, or 0.8.0 after wave 3 (guard, metadata, vocabulary) and 0.9.0 for dashboard writes and importers?
-13. Integration branch: `main` as in 0.7.0, or a separate integration branch merged into main?
+Still open, not blocking any wave:
+
+9. (b) Pinning `MNEMOPI_HOST_LLM_ENABLED`.
+10. (c) A real-session extraction test.
+11. (e) A 'second brain' line in the Goal.
 
 ---
 
@@ -862,10 +936,10 @@ Carried from the source plan's own open questions:
 
 1. In-phase task order comes from the source's "Build order" lines, not from task-level `deps` (the source only has `IMPORT.2` depending on `IMPORT.0`). META and SESSION build orders are not numeric (META.5 first; IMPORT.3, .1, .2).
 2. RESOLVED by Rohit's pick: the pinned flag task moved from SESSION (wave 5) to IMPORT.3 (wave 4), so CRUDX.3 and IMPORT.3 land in the same wave. CRUDX.3 treats a missing flag as not pinned and tests with a fixture, so the two lanes never wait on each other.
-3. REL8 depends on the whole HARDEN phase, which includes Rohit's manual HARDEN.4 and HARDEN.5, so REL8 cannot start until he finishes them (as in the source).
+3. REL9 depends on the whole HARDEN phase, which includes Rohit's manual HARDEN.4 and HARDEN.5, so REL9 cannot start until he finishes them. REL8 needs only HARDEN part A.
 4. Source wording "run log" (GUARD.4, HARDEN.4, HARDEN.5) and "the IMPORT brief's report" / "the orchestrator" (IMPORT.0) were MK terms; here they are "the coordinator's final report" and "the task's worker_done report". Check this is acceptable.
-5. The source's "Open questions" about `guardMode`, legacy rows, session summaries, the five SUPERSEDED rows, threshold, release split and integration branch are carried as items 7-13 of Open decisions. Item 13 originally named an MK-specific branch and is reworded.
+5. The source's "Open questions" about `guardMode`, legacy rows, session summaries, the five SUPERSEDED rows, threshold, release split and integration branch are carried as items 7-13 of the old Open decisions list, now decided. Item 13 originally named an MK-specific branch and is reworded.
 6. The source's SUITE `covers` list does not include MODEL.3 or META.3's embedding parts (EMBED covers them), nor IMPORT.0, HARDEN.4/5, or the LATER tasks. Copied as is.
 7. Source task fields `critical` and `risk` (numeric) are shown only as "(critical)" in task titles; the numeric values are dropped. Phase fields route, size, lane_group and subagents are dropped as MK-only.
-8. The README "3 GB peak note" in Open decisions (d) is from the request, not the source; the source does not mention it.
+8. The README "3 GB peak note" in Decisions item 8 is from the request, not the source; the source does not mention it.
 9. Wave 4 and 5 phases touch `hooks/register.ts` only in IMPORT and SESSION respectively, so the side-by-side pairs have disjoint scopes; `tsconfig.bun.json` appears in GUARD, VOCAB and IMPORT (different waves, no overlap).
