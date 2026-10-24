@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { engineEnv, EMBEDDINGS_CACHE_DIR, EMBEDDINGS_MODEL } from '../../hooks/engine'
 import { ROOT, toolCall } from './helpers'
+import { isolatedEnv } from './helpers'
 
 const CLI = join(ROOT, 'engine', 'src', 'cli.ts')
 const dirs: string[] = []
@@ -26,7 +27,7 @@ afterAll(() => {
 /** One engine process for `messages`, env as given (laid over a clean, non-hostile base). */
 async function spawnEngine(store: string, env: Record<string, string>, messages: readonly object[]) {
   const child = Bun.spawn([process.execPath, CLI, 'mcp'], {
-    env: { ...(process.env as Record<string, string>), ...env, MNEMOPI_DATA_DIR: store },
+    env: { ...isolatedEnv(), ...(process.env as Record<string, string>), ...env, MNEMOPI_DATA_DIR: store },
     stdin: 'pipe',
     stdout: 'pipe',
     stderr: 'pipe',
