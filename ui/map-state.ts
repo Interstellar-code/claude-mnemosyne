@@ -223,6 +223,44 @@ export function saveGlow(storage: Pick<Storage, 'setItem'> | undefined, level: G
     // storage is a convenience only
   }
 }
+
+// ---- The rail's collapsible cards ----
+
+export const RAIL_KEY = 'mnemosyne.map.rail'
+/** The rail cards by name (the element is `map-card-<name>`) with whether each starts open: Layout and Colour by do, the rest start closed. */
+export const RAIL_CARDS: readonly { name: string; open: boolean }[] = [
+  { name: 'layout', open: true },
+  { name: 'colour', open: true },
+  { name: 'glow', open: false },
+  { name: 'links', open: false },
+  { name: 'know', open: false },
+  { name: 'layers', open: false },
+  { name: 'projects', open: false },
+]
+
+/** The remembered open state of the rail cards, name to open; anything unreadable (no value, bad JSON, storage throws) is an empty record. */
+export function readRail(storage: Pick<Storage, 'getItem'> | undefined): Record<string, boolean> {
+  try {
+    const parsed: unknown = JSON.parse(storage?.getItem(RAIL_KEY) ?? '{}')
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
+    return Object.fromEntries(Object.entries(parsed).filter((entry): entry is [string, boolean] => typeof entry[1] === 'boolean'))
+  } catch {
+    return {}
+  }
+}
+
+/** Remembers the open state of the rail cards; failure is ignored. */
+export function saveRail(storage: Pick<Storage, 'setItem'> | undefined, rail: Record<string, boolean>): void {
+  try {
+    storage?.setItem(RAIL_KEY, JSON.stringify(rail))
+  } catch {
+    // storage is a convenience only
+  }
+}
+
+/** Whether a rail card is open: the remembered state, else its default. */
+export const railOpen = (rail: Record<string, boolean>, name: string): boolean => rail[name] ?? RAIL_CARDS.find(card => card.name === name)?.open ?? false
+
 const THREAD_OPACITY = 0.16
 const THREAD_OPACITY_FOCUSED = 0.3
 export const BRIDGE_OPACITY = 0.55
@@ -1575,7 +1613,7 @@ export function simulationInput(galaxy: Galaxy) {
 
 // ---- The live strip ----
 
-export const STRIP_KEEP = 4
+export const STRIP_KEEP = 5
 export const STRIP_STORE = 12
 type Layer = 'recall' | 'write'
 export const layerOf = (kind: MapEventKind): Layer => (kind === 'recall' ? 'recall' : 'write')

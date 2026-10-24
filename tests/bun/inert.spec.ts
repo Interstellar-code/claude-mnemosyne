@@ -199,6 +199,38 @@ describe('VIEW.4: the real render helpers keep markup as text', () => {
     expect(made.some(element => element.tagName === 'script' || element.tagName === 'img')).toBe(false)
   })
 
+  test('a denser Memories row: no id under the text, "never" for 0 recalls, the tooltip says when', () => {
+    made.length = 0
+    const row = app.memoryRow(memory, () => {}) as FakeElement
+    expect(row.texts()).not.toContain(memory.id)
+    expect(row.all().some(element => element.className === 'row-text')).toBe(true)
+    const cells = row.all().filter(element => element.tagName === 'td')
+    const last = cells[cells.length - 1]!
+    expect(last.textContent).toBe('3')
+    expect(last.title).toBe('Last recalled: never')
+    const never = app.memoryRow({ ...memory, recall_count: 0 }, () => {}) as FakeElement
+    const quiet = never.all().filter(element => element.tagName === 'td').pop()!
+    expect(quiet.textContent).toBe('never')
+    expect(quiet.className).toContain('muted')
+    const recalled = app.memoryRow({ ...memory, last_recalled: '2026-10-23T10:00:00.000Z' }, () => {}) as FakeElement
+    expect(recalled.all().filter(element => element.tagName === 'td').pop()!.title).toMatch(/^Last recalled: .*\d/)
+    // A preview the server cut short ends in an ellipsis.
+    const cut = app.memoryRow({ ...memory, preview: 'start', truncated: true }, () => {}) as FakeElement
+    expect(cut.texts()).toContain('start…')
+  })
+
+  test('the detail panel has two columns: the text on the left, facts, tags and Forget on the right', () => {
+    made.length = 0
+    const panel = app.memoryDetail(memory, () => {}) as FakeElement
+    const [main, side] = panel.children as FakeElement[]
+    expect(main!.className).toBe('detail-main')
+    expect(side!.className).toBe('detail-side')
+    expect(main!.all().some(element => element.className === 'detail-text')).toBe(true)
+    expect(main!.texts()).toContain(memory.id)
+    expect(side!.all().some(element => element.className === 'grid-facts')).toBe(true)
+    expect(side!.all().some(element => element.className === 'danger-zone')).toBe(true)
+  })
+
   test('the detail panel, with its forget confirm naming the first line and id', () => {
     made.length = 0
     const panel = app.memoryDetail(memory, () => {}) as FakeElement

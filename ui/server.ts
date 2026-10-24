@@ -97,9 +97,9 @@ export const ENGINE_TIMEOUT_MS = 20_000
 // GET /api/memories: at most this many rows, each with this much of its text.
 export const LIST_LIMIT = 1000
 export const PREVIEW_CHARS = 240
-// POST /api/search: the engine's top hits, as the first-prompt recall takes them;
+// POST /api/search: the engine's top hits per owner (the page shows 10, then "Show more");
 // across owners, at most this many owners (the largest), once each.
-export const SEARCH_LIMIT = 5
+export const SEARCH_LIMIT = 20
 export const SEARCH_OWNERS = 10
 export const MAX_QUERY_CHARS = 500
 // A POST body past this is refused unread.
@@ -172,6 +172,12 @@ export function openStore(store: string): Database | null {
   return db
 }
 
+// Per-process engine settings: `keywordOnly` runs this process with embeddings off.
+export type RunOptions = { keywordOnly?: boolean }
+
+// True when this server started with embeddings on (MNEMOSYNE_EMBEDDINGS=on, from hooks/ui-launch.ts).
+export const embeddingsOn = (env: Record<string, string | undefined> = process.env) => env.MNEMOSYNE_EMBEDDINGS === 'on'
+
 // One engine process for `requests`, as `owner`: the server's own environment
 // with engineEnv laid over it, as the hooks send it.
 export async function runEngine(
@@ -180,10 +186,12 @@ export async function runEngine(
   owner: string,
   baseEnv: Record<string, string | undefined> = process.env,
   timeoutMs = ENGINE_TIMEOUT_MS,
+  runOptions: RunOptions = {},
 ): Promise<(string | Error)[]> {
   // C11: the embeddings setting this server started with, passed by hooks/ui-launch.ts
   // (MNEMOSYNE_EMBEDDINGS). 'on' only when /mnemosyne-setup downloaded the model.
-  const embeddings = baseEnv.MNEMOSYNE_EMBEDDINGS === 'on'
+  // `keywordOnly` turns it off for this one process (a keyword search), never the server's own setting.
+  const embeddings = embeddingsOn(baseEnv) && runOptions.keywordOnly !== true
   const child = Bun.spawn([process.execPath, config.cli, 'mcp'], {
     env: { ...baseEnv, ...engineEnv(config.store, owner, { embeddings }) },
     stdin: 'pipe',
@@ -257,7 +265,7 @@ export function pluginVersion(uiDir: string = UI_DIR): string | undefined {
 
 function health(config: Config, store: Store, engine: string | undefined, plugin: string | undefined) {
   store.db ??= openStore(config.store)
-  const base = { ok: true, pid: process.pid, store: config.store, engine: engine ?? null, plugin: plugin ?? null, activity: config.activityLog !== '' }
+  const base = { ok: true, pid: process.pid, store: config.store, engine: engine ?? null, plugin: plugin ?? null, activity: config.activityLog !== '', embeddings: embeddingsOn() }
   if (store.db === null) return { ...base, total: 0, owners: [], note: 'The store has no database yet.' }
   try {
     const owners = store.db
@@ -1459,7 +1467,32 @@ type Hit = {
   importance: number | null
   metadata: Record<string, unknown> | null
   tags: string[]
+  // The engine's per-signal scores (0 when the signal did not run), and which one found the hit.
+  keyword_score: number
+  dense_score: number
+  fts_score: number
+  matched: Matched
 }
+
+export type Matched = 'keyword' | 'meaning' | 'both'
+export type SearchMode = 'keyword' | 'hybrid'
+
+// A signal under this counts as absent.
+export const MATCH_EPSILON = 0.05
+
+/**
+ * Which signal found a hit: 'meaning' when the vector score contributes and the
+ * keyword scores are ~0, 'both' when both pass MATCH_EPSILON, else 'keyword'.
+ */
+export function classifyMatch(keywordScore: number, denseScore: number, ftsScore = 0): Matched {
+  const keyword = Math.max(keywordScore, ftsScore) > MATCH_EPSILON
+  const meaning = denseScore > MATCH_EPSILON
+  if (keyword && meaning) return 'both'
+  if (meaning) return 'meaning'
+  return 'keyword'
+}
+
+const finiteScore = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) ? value : 0)
 
 // A JSON body that is one plain object holding only `allowed` keys; else the reason.
 function plainBody(text: string, allowed: readonly string[]): Record<string, unknown> | string {
@@ -1485,6 +1518,9 @@ export function mergeHits(runs: readonly (readonly Record<string, unknown>[])[],
       const seen = best.get(row.id)
       if (seen !== undefined && seen.score >= score) continue
       const metadata = parseMetadata(row.metadata_json)
+      const keyword = finiteScore(row.keyword_score)
+      const dense = finiteScore(row.dense_score)
+      const fts = finiteScore(row.fts_score)
       best.set(row.id, {
         id: row.id,
         owner: String(row.session_id ?? ''),
@@ -1498,6 +1534,10 @@ export function mergeHits(runs: readonly (readonly Record<string, unknown>[])[],
         importance: typeof row.importance === 'number' ? row.importance : null,
         metadata,
         tags: tagsOf(metadata),
+        keyword_score: keyword,
+        dense_score: dense,
+        fts_score: fts,
+        matched: classifyMatch(keyword, dense, fts),
       })
     }
   }
@@ -1521,7 +1561,7 @@ type Views = {
   // An activity line, origin ui; `extra` adds keys after the C3 ones.
   log: (fields: ActivityFields, extra?: Record<string, unknown>) => void
   // One engine process, within the server's cap on live engine processes.
-  run: (config: Pick<Config, 'cli' | 'store'>, requests: readonly EngineRequest[], owner: string) => Promise<(string | Error)[]>
+  run: (config: Pick<Config, 'cli' | 'store'>, requests: readonly EngineRequest[], owner: string, runOptions?: RunOptions) => Promise<(string | Error)[]>
   // True while a search runs: one at a time.
   searching: boolean
   // Forgets reach the engine one at a time: two engine processes deleting at once can fail with "database is locked".
@@ -1552,11 +1592,17 @@ export function limiter(max: number) {
   }
 }
 
-/** POST /api/search {query, owner?}: the engine's recall with recall counts left alone. */
+/** POST /api/search {query, owner?, mode?}: the engine's recall with recall counts left alone. */
 async function search(views: Views, text: string): Promise<Answer> {
-  const body = plainBody(text, ['query', 'owner'])
+  const body = plainBody(text, ['query', 'owner', 'mode'])
   if (typeof body === 'string') return { status: 400, body: { error: body } }
   const { query, owner } = body
+  // 'hybrid' (keyword + meaning) needs the embeddings this server started with; 'keyword' runs the engine with them off.
+  const embeddings = embeddingsOn()
+  const asked = body.mode
+  if (asked !== undefined && asked !== 'keyword' && asked !== 'hybrid') return { status: 400, body: { error: "mode must be 'keyword' or 'hybrid'" } }
+  const mode: SearchMode = asked ?? (embeddings ? 'hybrid' : 'keyword')
+  if (mode === 'hybrid' && !embeddings) return { status: 400, body: { error: 'Searching by meaning needs embeddings, which are off. Run /mnemosyne-setup to turn them on.' } }
   if (typeof query !== 'string' || query.trim() === '' || query.length > MAX_QUERY_CHARS) {
     return { status: 400, body: { error: `query must be a non-empty string of at most ${MAX_QUERY_CHARS} characters` } }
   }
@@ -1566,12 +1612,12 @@ async function search(views: Views, text: string): Promise<Answer> {
   if (owner !== undefined && !all.includes(owner)) return { status: 400, body: { error: 'no such owner in the store' } }
   const owners = owner !== undefined ? [owner] : all.slice(0, SEARCH_OWNERS)
   // An empty store: nothing to search, no engine run, no activity line.
-  if (owners.length === 0) return { status: 200, body: { query, owners, skipped: 0, count: 0, results: [] } }
+  if (owners.length === 0) return { status: 200, body: { query, owners, skipped: 0, count: 0, mode, embeddings, results: [] } }
   if (views.searching) return { status: 429, body: { error: 'A search is already running; try again when it ends.' } }
   views.searching = true
   try {
     const request: EngineRequest = ['mnemopi_recall', { query, limit: SEARCH_LIMIT, update_recall_counts: false }]
-    const runs = await Promise.all(owners.map(async as => recallResults((await views.run(views.config, [request], as))[0])))
+    const runs = await Promise.all(owners.map(async as => recallResults((await views.run(views.config, [request], as, { keywordOnly: mode === 'keyword' }))[0])))
     const failed = runs.find((run): run is Error => run instanceof Error)
     // One owner: that owner. Across owners: the C3 default owner, and `owners` says how many were searched.
     const logged = { action: 'recall', origin: 'ui', owner: (owners.length === 1 ? owners[0] : undefined) ?? 'global', text: query } as const
@@ -1582,7 +1628,7 @@ async function search(views: Views, text: string): Promise<Answer> {
     }
     const hits = mergeHits(runs as Record<string, unknown>[][])
     views.log({ ...logged, ok: true, ids: hits.map(hit => hit.id), count: hits.length }, extra)
-    return { status: 200, body: { query, owners, skipped: owner !== undefined ? 0 : all.length - owners.length, count: hits.length, results: hits } }
+    return { status: 200, body: { query, owners, skipped: owner !== undefined ? 0 : all.length - owners.length, count: hits.length, mode, embeddings, results: hits } }
   } finally {
     views.searching = false
   }
@@ -1708,7 +1754,7 @@ export async function startServer(config: Config, options: ServerOptions = {}): 
     config,
     store,
     log,
-    run: (cfg, requests, owner) => engines.run(() => runEngine(cfg, requests, owner, process.env, engineTimeoutMs)),
+    run: (cfg, requests, owner, runOptions) => engines.run(() => runEngine(cfg, requests, owner, process.env, engineTimeoutMs, runOptions)),
     searching: false,
     forgets: limiter(1),
   }

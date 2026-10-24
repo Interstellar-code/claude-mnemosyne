@@ -11,7 +11,7 @@ import type { Started } from '../../ui/server'
 import { body, engineCall, ROOT, tempDir, toolCall } from './helpers'
 
 // ui/knowledge.ts is DOM code (checked by ui/tsconfig.json): loaded by a path tsc does not follow.
-const { agoText, countText, daysAgo, extractionState, itemHead, KINDS, kindTabs, kpis, kpiTiles, notice, parseKnowledge, rowsOf, statusOf, tableRows, total, usedText } = (await import(join(ROOT, 'ui', 'knowledge.ts'))) as Record<string, any>
+const { agoText, countText, daysAgo, extractionState, itemHead, KINDS, kindTabs, kpis, summaryLine, filterItems, hasStatus, usedBar, ownersOf, notice, parseKnowledge, rowsOf, statusOf, tableRows, total, usedText } = (await import(join(ROOT, 'ui', 'knowledge.ts'))) as Record<string, any>
 type KnowledgeHost = { project: (owner: string) => unknown; showOnMap: (id: string) => void; now: () => number }
 type KnowledgeData = any
 
@@ -173,8 +173,11 @@ describe('VIEWS.1: the Knowledge tab on a real store', () => {
       const again = kindTabs(data, 'fact', (kind: string) => picked.push(kind)) as unknown as FakeNode[]
       again[3]!.fire('click')
       expect(picked).toEqual(['timeline'])
-      const tiles = kpiTiles(data, now) as unknown as FakeNode[]
-      expect(tiles.map(tile => tile.texts())).toEqual([['Items', '6'], ['Memory recalled in the last 7 days', '4'], ['Items whose memory was never recalled', '0']])
+      let never = 0
+      const line = summaryLine(data, now, () => never++) as unknown as FakeNode[]
+      expect(line.map(node => node.textContent).join('')).toBe('6 items · 4 from memories recalled this week · 0 never used')
+      line.find(node => node.tagName === 'button')!.fire('click')
+      expect(never).toBe(1)
     })
   })
 
@@ -183,30 +186,32 @@ describe('VIEWS.1: the Knowledge tab on a real store', () => {
     const facts = rowsOf(data, 'fact', now)
     // Newest first (KAPI.1 review fix): the second fact stored comes first.
     expect(facts.map((r: { text: string }) => r.text)).toEqual([MARKUP, 'Mnemosyne requires Bun'])
-    expect(facts[0]).toMatchObject({ topic: 'standards', owner: 'project-alpha-1a2b', memory: ids.m1, status: '', used: 'its memory was recalled 7 times', last: '2 days ago', stale: false })
+    expect(facts[0]).toMatchObject({ topic: 'standards', owner: 'project-alpha-1a2b', memory: ids.m1, status: '', recalls: 7, used: '7', last: '2 days ago', stale: false })
     // A memory not recalled for 40 days is amber.
     const timeline = rowsOf(data, 'timeline', now)[0]!
-    expect(timeline).toMatchObject({ text: 'Milestone v1 on 2026-11-01', memory: ids.m2, used: 'its memory was recalled 1 time', last: '40 days ago', stale: true })
+    expect(timeline).toMatchObject({ text: 'Milestone v1 on 2026-11-01', memory: ids.m2, recalls: 1, used: '1', last: '40 days ago', stale: true })
     const relation = rowsOf(data, 'relation', now)[0]!
     expect(relation.text).toBe('Antigravity powers Mnemosyne')
     expect(data.items.fact[0]!.id).toMatch(/^fact:\d+$/)
     expect(data.items.relation[0]!.id).toMatch(/^relation:\d+$/)
-    expect(usedText(0)).toBe('its memory was recalled 0 times')
+    expect(usedText(0)).toBe('never')
+    expect(usedText(3)).toBe('3')
     expect(itemHead('timeline')).toBe('Event')
-    // The table: seven cells a row, Show on map hands the source memory to the map.
+    // The table: six cells a row (seven with a Status column), Show on map hands the source memory to the map.
     await withDocument(() => {
       const shown: string[] = []
       const rows = tableRows(data, 'fact', host(shown)) as unknown as FakeNode[]
       expect(rows).toHaveLength(2)
-      expect(rows[0]!.children).toHaveLength(7)
+      expect(rows[0]!.children).toHaveLength(6)
       const button = rows[0]!.all().find(n => n.tagName === 'button')!
-      expect(button.textContent).toBe('Show on map')
+      expect(button.textContent).toBe('Map \u2197')
+      expect((button as unknown as { title: string }).title).toContain('Show on map')
       button.fire('click')
       expect(shown).toEqual([ids.m1])
-      expect(rows[0]!.texts().join('|')).toContain('its memory was recalled 7 times')
+      expect(rows[0]!.texts().join('|')).toContain('7')
       const old = (tableRows(data, 'timeline', host()) as unknown as FakeNode[])[0]!
-      expect((old.children[6] as FakeNode).className).toContain('is-stale')
-      expect((rows[0]!.children[6] as FakeNode).className).not.toContain('is-stale')
+      expect((old.children[5] as FakeNode).className).toContain('is-stale')
+      expect((rows[0]!.children[5] as FakeNode).className).not.toContain('is-stale')
       // An item with no source memory has nothing to show.
       const orphan = { ...data, items: { ...data.items, fact: [{ ...data.items.fact[0]!, memory: '' }] } }
       expect((tableRows(orphan, 'fact', host()) as unknown as FakeNode[])[0]!.all().find(n => n.tagName === 'button')!.disabled).toBe(true)
@@ -235,13 +240,13 @@ describe('VIEWS.1: the Knowledge tab on a real store', () => {
       for (const [kind, head] of [['instruction', 'Instruction'], ['fact', 'Fact'], ['relation', 'Relation']] as const) {
         const row = (tableRows(data, kind, host()) as unknown as FakeNode[])[0]!
         const cells = row.children as FakeNode[]
-        expect(cells.map(cell => cell.className.split(' ').find(name => name.startsWith('k-')))).toEqual(['k-text', 'k-topic', 'k-project', 'k-from', 'k-status', 'k-used', 'k-last'])
+        expect(cells.map(cell => cell.className.split(' ').find(name => name.startsWith('k-')))).toEqual(kind === 'fact' ? ['k-text', 'k-topic', 'k-project', 'k-from', 'k-used', 'k-last'] : ['k-text', 'k-topic', 'k-project', 'k-from', 'k-status', 'k-used', 'k-last'])
         // The card reads: the kind above the text, then Status / Used / Last used each with its label.
-        expect(cells.map(cell => cell.dataset.label ?? null)).toEqual([head, null, null, null, 'Status', 'Used', 'Last used'])
+        expect(cells.map(cell => cell.dataset.label ?? null)).toEqual(kind === 'fact' ? [head, null, null, null, 'Used', 'Last used'] : [head, null, null, null, 'Status', 'Used', 'Last used'])
       }
       // A stale item keeps both classes: the amber and the card placement.
       const old = (tableRows(data, 'timeline', host()) as unknown as FakeNode[])[0]!
-      expect((old.children[6] as FakeNode).className.split(' ')).toEqual(expect.arrayContaining(['is-stale', 'k-last']))
+      expect((old.children[5] as FakeNode).className.split(' ')).toEqual(expect.arrayContaining(['is-stale', 'k-last']))
     })
   })
 
@@ -370,17 +375,46 @@ describe('VIEWS.1: the Knowledge tab on a real store', () => {
     expect(agoText(null, now)).toBe('')
   })
 
+  test('filterItems: project, never used, text and sort; hasStatus and usedBar', async () => {
+    const data = await knowledge(started, 'unknown')
+    const facts = data.items.fact as { owner: string; recalls: number; text: string; lastRecalled: string | null }[]
+    const base = { owner: '', neverUsed: false, text: '', sort: 'newest' }
+    expect(filterItems(facts, base)).toEqual(facts)
+    expect(filterItems(facts, { ...base, owner: 'nobody' })).toEqual([])
+    expect(filterItems(facts, { ...base, owner: facts[0]!.owner }).every((i: { owner: string }) => i.owner === facts[0]!.owner)).toBe(true)
+    const mk = (text: string, recalls: number, lastRecalled: string | null) => ({ ...facts[0]!, text, recalls, lastRecalled, topic: null })
+    const items = [mk('a', 0, null), mk('b', 5, '2026-01-01T00:00:00Z'), mk('c', 2, '2026-03-01T00:00:00Z'), mk('d', 0, null)]
+    const names = (f: object) => filterItems(items, { ...base, ...f }).map((i: { text: string }) => i.text).join('')
+    expect(names({})).toBe('abcd')
+    expect(names({ sort: 'most' })).toBe('bcad')
+    expect(names({ sort: 'least' })).toBe('adcb')
+    expect(names({ sort: 'last' })).toBe('cbad')
+    expect(names({ neverUsed: true })).toBe('ad')
+    expect(names({ text: ' B ' })).toBe('b')
+    expect(hasStatus('instruction') && hasStatus('relation')).toBe(true)
+    expect(['fact', 'preference', 'timeline'].some(hasStatus)).toBe(false)
+    expect(usedBar(0, 0)).toBe('w0')
+    expect(usedBar(5, 5)).toBe('w20')
+    expect(usedBar(1, 4)).toBe('w5')
+    expect(ownersOf(data)).toEqual([...new Set(ownersOf(data))])
+    await withDocument(() => {
+      const rows = tableRows(data, 'fact', host(), { ...base, text: 'zzz-no-match' }) as unknown as FakeNode[]
+      expect(rows).toHaveLength(1)
+      expect(rows[0]!.texts().join('')).toBe('Nothing matches these filters.')
+    })
+  })
+
   test('VIEWS.1.a4: the page has the Knowledge tab, its markup, and tsc covers the new files', () => {
     const app = readFileSync(join(ROOT, 'ui', 'app.ts'), 'utf8')
     const html = readFileSync(join(ROOT, 'ui', 'index.html'), 'utf8')
-    expect(app).toMatch(/const VIEWS = \['map', 'memories', 'activity', 'search', 'knowledge', 'health'\] as const/)
-    expect(app).toMatch(/knowledge: 'Knowledge', health: 'Health'/)
-    for (const id of ['view-knowledge', 'view-health', 'know-status', 'know-notice', 'know-tabs', 'know-kpis', 'know-rows', 'know-item-head', 'know-body', 'know-retry', 'health-status', 'health-retry', 'health-title']) expect(html).toContain(`id="${id}"`)
+    expect(app).toMatch(/const VIEWS = \['map', 'memories', 'activity', 'search', 'knowledge', 'review', 'health'\] as const/)
+    expect(app).toMatch(/knowledge: 'Knowledge', review: 'Review', health: 'Health'/)
+    for (const id of ['view-knowledge', 'view-review', 'review-status', 'review-retry', 'review-title', 'review-body', 'view-health', 'know-status', 'know-notice', 'know-tabs', 'know-summary', 'know-owner', 'know-sort', 'know-find', 'know-never', 'know-status-head', 'know-rows', 'know-item-head', 'know-body', 'know-retry', 'health-status', 'health-retry', 'health-title']) expect(html).toContain(`id="${id}"`)
     // Plain toggle buttons in a labelled group: no tablist without tabpanels and arrow keys.
     expect(html).toContain('<div id="know-tabs" class="chips" role="group" aria-label="Knowledge kind">')
     expect(html).not.toMatch(/role="tab(list)?"/)
     // Every id the Knowledge and Health code looks up is in the markup.
-    const wanted = [...app.matchAll(/byId(?:<[^>]*>)?\('((?:know|health)-[^']+)'\)/g)].map(m => m[1]!)
+    const wanted = [...app.matchAll(/byId(?:<[^>]*>)?\('((?:know|health|review)-[^']+)'\)/g)].map(m => m[1]!)
     expect(wanted.length).toBeGreaterThan(15)
     const have = new Set([...html.matchAll(/\bid="([^"]+)"/g)].map(m => m[1]!))
     expect(wanted.filter(id => !have.has(id))).toEqual([])
@@ -388,9 +422,9 @@ describe('VIEWS.1: the Knowledge tab on a real store', () => {
     expect(html).toMatch(/<div class="table-wrap">\s*<table class="table know-table">\s*<thead>\s*<tr><th id="know-item-head">/)
     expect(html.slice(html.indexOf('id="view-knowledge"'), html.indexOf('<footer'))).not.toMatch(/\sstyle=|<script|\son\w+=/)
     const tsconfig = JSON.parse(readFileSync(join(ROOT, 'ui', 'tsconfig.json'), 'utf8')) as { include: string[] }
-    expect(tsconfig.include).toEqual(expect.arrayContaining(['knowledge.ts', 'health.ts']))
+    expect(tsconfig.include).toEqual(expect.arrayContaining(['knowledge.ts', 'health.ts', 'review.ts']))
     // The tabs are built in this order, like the others.
-    expect(app.indexOf("'search', 'knowledge', 'health'")).toBeGreaterThan(0)
+    expect(app.indexOf("'search', 'knowledge', 'review', 'health'")).toBeGreaterThan(0)
     // The data comes only from the two endpoints, through the page's api().
     expect(app).toContain("api('/api/knowledge')")
     expect(app).toContain("api('/api/health-report')")

@@ -201,21 +201,22 @@ describe('ACT: the Activity list on real-shaped lines', () => {
     }
     const pairs = (line: unknown) => {
       const source = cell(line)
-      return [(source.children[0] as Fake).textContent, ((source.children[1] as Fake).children[0] as Fake).textContent]
+      return (source.children[0] as Fake).textContent
     }
-    expect(pairs(LINES.hookRecall)).toEqual(['first prompt', 'hook'])
-    expect(pairs(LINES.toolRemember)).toEqual(['Claude tool', 'tool'])
-    expect(pairs(LINES.uiRecall)).toEqual(['dashboard', 'ui'])
-    expect(pairs(LINES.codexRecall)).toEqual(['Codex', 'external'])
-    expect(pairs(LINES.cursorUpdate)).toEqual(['Cursor', 'external'])
-    expect(pairs(LINES.zedRecall)).toEqual(['zed', 'external'])
+    expect(pairs(LINES.hookRecall)).toBe('Claude Code · hook')
+    expect(pairs(LINES.toolRemember)).toBe('Claude Code · tool')
+    expect(pairs(LINES.uiRecall)).toBe('Dashboard · ui')
+    expect(pairs(LINES.codexRecall)).toBe('Codex · external')
+    expect(pairs(LINES.cursorUpdate)).toBe('Cursor · external')
+    expect(pairs(LINES.zedRecall)).toBe('zed · external')
     // No client: the old words.
-    expect(pairs({ ...LINES.zedRecall, client: undefined })).toEqual(['outside agent', 'external'])
-    expect(pairs({ ...LINES.zedRecall, client: '  ' })).toEqual(['outside agent', 'external'])
-    expect(pairs({ ...LINES.zedRecall, client: 42 })).toEqual(['outside agent', 'external'])
-    // The raw origin line is mono.
-    const rawLine = ((app.activityItem(LINES.hookRecall) as Fake).children[2] as Fake).children[1] as Fake
-    expect(rawLine.className.split(' ')).toContain('mono')
+    expect(pairs({ ...LINES.zedRecall, client: undefined })).toBe('outside agent · external')
+    expect(pairs({ ...LINES.zedRecall, client: '  ' })).toBe('outside agent · external')
+    expect(pairs({ ...LINES.zedRecall, client: 42 })).toBe('outside agent · external')
+    // The origin word is explained in the tooltip, in the glossary's words.
+    const label = cell(LINES.toolRemember).children[0] as Fake
+    expect(label.title).toBe('tool: Claude called a memory tool in Claude Code')
+    expect((cell(LINES.codexRecall).children[0] as Fake).title).toContain('another MCP client')
     // The row keeps its six cells, in the header's order.
     expect((app.activityItem(LINES.codexRecall) as Fake).children.length).toBe(6)
   })
@@ -223,7 +224,7 @@ describe('ACT: the Activity list on real-shaped lines', () => {
   test('ACT.1.a4: a session shows its first 8 characters, never more; a line without one shows none', () => {
     const item = app.activityItem(LINES.hookRecall, () => {}) as Fake
     const texts = item.texts()
-    expect(texts).toContain('a1b2c3d4')
+    expect(texts).toContain('session a1b2c3d4')
     expect(texts.some(text => text.includes('a1b2c3d4-'))).toBe(false)
     const button = item.all().find(e => e.tagName === 'button')!
     expect(button.attributes.get('aria-label')).toBe('Show only session a1b2c3d4')
@@ -235,7 +236,60 @@ describe('ACT: the Activity list on real-shaped lines', () => {
     expect(app.shortSession('0123456789')).toBe('01234567')
     const legacy = app.activityItem(LINES.legacy, () => {}) as Fake
     expect(legacy.all().some(e => e.tagName === 'button')).toBe(false)
-    expect(legacy.texts()).toContain('tool')
+    expect(legacy.texts()).toContain('Claude Code · tool')
+  })
+
+  test('sentenceOf: one plain sentence per action; learn lines use the text, then a fetched preview, then the short id', () => {
+    const id = 'f36dd5c4aaaa0000bbbb'
+    const line = (extra: Record<string, unknown>) => ({ ...base, t: iso(1), origin: 'tool', ...extra })
+    expect(app.sentenceOf(line({ action: 'remember', text: 'use bun' }))).toBe('Saved: use bun')
+    expect(app.sentenceOf(line({ action: 'remember', text: '' }))).toBe('Saved a memory')
+    expect(app.sentenceOf(line({ action: 'remember', text: 'use bun', ok: false }))).toBe('Could not save: use bun')
+    expect(app.sentenceOf(line({ action: 'update', text: 'tags: a' }))).toBe('Updated: tags: a')
+    expect(app.sentenceOf(line({ action: 'recall', text: 'apples', count: 5 }))).toBe('Recalled 5 for “apples”')
+    expect(app.sentenceOf(line({ action: 'recall', text: 'apples', count: 0 }))).toBe('Recalled nothing for “apples”')
+    expect(app.sentenceOf(line({ action: 'forget', text: '', ids: [id] }))).toBe('Forgot f36dd5c4')
+    expect(app.sentenceOf(line({ action: 'rearm', text: '' }))).toBe('Re-armed: will recall on the next prompt')
+    expect(app.sentenceOf(line({ action: 'extract', text: 'use bun', ids: [id], count: 14 }))).toBe('Learned 14 items from: use bun')
+    expect(app.sentenceOf(line({ action: 'extract', text: '', ids: [id], count: 1 }))).toBe('Learned 1 item from memory f36dd5c4')
+    expect(app.sentenceOf(line({ action: 'extract', text: '', ids: [id], count: 14 }), 'use bun')).toBe('Learned 14 items from: use bun')
+    expect(app.sentenceOf(line({ action: 'extract', text: '', ids: [id], count: 0, ok: false }))).toBe('Could not learn from memory f36dd5c4')
+  })
+
+  test('a row opens its detail line on click, Enter or Space; ids open the memory; the chip still filters', () => {
+    const id = 'f36dd5c4aaaa0000bbbb'
+    const line = { ...base, t: iso(1), action: 'extract', origin: 'tool', client: 'claude-code', session: SESSION_A, ids: [id], count: 14, text: 'use bun' }
+    let toggled = 0
+    let opened = ''
+    let picked = ''
+    const make = (expanded: boolean) => app.activityItem(line, (s: string) => (picked = s), { expanded, toggle: () => toggled++, open: (m: string) => (opened = m) }) as Fake
+    const closed = make(false)
+    expect(closed.children.length).toBe(6)
+    expect(closed.attributes.get('aria-expanded')).toBe('false')
+    expect(closed.attributes.get('tabindex')).toBe('0')
+    closed.fire('click')
+    closed.fire('keydown', { key: 'Enter', target: closed })
+    closed.fire('keydown', { key: ' ', target: closed })
+    closed.fire('keydown', { key: 'a', target: closed })
+    closed.fire('keydown', { key: 'Enter', target: {} })
+    expect(toggled).toBe(3)
+    // The chip filters and does not toggle the row.
+    closed.all().find(e => e.tagName === 'button')!.fire('click', { stopPropagation() {} })
+    expect(picked).toBe(SESSION_A)
+    const open = make(true)
+    expect(open.attributes.get('aria-expanded')).toBe('true')
+    expect(open.children.length).toBe(7)
+    const detail = open.children[6] as Fake
+    expect(detail.className).toContain('event-detail')
+    const text = detail.texts().join(' ')
+    expect(text).toContain('Learned 14 items from: use bun')
+    expect(text).toContain('claude-code')
+    expect(text).toContain(SESSION_A)
+    expect(text).toContain('2026-')
+    detail.all().find(e => e.tagName === 'button')!.fire('click', { stopPropagation() {} })
+    expect(opened).toBe(id)
+    // Without a toggle the row is plain.
+    expect((app.activityItem(line, () => {}) as Fake).attributes.has('aria-expanded')).toBe(false)
   })
 
   test('ACT.1.a6: extract shows as learn, with its item count or its failure reason', () => {
@@ -324,14 +378,14 @@ describe('ACT: the Activity list on real-shaped lines', () => {
     app.drawFeed()
     const chip = els.get('act-session')!
     expect(chip.hidden).toBe(true)
-    clickSession(rows().find(row => row.texts().includes('a1b2c3d4'))!)
+    clickSession(rows().find(row => row.texts().includes('session a1b2c3d4'))!)
     expect(shownTimes().sort()).toEqual(timesOf('hookRecall', 'toolRemember'))
     expect(chip.hidden).toBe(false)
-    expect(chip.textContent).toBe('Session: a1b2c3d4 ×')
+    expect(chip.textContent).toBe('Showing one session (a1b2c3d4) · Show all')
     expect(chip.attributes.get('aria-label')).toBe('Clear session filter: a1b2c3d4')
     // The chip clears it, and another session can be picked.
     chip.fire('click')
-    clickSession(rows().find(row => row.texts().includes('f9e8d7c6'))!)
+    clickSession(rows().find(row => row.texts().includes('session f9e8d7c6'))!)
     expect(shownTimes()).toEqual(timesOf('toolRecallB'))
     chip.fire('click')
     expect(chip.hidden).toBe(true)
@@ -346,7 +400,7 @@ describe('ACT: the Activity list on real-shaped lines', () => {
     pickApp('Claude Code')
     expect(shownTimes().sort()).toEqual(timesOf('hookRecall', 'toolRecallB'))
     // + session
-    clickSession(rows().find(row => row.texts().includes('f9e8d7c6'))!)
+    clickSession(rows().find(row => row.texts().includes('session f9e8d7c6'))!)
     expect(shownTimes()).toEqual(timesOf('toolRecallB'))
     // action + session: another action leaves nothing, and says so
     pickApp('all')

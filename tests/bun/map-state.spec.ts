@@ -29,6 +29,11 @@ import {
   glowLevel,
   readGlow,
   saveGlow,
+  RAIL_CARDS,
+  RAIL_KEY,
+  railOpen,
+  readRail,
+  saveRail,
   buildGalaxy,
   type Candidate,
   coreSize,
@@ -730,7 +735,8 @@ describe('the galaxy on a real /api/galaxy reply', () => {
       expect(rows.length).toBe(3)
       expect(rows.map(row => row.texts().join('|')).sort().join(' ')).toContain('alpha')
       expect(node('map-path').texts()).toEqual(['All memories'])
-      expect(node('map-inspector').texts()).toContain('Overview')
+      expect(node('map-overview').texts()).toContain('Overview')
+      expect(node('map-inspector').texts()).toEqual([])
       expect(node('map-topics-box').hidden).toBe(true)
       expect(node('map-sim-recall').disabled).toBe(false)
       // Clicking a project's name focuses it: the path, the inspector and the topics list follow.
@@ -883,7 +889,7 @@ describe('the galaxy on a real /api/galaxy reply', () => {
       await Bun.sleep(40)
       const node = (id: string) => fake.nodes.get(id)!
       const stat = (label: string) => {
-        const texts = node('map-inspector').texts()
+        const texts = node('map-overview').texts()
         return texts[texts.indexOf(label) + 1]
       }
       const strip = () => (node('map-feed').children as FakeNode[]).map(row => row.texts().join(' | '))
@@ -893,7 +899,7 @@ describe('the galaxy on a real /api/galaxy reply', () => {
         await Bun.sleep(25)
       }
       const callsBefore = asked.length
-      expect(node('map-inspector').texts()).toContain('7 memories')
+      expect(node('map-overview').texts()).toContain('7 memories')
       expect(strip()).toEqual([STRIP_EMPTY_TEXT])
       expect(stat('Memories')).toBe('7')
       expect(stat('Recalls, all time')).toBe('18')
@@ -902,7 +908,7 @@ describe('the galaxy on a real /api/galaxy reply', () => {
       const before = 0
       await play(line('remember', [newId]))
       expect(asked.slice(callsBefore)).toEqual([`/api/memories/${newId}`])
-      expect(node('map-inspector').texts()).toContain('8 memories')
+      expect(node('map-overview').texts()).toContain('8 memories')
       expect(stat('Memories')).toBe('8')
       expect(strip()[0]).toContain('Saved a new memory')
       expect(strip()[0]).toContain('Claude Code')
@@ -921,7 +927,7 @@ describe('the galaxy on a real /api/galaxy reply', () => {
       expect(strip()[0]).toContain('Forgot a memory')
       expect(stat('Memories')).toBe('7')
       expect(stat('Never recalled')).toBe('3')
-      expect(node('map-inspector').texts()).toContain('7 memories')
+      expect(node('map-overview').texts()).toContain('7 memories')
       // The project's count in the rail fell too.
       expect(node('map-toggles').texts().join(' ')).toContain('alpha')
 
@@ -1203,7 +1209,7 @@ describe('GAL.3.a1/a3/a4: the Map page has the rail in order, the overlay contro
   test('the Reading the map card explains size, brightness, hollow ring, gold arc, cyan link, Claude core, sparks and moons', () => {
     const legend = page.slice(at('id="map-legend"'))
     for (const word of ['Size', 'Brightness', 'Hollow ring', 'Gold arc', 'Cyan link', 'Claude core', 'Sparks', 'Moons']) expect(legend).toContain(word)
-    expect(legend).toContain('Reading the map')
+    expect(legend).toContain('How to read the map')
   })
 
   test('the inspector is filled by the page, and no old v1 control is left', () => {
@@ -1443,7 +1449,7 @@ describe('LIVE.3: the live strip and the layers', () => {
     expect(appName('')).toBe('')
   })
 
-  test('LIVE.3.a1: the strip shows the last four of the layers that are on, newest first; the store holds 12', () => {
+  test('LIVE.3.a1: the strip shows the last five of the layers that are on, newest first; the store holds 12', () => {
     const g = freshGalaxy()
     let rows: ReturnType<typeof stripRow>[] = []
     const kinds: MapEvent['kind'][] = ['recall', 'save', 'recall', 'update', 'forget', 'recall', 'recall', 'save']
@@ -1453,9 +1459,9 @@ describe('LIVE.3: the live strip and the layers', () => {
     expect(rows).toHaveLength(8)
     for (let i = 0; i < 10; i++) rows = pushRow(rows, stripRow(g, event('recall', ['m1']), 1))
     expect(rows).toHaveLength(STRIP_STORE)
-    expect(STRIP_KEEP).toBe(4)
+    expect(STRIP_KEEP).toBe(5)
     const state = calm()
-    expect(stripRows(rows, state)).toHaveLength(4)
+    expect(stripRows(rows, state)).toHaveLength(5)
     const noRecall = toggleLayer(state, 'recall')
     expect(noRecall.layerRecall).toBe(false)
     expect(stripRows(pushRow(rows, stripRow(g, event('save', ['m1']), 1)), noRecall).every(row => row.kind !== 'recall')).toBe(true)
@@ -3113,6 +3119,69 @@ describe('GLOW: the bloom levels and the Glow control', () => {
       buttons[2]!.fire('click')
       expect(data.get(GLOW_KEY)).toBe('full')
       expect(pressed()).toEqual(['full'])
+    } finally {
+      g.document = saved.document
+      g.CSS = saved.CSS
+      g.HTMLElement = saved.HTMLElement
+      g.localStorage = saved.localStorage
+    }
+  })
+
+  test('the rail cards: Layout and Colour by start open, the rest closed; the state is read and saved through storage, and bad or blocked storage is ignored', () => {
+    expect(RAIL_CARDS.filter(card => card.open).map(card => card.name)).toEqual(['layout', 'colour'])
+    expect(RAIL_CARDS.map(card => card.name)).toEqual(['layout', 'colour', 'glow', 'links', 'know', 'layers', 'projects'])
+    const data = new Map<string, string>()
+    const storage = { getItem: (key: string) => data.get(key) ?? null, setItem: (key: string, value: string) => void data.set(key, value) }
+    expect(readRail(storage)).toEqual({})
+    expect(railOpen({}, 'layout')).toBe(true)
+    expect(railOpen({}, 'links')).toBe(false)
+    saveRail(storage, { layout: false, links: true })
+    expect(data.get(RAIL_KEY)).toBe('{"layout":false,"links":true}')
+    expect(railOpen(readRail(storage), 'layout')).toBe(false)
+    expect(railOpen(readRail(storage), 'links')).toBe(true)
+    // Not an object, or values that are not booleans: only the booleans survive.
+    data.set(RAIL_KEY, '[1,2]')
+    expect(readRail(storage)).toEqual({})
+    data.set(RAIL_KEY, '{"layout":"no","links":true}')
+    expect(readRail(storage)).toEqual({ links: true })
+    data.set(RAIL_KEY, 'not json')
+    expect(readRail(storage)).toEqual({})
+    const throwing = { getItem: () => { throw new Error('blocked') }, setItem: () => { throw new Error('blocked') } }
+    expect(readRail(throwing)).toEqual({})
+    expect(() => saveRail(throwing, { layout: true })).not.toThrow()
+    expect(readRail(undefined)).toEqual({})
+  })
+
+  test('createMap restores each rail card from storage, saves a fold, opens Topics when it appears, and keeps the Simulate buttons behind Demo', async () => {
+    const html = readFileSync(join(ROOT, 'ui', 'index.html'), 'utf8')
+    const fake = fakeDom(html)
+    const g = globalThis as Record<string, unknown>
+    const saved = { document: g.document, CSS: g.CSS, HTMLElement: g.HTMLElement, localStorage: g.localStorage }
+    const data = new Map<string, string>([[RAIL_KEY, '{"layout":false,"links":true}']])
+    g.document = fake.document
+    g.HTMLElement = FakeBase
+    g.localStorage = { getItem: (key: string) => data.get(key) ?? null, setItem: (key: string, value: string) => void data.set(key, value) }
+    ;(globalThis as Record<string, unknown>).CSS = { escape: (v: string) => v }
+    try {
+      const { createMap } = (await import(join(ROOT, 'ui', 'map.ts'))) as { createMap: (host: unknown) => unknown }
+      createMap({ api: async () => new Response(JSON.stringify({ projects: [], memories: [], knowledge: [], meaning: false, total: 0, shown: 0 }), { status: 200 }), openMemory: () => {}, status: () => {} })
+      await Bun.sleep(30)
+      const card = (name: string) => fake.nodes.get(`map-card-${name}`) as unknown as FakeNode & { open: boolean }
+      expect(['layout', 'colour', 'links', 'know', 'layers', 'projects'].map(name => card(name).open)).toEqual([false, true, true, false, false, false])
+      // A fold is saved; the other cards keep their state.
+      card('colour').open = false
+      card('colour').fire('toggle')
+      expect(JSON.parse(data.get(RAIL_KEY)!)).toMatchObject({ layout: false, colour: false, links: true })
+      // The Demo toggle shows and hides the two Simulate buttons.
+      const demo = fake.nodes.get('map-demo')!
+      const demoBox = fake.nodes.get('map-demo-box')!
+      expect(demoBox.hidden).toBe(true)
+      demo.fire('click')
+      expect(demoBox.hidden).toBe(false)
+      expect(demo.attributes.get('aria-expanded')).toBe('true')
+      demo.fire('click')
+      expect(demoBox.hidden).toBe(true)
+      expect(demo.attributes.get('aria-expanded')).toBe('false')
     } finally {
       g.document = saved.document
       g.CSS = saved.CSS

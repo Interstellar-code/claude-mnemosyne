@@ -170,6 +170,8 @@ export type Row = {
   owner: string
   memory: string
   status: string
+  /** Times the source memory was recalled; 'used' is its cell text ('never' for 0). */
+  recalls: number
   used: string
   last: string
   stale: boolean
@@ -182,12 +184,52 @@ export function statusOf(item: KnowledgeItem): string {
   return ''
 }
 
-/** The Used cell: how many times the memory the item came from was recalled. */
-export const usedText = (recalls: number) => `its memory was recalled ${recalls} ${recalls === 1 ? 'time' : 'times'}`
+/** The Used cell: how many times the memory the item came from was recalled; 'never' for none. */
+export const usedText = (recalls: number) => (recalls === 0 ? 'never' : String(recalls))
 
-/** The rows of one kind, in the reply's order: item, topic, project, source memory, status, used, last used (stale over 30 days). */
-export function rowsOf(data: KnowledgeData, kind: KnowledgeKind, now: number): Row[] {
-  return data.items[kind].map(item => {
+/** What the Used column heading says on hover (the column itself shows only the number). */
+export const USED_HINT = 'How many times the memory this item came from was recalled (all time). The engine keeps no usage count of its own for these items.'
+
+/** Whether a kind has a Status column: only instructions (active or retired) and relations (confidence) have values. */
+export const hasStatus = (kind: KnowledgeKind) => kind === 'instruction' || kind === 'relation'
+
+/** The width class of a Used bar, in twentieths (ui/style.css .w0 … .w20): this item's recalls against the most in the list. */
+export const usedBar = (recalls: number, most: number) => `w${most <= 0 ? 0 : Math.round(Math.min(1, Math.max(0, recalls / most)) * 20)}`
+
+export type KnowledgeSort = 'newest' | 'most' | 'least' | 'last'
+export type KnowledgeFilter = { owner: string; neverUsed: boolean; text: string; sort: KnowledgeSort }
+export const NO_FILTER: KnowledgeFilter = { owner: '', neverUsed: false, text: '', sort: 'newest' }
+
+/** The items that pass the filter, in the chosen order. 'newest' keeps the reply's order (the server sends newest first); the other sorts are stable. */
+export function filterItems(items: readonly KnowledgeItem[], filter: KnowledgeFilter): KnowledgeItem[] {
+  const needle = filter.text.trim().toLowerCase()
+  const kept = items.filter(item => {
+    if (filter.owner !== '' && item.owner !== filter.owner) return false
+    if (filter.neverUsed && item.recalls !== 0) return false
+    return needle === '' || item.text.toLowerCase().includes(needle) || (item.topic ?? '').toLowerCase().includes(needle)
+  })
+  const time = (item: KnowledgeItem) => (item.lastRecalled === null ? Number.NaN : Date.parse(item.lastRecalled))
+  const order = kept.map((item, index) => ({ item, index }))
+  if (filter.sort === 'most') order.sort((a, b) => b.item.recalls - a.item.recalls || a.index - b.index)
+  else if (filter.sort === 'least') order.sort((a, b) => a.item.recalls - b.item.recalls || a.index - b.index)
+  else if (filter.sort === 'last') {
+    // Most recently used first; an item never used goes last.
+    order.sort((a, b) => {
+      const x = time(a.item)
+      const y = time(b.item)
+      if (Number.isNaN(x) || Number.isNaN(y)) return Number.isNaN(x) === Number.isNaN(y) ? a.index - b.index : Number.isNaN(x) ? 1 : -1
+      return y - x || a.index - b.index
+    })
+  }
+  return order.map(entry => entry.item)
+}
+
+/** The owners the loaded items belong to, sorted, for the project select. */
+export const ownersOf = (data: KnowledgeData): string[] => [...new Set(KINDS.flatMap(({ kind }) => data.items[kind].map(item => item.owner)))].filter(owner => owner !== '').sort()
+
+/** The rows of one kind, filtered and sorted (the reply's order by default): item, topic, project, source memory, status, used, last used (stale over 30 days). */
+export function rowsOf(data: KnowledgeData, kind: KnowledgeKind, now: number, filter: KnowledgeFilter = NO_FILTER): Row[] {
+  return filterItems(data.items[kind], filter).map(item => {
     const days = daysAgo(item.lastRecalled, now)
     return {
       id: item.id,
@@ -196,6 +238,7 @@ export function rowsOf(data: KnowledgeData, kind: KnowledgeKind, now: number): R
       owner: item.owner,
       memory: item.memory,
       status: statusOf(item),
+      recalls: item.recalls,
       used: usedText(item.recalls),
       last: item.lastRecalled === null ? 'never' : agoText(item.lastRecalled, now) || 'never',
       stale: days !== null && days > STALE_DAYS,
@@ -236,44 +279,59 @@ export function kindTabs(data: KnowledgeData, selected: KnowledgeKind, pick: (ki
   })
 }
 
-/** The KPI tiles. */
-export function kpiTiles(data: KnowledgeData, now: number): HTMLElement[] {
-  return kpis(data, now).map(kpi => {
-    const tile = el('div', undefined, 'tile')
-    tile.append(el('div', kpi.label, 'tile-label'), el('div', kpi.value, 'tile-value'))
-    return tile
-  })
+/** The one-line summary: '257 items · 193 from memories recalled this week · 64 never used'; the last part is a button that turns on the Never used filter. */
+export function summaryLine(data: KnowledgeData, now: number, showNeverUsed: () => void): HTMLElement[] {
+  const [all, recent, never] = kpis(data, now)
+  const sep = () => el('span', ' · ', 'muted')
+  const button = el('button', `${never!.value} never used`, 'link')
+  button.type = 'button'
+  button.title = 'Show only the items whose memory was never recalled'
+  button.addEventListener('click', showNeverUsed)
+  return [el('span', `${all!.value} items`), sep(), el('span', `${recent!.value} from memories recalled this week`), sep(), button]
 }
 
-/** The table rows of one kind; an empty kind says so in one row. */
-export function tableRows(data: KnowledgeData, kind: KnowledgeKind, host: KnowledgeHost): HTMLElement[] {
-  const rows = rowsOf(data, kind, host.now())
+/** The table rows of one kind; an empty kind (or a filter that matches nothing) says so in one row. */
+export function tableRows(data: KnowledgeData, kind: KnowledgeKind, host: KnowledgeHost, filter: KnowledgeFilter = NO_FILTER): HTMLElement[] {
+  const rows = rowsOf(data, kind, host.now(), filter)
+  const status = hasStatus(kind)
   if (rows.length === 0) {
     const tr = el('tr')
-    const td = el('td', 'Nothing of this kind yet.', 'muted')
-    td.colSpan = 7
+    const td = el('td', data.items[kind].length === 0 ? 'Nothing of this kind yet.' : 'Nothing matches these filters.', 'muted')
+    td.colSpan = status ? 7 : 6
     tr.append(td)
     return [tr]
   }
   const head = itemHead(kind)
+  const most = Math.max(...rows.map(row => row.recalls))
   return rows.map(row => {
     const tr = el('tr')
-    const open = el('button', 'Show on map', 'link')
+    const open = el('button', 'Map \u2197', 'link')
     open.type = 'button'
+    open.title = 'Show on map: select the star of the memory this item came from'
+    open.setAttribute('aria-label', 'Show on map')
     open.disabled = row.memory === ''
     open.addEventListener('click', () => host.showOnMap(row.memory))
     const project = cell('td', undefined, 'k-project')
     project.append(host.project(row.owner))
     const fromMemory = cell('td', undefined, 'k-from')
     fromMemory.append(open)
+    // Used: the number with a small bar; 'never' alone, muted.
+    const used = cell('td', undefined, row.recalls === 0 ? 'small muted k-used' : 'small k-used', 'Used')
+    if (row.recalls === 0) used.append(el('span', row.used))
+    else {
+      const bar = el('span', undefined, 'bar k-bar')
+      bar.setAttribute('aria-hidden', 'true')
+      bar.append(el('span', undefined, `bar-fill ${usedBar(row.recalls, most)}`))
+      used.append(el('span', row.used, 'k-count'), bar)
+    }
     // On a phone each row is a card (ui/style.css): data-label names a cell there, the kind first, then the item.
     tr.append(
       cell('td', row.text, 'know-text k-text', head),
       cell('td', row.topic, 'muted k-topic'),
       project,
       fromMemory,
-      cell('td', row.status, 'muted k-status', 'Status'),
-      cell('td', row.used, 'small k-used', 'Used'),
+      ...(status ? [cell('td', row.status, 'muted k-status', 'Status')] : []),
+      used,
       cell('td', row.last, row.stale ? 'small is-stale k-last' : 'small k-last', 'Last used'),
     )
     return tr

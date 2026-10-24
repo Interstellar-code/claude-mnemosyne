@@ -346,7 +346,7 @@ describe('the live feed and the server limits on a real store', () => {
     try {
       const response = await blank.post('/api/search', { query: 'anything' })
       expect(response.status).toBe(200)
-      expect(await response.json()).toEqual({ query: 'anything', owners: [], skipped: 0, count: 0, results: [] })
+      expect(await response.json()).toEqual({ query: 'anything', owners: [], skipped: 0, count: 0, mode: 'keyword', embeddings: false, results: [] })
       expect(blank.lines()).toEqual([])
     } finally {
       blank.started.stop()

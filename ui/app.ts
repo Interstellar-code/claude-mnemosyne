@@ -15,16 +15,19 @@
 // Styles live in style.css: the CSP refuses inline ones.
 
 import { createMap, type MapView } from './map'
-import { extractionState, itemHead, kindTabs, kpiTiles as knowledgeKpiTiles, notice as knowledgeNotice, dotClass, ownerColour, ownerColours, parseKnowledge, tableRows, type KnowledgeData, type KnowledgeHost, type KnowledgeKind } from './knowledge'
-import { chartBars, chartText, coverageRows, dayBars, hotRows, kpiTiles as healthKpiTiles, neverRow, neverText, parseHealth, projectRows as healthProjectRows, storageList, type HealthData, type HealthHost } from './health'
+import { extractionState, hasStatus, itemHead, NO_FILTER, ownersOf, summaryLine, kindTabs, notice as knowledgeNotice, dotClass, ownerColour, ownerColours, parseKnowledge, tableRows, total as knowledgeTotal, type KnowledgeData, type KnowledgeFilter, type KnowledgeSort, type KnowledgeHost, type KnowledgeKind } from './knowledge'
+import { chartBars, chartText, coverageRows, dayBars, kpiTiles as healthKpiTiles, parseHealth, projectRows as healthProjectRows, storageList, storageSummary, tableFilterButtons, type HealthData, type HealthHost, type TableFilter } from './health'
+import { filterButtons, parseReview, reviewCounts, reviewList, reviewRow, reviewText, type ReviewData, type ReviewFilter, type ReviewHost } from './review'
 import { isClaudeRecall } from './recalls'
 import { startTheme } from './theme'
+import { closeSheet, openSheet, wireSheet } from './sheet'
+import { chooseMode, countNote, matchLabel, MEANING_OFF_HINT, readMode, saveMode, SHOW_FIRST, type SearchMode } from './search-mode'
 import { createStream, type StreamApi, type StreamHandle, type StreamListener, type StreamStatus } from './stream'
 
 const TOKEN_KEY = 'mnemosyne.token'
-const VIEWS = ['map', 'memories', 'activity', 'search', 'knowledge', 'health'] as const
+const VIEWS = ['map', 'memories', 'activity', 'search', 'knowledge', 'review', 'health'] as const
 type View = (typeof VIEWS)[number]
-const VIEW_NAMES: Record<View, string> = { map: 'Map', memories: 'Memories', activity: 'Activity', search: 'Search', knowledge: 'Knowledge', health: 'Health' }
+const VIEW_NAMES: Record<View, string> = { map: 'Map', memories: 'Memories', activity: 'Activity', search: 'Search', knowledge: 'Knowledge', review: 'Review', health: 'Health' }
 const FEED_KEEP = 1000
 const FEED_SHOW = 300
 const CONNECTED = 'Connected to the local Mnemosyne server.'
@@ -41,6 +44,8 @@ type Health = {
   /** True only for `bun run dev:ui`: the page then reloads when a file in ui/ changes. */
   dev?: boolean
   activity: boolean
+  /** True when the server's embeddings are on, so a search can match by meaning; absent from older servers. */
+  embeddings?: boolean
   total: number
   owners: Owner[]
   note?: string
@@ -63,7 +68,8 @@ export type Memory = {
   tags?: string[]
 }
 
-export type Hit = Memory & { content: string; score: number }
+// `matched` is absent from servers before the match modes.
+export type Hit = Memory & { content: string; score: number; matched?: 'keyword' | 'meaning' | 'both' }
 
 export type ActivityLine = {
   t?: string
@@ -293,14 +299,18 @@ export function memoryRow(memory: Memory, open: (id: string) => void, pickTag?: 
   row.tabIndex = 0
   row.dataset.id = memory.id
   const text = el('td')
-  const stack = el('div', undefined, 'stack')
-  stack.append(el('span', memory.preview ?? memory.content ?? ''), el('span', memory.id, 'mono muted id'))
-  text.append(stack)
+  // Two lines at most (the CSS clamps it); the id and the full text are in the sheet. A cut-short preview ends in an ellipsis.
+  const shown = memory.preview ?? memory.content ?? ''
+  text.append(el('span', memory.truncated === true && !shown.endsWith('…') ? `${shown}…` : shown, 'row-text'))
   const owner = el('td', undefined, 'nowrap')
   owner.append(project(memory.owner))
   const tags = el('td')
   tags.append(chips(tagsOfMemory(memory), pickTag))
-  row.append(text, owner, tags, el('td', day(memory.timestamp), 'muted nowrap'), el('td', String(memory.recall_count ?? 0), 'num mono'))
+  // Recalls: "never" (muted) for 0; the tooltip says when it was last recalled.
+  const recalls = memory.recall_count ?? 0
+  const recalled = el('td', recalls === 0 ? 'never' : String(recalls), recalls === 0 ? 'num muted' : 'num mono')
+  recalled.title = `Last recalled: ${day(memory.last_recalled) || 'never'}`
+  row.append(text, owner, tags, el('td', day(memory.timestamp), 'muted nowrap'), recalled)
   row.addEventListener('click', () => open(memory.id))
   row.addEventListener('keydown', event => {
     if (event.key === 'Enter' || event.key === ' ') {
@@ -311,7 +321,7 @@ export function memoryRow(memory: Memory, open: (id: string) => void, pickTag?: 
   return row
 }
 
-/** The detail panel's content for one memory; `forget` runs after the confirm. */
+/** The sheet's content for one memory (see openMemory); `forget` runs after the confirm. */
 export function memoryDetail(memory: Memory, forget: (memory: Memory, done: (error?: string) => void) => void, pickTag?: (tag: string) => void) {
   const panel = el('div', undefined, 'detail-body')
   const head = el('div', undefined, 'detail-head')
@@ -376,34 +386,150 @@ export function memoryDetail(memory: Memory, forget: (memory: Memory, done: (err
   })
   danger.append(ask, confirm)
 
-  panel.append(head, el('p', content, 'detail-text'), facts, tagBox, danger)
+  // Two columns on a wide screen: the memory itself on the left, what is known about it on the right.
+  const main = el('div', undefined, 'detail-main')
+  main.append(head, el('p', content, 'detail-text'))
+  const side = el('div', undefined, 'detail-side')
+  side.append(facts, tagBox, danger)
+  panel.append(main, side)
   return panel
 }
 
-/** One line of the Activity feed; `pickSession` is called with the full session id when its button is pressed. */
-export function activityItem(line: ActivityLine, pickSession: (session: string) => void) {
+/** The Source cell's words: "<App> · <origin word>", such as "Claude Code · tool". */
+export function sourceLabel(line: ActivityLine): string {
+  const app = line.origin === 'external' ? originLabel(line) : appOf(line) || originLabel(line)
+  return line.origin ? `${app} · ${line.origin}` : app
+}
+
+/** What an origin word means, for the Source cell's tooltip. */
+export const ORIGIN_HELP: Record<string, string> = {
+  hook: 'hook: automatic recall on a first prompt or after a compaction',
+  tool: 'tool: Claude called a memory tool in Claude Code',
+  trigger: 'trigger: you typed a trigger phrase, such as “remember that”',
+  external: 'external: another MCP client, through mnemosyne-mcp',
+  ui: 'ui: this dashboard (search or forget)',
+  backfill: 'backfill: the one-time tagging run, /mnemosyne-tags',
+}
+
+/**
+ * One activity line as a plain sentence, for the What cell. `preview` is the first line of the line's
+ * memory when the log did not keep one (older learn lines); '' or none falls back to the short id.
+ */
+export function sentenceOf(line: ActivityLine, preview = ''): string {
+  const text = textOf(line.text)
+  const ids = (line.ids ?? []).filter((id): id is string => typeof id === 'string')
+  const count = line.count ?? 0
+  const failed = line.ok === false
+  switch (line.action) {
+    case 'remember':
+      return text ? `${failed ? 'Could not save' : 'Saved'}: ${text}` : failed ? 'Could not save a memory' : 'Saved a memory'
+    case 'update':
+      return text ? `${failed ? 'Could not update' : 'Updated'}: ${text}` : failed ? 'Could not update a memory' : 'Updated a memory'
+    case 'recall': {
+      const found = count === 0 ? 'nothing' : String(count)
+      if (failed) return text ? `Could not recall for “${text}”` : 'Could not recall'
+      return text ? `Recalled ${found} for “${text}”` : `Recalled ${found}`
+    }
+    case 'forget':
+      return failed ? `Could not forget ${ids.map(shortSession).join(', ')}`.trim() : `Forgot ${ids.map(shortSession).join(', ') || 'a memory'}`
+    case 'rearm':
+      return 'Re-armed: will recall on the next prompt'
+    case 'stats':
+      return 'Checked memory stats'
+    case 'extract': {
+      const from = text || textOf(preview)
+      const source = from ? `from: ${from}` : ids[0] ? `from memory ${shortSession(ids[0])}` : 'from a memory'
+      if (failed) return `Could not learn ${source}`
+      if (count === 0) return `Learned nothing ${source}`
+      return `Learned ${count} ${count === 1 ? 'item' : 'items'} ${source}`
+    }
+    default:
+      return text
+  }
+}
+
+/** What the Activity page needs beyond the line itself: the open row, the memory previews and how to open a memory. */
+export type ActivityCtx = {
+  expanded?: boolean
+  toggle?: () => void
+  /** The first line of a memory the log did not keep text for. */
+  preview?: (id: string) => string | undefined
+  open?: (id: string) => void
+}
+
+/** A line's identity in the list (the log has no row id): the open row is found again by it after a redraw. */
+export const lineKey = (line: ActivityLine) => `${line.t ?? ''}|${line.action ?? ''}|${(line.ids ?? [])[0] ?? ''}|${textOf(line.session)}|${textOf(line.text).slice(0, 20)}`
+
+/** The detail line under an open row: full text, memory ids as links, the result, the client, the session and the date and time. */
+function activityDetail(line: ActivityLine, ctx: ActivityCtx, sentence: string) {
+  const box = el('div', undefined, 'event-detail')
+  box.append(el('p', sentence, 'detail-sentence'))
+  const facts = el('div', undefined, 'detail-facts')
+  const fact = (label: string, value: string | HTMLElement) => {
+    const row = el('span', undefined, 'fact')
+    row.append(el('span', label, 'muted'), typeof value === 'string' ? el('span', value, 'mono') : value)
+    facts.append(row)
+  }
+  const ids = (line.ids ?? []).filter((id): id is string => typeof id === 'string')
+  if (ids.length > 0) {
+    const links = el('span', undefined, 'id-links')
+    for (const id of ids) {
+      const link = el('button', shortSession(id), 'link mono')
+      link.type = 'button'
+      link.title = `Open memory ${id}`
+      link.setAttribute('aria-label', `Open memory ${shortSession(id)}`)
+      link.addEventListener('click', event => {
+        event.stopPropagation?.()
+        ctx.open?.(id)
+      })
+      links.append(link)
+    }
+    fact(ids.length === 1 ? 'Memory' : 'Memories', links)
+  }
+  const result = resultLabel(line)
+  fact('Result', line.ok === false && line.error ? `${result || 'failed'} (${textOf(line.error)})` : result || 'ok')
+  if (typeof line.count === 'number') fact('Count', String(line.count))
+  const client = textOf(line.client)
+  if (client) fact('Client', client)
+  const session = textOf(line.session)
+  if (session) fact('Session', session)
+  const date = day(line.t)
+  if (date) fact('Time', `${date} ${clock(line.t)}`)
+  box.append(facts)
+  return box
+}
+
+/**
+ * One line of the Activity feed; `pickSession` is called with the full session id when its chip is pressed.
+ * Pressing the row (or Enter or Space on it) opens its detail line when `ctx.toggle` is given.
+ */
+export function activityItem(line: ActivityLine, pickSession: (session: string) => void, ctx: ActivityCtx = {}) {
   const item = el('li', undefined, 'event')
   const action = line.action ?? ''
-  const what = line.text || (action === 'forget' ? (line.ids ?? []).join(', ') : action === 'rearm' ? 'will recall on next prompt' : '')
+  const first = (line.ids ?? [])[0]
+  const sentence = sentenceOf(line, action === 'extract' && !textOf(line.text) && first ? (ctx.preview?.(first) ?? '') : '')
   const result = el('span', resultLabel(line), line.ok === false ? 'result is-failed' : 'result')
   if (line.ok === false && line.error) result.title = line.error
   const source = el('span', undefined, 'source')
-  const raw = el('span', undefined, 'origin-raw mono muted')
-  if (line.origin) raw.append(el('span', String(line.origin)))
+  const origin = el('span', sourceLabel(line), 'muted origin')
+  if (line.origin) origin.title = ORIGIN_HELP[line.origin] ?? String(line.origin)
+  source.append(origin)
   const session = textOf(line.session)
   if (session) {
-    const button = el('button', shortSession(session), 'link mono session')
-    button.type = 'button'
-    button.title = 'Show only this session'
-    button.setAttribute('aria-label', `Show only session ${shortSession(session)}`)
-    button.addEventListener('click', () => pickSession(session))
-    raw.append(button)
+    const chip = el('button', `session ${shortSession(session)}`, 'link mono session')
+    chip.type = 'button'
+    chip.title = 'Show only this session'
+    chip.setAttribute('aria-label', `Show only session ${shortSession(session)}`)
+    chip.addEventListener('click', event => {
+      event.stopPropagation?.()
+      pickSession(session)
+    })
+    source.append(chip)
   }
-  source.append(el('span', originLabel(line), 'muted origin'), raw)
   const badge = provenanceBadge(line)
   const whatCell = el('span', undefined, 'what')
   if (badge !== '') whatCell.append(el('span', badge, line.author_type === 'human' ? 'prov prov-human' : 'prov prov-agent'))
-  whatCell.append(document.createTextNode(what))
+  whatCell.append(document.createTextNode(sentence))
   item.append(
     el('span', clock(line.t), 'mono muted time'),
     el('span', actionLabel(action), `badge a-${/^[a-z]+$/.test(action) ? action : 'other'}`),
@@ -412,6 +538,23 @@ export function activityItem(line: ActivityLine, pickSession: (session: string) 
     whatCell,
     result,
   )
+  const toggle = ctx.toggle
+  if (toggle) {
+    item.dataset.key = lineKey(line)
+    item.setAttribute('tabindex', '0')
+    item.setAttribute('aria-expanded', String(ctx.expanded === true))
+    item.addEventListener('click', () => toggle())
+    item.addEventListener('keydown', event => {
+      // Only the row's own keys: Enter on the session chip or a memory link presses that button.
+      if (event.target !== item || (event.key !== 'Enter' && event.key !== ' ')) return
+      event.preventDefault?.()
+      toggle()
+    })
+    if (ctx.expanded) {
+      item.className = 'event is-open'
+      item.append(activityDetail(line, ctx, sentence))
+    }
+  }
   return item
 }
 
@@ -423,7 +566,10 @@ export function searchHit(hit: Hit, rank: number, query: string, open: (id: stri
   const bar = el('span', undefined, 'bar')
   bar.append(el('span', undefined, `bar-fill ${barClass(hit.score)}`))
   score.append(bar, el('span', hit.score.toFixed(2), 'mono'))
-  head.append(el('span', `#${rank}`, 'mono muted small'), project(hit.owner), score)
+  head.append(el('span', `#${rank}`, 'mono muted small'), project(hit.owner))
+  const how = matchLabel(hit.matched)
+  if (how !== '') head.append(el('span', how, `match-badge m-${hit.matched}`))
+  head.append(score)
   const text = el('p', undefined, 'hit-text')
   for (const part of markParts(hit.content, query)) text.append(part.mark ? el('mark', part.text) : document.createTextNode(part.text))
   if (hit.truncated) text.append(el('span', ' …', 'muted'))
@@ -506,7 +652,7 @@ const failure = (err: unknown) => (err instanceof Error ? err.message : String(e
 
 // ---- Tabs ----
 
-let current: View = 'memories'
+let current: View = 'map'
 const opened = new Set<View>()
 
 function drawTabs() {
@@ -521,8 +667,9 @@ function drawTabs() {
 }
 
 export function show(view: View) {
-  // A message about the last tab (Forgot memory …) does not follow the page to another one.
+  // A message about the last tab (Forgot memory …) does not follow the page to another one, and neither does the bottom sheet.
   if (view !== current && !expired) setStatus(CONNECTED, 'ok')
+  if (view !== current) closeSheet()
   current = view
   for (const name of VIEWS) byId(`view-${name}`).hidden = name !== view
   for (const tab of byId('tabs').querySelectorAll<HTMLButtonElement>('button.tab')) {
@@ -541,8 +688,9 @@ export function show(view: View) {
     feedDirty = false
     drawFeed()
   }
-  // Knowledge and Health read fresh numbers every time they are opened.
+  // Knowledge, Review and Health read fresh numbers every time they are opened.
   if (view === 'knowledge') void loadKnowledge()
+  if (view === 'review') void loadReview()
   if (view === 'health') void loadHealthReport()
   map?.visible(view === 'map')
 }
@@ -553,7 +701,7 @@ let map: MapView | null = null
 
 const NARROW = '(max-width: 900px)'
 
-/** On a phone the inspector sits under the canvas: a newly selected star (a new title in it) brings it into view; a refresh of the same star does not. */
+/** The selection card sits under the canvas: a newly selected star (a new title in it) brings it into view when it is on a phone or below the fold on a wide screen; a refresh of the same star does not. */
 export const revealNeeded = (shown: string, next: string, narrow: boolean) => narrow && next !== '' && next !== shown
 
 function wireInspectorReveal() {
@@ -566,7 +714,9 @@ function wireInspectorReveal() {
   new MutationObserver(() => {
     back.hidden = inspector.childElementCount === 0
     const next = inspector.querySelector('.insp-title')?.textContent ?? ''
-    if (revealNeeded(shown, next, matchMedia(NARROW).matches)) inspector.scrollIntoView({ block: 'start', behavior: 'smooth' })
+    // Wide screens: only when the card starts in the last stretch of the window (below the fold).
+    const belowFold = typeof innerHeight === 'number' && inspector.getBoundingClientRect().top > innerHeight - 140
+    if (revealNeeded(shown, next, matchMedia(NARROW).matches || belowFold)) inspector.scrollIntoView({ block: 'start', behavior: 'smooth' })
     shown = next
   }).observe(inspector, { childList: true, subtree: true })
 }
@@ -585,10 +735,10 @@ function showOnMap(id: string) {
   map?.show(id)
 }
 
-const knowledgeView = { kind: 'fact' as KnowledgeKind, data: null as KnowledgeData | null }
+const knowledgeView = { kind: 'fact' as KnowledgeKind, data: null as KnowledgeData | null, filter: { ...NO_FILTER } as KnowledgeFilter }
 
-/** A tab's own status line (Knowledge and Health): the text, as an error or not, and its Try again button. */
-function tabStatus(name: 'know' | 'health', text: string, error = false) {
+/** A tab's own status line (Knowledge, Review and Health): the text, as an error or not, and its Try again button. */
+function tabStatus(name: 'know' | 'review' | 'health', text: string, error = false) {
   const line = byId(`${name}-status`)
   line.textContent = text
   line.className = error ? 'notice-line small is-error' : 'notice-line small muted'
@@ -597,10 +747,18 @@ function tabStatus(name: 'know' | 'health', text: string, error = false) {
 }
 const knowledgeHost: KnowledgeHost = { project: owner => project(owner, 'project'), showOnMap, now: () => Date.now() }
 
+/** Only the table body: the find box redraws it per keystroke. */
+function drawKnowledgeRows() {
+  const data = knowledgeView.data
+  if (data !== null) byId('know-rows').replaceChildren(...tableRows(data, knowledgeView.kind, knowledgeHost, knowledgeView.filter))
+}
+
 export function drawKnowledge() {
   const data = knowledgeView.data
   if (data === null) return
-  tabStatus('know', extractionState(data.extraction).status)
+  // With items in the table, extraction has plainly run: the 'cannot say' sentence only shows for off, or with no items.
+  const state = extractionState(data.extraction)
+  tabStatus('know', state.mode === 'unknown' && knowledgeTotal(data) > 0 ? '' : state.status)
   const note = knowledgeNotice(data)
   const box = byId('know-notice')
   box.hidden = note === null
@@ -611,9 +769,25 @@ export function drawKnowledge() {
       drawKnowledge()
     }),
   )
-  byId('know-kpis').replaceChildren(...knowledgeKpiTiles(data, Date.now()))
+  byId('know-summary').replaceChildren(
+    ...summaryLine(data, Date.now(), () => {
+      knowledgeView.filter.neverUsed = true
+      drawKnowledge()
+    }),
+  )
+  // The toolbar: the project select lists the owners present (the choice is kept while it is still there).
+  const filter = knowledgeView.filter
+  const ownerSelect = byId<HTMLSelectElement>('know-owner')
+  const present = ownersOf(data)
+  if (filter.owner !== '' && !present.includes(filter.owner)) filter.owner = ''
+  ownerSelect.replaceChildren(Object.assign(el('option', 'All projects'), { value: '' }), ...present.map(owner => Object.assign(el('option', ownerName(owner)), { value: owner, title: owner })))
+  ownerSelect.value = filter.owner
+  byId<HTMLSelectElement>('know-sort').value = filter.sort
+  byId<HTMLInputElement>('know-find').value = filter.text
+  byId('know-never').setAttribute('aria-pressed', String(filter.neverUsed))
   byId('know-item-head').textContent = itemHead(knowledgeView.kind)
-  byId('know-rows').replaceChildren(...tableRows(data, knowledgeView.kind, knowledgeHost))
+  byId('know-status-head').hidden = !hasStatus(knowledgeView.kind)
+  byId('know-rows').replaceChildren(...tableRows(data, knowledgeView.kind, knowledgeHost, filter))
   byId('know-body').hidden = false
 }
 
@@ -633,7 +807,7 @@ export async function loadKnowledge() {
 
 /**
  * The guarded forget, the one /api/forget call of the page: the Memories tab's button
- * (forgetMemory) and the Health tab's never-recalled list both go through it. `done()`
+ * (forgetMemory) and the Review tab's list both go through it. `done()`
  * on success or when the memory was already gone, `done(error)` on failure.
  */
 export function forgetById(id: string, done: (error?: string) => void) {
@@ -649,7 +823,7 @@ export function forgetById(id: string, done: (error?: string) => void) {
       memories.rows = memories.rows.filter(row => row.id !== id)
       if (memories.selected === id) {
         memories.selected = ''
-        emptyDetail(deleted ? undefined : 'That memory is already gone.')
+        closeSheet()
       }
       drawRows()
       if (deleted) setStatus(`Forgot memory ${id}.${body.note ? ` ${body.note}` : ''}`, 'ok')
@@ -663,15 +837,14 @@ export function forgetById(id: string, done: (error?: string) => void) {
   })()
 }
 
-// After a Health forget, the row index whose successor gets the focus once the list is redrawn.
-const healthView = { data: null as HealthData | null, refocus: null as number | null }
-const healthHost: HealthHost = { project: owner => project(owner, 'project'), review: id => openInMemories(id), forget: forgetById, now: () => Date.now() }
+const healthView = { data: null as HealthData | null, tables: 'all' as TableFilter }
+const healthHost: HealthHost = { project: owner => project(owner, 'project'), openReview: () => show('review') }
 
 export function drawHealth() {
   const data = healthView.data
   if (data === null) return
   const now = Date.now()
-  byId('health-kpis').replaceChildren(...healthKpiTiles(data))
+  byId('health-kpis').replaceChildren(...healthKpiTiles(data, healthHost.openReview))
   byId('health-coverage').replaceChildren(...coverageRows(data))
   const days = dayBars(data, now)
   const words = chartText(days, data)
@@ -680,27 +853,23 @@ export function drawHealth() {
   chart.replaceChildren(...chartBars(days))
   byId('health-chart-text').textContent = words.summary
   byId('health-projects').replaceChildren(...healthProjectRows(data, healthHost))
-  byId('health-never-text').textContent = neverText(data)
-  const rows = data.neverList.map((memory, index) =>
-    neverRow(memory, healthHost, () => {
-      healthView.refocus = index
-      void loadHealthReport()
-    }),
-  )
-  byId('health-never').replaceChildren(...rows)
-  byId('health-never-box').hidden = data.neverList.length === 0
-  byId('health-hot').replaceChildren(...hotRows(data, healthHost))
-  byId('health-hot-box').hidden = data.mostRecalled.length === 0
-  byId('health-storage').replaceChildren(...storageList(data))
+  // Storage is a collapsed <details>; its filter redraws only the list, so the open state stays.
+  byId('health-storage-summary').textContent = storageSummary(data)
+  drawStorage()
   tabStatus('health', '')
   byId('health-body').hidden = false
-  // The redrawn list lost the focused button: the next row's Review (the new last row's when the
-  // last was forgotten), else the tab's heading when the list is now empty.
-  if (healthView.refocus !== null) {
-    const row = rows[Math.min(healthView.refocus, rows.length - 1)]
-    healthView.refocus = null
-    ;(row?.querySelector<HTMLButtonElement>('button') ?? byId('health-title')).focus()
-  }
+}
+
+function drawStorage() {
+  const data = healthView.data
+  if (data === null) return
+  byId('health-storage-filter').replaceChildren(
+    ...tableFilterButtons(healthView.tables, filter => {
+      healthView.tables = filter
+      drawStorage()
+    }),
+  )
+  byId('health-storage').replaceChildren(...storageList(data, healthView.tables))
 }
 
 export async function loadHealthReport() {
@@ -715,16 +884,87 @@ export async function loadHealthReport() {
   } catch (err) {
     if (err instanceof Expired) return
     tabStatus('health', `Could not load the health report: ${failure(err)}`, true)
-    if (healthView.refocus !== null) {
-      healthView.refocus = null
-      byId('health-retry').focus()
+  }
+}
+
+// ---- Review ----
+
+// After a forget, the row index whose successor gets the focus once the list is redrawn.
+const reviewView = { data: null as ReviewData | null, filter: 'never' as ReviewFilter, refocus: null as number | null }
+const reviewHost: ReviewHost = { project: owner => project(owner, 'project'), open: id => openInMemories(id), forget: forgetById, now: () => Date.now() }
+
+export function drawReview() {
+  const data = reviewView.data
+  if (data === null) return
+  const now = Date.now()
+  byId('review-filters').replaceChildren(
+    ...filterButtons(reviewCounts(data.rows, now), reviewView.filter, filter => {
+      reviewView.filter = filter
+      drawReview()
+    }),
+  )
+  const list = reviewList(data.rows, reviewView.filter, now)
+  byId('review-text').textContent = reviewText(reviewView.filter, list.length, data.rows.length, data.total)
+  const rows = list.map((memory, index) =>
+    reviewRow(memory, reviewHost, () => {
+      reviewView.refocus = index
+      void loadReview()
+    }),
+  )
+  byId('review-rows').replaceChildren(...rows)
+  byId('review-box').hidden = list.length === 0
+  tabStatus('review', '')
+  byId('review-body').hidden = false
+  // The redrawn list lost the focused button: the next row's Open (the new last row's when the
+  // last was forgotten), else the tab's heading when the list is now empty.
+  if (reviewView.refocus !== null) {
+    const row = rows[Math.min(reviewView.refocus, rows.length - 1)]
+    reviewView.refocus = null
+    ;(row?.querySelector<HTMLButtonElement>('button') ?? byId('review-title')).focus()
+  }
+}
+
+export async function loadReview() {
+  if (reviewView.data === null) tabStatus('review', 'Loading…')
+  try {
+    // The newest memories (the server's list limit); the filters work on them here, since one request cannot ask for all four.
+    const response = await api('/api/memories?sort=newest')
+    if (!response.ok) throw new Error(`the server answered ${response.status}`)
+    const data = parseReview(await readJson<unknown>(response))
+    if (data === null) throw new Error('the reply was not a memory list')
+    reviewView.data = data
+    drawReview()
+  } catch (err) {
+    if (err instanceof Expired) return
+    tabStatus('review', `Could not load the memories: ${failure(err)}`, true)
+    if (reviewView.refocus !== null) {
+      reviewView.refocus = null
+      byId('review-retry').focus()
     }
   }
 }
 
-/** The Try again buttons of the Knowledge and Health status lines. */
+/** The Try again buttons of the Knowledge, Review and Health status lines. */
 export function wireKnowledgeHealth() {
+  byId('review-retry').addEventListener('click', () => void loadReview())
   byId('know-retry').addEventListener('click', () => void loadKnowledge())
+  byId('know-owner').addEventListener('change', () => {
+    knowledgeView.filter.owner = byId<HTMLSelectElement>('know-owner').value
+    drawKnowledge()
+  })
+  byId('know-sort').addEventListener('change', () => {
+    knowledgeView.filter.sort = byId<HTMLSelectElement>('know-sort').value as KnowledgeSort
+    drawKnowledge()
+  })
+  byId('know-find').addEventListener('input', () => {
+    knowledgeView.filter.text = byId<HTMLInputElement>('know-find').value
+    // Redraw only the table, so the find box keeps focus while typing.
+    drawKnowledgeRows()
+  })
+  byId('know-never').addEventListener('click', () => {
+    knowledgeView.filter.neverUsed = !knowledgeView.filter.neverUsed
+    drawKnowledge()
+  })
   byId('health-retry').addEventListener('click', () => void loadHealthReport())
 }
 
@@ -736,9 +976,11 @@ async function loadHealth() {
   const health = await readJson<Health>(await api('/api/health'))
   owners = health.owners ?? []
   useOwners(owners.map(row => row.owner))
+  setEmbeddings(health.embeddings === true)
   const projects = owners.length
   byId('summary').textContent = `${health.total} ${health.total === 1 ? 'memory' : 'memories'} · ${projects} ${projects === 1 ? 'project' : 'projects'}`
-  byId('engine').textContent = health.engine ? `engine ${health.engine}` : ''
+  // The plugin version beside the engine's, on every tab (the footer with the rest is on Health).
+  byId('engine').textContent = [health.plugin ? `v${health.plugin}` : '', health.engine ? `engine ${health.engine}` : ''].filter(Boolean).join(' · ')
   for (const id of ['mem-owner', 'search-owner']) {
     const select = byId<HTMLSelectElement>(id)
     const chosen = select.value
@@ -831,23 +1073,36 @@ function markSelected() {
   }
 }
 
-function emptyDetail(text = 'Pick a memory to see it in full.') {
-  byId('detail').replaceChildren(el('p', text, 'muted'))
-}
-
+/** Opens one memory in the bottom sheet: the sheet comes up at once, with the memory filled in when it arrives. */
 async function openMemory(id: string) {
   memories.selected = id
   markSelected()
+  // Focus goes back to the row on close (looked up then: the rows get redrawn).
+  const sheet = {
+    title: 'Memory',
+    returnFocus: () => [...byId('mem-rows').querySelectorAll<HTMLElement>('tr.row')].find(row => row.dataset.id === id) ?? null,
+    onClose: () => {
+      if (memories.selected === id) memories.selected = ''
+      markSelected()
+    },
+  }
+  openSheet({ ...sheet, body: el('p', 'Loading…', 'muted') })
   try {
     const response = await api(`/api/memories/${encodeURIComponent(id)}`)
+    // Another memory was picked, or the tab changed, while this one loaded.
+    if (memories.selected !== id) return
     if (response.status === 404) {
-      emptyDetail('That memory is gone.')
+      memories.selected = ''
+      closeSheet()
+      setStatus('That memory is gone.', 'error')
       return
     }
     const memory = await readJson<Memory & { error?: string }>(response)
     if (!response.ok) throw new Error(memory.error ?? `the server answered ${response.status}`)
-    byId('detail').replaceChildren(memoryDetail(memory, forgetMemory, setTagFilter))
+    if (memories.selected !== id) return
+    openSheet({ ...sheet, body: memoryDetail(memory, forgetMemory, setTagFilter) })
   } catch (err) {
+    if (memories.selected === id) closeSheet()
     if (!(err instanceof Expired)) setStatus(`Could not open the memory: ${failure(err)}`, 'error')
   }
 }
@@ -863,7 +1118,7 @@ function wireMemories() {
     if (memories.timer) clearTimeout(memories.timer)
     memories.timer = setTimeout(() => void loadMemories(), 250)
   })
-  emptyDetail()
+  wireSheet()
 }
 
 // ---- Activity: the recent lines, then the live tail read with fetch ----
@@ -969,7 +1224,7 @@ export function externalName(name: string): string {
 export const appName = (key: string) => (key.startsWith('ext:') ? externalName(key.slice(4)) : key)
 
 export const feed = newFeed()
-export const feedView = { filter: newFilter(), started: false, live: 'Connecting', apps: '' }
+export const feedView = { filter: newFilter(), started: false, live: 'Connecting', apps: '', open: '' }
 
 const isToday = (t: string | undefined) => day(t) === day(new Date().toISOString())
 
@@ -978,7 +1233,7 @@ function setSessionFilter(session: string) {
   feedView.filter.session = session
   const chip = byId('act-session')
   chip.hidden = session === ''
-  chip.textContent = session === '' ? '' : `Session: ${shortSession(session)} ×`
+  chip.textContent = session === '' ? '' : `Showing one session (${shortSession(session)}) · Show all`
   chip.title = session === '' ? '' : 'Showing only this session. Press to show all.'
   chip.setAttribute('aria-label', session === '' ? 'Clear session filter' : `Clear session filter: ${shortSession(session)}`)
   drawFeed()
@@ -1015,7 +1270,55 @@ export function drawFeed() {
   drawApps()
   const list = feed.lines.filter(line => showLine(line, feedView.filter)).slice(0, FEED_SHOW)
   const none = feed.lines.length > 0 ? 'No activity matches these filters.' : 'No activity yet.'
-  byId('act-list').replaceChildren(...(list.length > 0 ? list.map(line => activityItem(line, setSessionFilter)) : [el('li', none, 'event empty muted')]))
+  const ctx = (line: ActivityLine): ActivityCtx => {
+    const key = lineKey(line)
+    return { expanded: feedView.open === key, toggle: () => toggleRow(key), preview: id => previews.get(id), open: openInMemories }
+  }
+  byId('act-list').replaceChildren(...(list.length > 0 ? list.map(line => activityItem(line, setSessionFilter, ctx(line))) : [el('li', none, 'event empty muted')]))
+  void wantPreviews(list)
+}
+
+/** Opens a row's detail line (one at a time) or closes it, and gives the row the focus again after the redraw. */
+function toggleRow(key: string) {
+  feedView.open = feedView.open === key ? '' : key
+  drawFeed()
+  const row = Array.from(byId('act-list').children).find(child => (child as HTMLElement).dataset?.key === key)
+  ;(row as HTMLElement | undefined)?.focus?.()
+}
+
+// The first line of the memory an older learn line points to (the log kept no text for it), by memory id; '' when it is gone.
+const previews = new Map<string, string>()
+const PREVIEW_BATCH = 20
+
+/** Fetches the previews the shown learn lines miss, a small batch at a time, and redraws once when any arrived. */
+async function wantPreviews(lines: readonly ActivityLine[]) {
+  const ids: string[] = []
+  for (const line of lines) {
+    const id = (line.ids ?? [])[0]
+    if (line.action === 'extract' && !textOf(line.text) && typeof id === 'string' && !previews.has(id) && !ids.includes(id)) ids.push(id)
+    if (ids.length >= PREVIEW_BATCH) break
+  }
+  if (ids.length === 0) return
+  // Marked at once, so the redraw that follows does not ask again; a failure stays '' and shows the short id.
+  for (const id of ids) previews.set(id, '')
+  let found = false
+  await Promise.all(
+    ids.map(async id => {
+      try {
+        const response = await api(`/api/memories/${encodeURIComponent(id)}`)
+        if (!response.ok) return
+        const memory = await readJson<Memory>(response)
+        const text = firstLine(textOf(memory.content) || textOf(memory.preview), 120)
+        if (text !== '') {
+          previews.set(id, text)
+          found = true
+        }
+      } catch {
+        // The short id stays on the line.
+      }
+    }),
+  )
+  if (found && current === 'activity') drawFeed()
 }
 
 function setLive(text: string) {
@@ -1190,13 +1493,85 @@ export function wireActivity() {
 const SEARCH_TIMEOUT_MS = 60_000
 let searching: AbortController | null = null
 
+// The match mode: the server's capability (from /api/health, refreshed by each search reply),
+// the choice (remembered in this browser) and the hits of the last search, shown SHOW_FIRST at a time.
+let embeddingsOn = false
+let searchMode: SearchMode = 'keyword'
+let searchHits: Hit[] = []
+let searchShown = 0
+let searchQuery = ''
+
+function prefStorage(): Pick<Storage, 'getItem' | 'setItem'> | undefined {
+  try {
+    return typeof localStorage === 'undefined' ? undefined : localStorage
+  } catch {
+    return undefined
+  }
+}
+
+// The two Match by buttons: the chosen one pressed; Keyword + meaning disabled while embeddings are off.
+function drawMode() {
+  for (const button of byId('search-mode').querySelectorAll<HTMLButtonElement>('.seg-btn')) {
+    const hybrid = button.dataset.mode === 'hybrid'
+    button.setAttribute('aria-pressed', String(button.dataset.mode === searchMode))
+    button.disabled = hybrid && !embeddingsOn
+    button.title = hybrid && !embeddingsOn ? MEANING_OFF_HINT : ''
+  }
+}
+
+// Called with /api/health and with each search reply. The mode is picked again only when the capability is first
+// learned or changes (off forces keyword); otherwise the choice made on the page stands.
+let embeddingsKnown = false
+function setEmbeddings(on: boolean) {
+  const picked = !embeddingsKnown || on !== embeddingsOn
+  embeddingsKnown = true
+  embeddingsOn = on
+  if (picked) searchMode = chooseMode(readMode(prefStorage()), on)
+  if (document.getElementById('search-mode') !== null) drawMode()
+}
+
+// The first SHOW_FIRST hits, then SHOW_FIRST more for each press of Show more.
+function drawHits(more: boolean) {
+  const results = byId('search-results')
+  const open = (id: string) => {
+    show('memories')
+    void openMemory(id)
+  }
+  const from = more ? searchShown : 0
+  searchShown = Math.min(searchHits.length, more ? searchShown + SHOW_FIRST : SHOW_FIRST)
+  const rows = searchHits.slice(from, searchShown).map((hit, i) => searchHit(hit, from + i + 1, searchQuery, open))
+  if (more) results.append(...rows)
+  else results.replaceChildren(...rows)
+  byId('search-more').hidden = searchShown >= searchHits.length
+}
+
 function wireSearch() {
   const form = byId<HTMLFormElement>('search-form')
   form.addEventListener('submit', event => {
     event.preventDefault()
     void runSearch()
   })
+  for (const button of byId('search-mode').querySelectorAll<HTMLButtonElement>('.seg-btn')) {
+    button.addEventListener('click', () => {
+      const mode = button.dataset.mode
+      if (mode !== 'keyword' && mode !== 'hybrid') return
+      if (mode === 'hybrid' && !embeddingsOn) return
+      searchMode = mode
+      saveMode(prefStorage(), mode)
+      drawMode()
+    })
+  }
+  byId('search-more').addEventListener('click', () => {
+    drawHits(true)
+    const total = searchHits.length
+    byId('search-note').textContent = countNote(searchShown, total, noteMode, noteSkipped)
+  })
+  drawMode()
 }
+
+// The mode and skipped count of the last reply, for the note that Show more rewrites.
+let noteMode: string | undefined
+let noteSkipped = 0
 
 async function runSearch() {
   // A submit while a search is pending is ignored (the button is disabled too).
@@ -1215,19 +1590,21 @@ async function runSearch() {
   note.hidden = false
   note.textContent = 'Searching…'
   try {
-    const response = await api('/api/search', { method: 'POST', body: owner ? { query, owner } : { query }, signal: controller.signal })
-    const body = await readJson<{ results?: Hit[]; skipped?: number; error?: string }>(response)
+    const response = await api('/api/search', { method: 'POST', body: { query, ...(owner ? { owner } : {}), mode: searchMode }, signal: controller.signal })
+    const body = await readJson<{ results?: Hit[]; skipped?: number; mode?: string; embeddings?: boolean; error?: string }>(response)
     if (!response.ok) throw new Error(body.error ?? `the server answered ${response.status}`)
-    const hits = body.results ?? []
-    const open = (id: string) => {
-      show('memories')
-      void openMemory(id)
-    }
-    results.replaceChildren(...hits.map((hit, i) => searchHit(hit, i + 1, query, open)))
-    const skipped = body.skipped ? ` The ${body.skipped} smallest projects were not searched.` : ''
-    note.textContent = hits.length === 0 ? `Nothing found.${skipped}` : `${hits.length} ${hits.length === 1 ? 'memory' : 'memories'} found.${skipped}`
+    if (typeof body.embeddings === 'boolean') setEmbeddings(body.embeddings)
+    searchHits = body.results ?? []
+    searchQuery = query
+    noteMode = body.mode
+    noteSkipped = body.skipped ?? 0
+    drawHits(false)
+    note.textContent = countNote(searchShown, searchHits.length, noteMode, noteSkipped)
   } catch (err) {
     if (err instanceof Expired) return
+    searchHits = []
+    searchShown = 0
+    byId('search-more').hidden = true
     results.replaceChildren()
     note.textContent = controller.signal.aborted ? 'Search took too long and was stopped.' : `Search failed: ${failure(err)}`
   } finally {

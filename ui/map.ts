@@ -38,6 +38,10 @@ import {
   type GlowLevel,
   readGlow,
   saveGlow,
+  RAIL_CARDS,
+  readRail,
+  railOpen,
+  saveRail,
   enqueueSparks,
   eventStars,
   forgetMemory,
@@ -672,7 +676,10 @@ export function createMap(host: MapHost): MapView {
     )
     const box = byId('map-topics-box')
     const topics = topicRows(g, state)
+    // The Topics card opens by itself when it appears (a project was picked); after that it is the reader's to fold.
+    const appearing = box.hidden && state.project !== null
     box.hidden = state.project === null
+    if (appearing) (box as HTMLDetailsElement).open = true
     if (state.project !== null) {
       byId('map-topics-title').textContent = `Topics in ${projectRows(g, state).find(row => row.owner === state.project)?.label ?? state.project}`
       const colour = projectColour(g, state.project)
@@ -695,22 +702,35 @@ export function createMap(host: MapHost): MapView {
     if (focusedTopic !== undefined) byId('map-topics').querySelector<HTMLElement>(`button[data-topic="${CSS.escape(focusedTopic)}"]`)?.focus()
   }
 
+  /** The Overview card (right column) always shows the whole map; the selection card under the graph shows the star, topic or project picked, and is empty otherwise. */
   function renderInspector(g: Galaxy) {
-    const box = byId('map-inspector')
     const view = inspector(g, state)
+    const overview = view.kind === 'Overview' ? view : inspector(g, { ...state, selected: null, topic: null, project: null })
+    fillInspector(g, byId('map-overview'), overview, true)
+    if (view.kind === 'Overview') byId('map-inspector').replaceChildren()
+    else fillInspector(g, byId('map-inspector'), view, false)
+  }
+
+  /** Fills one card from an inspector view. The Overview is one column; a selection is two: the text on the left, the numbers, knowledge and actions on the right. */
+  function fillInspector(g: Galaxy, box: HTMLElement, view: ReturnType<typeof inspector>, overview: boolean) {
     const head = el('div', undefined, 'insp-head')
     const sub = el('span', undefined, 'insp-sub')
     sub.append(dot(view.colour, 'map-dot big'))
     if (view.sub !== '') sub.append(el('span', view.sub))
     head.append(el('span', view.kind, 'insp-kind'), el('h2', view.title, 'insp-title'), sub)
     const parts: HTMLElement[] = [head]
+    // What goes in the left column of a selection card (the Overview ignores the split).
+    const left = new Set<HTMLElement>([head])
     if (view.memory) {
       const memory = view.memory
-      parts.push(el('p', memory.text, 'insp-text'))
+      const text = el('p', memory.text, 'insp-text')
+      parts.push(text)
+      left.add(text)
       const tags = el('div', undefined, 'tag-list')
       for (const tag of memory.tags) tags.append(el('span', plainLabel(tag, 40), 'tag'))
       if (memory.tags.length === 0) tags.append(el('span', 'No tags yet.', 'muted small'))
       parts.push(tags)
+      left.add(tags)
     }
     const stats = el('dl', undefined, 'insp-stats')
     for (const stat of view.stats) {
@@ -771,15 +791,27 @@ export function createMap(host: MapHost): MapView {
       parts.push(open)
     }
     // A knowledge chip dims the map; the Overview says so, with a way to clear it.
-    const dimmed = view.kind === 'Overview' ? dimNote(state) : null
+    const dimmed = overview ? dimNote(state) : null
     if (dimmed !== null) {
       const clear = el('button', dimmed, 'btn insp-dim')
       clear.type = 'button'
       clear.addEventListener('click', () => dispatch(clearKinds(state)))
       parts.push(clear)
     }
-    if (view.hint) parts.push(el('p', view.hint, 'insp-hint'))
-    box.replaceChildren(...parts)
+    if (view.hint) {
+      const hint = el('p', view.hint, 'insp-hint')
+      parts.push(hint)
+      left.add(hint)
+    }
+    if (overview) {
+      box.replaceChildren(...parts)
+      return
+    }
+    const main = el('div', undefined, 'insp-main')
+    main.append(...parts.filter(part => left.has(part)))
+    const side = el('div', undefined, 'insp-side')
+    side.append(...parts.filter(part => !left.has(part)))
+    box.replaceChildren(main, side)
   }
 
   function renderControls(g: Galaxy) {
@@ -1894,10 +1926,10 @@ export function createMap(host: MapHost): MapView {
   }
   // Glow control: three buttons built here (index.html has no Glow card), placed after the Colour card.
   {
-    const card = el('section', undefined, 'rail-card')
-    card.setAttribute('aria-labelledby', 'map-glow-title')
-    const title = el('h2', 'Glow', 'rail-title')
-    title.id = 'map-glow-title'
+    const card = el('details', undefined, 'rail-card')
+    card.id = 'map-card-glow'
+    const title = el('summary', 'Glow', 'rail-title')
+    const body = el('div', undefined, 'rail-body')
     const group = el('div', undefined, 'segmented')
     group.id = 'map-glow'
     group.setAttribute('role', 'group')
@@ -1922,8 +1954,23 @@ export function createMap(host: MapHost): MapView {
       })
     }
     sync()
-    card.append(title, group)
-    byId('map-colour').closest?.('section')?.after?.(card)
+    body.append(group)
+    card.append(title, body)
+    byId('map-colour').closest?.('details')?.after?.(card)
+  }
+  // The rail's cards fold. Each remembers its open state (the same guarded storage as glow and layout); the Topics card is not remembered, it opens when it appears.
+  {
+    const rail = readRail(storage)
+    for (const { name } of RAIL_CARDS) {
+      // The Glow card is built above; the other cards are in index.html.
+      const card = (name === 'glow' ? document.getElementById('map-card-glow') : byId(`map-card-${name}`)) as HTMLDetailsElement | null
+      if (card === null) continue
+      card.open = railOpen(rail, name)
+      card.addEventListener('toggle', () => {
+        rail[name] = card.open
+        saveRail(storage, rail)
+      })
+    }
   }
   byId('map-spokes').addEventListener('change', () => dispatch(toggleSpokes(state)))
   byId('map-bridges').addEventListener('change', () => dispatch(toggleBridges(state)))
@@ -1949,6 +1996,14 @@ export function createMap(host: MapHost): MapView {
   // Simulate a recall / write play demo events: they never call the server and never reach the Activity tab.
   byId<HTMLButtonElement>('map-sim-recall').addEventListener('click', () => simulateOnce('recall'))
   byId<HTMLButtonElement>('map-sim-write').addEventListener('click', () => simulateOnce('write'))
+  // The two Simulate buttons hide behind a Demo toggle, closed at the start.
+  const demo = byId<HTMLButtonElement>('map-demo')
+  demo.addEventListener('click', () => {
+    const box = byId('map-demo-box')
+    box.hidden = !box.hidden
+    demo.setAttribute('aria-expanded', String(!box.hidden))
+    demo.textContent = box.hidden ? 'Demo ▾' : 'Demo ▴'
+  })
   // The Live pill switches live updates (On / Paused).
   const pill = byId('map-live-state').parentElement
   if (pill) {

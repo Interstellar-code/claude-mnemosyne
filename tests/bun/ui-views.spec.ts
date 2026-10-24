@@ -650,14 +650,14 @@ describe('VIEWS.3: provenance badges on saved memories in the Activity tab', () 
     expect(what.className).toBe('what')
     expect((what.children[0] as Node).textContent).toBe('you said')
     expect((what.children[0] as Node).className).toContain('prov-human')
-    expect(what.textContent).toBe('you saidalways use bun')
+    expect(what.textContent).toBe('you saidSaved: always use bun')
     const agent = row({ ...save, origin: 'tool', author_type: 'agent' })
     expect(((agent.children[4] as Node).children[0] as Node).className).toContain('prov-agent')
     // An old save and a recall have no badge, and the text is alone in the cell.
     for (const line of [save, { ...save, action: 'recall', author_type: 'human' }]) {
       const plain = row(line)
       expect(plain.children).toHaveLength(6)
-      expect((plain.children[4] as Node).textContent).toBe('always use bun')
+      expect((plain.children[4] as Node).textContent).toBe((line as { action: string }).action === 'recall' ?'Recalled 1 for “always use bun”' : 'Saved: always use bun')
       expect((plain.children[4] as Node).all().filter(n => n.className.includes('prov'))).toEqual([])
     }
   })
@@ -828,6 +828,11 @@ describe('VIEWS R2: the Knowledge and Health glue in app.ts', () => {
     expect(byId('health-status').hidden).toBe(false)
     expect(byId('health-retry').hidden).toBe(false)
     expect(byId('health-body').hidden).toBe(true)
+    await app.loadReview()
+    expect(byId('review-status').textContent).toBe('Could not load the memories: network down')
+    expect(byId('review-status').className).toContain('is-error')
+    expect(byId('review-retry').hidden).toBe(false)
+    expect(byId('review-body').hidden).toBe(true)
     // The page's global status line is left alone.
     expect(byId('status').textContent).toBe(globalStatus)
 
@@ -835,10 +840,14 @@ describe('VIEWS R2: the Knowledge and Health glue in app.ts', () => {
     app.wireKnowledgeHealth()
     byId('know-retry').fire('click')
     byId('health-retry').fire('click')
-    await until(() => !byId('know-body').hidden && !byId('health-body').hidden, 'both tabs to load')
+    byId('review-retry').fire('click')
+    await until(() => !byId('know-body').hidden && !byId('health-body').hidden && !byId('review-body').hidden, 'all three tabs to load')
+    expect(byId('review-retry').hidden).toBe(true)
+    expect(byId('review-status').hidden).toBe(true)
     expect(byId('know-retry').hidden).toBe(true)
     expect(byId('know-status').className).not.toContain('is-error')
-    expect(byId('know-status').textContent).toContain('cannot say whether extraction is on')
+    // The reply holds items, so the 'cannot say' sentence is hidden.
+    expect(byId('know-status').hidden).toBe(true)
     expect(byId('health-retry').hidden).toBe(true)
     expect(byId('health-status').hidden).toBe(true)
   })
@@ -856,9 +865,9 @@ describe('VIEWS R2: the Knowledge and Health glue in app.ts', () => {
     expect((byId('know-tabs').children as AppNode[]).map(tab => tab.attributes.get('aria-pressed'))).toEqual(['false', 'false', 'true', 'false', 'false'])
   })
 
-  test('items 6 and 7: a Health forget goes through the shared forget; the focus moves to the next row, the new last row, then the heading', async () => {
-    await app.loadHealthReport()
-    const rows = () => byId('health-never').children as AppNode[]
+  test('items 6 and 7: a Review forget goes through the shared forget; the focus moves to the next row, the new last row, then the heading', async () => {
+    await app.loadReview()
+    const rows = () => byId('review-rows').children as AppNode[]
     const label = (row: AppNode) => (row.children[0] as AppNode).textContent
     const lastFocus = () => focused.at(-1)
     // Three memories never recalled; the fourth too (its knowledge does not count as a recall).
@@ -877,7 +886,7 @@ describe('VIEWS R2: the Knowledge and Health glue in app.ts', () => {
     await forget(1)
     expect(rows().map(label)).toEqual(['fourth note, forgotten from Memories', 'second never recalled note', 'first never recalled note'])
     expect(lastFocus()).toBe(rows()[1]!.buttons()[0]!)
-    expect(lastFocus()!.textContent).toBe('Review')
+    expect(lastFocus()!.textContent).toBe('Open')
     expect(JSON.parse(forgets().at(-1)!.body)).toEqual({ memory_id: ids[2] })
 
     // The last row: focus goes to the new last row.
@@ -895,26 +904,28 @@ describe('VIEWS R2: the Knowledge and Health glue in app.ts', () => {
     expect(forgets()).toHaveLength(before + 1)
     expect(JSON.parse(forgets().at(-1)!.body)).toEqual({ memory_id: ids[3] })
     expect((await realFetch(`http://127.0.0.1:${server.port}/api/memories/${ids[3]}`, { headers: { Authorization: `Bearer ${server.token}` } })).status).toBe(404)
-    await app.loadHealthReport()
+    await app.loadReview()
     expect(rows().map(label)).toEqual(['second never recalled note'])
 
     // The only row: the list is empty, so the heading takes the focus.
     await forget(0)
-    expect(byId('health-never-box').hidden).toBe(true)
-    expect(lastFocus()).toBe(byId('health-title'))
+    expect(byId('review-box').hidden).toBe(true)
+    expect(byId('review-text').textContent).toBe('Every memory has come back in a recall at least once.')
+    expect(lastFocus()).toBe(byId('review-title'))
     // The page has one /api/forget call, and both tabs' forgets are it.
     const source = readFileSync(join(ROOT, 'ui', 'app.ts'), 'utf8')
     expect(source.match(/'\/api\/forget'/g)).toHaveLength(1)
     expect(source).toMatch(/forgetMemory = \(memory: Memory, done: \(error\?: string\) => void\) => forgetById\(memory\.id, done\)/)
-    expect(source).toMatch(/const healthHost: HealthHost = \{[^}]*forget: forgetById/)
+    expect(source).toMatch(/const reviewHost: ReviewHost = \{[^}]*forget: forgetById/)
+    expect(html).toMatch(/<h1 id="review-title" tabindex="-1">/)
     expect(html).toMatch(/<h1 id="health-title" tabindex="-1">/)
   })
 
   test('item 3: a forget whose reload fails puts the focus on Try again, not the body', async () => {
     // A failed forget keeps the row and says why; nothing is redrawn.
     const fresh = body((await engineCall(CLI, store, 'project-glue-1a2b', [toolCall(1, 'mnemopi_remember', { content: 'fifth note' })])).get(1)) as { memory_id: string }
-    await app.loadHealthReport()
-    const row = byId('health-never').children[0] as AppNode
+    await app.loadReview()
+    const row = byId('review-rows').children[0] as AppNode
     const [, ask, yes] = row.buttons()
     ask!.fire('click')
     mode = 'fail500'
@@ -925,7 +936,7 @@ describe('VIEWS R2: the Knowledge and Health glue in app.ts', () => {
     const calledBefore = calls.length
     const original = globalThis.fetch
     ;(globalThis as Record<string, unknown>).fetch = async (path: string, init: RequestInit = {}) => {
-      if (path === '/api/health-report') {
+      if (path.startsWith('/api/memories')) {
         calls.push({ path, method: 'GET', body: '' })
         return new Response('{}', { status: 503 })
       }
@@ -933,8 +944,8 @@ describe('VIEWS R2: the Knowledge and Health glue in app.ts', () => {
     }
     try {
       yes!.fire('click')
-      await until(() => byId('health-status').textContent === 'Could not load the health report: the server answered 503', 'the reload failure')
-      expect(focused.at(-1)).toBe(byId('health-retry'))
+      await until(() => byId('review-status').textContent === 'Could not load the memories: the server answered 503', 'the reload failure')
+      expect(focused.at(-1)).toBe(byId('review-retry'))
       expect(calls.length).toBeGreaterThan(calledBefore)
     } finally {
       ;(globalThis as Record<string, unknown>).fetch = original
@@ -976,8 +987,8 @@ describe('VIEWS R2: the Knowledge and Health glue in app.ts', () => {
     await app.loadKnowledge()
     const knowledgeRow = byId('know-rows').children[0] as AppNode
     expect(((knowledgeRow.children[2] as AppNode).children[0] as AppNode).children[0]).toMatchObject({ className: expected('project-glue-1a2b') })
-    await app.loadHealthReport()
-    const neverRow = byId('health-never').children[0] as AppNode
+    await app.loadReview()
+    const neverRow = byId('review-rows').children[0] as AppNode
     expect(((neverRow.children[1] as AppNode).children[0] as AppNode).children[0]).toMatchObject({ className: expected('project-glue-1a2b') })
     // A group label ("all projects") and an owner the store does not list are grey.
     expect(((app.project('all', 'project', 'all projects (3)') as AppNode).children[0] as AppNode).className).toBe('dot c-global')
@@ -1033,8 +1044,8 @@ describe('VIEWS R2: the Knowledge and Health glue in app.ts', () => {
 
   test('QAPAGE item 7b: the "Forgot memory" status goes when the tab changes', async () => {
     await memoryWithKnowledge('status check memory')
-    await app.loadHealthReport()
-    const row = byId('health-never').children[0] as AppNode
+    await app.loadReview()
+    const row = byId('review-rows').children[0] as AppNode
     const [, ask, yes] = row.buttons()
     ask!.fire('click')
     yes!.fire('click')
@@ -1095,16 +1106,16 @@ function parseCss(css: string): Rule[] {
   return rules
 }
 
-type PageNode = { tag: string; id: string; classes: string[]; children: PageNode[]; parent: PageNode | null }
+type PageNode = { tag: string; id: string; classes: string[]; open: boolean; children: PageNode[]; parent: PageNode | null }
 
 async function pageTree(html: string): Promise<PageNode> {
-  const root: PageNode = { tag: '#root', id: '', classes: [], children: [], parent: null }
+  const root: PageNode = { tag: '#root', id: '', classes: [], open: false, children: [], parent: null }
   let at = root
   const VOID = new Set(['meta', 'link', 'input', 'br', 'img', 'hr'])
   await new HTMLRewriter()
     .on('*', {
       element(element) {
-        const node: PageNode = { tag: element.tagName, id: element.getAttribute('id') ?? '', classes: (element.getAttribute('class') ?? '').split(/\s+/).filter(Boolean), children: [], parent: at }
+        const node: PageNode = { tag: element.tagName, id: element.getAttribute('id') ?? '', classes: (element.getAttribute('class') ?? '').split(/\s+/).filter(Boolean), open: element.hasAttribute('open'), children: [], parent: at }
         at.children.push(node)
         if (VOID.has(element.tagName)) return
         at = node
@@ -1183,15 +1194,21 @@ describe('QAPAGE R1: the page, read as a tree and a stylesheet', () => {
     tree = await pageTree(html)
   })
 
-  test('item 1: on a phone the canvas is first, 60vh tall, with the inspector right under it; wide screens keep the three columns', () => {
+  test('item 1: on a phone the canvas is first, 60vh tall, with the selection card right under it; wide screens keep the three columns', () => {
     const view = byIdIn(tree, 'view-map')
-    // The markup the order rules rely on: the stage lives in .map-centre, the inspector is a child of the view.
-    expect(view.children.map(node => node.id || node.classes[0] || node.tag)).toEqual(['sr-only', 'map-rail', 'map-centre', 'map-back', 'map-inspector'])
+    // The markup the order rules rely on: the stage and the selection card live in .map-centre; the Overview, Live and the legend in .map-side.
+    expect(view.children.map(node => node.id || node.classes[0] || node.tag)).toEqual(['sr-only', 'map-rail', 'map-centre', 'map-side', 'map-back'])
     expect(byIdIn(tree, 'map-stage').parent!.classes).toContain('map-centre')
-    expect(byIdIn(tree, 'map-live-strip').parent!.classes).toContain('map-centre')
-    expect(byIdIn(tree, 'map-legend').parent!.classes).toContain('map-centre')
-    // 900px and narrower: one column, the canvas first, then the inspector, the live strip, the legend, the rail's controls.
-    expect(flowOf(view, rules, [PHONE])).toEqual(['map-stage', 'map-back', 'map-inspector', 'map-live-strip', 'map-legend', 'map-rail'])
+    expect(byIdIn(tree, 'map-inspector').parent!.classes).toContain('map-centre')
+    for (const id of ['map-overview', 'map-live-strip', 'map-legend']) expect(byIdIn(tree, id).parent!.classes).toContain('map-side')
+    // The legend and the rail cards fold; the legend starts closed and Layout and Colour by start open.
+    expect(byIdIn(tree, 'map-legend').tag).toBe('details')
+    expect(byIdIn(tree, 'map-legend').open).toBe(false)
+    expect(byIdIn(tree, 'map-card-layout').open).toBe(true)
+    expect(byIdIn(tree, 'map-card-colour').open).toBe(true)
+    for (const id of ['map-card-links', 'map-card-know', 'map-card-layers', 'map-card-projects']) expect(byIdIn(tree, id).open).toBe(false)
+    // 900px and narrower: one column, the canvas first, then the Back link and the selection card, the Overview, the live card, the legend, the rail's controls.
+    expect(flowOf(view, rules, [PHONE])).toEqual(['map-stage', 'map-back', 'map-inspector', 'map-overview', 'map-live-strip', 'map-legend', 'map-rail'])
     expect(styleOf(view, rules, 'flex-direction', [PHONE])).toBe('column')
     expect(styleOf(view, rules, 'flex-wrap', [PHONE])).toBe('nowrap')
     const stage = byIdIn(tree, 'map-stage')
@@ -1199,26 +1216,26 @@ describe('QAPAGE R1: the page, read as a tree and a stylesheet', () => {
     expect(styleOf(stage, rules, 'max-height', [PHONE])).toBe('none')
     // On the QA's 390x844 phone: 60vh is 506px, so the canvas ends well above the fold of a 844px screen once the header (about 150px) is counted.
     expect(Math.round(0.6 * 844)).toBe(506)
-    // Wide screens: the old arrangement, untouched: rail, centre, inspector in a row; the stage 620px.
-    expect(flowOf(view, rules, [])).toEqual(['map-rail', 'map-centre', 'map-inspector'])
+    // Wide screens: rail, centre (graph, then the selection card) and the side column in a row; the stage 540px.
+    expect(flowOf(view, rules, [])).toEqual(['map-rail', 'map-centre', 'map-side'])
     // The Back link is hidden outside the phone query, and starts hidden in the markup.
     expect(styleOf(byIdIn(tree, 'map-back'), rules, 'display', [])).toBe('none')
     expect(styleOf(view, rules, 'flex-direction', [])).toBeUndefined()
-    expect(styleOf(stage, rules, 'height', [])).toBe('620px')
+    expect(styleOf(stage, rules, 'height', [])).toBe('540px')
     expect(styleOf(byIdIn(tree, 'map-inspector'), rules, 'order', [])).toBeUndefined()
     expect(rules.filter(rule => rule.media === null && 'order' in rule.decls)).toEqual([])
     // Nothing inside the phone query reaches a wide screen: every rule it holds is in that one media query.
     expect(rules.some(rule => rule.media === PHONE && rule.selector === '.map-centre' && rule.decls.display === 'contents')).toBe(true)
   })
 
-  test('item 2: the never-recalled table fits its card (min-width 0, the .table 720px is overridden) and the lists in a card size to their rows', () => {
+  test('item 2: the review table fits its card (min-width 0, the .table 720px is overridden) and the lists in a card size to their rows', () => {
     const never = allNodes(tree).find(node => node.tag === 'table' && node.classes.includes('compact'))!
-    expect(hasAncestor(never, node => node.id === 'health-never-box')).toBe(true)
+    expect(hasAncestor(never, node => node.id === 'review-box')).toBe(true)
     expect(styleOf({ ...never, classes: ['table'] }, rules, 'min-width', [])).toBe('720px')
     expect(styleOf(never, rules, 'min-width', [])).toBe('0')
-    // The stretched chart card: the Projects, Most recalled and Storage lists are .list inside a .card; .list alone has a 640px flex basis (the Memories list).
+    // The stretched chart card: the Projects and Storage lists are .list inside a .card; .list alone has a 640px flex basis (the Memories list).
     expect(rules.find(rule => rule.selector === '.list' && rule.decls.flex !== undefined)?.decls.flex).toBe('999 1 640px')
-    for (const id of ['health-projects', 'health-hot', 'health-storage']) {
+    for (const id of ['health-projects', 'health-storage']) {
       const list = byIdIn(tree, id)
       expect(list.classes).toContain('list')
       expect(hasAncestor(list, node => node.classes.includes('card'))).toBe(true)

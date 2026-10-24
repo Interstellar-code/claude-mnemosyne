@@ -703,16 +703,22 @@ function knowledgeEngine($: EngineInterface, options: PluginOptions): KnowledgeE
   return (requests, owner) => runAll($, options, requests.map(([name, args]) => [name, args] as const), owner, KNOWLEDGE_ENGINE_TIMEOUT_MS)
 }
 
+/** The learn line's `text`: the source memory's first line, about 120 characters (the log writer masks secrets). Nothing when unknown. */
+function sourceText(source: string | undefined): { text?: string } {
+  const line = (source ?? '').split('\n').map(part => part.trim()).find(part => part !== '')
+  return line === undefined ? {} : { text: Array.from(line).slice(0, 120).join('') }
+}
+
 /**
  * One extraction for one memory, run after the tool reply (KNOWX.2). Never throws:
  * every outcome - stored, empty, failed, stale, gone - is one 'extract' activity
  * line, and nothing runs while the engine is stale or extraction is off.
  */
-export async function extraction($: EngineInterface, options: PluginOptions, id: string, as: string, queue?: <T>(work: () => Promise<T>) => Promise<T>) {
+export async function extraction($: EngineInterface, options: PluginOptions, id: string, as: string, queue?: <T>(work: () => Promise<T>) => Promise<T>, source?: string) {
   const model = extractionModelOf(options)
   if (extractionOff(model)) return
   if (!(await isCurrent($, options))) {
-    await record($, options, [{ action: 'extract', origin: 'tool', owner: as, ok: false, error: 'engine out of date', ids: [id], count: 0 }])
+    await record($, options, [{ action: 'extract', origin: 'tool', owner: as, ok: false, error: 'engine out of date', ids: [id], count: 0, ...sourceText(source) }])
     return
   }
   const { root } = await paths($, options)
@@ -748,6 +754,7 @@ export async function extraction($: EngineInterface, options: PluginOptions, id:
       count: storedCount(outcome),
       ok: failed === undefined,
       ...(failed === undefined ? {} : { error: failed }),
+      ...sourceText(source),
     },
   ])
 }
@@ -1308,7 +1315,7 @@ export const register: Register = (on, options) => {
           return work()
         }
         // The slot opens when the extraction ends, whatever happened (an early return never reaches the queue).
-        const queued = extraction($, options, id, who, queue)
+        const queued = extraction($, options, id, who, queue, typeof input.content === 'string' ? input.content : undefined)
           .catch(() => undefined)
           .finally(() => {
             release()
