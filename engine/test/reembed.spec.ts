@@ -128,6 +128,17 @@ describe("mnemopi reembed", () => {
 		expect(vectors(store).n).toBe(0);
 	}, 60_000);
 
+	test("L7: a dry run with nothing missing prints no 'apply' hint", async () => {
+		const store = join(temp("reembed-hint"), "store");
+		await storeWithoutVectors(store);
+		expect((await cli(store, ["reembed", "apply"]))[2]).toBe(0);
+		// A second dry run: nothing missing, so no 'Run ... apply' hint.
+		const [stdout, , exitCode] = await cli(store, ["reembed"]);
+		expect(exitCode).toBe(0);
+		expect(stdout).toContain("Memories with no vector");
+		expect(stdout).not.toContain("Run 'mnemopi reembed apply'");
+	}, 120_000);
+
 	test("apply fills them, and a second apply adds nothing", async () => {
 		const store = join(temp("reembed-apply"), "store");
 		await storeWithoutVectors(store);

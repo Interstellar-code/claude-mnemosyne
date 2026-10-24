@@ -399,7 +399,7 @@ export const cmdReembed: CommandHandler = async (args, context) => {
 		}
 		if (mode === "") {
 			out(context, `Memories with no vector (${active}): ${survey.missing}`);
-			out(context, "Run 'mnemopi reembed apply' to fill them.");
+			if (survey.missing > 0) out(context, "Run 'mnemopi reembed apply' to fill them.");
 			return 0;
 		}
 		// A model change wipes every stored vector; prove the active model loads

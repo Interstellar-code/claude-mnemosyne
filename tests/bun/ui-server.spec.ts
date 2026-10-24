@@ -578,10 +578,9 @@ describe('SRV.1: the server runs the engine as the hooks do', () => {
     OPENROUTER_BASE_URL: '',
     OPENROUTER_API_KEY: '',
     OPENAI_API_KEY: '',
+    MNEMOPI_EMBEDDINGS_API_OPT_IN: '0',
+    HF_ENDPOINT: 'https://huggingface.co',
     PI_CONFIG_DIR: '.claude/mnemosyne/model-cache',
-    XDG_CACHE_HOME: '',
-    OMP_PROFILE: '',
-    PI_PROFILE: '',
   })
 
   test('its own environment with engineEnv laid over it; the variables match the hooks for the same owner', async () => {
@@ -592,7 +591,7 @@ describe('SRV.1: the server runs the engine as the hooks do', () => {
       writeFileSync(
         fake,
         `const lines = (await Bun.stdin.text()).split('\\n').filter(Boolean)
-const PINNED = new Set(['PI_CONFIG_DIR','XDG_CACHE_HOME','OMP_PROFILE','PI_PROFILE','OPENROUTER_BASE_URL','OPENROUTER_API_KEY','OPENAI_API_KEY','KEEP_ME'])
+const PINNED = new Set(['PI_CONFIG_DIR','HF_ENDPOINT','OPENROUTER_BASE_URL','OPENROUTER_API_KEY','OPENAI_API_KEY','KEEP_ME'])
 const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => k.startsWith('MNEMOPI_') || PINNED.has(k)))
 for (const line of lines) {
   const { id } = JSON.parse(line)

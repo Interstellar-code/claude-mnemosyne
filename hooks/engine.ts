@@ -8,9 +8,9 @@
 export type EngineRequest = readonly [name: string, args: Record<string, unknown>]
 
 // Where the local model lives, relative to $HOME: the plugin pins PI_CONFIG_DIR
-// so pi-utils resolves the fastembed cache under the plugin's root instead of
-// the shared ~/.omp one (EMB.1: the variable is PI_CONFIG_DIR, and the engine's
-// getFastembedCacheDir() is <PI_CONFIG_DIR>/cache/fastembed).
+// and the engine reads it directly (never through pi-utils' XDG/profile
+// resolver), so the fastembed cache is <PI_CONFIG_DIR>/cache/fastembed =
+// <HOME>/.claude/mnemosyne/model-cache/cache/fastembed (EMB.1, H1b).
 export const EMBEDDINGS_MODEL = 'BAAI/bge-small-en-v1.5'
 export const EMBEDDINGS_CACHE_DIR = '.claude/mnemosyne/model-cache'
 
@@ -61,13 +61,17 @@ export function engineEnv(store: string, owner: string, options: EngineEnvOption
     OPENROUTER_BASE_URL: '',
     OPENROUTER_API_KEY: '',
     OPENAI_API_KEY: '',
+    // The opt-in that reopens the API route is pinned '0' (non-empty, so the
+    // engine's dotenv pass cannot fill it from a `~/.env` or project `.env`
+    // line), keeping local-only the only route (C1b).
+    MNEMOPI_EMBEDDINGS_API_OPT_IN: '0',
+    // fastembed reads this when it downloads; pinning it keeps the download on
+    // the host setup prints (L6).
+    HF_ENDPOINT: 'https://huggingface.co',
     // The model cache under the plugin's root, never the shared ~/.omp one.
+    // Read directly by the engine (not through pi-utils' XDG/profile resolver),
+    // so a `~/.env`/project `.env` line cannot move it (H1b).
     PI_CONFIG_DIR: EMBEDDINGS_CACHE_DIR,
-    // pi-utils would otherwise move the cache to an inherited XDG/profile dir and
-    // the engine would download the model lazily outside setup (H1).
-    XDG_CACHE_HOME: '',
-    OMP_PROFILE: '',
-    PI_PROFILE: '',
     // On only when the caller proved the model is downloaded. Off blocks the
     // engine's lazy model download outside /mnemosyne-setup; on clears an
     // inherited MNEMOPI_NO_EMBEDDINGS (empty counts as unset in the engine).

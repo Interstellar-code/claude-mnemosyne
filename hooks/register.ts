@@ -379,10 +379,9 @@ export MNEMOPI_EMBEDDING_DIM=
 export OPENROUTER_BASE_URL=
 export OPENROUTER_API_KEY=
 export OPENAI_API_KEY=
+export MNEMOPI_EMBEDDINGS_API_OPT_IN=0
+export HF_ENDPOINT=https://huggingface.co
 export PI_CONFIG_DIR=${EMBEDDINGS_CACHE_DIR}
-export XDG_CACHE_HOME=
-export OMP_PROFILE=
-export PI_PROFILE=
 export MNEMOSYNE_CLI=${shellQuote(cli)}
 export MNEMOSYNE_ACTIVITY_LOG=${activity ? shellQuote(activity) : ''}
 exec bun ${shellQuote(proxy)}
@@ -410,10 +409,9 @@ set "MNEMOPI_EMBEDDING_DIM="\r
 set "OPENROUTER_BASE_URL="\r
 set "OPENROUTER_API_KEY="\r
 set "OPENAI_API_KEY="\r
+set "MNEMOPI_EMBEDDINGS_API_OPT_IN=0"\r
+set "HF_ENDPOINT=https://huggingface.co"\r
 set "PI_CONFIG_DIR=${EMBEDDINGS_CACHE_DIR}"\r
-set "XDG_CACHE_HOME="\r
-set "OMP_PROFILE="\r
-set "PI_PROFILE="\r
 set "MNEMOSYNE_CLI=${cli}"\r
 set "MNEMOSYNE_ACTIVITY_LOG=${activity}"\r
 bun "${proxy}"\r
@@ -1132,7 +1130,7 @@ export const register: Register = (on, options) => {
         // generic install failure.
         if (embeddings && /no memory_embeddings row|model did not load/i.test(`${installed.stderr}${installed.stdout}`)) {
           await bunFs($, 'fs.rmSync(a[0], { force: true })', `${pluginRoot}/${EMBEDDINGS_MARKER}`)
-          return { text: 'Embeddings are off: the model did not load, so no memory_embeddings row was written, the engine was not swapped and no marker was written. Set the embeddings option to off and re-run /mnemosyne-setup.' }
+          return { text: 'Embeddings are off: the model did not load, so no memory_embeddings row was written, the engine was not swapped and no marker was written. Set the embeddings option to off and re-run /mnemosyne-setup, or re-run /mnemosyne-setup when online.' }
         }
         return { text: `Engine install failed; the engine already installed (if any) is unchanged:\n${`${installed.stderr}\n${installed.stdout}`.trim().slice(-800)}` }
       }

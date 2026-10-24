@@ -28,6 +28,8 @@ type Extra = {
   darwinArm64?: boolean
   // True to report the setup marker + model files as present (embeddings ready).
   embeddingsReady?: boolean
+  // L4: the marker is present but the model files are missing (a half-finished setup).
+  markerOnly?: boolean
 }
 const MODEL_DIR = '/home/u/.claude/mnemosyne/model-cache/cache/fastembed/Qdrant_bge-small-en-v1.5-onnx-Q'
 const MARKER = '/home/u/.claude/mnemosyne/embeddings.json'
@@ -41,11 +43,15 @@ function world(on: On, reply: string, isInstalled = true, exitCode = 0, build: s
     (_$, e) =>
       (!isInstalled
         ? { deny: 'ENOENT' }
-        : (e as { path: string }).path === MARKER || (e as { path: string }).path.startsWith(MODEL_DIR)
-          ? extra.embeddingsReady
+        : (e as { path: string }).path === MARKER
+          ? extra.markerOnly || extra.embeddingsReady
             ? ({ value: { kind: 'file' } } as never)
             : ({ deny: 'ENOENT' } as never)
-          : { value: { kind: 'file' } }) as never,
+          : (e as { path: string }).path.startsWith(MODEL_DIR)
+            ? extra.embeddingsReady
+              ? ({ value: { kind: 'file' } } as never)
+              : ({ deny: 'ENOENT' } as never)
+            : { value: { kind: 'file' } }) as never,
   )
   on('fs.read', (_$, e) => (e.path === INSTALLED_PACKAGE && isInstalled ? { value: JSON.stringify({ name: '@oh-my-pi/pi-mnemopi', version: build }) } : { deny: 'ENOENT' }) as never)
   on('session.id', () => {
@@ -113,10 +119,9 @@ test('remember runs the private engine against the private store, global bank', 
     OPENROUTER_BASE_URL: '',
     OPENROUTER_API_KEY: '',
     OPENAI_API_KEY: '',
+    MNEMOPI_EMBEDDINGS_API_OPT_IN: '0',
+    HF_ENDPOINT: 'https://huggingface.co',
     PI_CONFIG_DIR: '.claude/mnemosyne/model-cache',
-    XDG_CACHE_HOME: '',
-    OMP_PROFILE: '',
-    PI_PROFILE: '',
     MNEMOPI_NO_EMBEDDINGS: '1',
   })
   // `imported`: the durable tier the engine's 24h working-memory trim skips.
@@ -287,6 +292,8 @@ test('externalMcp writes an owner-only stdio wrapper', { options: { externalMcp:
   expect(wrapper.text).toContain('export MNEMOPI_EMBEDDINGS_VIA_API=')
   expect(wrapper.text).toContain('export MNEMOPI_EMBEDDING_API_KEY=')
   expect(wrapper.text).toContain('export MNEMOPI_EMBEDDING_MODEL=BAAI/bge-small-en-v1.5')
+  expect(wrapper.text).toContain('export MNEMOPI_EMBEDDINGS_API_OPT_IN=0')
+  expect(wrapper.text).toContain('export HF_ENDPOINT=https://huggingface.co')
   expect(wrapper.text).toContain('export PI_CONFIG_DIR=.claude/mnemosyne/model-cache')
   expect(wrapper.text).toMatch(/exec bun '.*\/bin\/mcp-proxy\.ts'/)
   // Folder work runs through `bun -e`: the code, then its path arguments.
@@ -1735,6 +1742,14 @@ test('EMB.2.a4: an empty cache (no marker or model files) keeps embeddings off, 
   expect(env?.MNEMOPI_EMBEDDING_MODEL).toBe('BAAI/bge-small-en-v1.5')
 })
 
+test('L4: marker present but model files missing keeps embeddings off, no download', { options: { embeddings: 'on' } }, async ($, on) => {
+  const runs = world(on, '{"status":"stored"}', true, 0, ENGINE_BUILD, { darwinArm64: true, markerOnly: true })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'fact' })
+  const env = runs.find(r => (r.argv[1] ?? '').endsWith('/src/cli.ts'))?.init?.env
+  // The marker alone is not enough: every model file must be present too.
+  expect(env?.MNEMOPI_NO_EMBEDDINGS).toBe('1')
+})
+
 test('EMB.3.a3: elsewhere (not macOS arm64) setup writes no marker, so engine runs stay off', async ($, on) => {
   // The platform decision lives in /mnemosyne-setup: off-machine it does not download,
   // so no marker and no model files exist and an engine run keeps embeddings off.
@@ -1815,6 +1830,8 @@ test('M2: setup whose install check could not prove the model loaded reports "em
   on('ui.status', () => ({ value: undefined }))
   const ran = await $.command.run({ command: 'mnemosyne-setup', args: '' } as never)
   expect((ran as { text?: string }).text).toContain('Embeddings are off: the model did not load')
+  // L5: the message also says to re-run setup when online.
+  expect((ran as { text?: string }).text).toContain('re-run /mnemosyne-setup when online')
   // No marker written: only the rmSync (fs code) touches the marker path, never a write.
   expect(writes).toEqual([])
 })

@@ -123,10 +123,9 @@ async function check(next: string, build: string, embeddings: boolean) {
     OPENROUTER_BASE_URL: '',
     OPENROUTER_API_KEY: '',
     OPENAI_API_KEY: '',
+    MNEMOPI_EMBEDDINGS_API_OPT_IN: '0',
+    HF_ENDPOINT: 'https://huggingface.co',
     PI_CONFIG_DIR: '.claude/mnemosyne/model-cache',
-    XDG_CACHE_HOME: '',
-    OMP_PROFILE: '',
-    PI_PROFILE: '',
   }
   const request = (id: number, name: string, args: Record<string, unknown>) =>
     `${JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } })}\n`
