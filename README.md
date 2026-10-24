@@ -96,16 +96,17 @@ That is a dry run: it counts the memories with no vector. Then `/mnemosyne-embed
 /mnemosyne-ui
 ```
 
-Starts a small local web page for your memories and opens it in your default browser. The reply shows the full link, with its key after `#`, and the link is on the clipboard too, so you can open it in another browser. The page has six tabs and opens on Memories:
+Starts a small local web page for your memories and opens it in your default browser. The reply shows the full link, with its key after `#`, and the link is on the clipboard too, so you can open it in another browser. The page has seven tabs and opens on Map:
 
-- **Map:** every memory as a star in a glowing 3D galaxy, with what was learned from each as moons, a Timeline layout, a Meaning layout, Similar memories links and live sparks (see [The galaxy](#the-galaxy)).
-- **Memories:** every memory, with a project filter, sorting (newest, most recalled, never recalled), a text and tag filter, and a detail panel with a Forget button that asks before it deletes.
-- **Activity:** the activity log, live, with the app and the session that made each call (see [Activity log](#activity-log)).
-- **Search:** the same recall Claude uses, with scores. Searching here does not change any memory's recall count.
+- **Map:** every memory as a star in a glowing 3D galaxy that fills the window, with what was learned from each as moons, a Timeline layout, a Meaning layout, Similar memories links and live sparks (see [The galaxy](#the-galaxy)). The controls on the left fold away, a clicked star's details show under the graph, and the overview, the live feed and how to read the map sit on the right.
+- **Memories:** every memory, with a project filter, sorting (newest, most recalled, never recalled), a text and tag filter. A memory opens in a panel that slides up from the bottom, with a Forget button that asks before it deletes. Knowledge and Search open memories in the same panel.
+- **Activity:** the activity log, live, one plain sentence per call, with the app and the session that made it; click a line for its details (see [Activity log](#activity-log)).
+- **Search:** the same recall Claude uses, with scores and the top 20 results. Match by Keyword, or Keyword + meaning when embeddings are on; each result says whether it matched on words, meaning or both. Searching here does not change any memory's recall count.
 - **Knowledge:** the facts, preferences, instructions, dated events and relations that extraction pulled out of your memories (see [The Knowledge and Health tabs](#the-knowledge-and-health-tabs)).
+- **Review:** memories to look at again: never recalled, no tags, not recalled in 30 days, or low importance, each with Open and Forget.
 - **Health:** how much of your memory is used, how much has never been recalled, and which features are switched on.
 
-The Theme button in the header switches the whole dashboard between Auto (follows your system), Light and Dark, and remembers your choice. The block at the bottom right shows the plugin version the dashboard runs (for example `Mnemosyne v0.7.5`), the store, the server process and whether the activity log is on; a dashboard from before 0.7.5 shows no version there.
+The Theme button in the header switches the whole dashboard between Auto (follows your system), Light and Dark, and remembers your choice. The header shows the plugin version the dashboard runs (for example `v0.7.6`) beside the engine's. The block at the bottom of the Health tab shows the store, the server process and whether the activity log is on.
 
 One dashboard runs at a time: running `/mnemosyne-ui` again, in this session or another, hands over the same link. It stops when the session that started it ends; `/clear` in that session counts as an end. Run `/mnemosyne-ui` again for a fresh one.
 
@@ -133,9 +134,9 @@ The Glow control in the rail sets how strongly stars glow: Soft (the default), F
 
 ### The Knowledge and Health tabs
 
-Knowledge lists what extraction pulled out of your memories (see [Knowledge extraction](#knowledge-extraction-what-claude-learned)), one table per kind: Facts, Preferences, Instructions, Timeline and Relations. A row shows the item, its topic (the memory's first tag), its project, the memory it came from, its status (an instruction is active or retired, a relation shows its confidence), how many times that memory was recalled and when it was last used. Show on map selects the source star on the Map tab. A notice at the top says when extraction is off, or when the store holds no items yet.
+Knowledge lists what extraction pulled out of your memories (see [Knowledge extraction](#knowledge-extraction-what-claude-learned)), one table per kind: Facts, Preferences, Instructions, Timeline and Relations. A row shows the item, its topic (the memory's first tag), its project, the memory it came from, its status for instructions and relations (an instruction is active or retired, a relation shows its confidence), how many times that memory was recalled and when it was last used. A bar above the table filters by project, finds text, sorts, and shows only the items never used. Click a row to open its memory; Map ↗ selects the source star on the Map tab. A notice at the top says when extraction is off, or when the store holds no items yet.
 
-Health shows four numbers (memories, never recalled, recalls in the log, store size), the share of memories that have topic tags, knowledge, a recorded author and at least one recall, recalls per day over the last 14 days, the projects, the 50 newest memories never recalled with Review and Forget (which asks again before deleting) and the 10 most recalled. The "Embeddings (meaning search)" bar counts the memories that have a vector; while there are none it reads 0 and shows the hint "Turn on embeddings, then run /mnemosyne-embed apply".
+Health shows four numbers (memories, never recalled, recalls in the log, store size), the share of memories that have topic tags, knowledge, a recorded author and at least one recall, recalls per day over the last 14 days, and the projects; the days before the activity log starts are greyed out. The never-recalled list moved to the Review tab. Storage folds into one line and filters its tables by All, Has data or Empty. The "Embeddings (meaning search)" bar counts the memories that have a vector; while there are none it reads 0 and shows the hint "Turn on embeddings, then run /mnemosyne-embed apply".
 
 ### Topic tags: /mnemosyne-tags
 
