@@ -1127,11 +1127,12 @@ export const register: Register = (on, options) => {
       )
       if (installed.exitCode !== 0) {
         // M2: when embeddings were requested but the install check could not prove
-        // the model loaded (recall had no dense score), the swap was refused and no
-        // marker is written: report "embeddings off", not a generic install failure.
-        if (embeddings && /no dense score|model did not load/i.test(`${installed.stderr}${installed.stdout}`)) {
+        // the model loaded (no memory_embeddings row in the check store), the swap
+        // was refused and no marker is written: report "embeddings off", not a
+        // generic install failure.
+        if (embeddings && /no memory_embeddings row|model did not load/i.test(`${installed.stderr}${installed.stdout}`)) {
           await bunFs($, 'fs.rmSync(a[0], { force: true })', `${pluginRoot}/${EMBEDDINGS_MARKER}`)
-          return { text: 'Embeddings are off: the model did not load, so the engine was not swapped and no marker was written. Run /mnemosyne-setup again once the download can complete, or set the embeddings option to off.' }
+          return { text: 'Embeddings are off: the model did not load, so no memory_embeddings row was written, the engine was not swapped and no marker was written. Set the embeddings option to off and re-run /mnemosyne-setup.' }
         }
         return { text: `Engine install failed; the engine already installed (if any) is unchanged:\n${`${installed.stderr}\n${installed.stdout}`.trim().slice(-800)}` }
       }

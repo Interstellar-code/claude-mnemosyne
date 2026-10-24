@@ -304,7 +304,7 @@ for (const line of lines) {
       child.exited,
     ])
     expect(code).toBe(1)
-    expect(`${stdout}${stderr}`).toContain('no dense score')
+    expect(`${stdout}${stderr}`).toContain('no memory_embeddings row')
     expect(existsSync(`${engine}.next`)).toBe(false)
     expect(readdirSync(engine).sort()).toEqual(listing)
   }, INSTALL_TIMEOUT)

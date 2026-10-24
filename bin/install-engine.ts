@@ -17,6 +17,7 @@
 // <engine dir>/node_modules/@oh-my-pi/pi-mnemopi/src/cli.ts.
 import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { Database } from 'bun:sqlite'
 import { INSTALL_CHECK_TIMEOUT_MS, INSTALL_STEP_TIMEOUT_MS } from '../hooks/engine-build'
 
 const PACKAGE = '@oh-my-pi/pi-mnemopi'
@@ -136,7 +137,6 @@ async function check(next: string, build: string, embeddings: boolean) {
       request(3, 'mnemopi_recall', { query: 'dark mode' })
     : `${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' })}\n`
   const ran = await run([process.execPath, cliOf(next), 'mcp'], next, stdin, INSTALL_CHECK_TIMEOUT_MS, env)
-  rmSync(data, { recursive: true, force: true })
   const replies = new Map<number, { result?: { content?: { text?: string }[]; isError?: boolean }; error?: { message?: string } }>()
   for (const line of ran.stdout.split('\n')) {
     try {
@@ -150,7 +150,10 @@ async function check(next: string, build: string, embeddings: boolean) {
   if (!Array.isArray(tools)) throw new InstallError(`the new engine did not answer tools/list (exit ${ran.exitCode}): ${ran.stderr.trim().slice(-400)}`)
   const update = tools.find(tool => tool.name === 'mnemopi_update')
   if (!update?.inputSchema?.properties?.metadata) throw new InstallError('the new engine has no mnemopi_update with metadata')
-  if (!embeddings) return
+  if (!embeddings) {
+    rmSync(data, { recursive: true, force: true })
+    return
+  }
   // A clean embeddings run: remember and recall reply, the process exits 0, and
   // no ORT exit panic is on stderr. Any failure refuses the swap (EMB.3.a4).
   if (ran.exitCode !== 0) throw new InstallError(`embeddings check failed: engine exited ${ran.exitCode}: ${ran.stderr.trim().slice(-400)}`)
@@ -164,21 +167,25 @@ async function check(next: string, build: string, embeddings: boolean) {
       throw new InstallError(`embeddings check failed: ${what} did not succeed (${detail})`)
     }
   }
-  // M2: prove the embedding path really ran, not a silent full-text fallback.
-  // A model that fails to load still answers remember/recall (full text), so exit
-  // 0 alone is not proof. The recall reply carries a dense_score > 0 only when a
-  // vector was computed and used.
-  const recallText = replies.get(3)?.result?.content?.[0]?.text ?? ''
-  const recallBody = (() => {
+  // M2 (EMB review round 2): prove the embedding path really ran, not a silent
+  // full-text fallback. A model that fails to load still answers remember/recall
+  // (full text), so a clean exit alone is not proof: the check store must hold a
+  // memory_embeddings row for the remembered memory.
+  const vectorRows = (() => {
+    // A check store that never opened the engine's DB (or a fallback-to-full-text
+    // run that wrote no vector) leaves no mnemopi.db / no memory_embeddings row.
+    if (!existsSync(join(data, 'mnemopi.db'))) return 0
+    const db = new Database(join(data, 'mnemopi.db'), { readonly: true })
     try {
-      return JSON.parse(recallText) as { results?: { dense_score?: number }[] }
-    } catch {
-      return null
+      const table = db.query("SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='memory_embeddings'").get() as { n: number }
+      return table.n > 0 ? (db.query('SELECT COUNT(*) AS n FROM memory_embeddings').get() as { n: number }).n : 0
+    } finally {
+      db.close()
     }
   })()
-  const dense = recallBody?.results?.some(row => (row.dense_score ?? 0) > 0)
-  if (dense !== true) {
-    throw new InstallError('embeddings check failed: recall answered with no dense score, so the model did not load')
+  rmSync(data, { recursive: true, force: true })
+  if (vectorRows === 0) {
+    throw new InstallError('embeddings check failed: the check store has no memory_embeddings row, so the model did not load')
   }
 }
 

@@ -1807,7 +1807,7 @@ test('M2: setup whose install check could not prove the model loaded reports "em
       return { value: { exitCode: 0, stdout, stderr: '' } } as never
     }
     if ((e.argv[1] ?? '').endsWith('/bin/install-engine.ts')) {
-      return { value: { exitCode: 1, stdout: '', stderr: 'install-engine: embeddings check failed: recall answered with no dense score, so the model did not load' } } as never
+      return { value: { exitCode: 1, stdout: '', stderr: 'install-engine: embeddings check failed: the check store has no memory_embeddings row, so the model did not load' } } as never
     }
     return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
   })
