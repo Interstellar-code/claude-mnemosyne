@@ -418,7 +418,7 @@ describe('finding 6: the real proxy never accepts veracity or a trust tier from 
       control.close()
 
       const child = Bun.spawn([process.execPath, join(ROOT, 'bin', 'mcp-proxy.ts')], {
-        env: { ...(process.env as Record<string, string>), ...engineEnv(store, 'global'), MNEMOSYNE_CLI: CLI, MNEMOSYNE_ACTIVITY_LOG: '' },
+        env: { ...(process.env as Record<string, string>), ...isolatedEnv(), ...engineEnv(store, 'global'), MNEMOSYNE_CLI: CLI, MNEMOSYNE_ACTIVITY_LOG: '' },
         stdin: 'pipe',
         stdout: 'pipe',
         stderr: 'pipe',

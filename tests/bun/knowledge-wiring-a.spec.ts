@@ -218,7 +218,7 @@ describe('non-ASCII text through the whole path', () => {
     // The prompt the model saw carries the text.
     expect(host.model[0]!.request.prompt).toContain('日本語')
 
-    const child = Bun.spawn([process.execPath, MEMORIES, '--store', host.store, 'get', id], { env: process.env as Record<string, string>, stdout: 'pipe', stderr: 'pipe' })
+    const child = Bun.spawn([process.execPath, MEMORIES, '--store', host.store, 'get', id], { env: { ...(process.env as Record<string,string>), ...isolatedEnv() }, stdout: 'pipe', stderr: 'pipe' })
     const [stdout, , exitCode] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
     expect(exitCode).toBe(0)
     const [row] = JSON.parse(stdout) as { id: string; content: string; sha256: string }[]
