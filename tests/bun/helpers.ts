@@ -19,6 +19,7 @@ export function isolatedEnv(prefix = 'isolated') {
   const home = mkdtempSync(join(tmpdir(), `mnemosyne-${prefix}-`))
   const piConfig = join(home, '.claude', 'mnemosyne', 'model-cache')
   mkdirSync(piConfig, { recursive: true })
+  mkdirSync(join(piConfig, 'logs'), { recursive: true })
   // Reuse the already-downloaded model cache (a cache, not user data) via a
   // symlink so tests do not re-download it; `logs/` stays a real folder in the
   // temp home and is removed with it. rmSync(home, { recursive: true }) deletes
