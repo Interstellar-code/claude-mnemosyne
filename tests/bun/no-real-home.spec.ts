@@ -8,7 +8,7 @@ describe('no spawned process inherits the real home', () => {
   test('every Bun.spawn/spawnSync env ends with isolatedEnv() or a temp HOME', () => {
     const offenders: string[] = []
     for (const name of readdirSync(DIR as string)) {
-      if (!name.endsWith('.ts')) continue
+      if (!(name as string).endsWith('.ts')) continue
       if (name === 'no-real-home.spec.ts') continue
       const text = readFileSync(join(DIR as string, name), 'utf8')
       const lines = text.split('\n')
