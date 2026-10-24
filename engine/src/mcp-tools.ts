@@ -154,6 +154,11 @@ export const INVALIDATE_SCHEMA = {
 	properties: {
 		memory_id: { type: "string", description: "ID of memory to invalidate." },
 		replacement_id: { type: "string", description: "Optional replacement memory ID." },
+		validator: {
+			type: "string",
+			description: "Who makes this change, for the audit trail. At most 64 characters.",
+			default: "unknown",
+		},
 		bank: { type: "string", default: "default" },
 	},
 	required: ["memory_id"],
@@ -164,7 +169,11 @@ export const VALIDATE_SCHEMA = {
 	properties: {
 		memory_id: { type: "string", description: "ID of memory to validate." },
 		action: { type: "string", enum: ["attest", "update", "invalidate", "delete"] },
-		validator: { type: "string", description: "Agent identifier performing validation." },
+		validator: {
+			type: "string",
+			description: "Agent identifier performing validation. At most 64 characters.",
+			default: "unknown",
+		},
 		new_content: { type: "string", description: "New content for action=update." },
 		note: { type: "string", description: "Optional reason or evidence." },
 		bank: { type: "string", enum: ["private", "surface"], default: "private" },
@@ -257,6 +266,11 @@ export const EXPIRE_UNUSED_SCHEMA = {
 		},
 		dry_run: { type: "boolean", description: "List the candidates and change nothing.", default: true },
 		limit: { type: "number", description: "At most this many rows, 1 to 200.", default: 50 },
+		validator: {
+			type: "string",
+			description: "Who makes this change, for the audit trail. At most 64 characters.",
+			default: "unknown",
+		},
 		bank: { type: "string", default: "default" },
 	},
 } as const;
@@ -270,6 +284,11 @@ export const UPDATE_SCHEMA = {
 		metadata: {
 			type: "object",
 			description: "Keys to merge into the memory's metadata. A key set to null is removed; other keys stay.",
+		},
+		validator: {
+			type: "string",
+			description: "Who makes this change, for the audit trail. At most 64 characters.",
+			default: "unknown",
 		},
 		memory_type: { type: "string", description: "New kind of memory." },
 		valid_until: { type: ["string", "null"], description: "New expiry date or timestamp; null clears the expiry." },
@@ -528,6 +547,17 @@ function validUntilArg(args: ToolArguments): string | null | { error: string } {
 	return new Date(value).toISOString();
 }
 
+const VALIDATOR_MAX = 64;
+
+/** The audit-trail validator: 'unknown' when absent or empty; an `{ error }` when not a string or over 64 characters. */
+function validatorArg(args: ToolArguments): string | { error: string } {
+	const value = args.validator;
+	if (value === undefined || value === null || value === "") return "unknown";
+	if (typeof value !== "string") return { error: "validator must be a string" };
+	if (value.length > VALIDATOR_MAX) return { error: `validator must be at most ${VALIDATOR_MAX} characters` };
+	return value;
+}
+
 function metadataArg(args: ToolArguments): Record<string, JsonValue> | null {
 	const value = args.metadata;
 	return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -660,6 +690,8 @@ async function handleSimilar(args: ToolArguments): Promise<ToolResult> {
 const EXPIRABLE_KINDS = ["context", "event", "error", "artifact"];
 
 async function handleExpireUnused(args: ToolArguments): Promise<ToolResult> {
+	const validator = validatorArg(args);
+	if (typeof validator === "object") return validator;
 	const days = Math.max(30, numberArg(args, "days", 90));
 	const limit = Math.min(200, Math.max(1, Math.trunc(numberArg(args, "limit", 50))));
 	// Anything but an explicit boolean false is a dry run.
@@ -672,7 +704,7 @@ async function handleExpireUnused(args: ToolArguments): Promise<ToolResult> {
 		kinds = given.map(kind => (kind as string).trim());
 	}
 	return withBeam(args, (beam, bank) => {
-		const rows = beam.expireUnused({ days, kinds, dryRun, limit });
+		const rows = beam.expireUnused({ days, kinds, dryRun, limit, validator });
 		return {
 			status: "ok",
 			dry_run: dryRun,
@@ -771,8 +803,12 @@ async function handleScratchpadClear(args: ToolArguments): Promise<ToolResult> {
 async function handleInvalidate(args: ToolArguments): Promise<ToolResult> {
 	const memoryId = required(args, "memory_id");
 	if (typeof memoryId !== "string") return memoryId;
+	const validator = validatorArg(args);
+	if (typeof validator === "object") return validator;
 	return withBeam(args, (beam, bank) => ({
-		status: beam.invalidate(memoryId, optionalStringArg(args, "replacement_id")) ? "invalidated" : "not_found",
+		status: beam.invalidate(memoryId, optionalStringArg(args, "replacement_id"), validator)
+			? "invalidated"
+			: "not_found",
 		memory_id: memoryId,
 		bank,
 	}));
@@ -792,12 +828,14 @@ async function handleGet(args: ToolArguments): Promise<ToolResult> {
 async function handleUpdate(args: ToolArguments): Promise<ToolResult> {
 	const memoryId = required(args, "memory_id");
 	if (typeof memoryId !== "string") return memoryId;
+	const validator = validatorArg(args);
+	if (typeof validator === "object") return validator;
 	const restore = args.restore === true;
 	const hasFields = ["content", "importance", "metadata", "memory_type", "valid_until"].some(key => key in args);
 	if (restore && hasFields) return { error: "restore cannot be combined with other fields" };
 	if (restore) {
 		return withBeam(args, (beam, bank) => {
-			const status = beam.restoreWorking(memoryId);
+			const status = beam.restoreWorking(memoryId, validator);
 			return { status, memory_id: memoryId, bank };
 		});
 	}
@@ -825,6 +863,7 @@ async function handleUpdate(args: ToolArguments): Promise<ToolResult> {
 			importance !== null && Number.isFinite(importance) ? importance : null,
 			metadata,
 			fields,
+			validator,
 		);
 		return { status: ok ? "updated" : "not_found", memory_id: memoryId, bank };
 	});
@@ -996,22 +1035,25 @@ async function handleValidate(args: ToolArguments): Promise<ToolResult> {
 	if (!["attest", "update", "invalidate", "delete"].includes(action)) return { error: `unknown action: ${action}` };
 	if (action === "update" && !optionalStringArg(args, "new_content"))
 		return { error: "new_content is required for action='update'" };
+	const validator = validatorArg(args);
+	if (typeof validator === "object") return validator;
 	return withBeam(args, (beam, bank) => {
 		const existing = beam.get(memoryId) as { content?: string; author_id?: string | null } | null;
 		if (existing === null) return { error: "memory_not_found", memory_id: memoryId, bank };
 		let status: string;
 		if (action === "delete") status = beam.forgetWorking(memoryId) ? "validation_delete" : "not_found";
 		else if (action === "update")
-			status = beam.updateWorking(memoryId, stringArg(args, "new_content"), null)
+			status = beam.updateWorking(memoryId, stringArg(args, "new_content"), null, null, {}, validator)
 				? "validation_update"
 				: "not_found";
-		else if (action === "invalidate") status = beam.invalidate(memoryId) ? "validation_invalidate" : "not_found";
-		else status = "validation_attest";
+		else if (action === "invalidate")
+			status = beam.invalidate(memoryId, null, validator) ? "validation_invalidate" : "not_found";
+		else status = beam.attestWorking(memoryId, validator) ? "validation_attest" : "not_found";
 		return {
 			status,
 			memory_id: memoryId,
 			bank,
-			validator: stringArg(args, "validator", "unknown"),
+			validator,
 			author_id: existing.author_id ?? null,
 			previous_content: existing.content?.slice(0, 200) ?? null,
 		};

@@ -30,7 +30,7 @@ Ours, not upstream's (engine-diff ignores them): `UPSTREAM.md`, `bun.lock` (our 
 | 18.12.3-mnemosyne.5 | e67c4972b298ce2692bad37b377a423881b53d1141390474782f0ce44f8a9b2f |
 | 18.12.3-mnemosyne.6 | 0444615859cc5d26331686a86ce458da92c0df9263423a7d04dd410319e78d14 |
 | 18.12.3-mnemosyne.7 | 4c6e5c1512eeb225d91d5c733b668860d6b324eea94e31ac302473da44eccb96 |
-| 18.12.3-mnemosyne.8 | 95deafd2de12e73f7709514d5594665453272a2d65f39db32dafbe59e3e30789 |
+| 18.12.3-mnemosyne.8 | bb74cd49b07a45c613548b1cedc512b6ebcb3d48d0093b64bcf3dc0e80fa72eb |
 
 The `18.12.3` row is the untouched upstream source, for reference. `.1` had changes 1 to 3; `.2` makes the change 1 merge keep a `__proto__` key as plain data (it was dropped); `.3` adds the two knowledge tools (change 4) and keeps the first author on dedupe with empty author env unset (change 5); `.4` is the review fix round: the knowledge reply is normalised by `parseExtractedFactCategories` (change 4), and the author pair merges as one unit (change 5); `.5` turns embeddings on: fastembed is a real dependency with an onnxruntime override (change 6), the CLI exits naturally on success (change 7), the on-demand runtime install is gone (change 8), and a `reembed` command backfills vectors (change 9); `.6` is the review fix round: `reembed` recounts after the drain and proves the model before a rebuild (change 9), and the API embedding route is refused without an explicit opt-in (change 10); `.7` is the second fix round: the fastembed cache dir is read from the plugin-pinned `PI_CONFIG_DIR` directly, immune to the dotenv/XDG/profile refill (change 11), and the dry run prints the 'apply' hint only when something is missing (change 9). `.8` is phase MODEL (v3): the trim spares every row whose scope is not 'session' (change 12). Later MODEL tasks add their changes to this build and re-record its hash.
 
@@ -159,6 +159,14 @@ Status is `open` (ours only) or `merged-upstream` (drop it at the next rebase).
 - Why: Rohit chose auto-expire (2026-10-24) so unpinned project-state notes fade without anyone retiring them by hand; the guards (own rows, expirable kinds, pinned exempt, dry run by default, no delete, restore) keep it from losing a memory he wants.
 - Files: `src/mcp-tools.ts` `src/core/beam/store.ts` `src/core/beam/index.ts`
 - Tests: `test/expire-unused.spec.ts`
+- Status: open
+
+### 16. An audit trail: retire, restore, update, attest and expire write memory_validations; forget purges it
+
+- What: the `memory_validations` table (it already exists in `src/core/beam/schema.ts`; its `trim_validations_to_3` trigger is unchanged and keeps the last 3 rows per memory) gets a writer. `mnemopi_invalidate` (action `retire`), `mnemopi_update` with `restore: true` (`restore`), `mnemopi_update` with new `content` (`update`), `mnemopi_validate` with `attest` (`attest`; its `update` and `invalidate` actions write `update` and `retire` too) and `mnemopi_expire_unused` with `dry_run` false (`expire`, one row per expired memory) each insert one row `{ memory_id, validator, action }`, in the same transaction as the change and only when it actually changed or attested a row; a no-op, refused or not-found call writes nothing, and an update that sets only importance, metadata, kind or expiry writes none. `new_content` and `note` are always NULL, so the trail never holds memory text. Each of those tools takes an optional `validator` string (default `unknown`, at most 64 characters; a longer value or a non-string is an `{ error }` before the store is opened). `attest` is owner-checked: it writes only for a working memory of `MNEMOPI_SESSION_ID`, and `mnemopi_validate` now answers `not_found` for any other row instead of `validation_attest`. `purgeWorkingMemoryArtifacts` also deletes the memory's `memory_validations` rows, so `forgetWorking`, `mnemopi_validate` `delete` and the 24-hour trim purge the trail in the same transaction as the row.
+- Why: the plugin must show who retired, restored, edited or expired a memory (the Review tab and the expiry sweep) without ever copying memory text into a second table, and forgetting a memory must leave nothing of it behind.
+- Files: `src/mcp-tools.ts` `src/core/beam/store.ts` `src/core/beam/index.ts`
+- Tests: `test/audit-trail.spec.ts`
 - Status: open
 
 Not changed: `dist/types/*.d.ts` still describe upstream 18.12.3 (no `metadata` on `updateWorking`). Nothing in the plugin reads them; regenerating them needs upstream's monorepo build.

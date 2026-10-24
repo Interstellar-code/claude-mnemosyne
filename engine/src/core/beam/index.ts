@@ -43,6 +43,7 @@ import {
 	scratchpadRead,
 	scratchpadWrite,
 	type MetadataPatch,
+	attestWorking,
 	type ExpiredRow,
 	type ExpireUnusedOptions,
 	expireUnused,
@@ -240,8 +241,8 @@ export class BeamMemory implements BeamMemoryState {
 		return getContext(this, limit);
 	}
 
-	invalidate(memoryId: string, replacementId: string | null = null): boolean {
-		return invalidate(this, memoryId, replacementId);
+	invalidate(memoryId: string, replacementId: string | null = null, validator: string | null = null): boolean {
+		return invalidate(this, memoryId, replacementId, validator);
 	}
 
 	getWorkingStats(
@@ -262,12 +263,17 @@ export class BeamMemory implements BeamMemoryState {
 		importance: number | null = null,
 		metadata: MetadataPatch | null = null,
 		fields: WorkingFieldPatch = {},
+		validator: string | null = null,
 	): boolean {
-		return updateWorking(this, memoryId, content, importance, metadata, fields);
+		return updateWorking(this, memoryId, content, importance, metadata, fields, validator);
 	}
 
-	restoreWorking(memoryId: string): "restored" | "unchanged" | "not_found" {
-		return restoreWorking(this, memoryId);
+	restoreWorking(memoryId: string, validator: string | null = null): "restored" | "unchanged" | "not_found" {
+		return restoreWorking(this, memoryId, validator);
+	}
+
+	attestWorking(memoryId: string, validator: string): boolean {
+		return attestWorking(this, memoryId, validator);
 	}
 
 	expireUnused(options: ExpireUnusedOptions): ExpiredRow[] {

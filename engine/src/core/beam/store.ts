@@ -201,6 +201,9 @@ function purgeWorkingMemoryArtifacts(db: BeamMemoryState["db"], ids: readonly st
 	}
 
 	db.run(`DELETE FROM annotations WHERE memory_id IN (${placeholders})`, [...ids]);
+	if (tableExists(db, "memory_validations")) {
+		db.run(`DELETE FROM memory_validations WHERE memory_id IN (${placeholders})`, [...ids]);
+	}
 	db.run(`DELETE FROM memory_embeddings WHERE memory_id IN (${placeholders})`, [...ids]);
 	for (const table of MEMORIA_SOURCE_TABLES) {
 		db.run(`DELETE FROM ${table} WHERE source_memory_id IN (${placeholders})`, [...ids]);
@@ -645,7 +648,53 @@ export function getContext(beam: BeamMemoryState, limit = 10): Row[] {
 	return (statement.all(beam.sessionId, now, limit) as Row[]).map(rowToDict);
 }
 
-export function invalidate(beam: BeamMemoryState, memoryId: string, replacementId: string | null = null): boolean {
+/** The actions the audit trail records (mnemosyne change 16). */
+export type AuditAction = "retire" | "restore" | "update" | "attest" | "expire";
+
+/**
+ * Inserts one `memory_validations` row `{ memory_id, validator, action }` (mnemosyne change 16).
+ * `new_content` and `note` stay NULL, so the trail never holds memory text. The table's
+ * `trim_validations_to_3` trigger keeps the last three rows per memory. Callers run it inside the
+ * transaction of the change it records, and only after a row actually changed.
+ */
+function recordValidation(beam: BeamMemoryState, memoryId: string, validator: string, action: AuditAction): void {
+	beam.db.run("INSERT INTO memory_validations (memory_id, validator, action) VALUES (?, ?, ?)", [
+		memoryId,
+		validator,
+		action,
+	]);
+}
+
+/**
+ * Attests the caller's own working memory: writes the audit row `attest` and changes nothing else.
+ * Returns false (and writes nothing) when no such row belongs to `MNEMOPI_SESSION_ID`.
+ */
+export function attestWorking(beam: BeamMemoryState, memoryId: string, validator: string): boolean {
+	return immediateTransaction(beam.db, () => {
+		using statement = beam.db.prepare("SELECT 1 AS found FROM working_memory WHERE id = ? AND session_id = ?");
+		if (statement.get(memoryId, beam.sessionId) == null) return false;
+		recordValidation(beam, memoryId, validator, "attest");
+		return true;
+	});
+}
+
+export function invalidate(
+	beam: BeamMemoryState,
+	memoryId: string,
+	replacementId: string | null = null,
+	validator: string | null = null,
+): boolean {
+	const changed = immediateTransaction(beam.db, () => invalidateRows(beam, memoryId, replacementId, validator));
+	if (changed) invalidateCaches(beam);
+	return changed;
+}
+
+function invalidateRows(
+	beam: BeamMemoryState,
+	memoryId: string,
+	replacementId: string | null,
+	validator: string | null,
+): boolean {
 	const now = toUtcIso();
 	const working = beam.db.run(
 		`
@@ -656,6 +705,7 @@ export function invalidate(beam: BeamMemoryState, memoryId: string, replacementI
 		[now, replacementId, memoryId, beam.sessionId],
 	);
 	if (working.changes > 0) {
+		if (validator !== null) recordValidation(beam, memoryId, validator, "retire");
 		// Recall filters `valid_until`/`superseded_by` in SQL, but the enhanced path consults the
 		// query cache BEFORE it reaches SQL. Without this the row a caller just retired keeps being
 		// served to an identical query for the rest of the cache TTL -- the one thing an explicit
@@ -674,6 +724,7 @@ export function invalidate(beam: BeamMemoryState, memoryId: string, replacementI
 		[now, replacementId, memoryId, beam.sessionId],
 	);
 	if (episodic.changes > 0) {
+		if (validator !== null) recordValidation(beam, memoryId, validator, "retire");
 		invalidateCaches(beam);
 		return true;
 	}
@@ -779,6 +830,7 @@ export function updateWorking(
 	importance: number | null = null,
 	metadata: MetadataPatch | null = null,
 	fields: WorkingFieldPatch = {},
+	validator: string | null = null,
 ): boolean {
 	const assignments: string[] = [];
 	const params: SQLQueryBindings[] = [];
@@ -817,7 +869,16 @@ export function updateWorking(
 			params,
 		).changes;
 	};
-	const changes = metadata === null ? write() : immediateTransaction(beam.db, write);
+	// A content change leaves one 'update' audit row, in the same transaction as the write.
+	const auditBy = content !== null ? validator : null;
+	const changes =
+		metadata === null && auditBy === null
+			? write()
+			: immediateTransaction(beam.db, () => {
+					const written = write();
+					if (written > 0 && auditBy !== null) recordValidation(beam, memoryId, auditBy, "update");
+					return written;
+				});
 	if (changes > 0) {
 		invalidateCaches(beam);
 		if (content !== null) scheduleEmbedding(beam, [{ memoryId, content }]);
@@ -831,7 +892,11 @@ export function updateWorking(
  * its expiry has passed. A live row (no replacement, no expiry or one still ahead) is
  * left exactly as it is, and another owner's row is never touched, even a global one.
  */
-export function restoreWorking(beam: BeamMemoryState, memoryId: string): "restored" | "unchanged" | "not_found" {
+export function restoreWorking(
+	beam: BeamMemoryState,
+	memoryId: string,
+	validator: string | null = null,
+): "restored" | "unchanged" | "not_found" {
 	const result = immediateTransaction(beam.db, () => {
 		using statement = beam.db.prepare(
 			"SELECT valid_until, superseded_by FROM working_memory WHERE id = ? AND session_id = ?",
@@ -847,6 +912,7 @@ export function restoreWorking(beam: BeamMemoryState, memoryId: string): "restor
 			"UPDATE working_memory SET valid_until = NULL, superseded_by = NULL WHERE id = ? AND session_id = ?",
 			[memoryId, beam.sessionId],
 		);
+		if (validator !== null) recordValidation(beam, memoryId, validator, "restore");
 		return "restored" as const;
 	});
 	if (result === "restored") invalidateCaches(beam);
@@ -917,6 +983,8 @@ export interface ExpireUnusedOptions {
 	readonly limit: number;
 	/** The clock, for tests. */
 	readonly now?: Date;
+	/** Who runs the sweep, for the audit trail (one 'expire' row per expired memory). */
+	readonly validator?: string | null;
 }
 
 export interface ExpiredRow {
@@ -1008,7 +1076,10 @@ export function expireUnused(beam: BeamMemoryState, options: ExpireUnusedOptions
 				"UPDATE working_memory SET valid_until = ? WHERE id = ? AND session_id = ? AND valid_until IS NULL AND superseded_by IS NULL",
 				[stamp, row.id, beam.sessionId],
 			).changes;
-			if (changes > 0) kept.push(row);
+			if (changes > 0) {
+				if (options.validator != null) recordValidation(beam, row.id, options.validator, "expire");
+				kept.push(row);
+			}
 		}
 		return kept;
 	});
