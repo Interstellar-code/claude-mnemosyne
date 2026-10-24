@@ -41,8 +41,9 @@ import { buildRequests, EMBEDDINGS_CACHE_DIR, EMBEDDINGS_MODEL, engineEnv, parse
 import type { EngineRequest } from './engine'
 import { ENGINE_BUILD, SETUP_TIMEOUT_MS } from './engine-build'
 import { mnemosyneStats } from './surface'
-import { admit } from './guard'
-import type { GuardResult } from './guard'
+import { admit, NEAR_DUPLICATE_SCORE, nearDuplicateFlags, nearDuplicateMessage, nearMatchesOf } from './guard'
+import type { GuardResult, NearMatch } from './guard'
+import { expiresInDaysProblem, KIND_NAMES, kindProblem, validUntilFor, withNoKindWarning } from './kinds'
 import { cleanTags } from './tags'
 import { openDashboard, stopDashboard } from './ui-launch'
 
@@ -64,10 +65,11 @@ const RULES_SECTION = {
   text: `# Long-term memory (Mnemosyne)
 mcp__mnemosyne__memory_remember / _recall / _update / _forget keep facts across sessions and repos.
 - Remember: lasting preferences, conventions, decisions, runbooks the user states. One self-contained fact per call.
+- With each fact, pass kind: fact, preference, instruction (a rule or runbook), decision, context (project state), error (a bug note), artifact (a reference) or event (a session summary).
 - With each fact, pass tags: 2 to 5 short lowercase topic words (for example ["git", "ci"]).
 - Never remember secrets, credentials, or one-off task details.
 - Recall before answering about past decisions or preferences ("what did we…", "how do I usually…").
-- To change or tag a fact, update it by id and owner with memory_update. Use memory_forget only to delete. Never save a duplicate.`,
+- To change or tag a fact, update it by id and owner with memory_update. Use memory_forget only to delete. Never save a near-duplicate: recall first, and if a close memory exists, update it (or save the new fact with replaces: the old id, which retires the old one) instead of saving another.`,
 } as const
 
 const recalled = atom({ plugin: 'mnemosyne', key: 'recalled' } as const, {} as Recalled)
@@ -82,6 +84,12 @@ const CONFIRM_PROPERTY = {
 
 // The guardMode option: strict (the default) refuses a warned save unless the call passes confirm: true; warn saves it with the warnings.
 export const guardModeOf = (options: PluginOptions): 'strict' | 'warn' => (typeof options.guardMode === 'string' && options.guardMode.trim().toLowerCase() === 'warn' ? 'warn' : 'strict')
+
+const KIND_PROPERTY = {
+  type: 'string',
+  enum: KIND_NAMES,
+  description: 'What kind of memory this is. Without it the memory is saved as unknown.',
+} as const
 
 const TOOLS = [
   {
@@ -102,6 +110,16 @@ const TOOLS = [
           items: { type: 'string' },
           description: '2 to 5 short lowercase topic tags for the fact, e.g. ["git", "ci"].',
         },
+        kind: KIND_PROPERTY,
+        expires_in_days: {
+          type: 'integer',
+          description: 'Forget this memory after this many days (1 to 365). A context note expires after 14 days when this is not given.',
+        },
+        replaces: {
+          type: 'string',
+          description: 'The id of an older memory this one supersedes. After the save it is retired (not deleted): recall stops returning it, and it can be restored.',
+        },
+        owner: { type: 'string', description: "With replaces: the owner of that older memory, from memory_recall; default this project's." },
         confirm: CONFIRM_PROPERTY,
       },
       required: ['content'],
@@ -122,7 +140,7 @@ const TOOLS = [
   {
     name: 'memory_update',
     description:
-      'Change a memory in place, by the id and owner memory_recall returned: its content, importance or topic tags. Keeps its id and recall history. Use this rather than forgetting and saving again.',
+      'Change a memory in place, by the id and owner memory_recall returned: its content, importance, kind or topic tags. Keeps its id and recall history. Use this rather than forgetting and saving again.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -134,6 +152,7 @@ const TOOLS = [
           items: { type: 'string' },
           description: 'Short lowercase topic tags (at most 5); replaces the old ones. [] removes them.',
         },
+        kind: { ...KIND_PROPERTY, description: 'Change what kind of memory this is.' },
         confirm: CONFIRM_PROPERTY,
         owner: { type: 'string', description: "The row's owner from memory_recall; default this project's." },
       },
@@ -378,7 +397,7 @@ export MNEMOPI_DATA_DIR=${shellQuote(store)}
 export MNEMOPI_SESSION_ID="\${MNEMOSYNE_OWNER:-global}"
 export MNEMOPI_CHANNEL_ID="$MNEMOPI_SESSION_ID"
 ${embeddings ? 'unset MNEMOPI_NO_EMBEDDINGS' : 'export MNEMOPI_NO_EMBEDDINGS=1'}
-export MNEMOPI_MCP_BANK=
+export MNEMOPI_MCP_BANK=default
 export MNEMOPI_LLM_BASE_URL=
 export MNEMOPI_HOST_LLM_ENABLED=
 export MNEMOPI_AUTHOR_ID=
@@ -409,7 +428,7 @@ if not defined MNEMOSYNE_OWNER set "MNEMOSYNE_OWNER=global"\r
 set "MNEMOPI_SESSION_ID=%MNEMOSYNE_OWNER%"\r
 set "MNEMOPI_CHANNEL_ID=%MNEMOSYNE_OWNER%"\r
 ${embeddings ? 'set "MNEMOPI_NO_EMBEDDINGS="' : 'set "MNEMOPI_NO_EMBEDDINGS=1"'}\r
-set "MNEMOPI_MCP_BANK="\r
+set "MNEMOPI_MCP_BANK=default"\r
 set "MNEMOPI_LLM_BASE_URL="\r
 set "MNEMOPI_HOST_LLM_ENABLED="\r
 set "MNEMOPI_AUTHOR_ID="\r
@@ -457,14 +476,21 @@ function updateArgs(input: Record<string, unknown>): Record<string, unknown> | s
   const hasContent = typeof input.content === 'string'
   const hasImportance = typeof input.importance === 'number' && Number.isFinite(input.importance)
   if (input.tags !== undefined && !Array.isArray(input.tags)) return 'tags must be an array of strings.'
-  if (!hasContent && !hasImportance && input.tags === undefined) return 'memory_update needs content, importance or tags.'
+  const hasKind = input.kind !== undefined && input.kind !== null
+  const refused = kindProblem(input.kind)
+  if (refused !== undefined) return refused
+  if (!hasContent && !hasImportance && input.tags === undefined && !hasKind) return 'memory_update needs content, importance, tags or kind.'
   const tags = Array.isArray(input.tags) ? cleanTags(input.tags) : undefined
   return {
     memory_id: input.memory_id,
     ...(hasContent ? { content: input.content } : {}),
     ...(hasImportance ? { importance: clamp(input.importance, 0, 1, 0.5) } : {}),
+    // The kind goes to the engine as memory_type.
+    ...(hasKind ? { memory_type: input.kind } : {}),
     // An empty list removes the key (C7).
     ...(tags !== undefined ? { metadata: { tags: tags.length > 0 ? tags : null } } : {}),
+    // C10.2: a content change names Claude in the audit trail.
+    ...(hasContent ? { validator: 'claude-code' } : {}),
   }
 }
 
@@ -492,6 +518,61 @@ async function call($: EngineInterface, options: PluginOptions, name: string, ar
   const [answer] = await runAll($, options, [[name, args]], as)
   if (answer instanceof Error) throw answer
   return answer ?? ''
+}
+
+/**
+ * G3: the close memories (cosine 0.88 or more, the engine's mnemopi_similar) of a text about to be saved.
+ * Advisory, so it fails open: embeddings off, an engine that is not installed or too old, or any failure
+ * gives none and the save goes on as it would have. Runs as the owner the save will, before it.
+ * (Two engine runs, similar then the save: $.process.run takes its whole stdin up front, and the save
+ * needs the matches for its metadata.guard and, in strict mode, may have to be refused.)
+ */
+async function nearDuplicates($: EngineInterface, options: PluginOptions, content: string, as?: string): Promise<NearMatch[]> {
+  try {
+    if (!(await isInstalled($, options)) || !(await isCurrent($, options)) || !(await embeddingsOn($, options))) return []
+    const [answer] = await runAll($, options, [['mnemopi_similar', { content, top_k: 3, min_score: NEAR_DUPLICATE_SCORE }]], as)
+    if (typeof answer !== 'string') return []
+    const reply = JSON.parse(answer) as { embeddings?: unknown; matches?: unknown }
+    return reply.embeddings === true ? nearMatchesOf(reply.matches, content) : []
+  } catch {
+    return []
+  }
+}
+
+const REPLACES_ID = /^[A-Za-z0-9_-]{1,64}$/
+
+/** Why `replaces` / `owner` on a remember cannot be used, or undefined when fine or missing. */
+function replacesProblem(input: Record<string, unknown>): string | undefined {
+  if (input.replaces !== undefined && input.replaces !== null && !(typeof input.replaces === 'string' && REPLACES_ID.test(input.replaces)))
+    return 'replaces must be the id of a memory (from memory_recall).'
+  if (input.owner !== undefined && input.owner !== null && !(typeof input.owner === 'string' && REPLACES_ID.test(input.owner)))
+    return 'owner must be the owner of the memory in replaces (from memory_recall).'
+  return undefined
+}
+
+type Retired = { oldId: string; newId?: string; owner?: string; ok: boolean; line: string; error: string }
+
+/**
+ * META.4: after a successful save, retires the memory it supersedes: mnemopi_invalidate(old, replacement = the new
+ * id) as the old row's owner, named claude-code in the audit trail. The row is not deleted (valid_until and
+ * superseded_by are set; update with restore brings it back). Never throws: a step that cannot be done is a line
+ * for the reply and the new memory stays saved. A save that is the old row itself again (the engine's dedupe
+ * answered the old id) retires nothing.
+ */
+async function retireReplaced($: EngineInterface, options: PluginOptions, oldId: string, newId: string | undefined, as?: string): Promise<Retired> {
+  const base = { oldId, ...(newId === undefined ? {} : { newId }), ...(as === undefined ? {} : { owner: as }) }
+  const failed = (why: string): Retired => ({ ...base, ok: false, line: `\nMnemosyne: replaces ${oldId} did not retire it: ${why} The new memory is saved${newId === undefined ? '' : ` (${newId})`}; the old one was left as it was.`, error: why })
+  if (newId === undefined) return failed('the save gave no memory id to point it at.')
+  if (newId === oldId) return failed('it is the memory just saved (the same text), so there is nothing to retire.')
+  try {
+    const [answer] = await runAll($, options, [['mnemopi_invalidate', { memory_id: oldId, replacement_id: newId, validator: 'claude-code' }]], as)
+    if (answer instanceof Error) return failed(`${answer.message}.`.replace(/\.\.$/, '.'))
+    const status = (JSON.parse(String(answer)) as { status?: unknown }).status
+    if (status === 'invalidated') return { ...base, ok: true, line: `\nMnemosyne: retired ${oldId}, replaced by ${newId}. It is not deleted: it can be restored.`, error: '' }
+    return failed(`no memory ${oldId} found${as === undefined ? ' for this project' : ` for owner ${as}`}.`)
+  } catch (err) {
+    return failed(`${(err as Error).message}.`.replace(/\.\.$/, '.'))
+  }
 }
 
 // Recall rows carry a dozen scoring fields; the model needs only these.
@@ -602,15 +683,34 @@ const TAGS_USAGE = 'Usage: /mnemosyne-tags (a dry run: Haiku proposes tags, noth
 // apply's one engine process per owner may carry every proposal of that owner.
 const APPLY_TIMEOUT_MS = 120_000
 const MEMORIES_TIMEOUT_MS = 60_000
+// The C9 backup copies the whole store (VACUUM INTO), so it gets longer than a listing.
+const BACKUP_TIMEOUT_MS = 300_000
+
+/**
+ * C9: every apply command backs the store up first and stops if that fails. Returns the stop message, or
+ * undefined when the backup was made. The message names the cause and says nothing was changed.
+ */
+async function backupFirst($: EngineInterface, options: PluginOptions, command: string): Promise<string | undefined> {
+  try {
+    const { root } = await paths($, options)
+    // The data root is named, because a custom memoryDir does not sit under it.
+    const made = JSON.parse(await memoriesCli($, options, ['backup', root], undefined, BACKUP_TIMEOUT_MS)) as { path?: unknown; rows?: unknown }
+    if (typeof made.path !== 'string') throw new Error('the backup reported no file')
+    progress($, `backed up ${typeof made.rows === 'number' ? plural(made.rows, 'memory', 'memories') : 'the store'}`)
+    return undefined
+  } catch (err) {
+    return `Stopped: the backup before the change failed (${(err as Error).message.slice(0, 300)}). No memory was changed. Fix that, then run ${command} again.`
+  }
+}
 
 // bin/memories.ts: lists and reads rows from a read-only handle, and saves the proposals file.
-async function memoriesCli($: EngineInterface, options: PluginOptions, args: readonly string[], stdin?: string) {
+async function memoriesCli($: EngineInterface, options: PluginOptions, args: readonly string[], stdin?: string, timeoutMs = MEMORIES_TIMEOUT_MS) {
   const { store } = await paths($, options)
   // --store goes first, before the command: the script refuses a second one, so no id can redirect the read.
   // save and pending name their own folder (the data root) and refuse --store.
   const ran = await $.process.run(['bun', `${slashes($.plugin.root)}/bin/memories.ts`, ...(args[0] === 'save' || args[0] === 'pending' ? [] : ['--store', store]), ...args], {
     ...(stdin === undefined ? {} : { stdin }),
-    timeoutMs: MEMORIES_TIMEOUT_MS,
+    timeoutMs,
   })
   if (ran.exitCode !== 0) throw new Error(`bin/memories.ts ${args[0]} failed: ${`${ran.stderr}\n${ran.stdout}`.trim().slice(-300)}`)
   // The host keeps 4 MiB of stdout; a cut listing would be broken JSON and a misleading error.
@@ -982,6 +1082,9 @@ export async function tagsApply($: EngineInterface, options: PluginOptions, sign
     return `The saved proposals cannot be used (${(err as Error).message}): run /mnemosyne-tags again.`
   }
   if (proposals.length === 0) return 'The saved proposals list is empty: run /mnemosyne-tags again.'
+  // C9: the backup comes before the first write; a failed backup stops the run.
+  const stopped = await backupFirst($, options, '/mnemosyne-tags apply')
+  if (stopped !== undefined) return stopped
   const byOwner = new Map<string, Proposal[]>()
   for (const proposal of proposals) byOwner.set(proposal.owner, [...(byOwner.get(proposal.owner) ?? []), proposal])
   const counts = { gone: 0, tagged: 0, untaggable: 0, changed: 0 }
@@ -1057,19 +1160,26 @@ export const register: Register = (on, options) => {
         const isGlobal = !isPerProject || input.global === true
         // Tags are cleaned as the engine stores them (hooks/tags.ts); none left, no metadata.
         const tags = Array.isArray(input.tags) ? cleanTags(input.tags) : []
+        const validUntil = validUntilFor(input.kind, input.expires_in_days)
         return [
           'mnemopi_remember',
           {
             content: input.content,
             importance: clamp(input.importance, 0, 1, 0.5),
-            // `imported` is the engine's durable trust tier: any other source lands
-            // as STATED working memory, which the engine deletes after 24 hours.
-            source: 'imported',
+            // C4: Claude's own save. source and trust_tier say who wrote it; the trim spares it by scope
+            // (always explicit, so a re-save of the same text never lands as 'session'), not by a label.
+            source: 'claude-code',
+            trust_tier: 'DERIVED',
+            // veracity is left to the engine's default, 'unknown'.
             scope: isGlobal ? 'global' : 'channel',
             // Claude's own save: an agent wrote it (KNOWX.1.a3). A trigger save
             // overrides this with human + 'stated' in tool.call.
             author_id: 'claude-code',
             author_type: 'agent',
+            // The kind goes to the engine as memory_type; none given, the engine stores 'unknown'.
+            ...(typeof input.kind === 'string' ? { memory_type: input.kind } : {}),
+            // A context note fades after 14 days unless the call gives expires_in_days.
+            ...(validUntil === undefined ? {} : { valid_until: validUntil }),
             ...(tags.length > 0 ? { metadata: { tags } } : {}),
           },
         ] as const
@@ -1279,10 +1389,17 @@ export const register: Register = (on, options) => {
     // Strict mode: a warned save is refused until the call says confirm: true. A block has no override.
     const needsConfirm = guard?.verdict === 'warn' && guardModeOf(options) === 'strict' && input.confirm !== true
     const refusedByGuard = guard?.verdict === 'block' || needsConfirm
+    // G3 (META.3): close memories of a text about to be saved. Before the trigger is consumed, so a refusal leaves it for the retry.
+    const replacesId = tool === 'memory_remember' && typeof input.replaces === 'string' && REPLACES_ID.test(input.replaces) ? input.replaces : undefined
+    const replacesOwner = replacesId !== undefined && typeof input.owner === 'string' && REPLACES_ID.test(input.owner) ? input.owner : undefined
+    // The memory named in replaces is meant to be superseded, so it is not a near-duplicate to warn about.
+    const near = tool === 'memory_remember' && !refusedByGuard ? (await nearDuplicates($, options, input.content as string)).filter(match => match.id !== replacesId) : []
+    const nearRefused = near.length > 0 && guardModeOf(options) === 'strict' && input.confirm !== true
+    const refused = refusedByGuard || nearRefused
     // KNOWX.1: only the main thread's first save after a remember phrase is the
     // human's. A subagent's event carries an agentId and never consumes the trigger.
     let provenance: { author_type: 'human'; veracity: 'stated' } | undefined
-    if (tool === 'memory_remember' && e.agentId === undefined && !refusedByGuard) {
+    if (tool === 'memory_remember' && e.agentId === undefined && !refused) {
       const session = await $.session.id().catch(() => undefined)
       if (session !== undefined) {
         // Consumed inside the updater, which sees the value as it is when the update lands: of two saves at once only one takes it.
@@ -1296,13 +1413,25 @@ export const register: Register = (on, options) => {
         if (took) provenance = { author_type: 'human', veracity: 'stated' }
       }
     }
+    let retired: Retired | undefined
     const answer = await (async (): Promise<{ result: string; reply: string } | { deny: string }> => {
       try {
         if (guard?.verdict === 'block') {
           return { deny: `Mnemosyne: the save guard blocked this save (${guardIds.join(', ')}). ${guard.hits.map(hit => hit.message).join(' ')}` }
         }
+        if (nearRefused) {
+          return { deny: `Mnemosyne: the save guard warns about this save (G3). ${nearDuplicateMessage(near)} Or resend with confirm: true if a new memory is wanted.` }
+        }
         if (needsConfirm) {
           return { deny: `Mnemosyne: the save guard warns about this save (${guardIds.join(', ')}). ${guard!.hits.map(hit => hit.message).join(' ')} Resend with confirm: true if the save is wanted.` }
+        }
+        if (tool === 'memory_remember') {
+          const badKind = kindProblem(input.kind)
+          if (badKind !== undefined) return { deny: `Mnemosyne: ${badKind}` }
+          const badDays = expiresInDaysProblem(input.expires_in_days)
+          if (badDays !== undefined) return { deny: `Mnemosyne: ${badDays}` }
+          const badReplaces = replacesProblem(input)
+          if (badReplaces !== undefined) return { deny: `Mnemosyne: ${badReplaces}` }
         }
         if (tool === 'memory_update') {
           const refused = updateArgs(input)
@@ -1315,27 +1444,43 @@ export const register: Register = (on, options) => {
         if (tool === 'memory_update' && !(await isCurrent($, options))) return { deny: NOT_CURRENT }
         const [name, args] = engineArgs(tool, input)
         // The trigger save is the person's: human, with veracity 'stated'.
-        const withProvenance = provenance === undefined ? args : { ...args, ...provenance }
+        // C4: source 'user' and trust tier STATED besides the human author and veracity 'stated'.
+        const withProvenance = provenance === undefined ? args : { ...args, ...provenance, source: 'user', trust_tier: 'STATED' }
         // A warned save is stored, flagged with the rule ids in metadata.guard.
+        // A content update that now passes the guard clean clears an old flag (null removes the key through the metadata merge).
+        const clearsGuard = tool === 'memory_update' && typeof input.content === 'string' && warnIds.length === 0
+        const flags = [...warnIds, ...nearDuplicateFlags(near)]
         const sent: Record<string, unknown> =
-          warnIds.length > 0
-            ? { ...withProvenance, metadata: { ...(withProvenance as { metadata?: object }).metadata, guard: warnIds } }
-            : withProvenance
+          flags.length > 0
+            ? { ...withProvenance, metadata: { ...(withProvenance as { metadata?: object }).metadata, guard: flags } }
+            : clearsGuard
+              ? { ...withProvenance, metadata: { ...(withProvenance as { metadata?: object }).metadata, guard: null } }
+              : withProvenance
         const text = await call($, options, name, sent, as)
+        // META.4: the save went in; now the memory it replaces is retired, as its owner. A failure here is a line, not a denial.
+        let retireLine = ''
+        if (replacesId !== undefined) {
+          retired = await retireReplaced($, options, replacesId, savedId(text), replacesOwner)
+          retireLine = retired.line
+        }
         // One warning line per hit, after the engine's reply; `reply` stays the engine's own text.
-        const warnings = warnIds.length > 0 ? guard!.hits.map(hit => `\nMnemosyne guard warning: ${hit.message}`).join('') : ''
-        return { reply: text, result: name === 'mnemopi_recall' ? JSON.stringify(compact(text)) : name === 'mnemopi_stats' ? mnemosyneStats(text) : `${text}${warnings}` }
+        const warnings = (warnIds.length > 0 ? guard!.hits.map(hit => `\nMnemosyne guard warning: ${hit.message}`).join('') : '') + (near.length > 0 ? `\nMnemosyne guard warning: ${nearDuplicateMessage(near)}` : '')
+        // A remember that named no kind is saved as 'unknown', with one warning in the reply; never a refusal.
+        const noKind = tool === 'memory_remember' && (input.kind === undefined || input.kind === null)
+        return { reply: text, result: name === 'mnemopi_recall' ? JSON.stringify(compact(text)) : name === 'mnemopi_stats' ? mnemosyneStats(text) : `${noKind ? withNoKindWarning(text) : text}${warnings}${retireLine}` }
       } catch (err) {
         return { deny: `Mnemosyne: ${(err as Error).message}` }
       }
     })()
     if (action !== undefined) {
-      const blocked = refusedByGuard
+      const blocked = refused
       // A refused call logs its rule ids only: no content text, in the line or the error.
-      const outcome = blocked ? { ok: false, error: `guard:${guardIds.join(',')}` } : 'deny' in answer ? { ok: false, error: answer.deny } : callOutcome(action, input, answer.reply)
+      const outcome = blocked ? { ok: false, error: `guard:${[...guardIds, ...(near.length > 0 ? ['G3'] : [])].join(',')}` } : 'deny' in answer ? { ok: false, error: answer.deny } : callOutcome(action, input, answer.reply)
       // Tags as the engine gets them, cleaned, as the proxy logs them.
       const shown = Array.isArray(input.tags) ? { ...input, tags: cleanTags(input.tags) } : input
-      await record($, options, [{ action, origin: 'tool', owner: as, text: blocked ? '' : callText(action, shown), ...outcome, ...(provenance ?? {}) }])
+      // A retire line follows the save's own line, with both ids and no memory text (META.4).
+      const retireEntry = retired === undefined ? [] : [{ action: 'retire' as const, origin: 'tool' as const, owner: retired.owner, text: `retire ${retired.oldId} replaced by ${retired.newId ?? 'unknown'}`, ids: [retired.oldId, ...(retired.newId === undefined ? [] : [retired.newId])], count: retired.ok ? 1 : 0, ok: retired.ok, error: retired.error }]
+      await record($, options, [{ action, origin: 'tool', owner: as, text: blocked ? '' : callText(action, shown), ...outcome, ...(provenance ?? {}) }, ...retireEntry])
     }
     // A successful save (or a content update) starts extraction after the reply.
     // A tags-only or importance-only update changes no text, so it extracts nothing.
