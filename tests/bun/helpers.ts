@@ -1,6 +1,6 @@
 // Shared helpers for the Bun specs: temporary folders, the real installer, and
 // one-shot calls to a real engine cli.
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { engineEnv } from '../../hooks/engine'
