@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { body, engineCall, ROOT, toolCall } from './helpers'
+import { isolatedEnv } from './helpers'
 import { ENGINE_BUILD, GOOD_REPLY, makeHost, until } from './knowledge-host'
 import type { Host, ModelAnswer } from './knowledge-host'
 
