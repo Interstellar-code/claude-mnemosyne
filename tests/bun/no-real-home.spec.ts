@@ -18,7 +18,7 @@ describe('no spawned process inherits the real home', () => {
         // gather the env object roughly: find matching closing by scanning until a line containing stdin/stdout/stderr or })
         let block = line
         let j = i
-        while (j + 1 < lines.length && !/\}\s*\)/.test(lines[j])) { j++; block += '\n' + lines[j] }
+        while (j + 1 < lines.length && !/\}\s*\)/.test(lines[j] as string)) { j++; block += '\n' + (lines[j] as string) }
         if (!/env\s*:/.test(block as string)) continue
         const ok = /isolatedEnv\(\)/.test(block as string) || /serverEnv\(/.test(block as string) || /HOME:\s*[^,]*tmpdir|tmpdir\(\)/.test(block as string) || /HOME:\s*home\b/.test(block as string) || /HOME:\s*tmpHome/.test(block as string)
         if (!ok) offenders.push(`${name as string}:${i + 1}`)
