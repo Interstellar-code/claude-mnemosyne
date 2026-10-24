@@ -10,6 +10,8 @@ import { join } from 'node:path'
 import { backupName, backupStore, BACKUP_KEEP, getRows } from '../../bin/memories'
 import { BACKFILL_TEXT_LIMIT, hasTags, judge, parseProposals, parseRows, PROPOSALS_FILE } from '../../hooks/backfill'
 import type { Proposal } from '../../hooks/backfill'
+import { makeHost } from './knowledge-host'
+import type { Host } from './knowledge-host'
 import { body, engineCall, ROOT, tempDir, toolCall } from './helpers'
 
 const CLI = join(ROOT, 'engine', 'src', 'cli.ts')
@@ -562,5 +564,135 @@ describe('bin/memories.ts backup', () => {
     expect((await memories(['backup'])).exitCode).toBe(1)
     expect((await memories(['--store', store, 'backup', 'a', 'b'])).exitCode).toBe(1)
     expect((await memories(['--store', store, 'backup', '--evil'])).exitCode).toBe(1)
+  })
+})
+
+// META.2 (C4): what each save path writes, read back from the row, through the real hooks/register.ts
+// over the real engine (the host of the knowledge specs; only the model is a stand-in, and it is off here).
+describe('META.2: the save paths write honest source, trust tier and veracity', () => {
+  const hosts: Host[] = []
+  const open = async (options: Record<string, unknown> = {}) => {
+    const host = await makeHost({ options: { extractionModel: 'off', ...options } })
+    hosts.push(host)
+    return host
+  }
+  afterAll(() => {
+    for (const host of hosts.splice(0)) host.dispose()
+  })
+
+  const COLUMNS = 'id, content, source, trust_tier, veracity, memory_type, valid_until, scope, author_type, metadata_json'
+  type Saved = { id: string; content: string; source: string; trust_tier: string; veracity: string; memory_type: string; valid_until: string | null; scope: string; author_type: string; metadata_json: string | null }
+  const rows = (host: Host) => {
+    const db = new Database(join(host.store, 'mnemopi.db'), { readonly: true })
+    try {
+      return db.query(`SELECT ${COLUMNS} FROM working_memory ORDER BY timestamp, id`).all() as Saved[]
+    } finally {
+      db.close()
+    }
+  }
+  const rowOf = (host: Host, content: string) => rows(host).find(row => row.content === content)!
+  const idOf = (reply: { result?: string }) => JSON.parse(String(reply.result).split('\nMnemosyne')[0]!).memory_id as string
+  const DAY = 86_400_000
+  /** Within a minute of `days` from now. */
+  const inDays = (value: string | null, days: number) => {
+    expect(value).not.toBeNull()
+    expect(Math.abs(Date.parse(value!) - (Date.now() + days * DAY))).toBeLessThan(60_000)
+  }
+
+  test('META.2.a1/a3: Claude\'s save is source claude-code, tier DERIVED, veracity unknown, kind as given, no expiry', async () => {
+    const host = await open()
+    await host.tool('memory_remember', { content: 'we use bun for every script here', kind: 'decision' })
+    expect(rowOf(host, 'we use bun for every script here')).toMatchObject({ source: 'claude-code', trust_tier: 'DERIVED', veracity: 'unknown', memory_type: 'decision', valid_until: null, scope: 'global', author_type: 'agent' })
+  })
+
+  test('META.2.a1/a3: a trigger-phrase save is source user, tier STATED, veracity stated; the next save is Claude\'s', async () => {
+    const host = await open({ rememberTerms: 'remember that' })
+    await host.prompt('remember that we deploy on fridays')
+    await host.tool('memory_remember', { content: 'we deploy on fridays only', kind: 'fact' })
+    await host.tool('memory_remember', { content: 'the second save of that turn', kind: 'fact' })
+    expect(rowOf(host, 'we deploy on fridays only')).toMatchObject({ source: 'user', trust_tier: 'STATED', veracity: 'stated', memory_type: 'fact', author_type: 'human', scope: 'global' })
+    expect(rowOf(host, 'the second save of that turn')).toMatchObject({ source: 'claude-code', trust_tier: 'DERIVED', veracity: 'unknown', author_type: 'agent' })
+  })
+
+  test('META.2.a2/a3: a context note expires in 14 days; expires_in_days sets it (1-365); other kinds have none; a bad value is refused', async () => {
+    const host = await open()
+    await host.tool('memory_remember', { content: 'the importer is half done today', kind: 'context' })
+    await host.tool('memory_remember', { content: 'the importer wrap up is set for next quarter', kind: 'context', expires_in_days: 30 })
+    await host.tool('memory_remember', { content: 'a fact that never expires on its own', kind: 'fact' })
+    await host.tool('memory_remember', { content: 'a note with no kind and no expiry' })
+    inDays(rowOf(host, 'the importer is half done today').valid_until, 14)
+    inDays(rowOf(host, 'the importer wrap up is set for next quarter').valid_until, 30)
+    expect(rowOf(host, 'a fact that never expires on its own').valid_until).toBeNull()
+    expect(rowOf(host, 'a note with no kind and no expiry').valid_until).toBeNull()
+    const before = rows(host).length
+    for (const expires_in_days of [0, 366, 1.5, '7', -1]) {
+      const refused = await host.tool('memory_remember', { content: 'a context note with a bad expiry', kind: 'context', expires_in_days })
+      expect(refused.deny).toContain('expires_in_days must be a whole number from 1 to 365')
+    }
+    expect(rows(host).length).toBe(before)
+    const edge = await host.tool('memory_remember', { content: 'the longest expiry allowed here', kind: 'context', expires_in_days: 365 })
+    expect(edge.deny).toBeUndefined()
+    inDays(rowOf(host, 'the longest expiry allowed here').valid_until, 365)
+  })
+
+  test('MODEL NB1/NB2 (b): re-saving identical text keeps scope and tier: a global row stays global, a per-project row stays channel', async () => {
+    for (const [options, input, scope] of [
+      [{}, {}, 'global'],
+      [{ scope: 'per-project' }, {}, 'channel'],
+      [{ scope: 'per-project' }, { global: true }, 'global'],
+    ] as const) {
+      const host = await open(options)
+      const content = `re-saving this note must not change its scope (${scope})`
+      await host.tool('memory_remember', { content, kind: 'fact', ...input })
+      const first = rowOf(host, content)
+      expect(first.scope).toBe(scope)
+      await host.tool('memory_remember', { content, kind: 'fact', ...input })
+      await host.tool('memory_remember', { content, ...input }) // no kind: the stored kind stays too
+      expect(rows(host).filter(row => row.content === content)).toHaveLength(1)
+      expect(rowOf(host, content)).toMatchObject({ id: first.id, scope, trust_tier: 'DERIVED', source: 'claude-code', memory_type: 'fact' })
+    }
+  })
+
+  test('META.2.a4 / (c): rows saved before v3 are not relabelled; only a row whose exact text is saved again takes the new path\'s values', async () => {
+    const host = await open()
+    // Two rows written the pre-v3 way, straight through the engine.
+    const old = async (content: string) => {
+      const reply = body((await engineCall(join(ROOT, 'engine', 'src', 'cli.ts'), host.store, 'global', [toolCall(1, 'mnemopi_remember', { content, source: 'imported', scope: 'global' })])).get(1))
+      return reply!.memory_id as string
+    }
+    await old('an older memory that stays exactly as it is')
+    await old('an older memory that is saved a second time')
+    const snapshot = (content: string) => rowOf(host, content)
+    const untouched = snapshot('an older memory that stays exactly as it is')
+    expect(untouched).toMatchObject({ source: 'imported', trust_tier: 'IMPORTED' })
+    // Other saves, an update of a different row and a kind-less save: none of them relabels it.
+    await host.tool('memory_remember', { content: 'a brand new memory saved after the old ones', kind: 'fact' })
+    expect(snapshot('an older memory that stays exactly as it is')).toEqual(untouched)
+    // Saving the exact text again is the same memory written again: it takes the new path's values.
+    await host.tool('memory_remember', { content: 'an older memory that is saved a second time', kind: 'fact' })
+    expect(snapshot('an older memory that is saved a second time')).toMatchObject({ source: 'claude-code', trust_tier: 'DERIVED', scope: 'global', memory_type: 'fact' })
+    expect(snapshot('an older memory that stays exactly as it is')).toEqual(untouched)
+  })
+
+  test('GUARD review finding 3 (a): a content update that is clean clears the old metadata.guard flag, and keeps the tags', async () => {
+    const host = await open({ guardMode: 'warn' })
+    const saved = await host.tool('memory_remember', { content: 'Today the importer was rewired to use the guard module', kind: 'fact', tags: ['ops'] })
+    const id = idOf(saved)
+    expect(JSON.parse(rowOf(host, 'Today the importer was rewired to use the guard module').metadata_json!)).toEqual({ tags: ['ops'], guard: ['G4'] })
+    const updated = await host.tool('memory_update', { memory_id: id, content: 'The importer uses the guard module for every save path.' })
+    expect(updated.deny).toBeUndefined()
+    expect(JSON.parse(rowOf(host, 'The importer uses the guard module for every save path.').metadata_json!)).toEqual({ tags: ['ops'] })
+    // A content update that is warned again sets the flag again.
+    await host.tool('memory_update', { memory_id: id, content: 'Today the importer was rewired to use the guard module again' })
+    expect(JSON.parse(rowOf(host, 'Today the importer was rewired to use the guard module again').metadata_json!)).toEqual({ tags: ['ops'], guard: ['G4'] })
+  })
+
+  test('META.2.a1: no hooks/ or bin/ file writes source: \'imported\' (bin/install-engine.ts is the one named exception)', async () => {
+    const files: string[] = []
+    for (const folder of ['hooks', 'bin']) for (const name of readdirSync(join(ROOT, folder))) if (name.endsWith('.ts')) files.push(join(folder, name))
+    // bin/install-engine.ts: its install-check probe saves one line to a throwaway temp store that is deleted afterwards; it is not a save path.
+    const found = files.filter(file => file !== join('bin', 'install-engine.ts') && /source:\s*['"]imported['"]/.test(readFileSync(join(ROOT, file), 'utf8')))
+    expect(found).toEqual([])
+    expect(files.length).toBeGreaterThan(10)
   })
 })

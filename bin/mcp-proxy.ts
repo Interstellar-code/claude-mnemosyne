@@ -6,8 +6,9 @@
 // project's facts to global, get reads any owner's row, export writes the whole
 // store anywhere, shared_* rows are deleted after 24 hours.
 //
-// Remember is pinned the way the plugin writes it: `source: 'imported'`, the
-// durable tier (any other source is deleted after 24 hours, DESIGN §5.2).
+// Remember is pinned the way C4 says an outside agent writes: source `mcp:<client>`, trust tier
+// EXTERNAL_WRITE, veracity unknown (a client never sets how far its save is trusted), and a scope that
+// keeps the row out of the engine's 24-hour trim (the trim spares every scope but 'session').
 // A client never picks a bank (it would move writes to <store>/banks/<x>) and
 // never writes metadata: only `tags`, cleaned by hooks/tags.ts, reach the
 // engine, as metadata.tags. A client names a memory's kind as `kind` (hooks/kinds.ts), sent as
@@ -26,7 +27,7 @@ import { activityLine, callOutcome, callText, TOOL_ACTIONS } from '../hooks/acti
 import type { ActivityAction } from '../hooks/activity-log'
 import { ENGINE_BUILD } from '../hooks/engine-build'
 import { admit } from '../hooks/guard'
-import { KIND_NAMES, kindProblem, withNoKindWarning } from '../hooks/kinds'
+import { expiresInDaysProblem, KIND_NAMES, kindProblem, validUntilFor, withNoKindWarning } from '../hooks/kinds'
 import { engineTool, mnemosyneStats, publicTool } from '../hooks/surface'
 import { cleanTags } from '../hooks/tags'
 import { appendActivity } from './activity'
@@ -42,6 +43,10 @@ const KIND_PROPERTY = {
   type: 'string',
   enum: KIND_NAMES,
   description: 'What kind of memory this is. On remember, without it the memory is saved as unknown.',
+}
+const EXPIRES_PROPERTY = {
+  type: 'integer',
+  description: 'Forget this memory after this many days (1 to 365). A context note expires after 14 days when this is not given.',
 }
 const CONFIRM_PROPERTY = {
   type: 'boolean',
@@ -194,7 +199,7 @@ void (async () => {
       // META.1: `kind` is the client's word for the engine's memory_type. An unknown kind is refused;
       // a missing one on remember is saved as 'unknown' with a one-line warning. A client's own
       // memory_type is dropped, so the kind list is the only way in.
-      const { bank: _bank, metadata: _metadata, tags, confirm: _confirm, kind, memory_type: _memoryType, ...args } = given
+      const { bank: _bank, metadata: _metadata, tags, confirm: _confirm, kind, memory_type: _memoryType, valid_until: _validUntil, ...args } = given
       if (TAGGED.has(name)) {
         const badKind = kindProblem(kind)
         if (badKind !== undefined) {
@@ -203,6 +208,16 @@ void (async () => {
         }
         if (kind !== undefined && kind !== null) args.memory_type = kind
         else if (name === 'memory_remember') noKind = true
+        if (name === 'memory_remember') {
+          const badDays = expiresInDaysProblem(args.expires_in_days)
+          if (badDays !== undefined) {
+            refuse(message.id, action, given, { code: -32602, message: badDays })
+            continue
+          }
+          // A context note fades after 14 days unless the call gives expires_in_days; the engine takes valid_until.
+          const validUntil = validUntilFor(kind, args.expires_in_days)
+          if (validUntil !== undefined) args.valid_until = validUntil
+        }
       }
       if (TAGGED.has(name) && tags !== undefined) {
         if (!Array.isArray(tags)) {
@@ -225,8 +240,9 @@ void (async () => {
         delete args.validator
         if (name === 'memory_update' && typeof args.content === 'string') args.validator = `mcp:${client}`.slice(0, 64)
       }
-      // A warned save is stored, flagged with the rule ids in metadata.guard.
+      // A warned save is stored, flagged with the rule ids in metadata.guard; a content update that is clean now clears an old flag.
       if (warned.length > 0) args.metadata = { ...(args.metadata as object | undefined), guard: [...new Set(warned.map(hit => hit.rule))] }
+      else if (name === 'memory_update' && typeof args.content === 'string') args.metadata = { ...(args.metadata as object | undefined), guard: null }
       if (action && message.id !== undefined) {
         pending.set(message.id, {
           action,
@@ -240,12 +256,15 @@ void (async () => {
       message.params.arguments = args
       if (name === 'memory_stats') statsIds.add(message.id)
       if (name === 'memory_remember') {
-        // An outside client never sets how far its save is trusted: no veracity, no trust tier (the plugin's own trigger save is the only 'stated').
+        // An outside client never sets how far its save is trusted: its own veracity and trust tier are dropped (the plugin's own trigger save is the only 'stated').
         delete args.veracity
         delete args.trust_tier
+        delete args.expires_in_days
         message.params.arguments = {
           ...args,
-          source: 'imported',
+          // C4: an outside agent's save, named by its client.
+          source: `mcp:${client}`,
+          trust_tier: 'EXTERNAL_WRITE',
           scope: args.scope === 'global' || isGlobalOwner ? 'global' : 'channel',
           // KNOWX.1.a3: an outside agent's save is an agent's, named by its client.
           author_id: client === 'unknown' ? 'unknown' : client,
@@ -266,7 +285,7 @@ function publicSchema(name: string, schema: Schema | undefined): Schema {
   const { bank: _bank, metadata: _metadata, memory_type: _memoryType, ...properties } = schema?.properties ?? {}
   return {
     ...schema,
-    properties: TAGGED.has(name) ? { ...properties, kind: KIND_PROPERTY, tags: TAGS_PROPERTY, confirm: CONFIRM_PROPERTY } : properties,
+    properties: TAGGED.has(name) ? { ...properties, kind: KIND_PROPERTY, ...(name === 'memory_remember' ? { expires_in_days: EXPIRES_PROPERTY } : {}), tags: TAGS_PROPERTY, confirm: CONFIRM_PROPERTY } : properties,
     ...(schema?.required ? { required: schema.required.filter(key => key !== 'bank' && key !== 'metadata') } : {}),
   }
 }

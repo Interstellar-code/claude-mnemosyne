@@ -54,3 +54,24 @@ export function withNoKindWarning(reply: string): string {
   }
   return `${reply}\nMnemosyne: ${NO_KIND_WARNING}`
 }
+
+// ---- expiry of a save (META.2) ----
+
+/** A 'context' note (project state) fades after this many days unless the call says otherwise. */
+export const CONTEXT_EXPIRY_DAYS = 14
+
+/** Why `expires_in_days` cannot be used (a whole number from 1 to 365), or undefined when it is fine or missing. */
+export function expiresInDaysProblem(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined
+  if (typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= 365) return undefined
+  return 'expires_in_days must be a whole number from 1 to 365.'
+}
+
+/**
+ * The `valid_until` a save gets: `expires_in_days` from now when the call gives it, else 14 days for kind
+ * 'context', else none (undefined). Assumes expiresInDaysProblem found nothing wrong.
+ */
+export function validUntilFor(kind: unknown, expiresInDays: unknown, now: number = Date.now()): string | undefined {
+  const days = typeof expiresInDays === 'number' ? expiresInDays : kind === 'context' ? CONTEXT_EXPIRY_DAYS : undefined
+  return days === undefined ? undefined : new Date(now + days * 86_400_000).toISOString()
+}

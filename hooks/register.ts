@@ -43,7 +43,7 @@ import { ENGINE_BUILD, SETUP_TIMEOUT_MS } from './engine-build'
 import { mnemosyneStats } from './surface'
 import { admit } from './guard'
 import type { GuardResult } from './guard'
-import { KIND_NAMES, kindProblem, withNoKindWarning } from './kinds'
+import { expiresInDaysProblem, KIND_NAMES, kindProblem, validUntilFor, withNoKindWarning } from './kinds'
 import { cleanTags } from './tags'
 import { openDashboard, stopDashboard } from './ui-launch'
 
@@ -111,6 +111,10 @@ const TOOLS = [
           description: '2 to 5 short lowercase topic tags for the fact, e.g. ["git", "ci"].',
         },
         kind: KIND_PROPERTY,
+        expires_in_days: {
+          type: 'integer',
+          description: 'Forget this memory after this many days (1 to 365). A context note expires after 14 days when this is not given.',
+        },
         confirm: CONFIRM_PROPERTY,
       },
       required: ['content'],
@@ -1096,14 +1100,17 @@ export const register: Register = (on, options) => {
         const isGlobal = !isPerProject || input.global === true
         // Tags are cleaned as the engine stores them (hooks/tags.ts); none left, no metadata.
         const tags = Array.isArray(input.tags) ? cleanTags(input.tags) : []
+        const validUntil = validUntilFor(input.kind, input.expires_in_days)
         return [
           'mnemopi_remember',
           {
             content: input.content,
             importance: clamp(input.importance, 0, 1, 0.5),
-            // `imported` is the engine's durable trust tier: any other source lands
-            // as STATED working memory, which the engine deletes after 24 hours.
-            source: 'imported',
+            // C4: Claude's own save. source and trust_tier say who wrote it; the trim spares it by scope
+            // (always explicit, so a re-save of the same text never lands as 'session'), not by a label.
+            source: 'claude-code',
+            trust_tier: 'DERIVED',
+            // veracity is left to the engine's default, 'unknown'.
             scope: isGlobal ? 'global' : 'channel',
             // Claude's own save: an agent wrote it (KNOWX.1.a3). A trigger save
             // overrides this with human + 'stated' in tool.call.
@@ -1111,6 +1118,8 @@ export const register: Register = (on, options) => {
             author_type: 'agent',
             // The kind goes to the engine as memory_type; none given, the engine stores 'unknown'.
             ...(typeof input.kind === 'string' ? { memory_type: input.kind } : {}),
+            // A context note fades after 14 days unless the call gives expires_in_days.
+            ...(validUntil === undefined ? {} : { valid_until: validUntil }),
             ...(tags.length > 0 ? { metadata: { tags } } : {}),
           },
         ] as const
@@ -1348,6 +1357,8 @@ export const register: Register = (on, options) => {
         if (tool === 'memory_remember') {
           const badKind = kindProblem(input.kind)
           if (badKind !== undefined) return { deny: `Mnemosyne: ${badKind}` }
+          const badDays = expiresInDaysProblem(input.expires_in_days)
+          if (badDays !== undefined) return { deny: `Mnemosyne: ${badDays}` }
         }
         if (tool === 'memory_update') {
           const refused = updateArgs(input)
@@ -1360,12 +1371,17 @@ export const register: Register = (on, options) => {
         if (tool === 'memory_update' && !(await isCurrent($, options))) return { deny: NOT_CURRENT }
         const [name, args] = engineArgs(tool, input)
         // The trigger save is the person's: human, with veracity 'stated'.
-        const withProvenance = provenance === undefined ? args : { ...args, ...provenance }
+        // C4: source 'user' and trust tier STATED besides the human author and veracity 'stated'.
+        const withProvenance = provenance === undefined ? args : { ...args, ...provenance, source: 'user', trust_tier: 'STATED' }
         // A warned save is stored, flagged with the rule ids in metadata.guard.
+        // A content update that now passes the guard clean clears an old flag (null removes the key through the metadata merge).
+        const clearsGuard = tool === 'memory_update' && typeof input.content === 'string' && warnIds.length === 0
         const sent: Record<string, unknown> =
           warnIds.length > 0
             ? { ...withProvenance, metadata: { ...(withProvenance as { metadata?: object }).metadata, guard: warnIds } }
-            : withProvenance
+            : clearsGuard
+              ? { ...withProvenance, metadata: { ...(withProvenance as { metadata?: object }).metadata, guard: null } }
+              : withProvenance
         const text = await call($, options, name, sent, as)
         // One warning line per hit, after the engine's reply; `reply` stays the engine's own text.
         const warnings = warnIds.length > 0 ? guard!.hits.map(hit => `\nMnemosyne guard warning: ${hit.message}`).join('') : ''

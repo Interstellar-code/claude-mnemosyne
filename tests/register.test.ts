@@ -126,10 +126,10 @@ test('remember runs the private engine against the private store, global bank', 
     PI_CONFIG_DIR: '.claude/mnemosyne/model-cache',
     MNEMOPI_NO_EMBEDDINGS: '1',
   })
-  // `imported`: the durable tier the engine's 24h working-memory trim skips.
+  // C4: Claude's own save is source 'claude-code', tier DERIVED, veracity left to the engine's 'unknown'; the scope (global) keeps it out of the 24 h trim.
   expect(request(run)).toEqual({
     name: 'mnemopi_remember',
-    arguments: { content: 'a durable test fact', importance: 0.5, source: 'imported', scope: 'global', author_id: 'claude-code', author_type: 'agent' },
+    arguments: { content: 'a durable test fact', importance: 0.5, source: 'claude-code', trust_tier: 'DERIVED', scope: 'global', author_id: 'claude-code', author_type: 'agent' },
   })
 })
 
@@ -167,7 +167,7 @@ test('META.1.a2: update takes kind as memory_type, alone or with content; an unk
   expect(request(runs[0]!).arguments).toEqual({ memory_id: 'm1', memory_type: 'context' })
   const both = await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1', content: 'the new text of it', kind: 'event' })
   expect(both.result).toBe('{"status":"updated"}')
-  expect(request(runs[1]!).arguments).toEqual({ memory_id: 'm1', content: 'the new text of it', memory_type: 'event', validator: 'claude-code' })
+  expect(request(runs[1]!).arguments).toEqual({ memory_id: 'm1', content: 'the new text of it', memory_type: 'event', metadata: { guard: null }, validator: 'claude-code' })
   const bad = await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1', kind: 'unknown' })
   expect(bad.deny).toContain('Mnemosyne: unknown kind')
   expect(runs.length).toBe(2)
@@ -566,7 +566,8 @@ test('memory_update runs mnemopi_update as the given owner, tags cleaned into me
       memory_id: 'm1',
       content: 'new text of the fact',
       importance: 1,
-      metadata: { tags: ['build', 'ci', 'a-very-long-tag-name-tha', 'x', 'y'] },
+      // A clean content update clears an old guard flag (null removes the key).
+      metadata: { tags: ['build', 'ci', 'a-very-long-tag-name-tha', 'x', 'y'], guard: null },
       validator: 'claude-code',
     },
   })
@@ -577,7 +578,7 @@ test('memory_update without tags sends no metadata; tags [] sends tags null', as
   await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1', content: 'only the text changes' })
   await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1', tags: [] })
 
-  expect(request(runs[0]!).arguments).toEqual({ memory_id: 'm1', content: 'only the text changes', validator: 'claude-code' })
+  expect(request(runs[0]!).arguments).toEqual({ memory_id: 'm1', content: 'only the text changes', metadata: { guard: null }, validator: 'claude-code' })
   expect(request(runs[1]!).arguments).toEqual({ memory_id: 'm1', metadata: { tags: null } })
   // no owner given: this project's (global here)
   expect(runs[0]!.init?.env?.MNEMOPI_SESSION_ID).toBe('global')
@@ -1044,7 +1045,8 @@ test('TAGS.1.a3: the engine call carries metadata {tags}, cleaned by hooks/tags.
   expect(request(runs[0]!).arguments).toEqual({
     content: 'a durable test fact',
     importance: 0.5,
-    source: 'imported',
+    source: 'claude-code',
+    trust_tier: 'DERIVED',
     scope: 'global',
     author_id: 'claude-code',
     author_type: 'agent',
@@ -1059,7 +1061,7 @@ test('TAGS.1.a4: a call without tags, with an empty or all-blank list, or with t
   await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'second plain fact', tags: [] })
   await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'third plain fact', tags: ['', '  ', 4] })
   await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'fourth plain fact', tags: 'git' })
-  for (const run of runs) expect(Object.keys(request(run).arguments).sort()).toEqual(['author_id', 'author_type', 'content', 'importance', 'scope', 'source'])
+  for (const run of runs) expect(Object.keys(request(run).arguments).sort()).toEqual(['author_id', 'author_type', 'content', 'importance', 'scope', 'source', 'trust_tier'])
   expect(runs.length).toBe(4)
 })
 
@@ -1803,7 +1805,7 @@ test('KNOWX.1.a3 and a7: a save line carries author_type and veracity; memory_up
   expect(line).toMatchObject({ author_type: 'human', veracity: 'stated' })
   // An update sends no provenance at all.
   const update = runs.flatMap(run => (run.init?.stdin ?? '').split('\n').filter(Boolean).map(text => JSON.parse(text))).find(call => call.params?.name === 'mnemopi_update')
-  expect(Object.keys(update.params.arguments).sort()).toEqual(['content', 'memory_id', 'validator'])
+  expect(Object.keys(update.params.arguments).sort()).toEqual(['content', 'memory_id', 'metadata', 'validator'])
 })
 
 test('KNOWX.2.a1: extractionModelOf defaults to haiku, takes a model id, and off turns it off', () => {
