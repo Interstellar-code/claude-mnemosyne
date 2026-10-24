@@ -33,14 +33,11 @@ import {
   type Candidate,
   coreSize,
   coreTarget,
-  DEMO_EVERY_MS,
   GLOW_LEVELS,
   glowLevel,
   type GlowLevel,
   readGlow,
   saveGlow,
-  demoKind,
-  demoTimerOn,
   enqueueSparks,
   eventStars,
   forgetMemory,
@@ -75,6 +72,7 @@ import {
   layoutFlight,
   layoutStep,
   linkFadeAt,
+  linksHint,
   linkFadeToApply,
   separateLabels,
   type LabelRect,
@@ -131,7 +129,12 @@ import {
   hasKnowledge,
   isHollow,
   KNOWLEDGE_KINDS,
+  KNOWLEDGE_MARK_COLOUR,
+  KNOWLEDGE_MARK_OPACITY,
+  KNOWLEDGE_MARK_SCALE,
   knowledgeCounts,
+  knowledgeMarked,
+  knowledgeOf,
   knowledgeNote,
   type KnowledgeKind,
   labelScale,
@@ -392,6 +395,8 @@ export function createMap(host: MapHost): MapView {
   let pending: string | null = null
   let visuals: Visual[] = []
   const starVisual = new Map<string, Visual>()
+  // A faint ring sprite per star that has knowledge, drawn in the star's own group.
+  const knowledgeMarks = new Map<string, Any>()
   const hubVisual = new Map<string, Visual>()
   const coreVisual = new Map<string, Visual>()
   let seen: MapState | null = null
@@ -427,14 +432,12 @@ export function createMap(host: MapHost): MapView {
   let hovered = ''
   let starfieldMade = false
   let lastSaid = ''
-  // Live: the graph's data, the strip, the sparks and the demo timer.
+  // Live: the graph's data, the strip and the sparks.
   let graphNodes: GraphNode[] = []
   let graphLinks: GraphLinkData[] = []
   let strip: StripRow[] = []
   const sparkPool = newSparkPool()
   let sparkSprites: Any[] = []
-  let demoPressed = false
-  let demoTimer: ReturnType<typeof setInterval> | 0 = 0
   let stopEvents: (() => void) | null = null
   let chain: Promise<void> = Promise.resolve()
   const fetching = new Set<string>()
@@ -803,6 +806,9 @@ export function createMap(host: MapHost): MapView {
     byId<HTMLInputElement>('map-layer-recall').checked = state.layerRecall
     byId<HTMLInputElement>('map-layer-write').checked = state.layerWrite
     renderKnowledgeControls(g)
+    const linksLine = byId('map-links-hint')
+    linksLine.textContent = linksHint(g, state)
+    linksLine.hidden = linksLine.textContent === ''
     rotate.setAttribute('aria-pressed', String(state.rotating))
     byId('map-found').textContent = found === null ? '' : foundText(state.query, found)
     const pillText = liveLabel(state, connected)
@@ -810,7 +816,6 @@ export function createMap(host: MapHost): MapView {
     byId('map-live-state').parentElement?.classList.toggle('is-on', pillText === 'On')
     byId('map-live-state').parentElement?.setAttribute('aria-pressed', String(state.live))
     renderStrip()
-    syncDemoTimer()
   }
 
   /** Knowledge moons and the five chips: disabled until the page holds some knowledge, then live. */
@@ -891,6 +896,10 @@ export function createMap(host: MapHost): MapView {
   function addStar(g: Galaxy, star: GalaxyStar, i: number) {
     const v = addVisual(`s:${star.id}`, star.position, i, { kind: 'star', key: star.id, owner: star.owner, sprite: makeSprite(isHollow(star.recalls) ? 'ring' : 'glow', starColour(g, i, state.colourBy)), size: starSize(star.recalls), label: null, labelBase: [1, 1], labelOffset: 0 })
     starVisual.set(star.id, v)
+    if (knowledgeOf(g, star.id).length > 0) {
+      const mark = makeSprite('ring', KNOWLEDGE_MARK_COLOUR)
+      if (mark) knowledgeMarks.set(star.id, mark)
+    }
     graphLinks.push({ source: `h:${star.topic}`, target: `s:${star.id}`, kind: 'spoke', owner: star.owner, star: star.id })
   }
 
@@ -907,6 +916,11 @@ export function createMap(host: MapHost): MapView {
         v.label.material?.dispose?.()
       }
     }
+    for (const mark of knowledgeMarks.values()) {
+      mark.parent?.remove(mark)
+      mark.material?.dispose?.()
+    }
+    knowledgeMarks.clear()
   }
 
   /** The graph data and a visual per node for a galaxy; threads and bridges are the library's links. */
@@ -952,6 +966,8 @@ export function createMap(host: MapHost): MapView {
       if (v === undefined || three === null) return null
       const group = new three.Object3D()
       if (v.sprite) group.add(v.sprite)
+      const mark = v.kind === 'star' ? knowledgeMarks.get(v.key) : undefined
+      if (mark) group.add(mark)
       if (v.label) {
         v.label.position.set(0, v.labelOffset, 0)
         group.add(v.label)
@@ -1452,6 +1468,11 @@ export function createMap(host: MapHost): MapView {
         const scale = visualScale(v.kind, v.size, blend, v.pulse)
         v.sprite.scale.set(scale, scale, 1)
         v.sprite.material.opacity = Math.min(1, v.alpha) * v.fade
+        const mark = v.kind === 'star' ? knowledgeMarks.get(v.key) : undefined
+        if (mark) {
+          mark.scale.set(scale * KNOWLEDGE_MARK_SCALE, scale * KNOWLEDGE_MARK_SCALE, 1)
+          mark.material.opacity = knowledgeMarked(galaxy, state, v.key) ? KNOWLEDGE_MARK_OPACITY * Math.min(1, v.alpha) * v.fade : 0
+        }
       }
       if (v.label) {
         const base = labelBaseY(v, galaxy, blend)
@@ -1778,25 +1799,7 @@ export function createMap(host: MapHost): MapView {
     )
   }
 
-  /** Demo events play on their own every 3.4 s while Live is On and a Simulate button was pressed in this page load. */
-  function syncDemoTimer() {
-    const want = shown && demoTimerOn(state, demoPressed)
-    if (want && demoTimer === 0) {
-      demoTimer = setInterval(() => {
-        const kind = demoKind(state, Math.random)
-        if (kind === null || galaxy === null) return
-        const event = simulate(kind, simulationInput(galaxy))
-        if (event) enqueueEvent(event)
-      }, DEMO_EVERY_MS)
-    } else if (!want && demoTimer !== 0) {
-      clearInterval(demoTimer)
-      demoTimer = 0
-    }
-  }
-
   function simulateOnce(kind: 'recall' | 'write') {
-    demoPressed = true
-    syncDemoTimer()
     if (galaxy === null) return
     const event = simulate(kind, simulationInput(galaxy))
     if (event) enqueueEvent(event)
@@ -1946,7 +1949,7 @@ export function createMap(host: MapHost): MapView {
   // Simulate a recall / write play demo events: they never call the server and never reach the Activity tab.
   byId<HTMLButtonElement>('map-sim-recall').addEventListener('click', () => simulateOnce('recall'))
   byId<HTMLButtonElement>('map-sim-write').addEventListener('click', () => simulateOnce('write'))
-  // The Live pill is also the switch for the demo timer (On / Paused).
+  // The Live pill switches live updates (On / Paused).
   const pill = byId('map-live-state').parentElement
   if (pill) {
     pill.setAttribute('role', 'button')
@@ -2121,7 +2124,6 @@ export function createMap(host: MapHost): MapView {
         else graph.pauseAnimation()
         graph.controls().autoRotate = state.rotating && shown
       }
-      syncDemoTimer()
       if (next) {
         lastFrame = performance.now()
         if (failed) void loadGalaxy()

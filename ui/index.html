@@ -62,6 +62,7 @@
         <label class="toggle"><input id="map-bridges" type="checkbox" checked><span class="toggle-text">Bridges</span><span class="swatch sw-gold" aria-hidden="true"></span></label>
         <label class="toggle" title="Turn on embeddings, then run /mnemosyne-embed apply"><input id="map-similar" type="checkbox" disabled><span class="toggle-text">Similar memories</span><span class="swatch sw-cyan" aria-hidden="true"></span></label>
         <label class="toggle" title="Needs knowledge extraction"><input id="map-moons" type="checkbox" disabled><span class="toggle-text">Knowledge moons</span><span class="swatch-dots" aria-hidden="true"><span class="lg-dot d-moon-blue"></span><span class="lg-dot d-moon-pink"></span><span class="lg-dot d-moon-green"></span></span></label>
+        <p id="map-links-hint" class="muted small" hidden></p>
       </section>
 
       <section class="rail-card" aria-labelledby="map-know-title">
@@ -136,7 +137,7 @@
           <div class="legend-row"><dt><span class="lg"><span class="lg-bar sw-cyan"></span></span>Cyan link</dt><dd>Similar memories, found from embeddings.</dd></div>
           <div class="legend-row"><dt><span class="lg"><span class="lg-dot d-core"></span></span>Claude core</dt><dd>The white star in the centre: where recalls and saves start.</dd></div>
           <div class="legend-row"><dt><span class="lg"><span class="lg-dot d-spark-recall"></span><span class="lg-dot d-spark-write"></span><span class="lg-dot d-spark-forget"></span></span>Sparks</dt><dd>Gold is a recall, teal is a save or an update, red is a forget.</dd></div>
-          <div class="legend-row"><dt><span class="lg"><span class="lg-dot d-moon-blue"></span><span class="lg-dot d-moon-pink"></span><span class="lg-dot d-moon-green"></span></span>Moons</dt><dd>Knowledge extracted from a memory, orbiting its star.</dd></div>
+          <div class="legend-row"><dt><span class="lg"><span class="lg-dot d-moon-blue"></span><span class="lg-dot d-moon-pink"></span><span class="lg-dot d-moon-green"></span></span>Moons</dt><dd>Knowledge extracted from a memory, orbiting its star once you click it. A faint wide ring marks a star that has some.</dd></div>
         </dl>
       </section>
     </section>

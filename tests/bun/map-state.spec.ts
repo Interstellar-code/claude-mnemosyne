@@ -34,9 +34,6 @@ import {
   coreSize,
   appName,
   coreTarget,
-  DEMO_EVERY_MS,
-  demoKind,
-  demoTimerOn,
   enqueueSparks,
   eventStars,
   forgetMemory,
@@ -124,6 +121,9 @@ import {
   type GalaxyReply,
   DIM_NO_KNOWLEDGE,
   hasKnowledge,
+  knowledgeMarked,
+  KNOWLEDGE_MARK_OPACITY,
+  linksHint,
   LINE_CHECKS,
   KIND_LABELS,
   CHIP_LABELS,
@@ -1418,7 +1418,7 @@ describe('LIVE.2: sparks and pulses', () => {
   })
 })
 
-describe('LIVE.3: the live strip, the layers and the demo timer', () => {
+describe('LIVE.3: the live strip and the layers', () => {
   test('LIVE.3.a2: a row has the time, the kind badge, a sentence with the topic and project, the app and the demo mark', () => {
     const g = freshGalaxy()
     const row = stripRow(g, event('recall', ['m1', 'm3']), 2)
@@ -1466,21 +1466,10 @@ describe('LIVE.3: the live strip, the layers and the demo timer', () => {
     expect(layerOn(noRecall, 'forget')).toBe(true)
   })
 
-  test('LIVE.3.a3: a demo event plays every 3.4 s only while Live is On and a Simulate button was pressed in this page load', () => {
-    expect(DEMO_EVERY_MS).toBe(3400)
+  test('LIVE.3.a3: the Live pill toggles live updates, and two presses restore the state', () => {
     const on = calm()
-    expect(demoTimerOn(on, false)).toBe(false)
-    expect(demoTimerOn(on, true)).toBe(true)
-    expect(demoTimerOn(toggleLive(on), true)).toBe(false)
     expect(toggleLive(toggleLive(on))).toEqual(on)
-    // Reduced motion starts Live paused.
-    expect(demoTimerOn(initialState({ reducedMotion: true }), true)).toBe(false)
-    // The draw: recall 3 in 5, write 2 in 5, among the layers that are on.
-    const draws = [0, 0.19, 0.59, 0.61, 0.8].map(r => demoKind(on, () => r))
-    expect(draws).toEqual(['recall', 'recall', 'recall', 'write', 'write'])
-    expect(demoKind(toggleLayer(on, 'recall'), () => 0)).toBe('write')
-    expect(demoKind(toggleLayer(on, 'write'), () => 0.99)).toBe('recall')
-    expect(demoKind(toggleLayer(toggleLayer(on, 'write'), 'recall'), () => 0)).toBeNull()
+    expect(toggleLive(on).live).toBe(false)
   })
 
   test('LIVE.3.a4: Simulate makes demo events from the galaxy the page holds, with no server in reach', () => {
@@ -1741,6 +1730,25 @@ describe('MOON: moons on a clicked star and the knowledge filter', () => {
     expect(toggleMoons(toggleMoons(select('few'))).moons).toBe(true)
     // 0 knowledge rows: none.
     expect(moonRows(galaxy, select('bare'))).toEqual([])
+  })
+
+  test('MOON.hint: a faint ring marks the stars with knowledge, and a line under Links says to click a star', () => {
+    expect(KNOWLEDGE_MARK_OPACITY).toBeGreaterThan(0)
+    expect(KNOWLEDGE_MARK_OPACITY).toBeLessThan(0.5)
+    // Ringed: a star with knowledge, while moons are on and it is not the selected one.
+    expect(knowledgeMarked(galaxy, base(), ids.few!)).toBe(true)
+    expect(knowledgeMarked(galaxy, base(), ids.bare!)).toBe(false)
+    expect(knowledgeMarked(galaxy, select('few'), ids.few!)).toBe(false)
+    expect(knowledgeMarked(galaxy, select('few'), ids.many!)).toBe(true)
+    expect(knowledgeMarked(galaxy, toggleMoons(base()), ids.few!)).toBe(false)
+    // The line: moons only, both, Meaning (its similar links show anyway), a selected star, everything off.
+    expect(linksHint({ ...galaxy, meaning: false }, base())).toBe('Click a star to see its knowledge moons. A faint ring marks the stars that have knowledge.')
+    const embedded = { ...galaxy, meaning: true }
+    expect(linksHint(embedded, base())).toBe('Click a star to see its similar links and knowledge moons. A faint ring marks the stars that have knowledge.')
+    expect(linksHint(embedded, { ...base(), layout: 'meaning' })).toBe('Click a star to see its knowledge moons. A faint ring marks the stars that have knowledge.')
+    expect(linksHint(embedded, toggleMoons(base()))).toBe('Click a star to see its similar links.')
+    expect(linksHint(embedded, select('few'))).toBe('')
+    expect(linksHint({ ...galaxy, meaning: false }, toggleMoons(base()))).toBe('')
   })
 
   test('MOON.1.a1: orbit radius 18, 0.45 rad/s, still under reduced motion; MOON.1.a2: colours, sizes and pulse are constants', () => {

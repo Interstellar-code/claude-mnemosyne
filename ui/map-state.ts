@@ -677,6 +677,30 @@ export function selectMoon(state: MapState, galaxy: Galaxy, id: string): MapStat
 
 export const toggleMoons = (state: MapState): MapState => ({ ...state, moons: !state.moons })
 
+/** A faint ring marks a star that has knowledge (so has moons to show) while Knowledge moons is on and the star is not the selected one. */
+export const KNOWLEDGE_MARK_OPACITY = 0.3
+/** The ring's size: this many times the star's own. */
+export const KNOWLEDGE_MARK_SCALE = 1.9
+export const KNOWLEDGE_MARK_COLOUR = '#E8E2FF'
+
+export function knowledgeMarked(galaxy: Galaxy, state: MapState, id: string): boolean {
+  return state.moons && state.selected !== id && knowledgeOf(galaxy, id).length > 0
+}
+
+/**
+ * The line under Links while no star is selected: which links only a selected star shows, in plain words.
+ * Similar links count outside Meaning (Meaning draws them for every star); moons count once the page holds knowledge.
+ * Empty while a star is selected or neither applies.
+ */
+export function linksHint(galaxy: Galaxy, state: MapState): string {
+  if (state.selected !== null) return ''
+  const similar = galaxy.meaning && state.similar && state.layout !== 'meaning'
+  const moons = state.moons && hasKnowledge(galaxy)
+  if (!similar && !moons) return ''
+  const what = similar && moons ? 'its similar links and knowledge moons' : similar ? 'its similar links' : 'its knowledge moons'
+  return `Click a star to see ${what}.${moons ? ' A faint ring marks the stars that have knowledge.' : ''}`
+}
+
 /**
  * Where moon i of n is: on a circle of radius 18 around the star, flattened to 0.45 in height, turning at 0.45 rad/s.
  * Under reduced motion the moons STAND STILL (speed 0): orchestrator decision, matching the mockup
@@ -1560,7 +1584,7 @@ export const toggleLive = (state: MapState): MapState => ({ ...state, live: !sta
 
 /** The strip lists the events since the page was opened, not the log: its empty line says so. */
 export const STRIP_EMPTY_TEXT = 'No new activity since you opened this page.'
-/** The Live pill switches live updates (and the demo timer) on or off. */
+/** The Live pill switches live updates on or off. */
 export const LIVE_PILL_TITLE = 'Press to switch live updates on or off'
 
 /** A frame re-picks under the pointer when it moved, or while it rests on the map with moons shown (they orbit under it). */
@@ -1614,18 +1638,6 @@ export const stripRows = (rows: readonly StripRow[], state: MapState): StripRow[
 
 /** A new row at the front, the store capped at 12. */
 export const pushRow = (rows: readonly StripRow[], row: StripRow): StripRow[] => [row, ...rows].slice(0, STRIP_STORE)
-
-/** Whether a demo event plays on its own now: Live is On and a Simulate button was pressed in this page load. */
-export const demoTimerOn = (state: MapState, pressed: boolean) => state.live && pressed
-export const DEMO_EVERY_MS = 3400
-
-/** The demo timer's draw: recall three times in five, write two, among the layers that are on; null when both are off. */
-export function demoKind(state: MapState, random: () => number): 'recall' | 'write' | null {
-  const kinds: ('recall' | 'write')[] = []
-  if (state.layerRecall) kinds.push('recall', 'recall', 'recall')
-  if (state.layerWrite) kinds.push('write', 'write')
-  return kinds.length === 0 ? null : kinds[Math.floor(random() * kinds.length)]!
-}
 
 // ---- Sparks: our own glow points, flying from the Claude core to a star ----
 

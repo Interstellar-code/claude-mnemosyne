@@ -558,7 +558,7 @@ button.toggle-name:focus-visible { outline: 2px solid var(--accent); outline-off
 .sim-item { flex-direction: column; align-items: flex-start; gap: 2px; padding: 6px 8px; }
 .sim-text { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sim-meta { display: flex; align-items: center; gap: 6px; }
-#map-meaning-hint { margin: 6px 0 0; line-height: 1.4; }
+#map-meaning-hint, #map-links-hint { margin: 6px 0 0; line-height: 1.4; }
 
 .map-centre { flex: 999 1 560px; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
 
