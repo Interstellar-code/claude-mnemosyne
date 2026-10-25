@@ -1515,13 +1515,14 @@ export const register: Register = (on, options) => {
         if (guard?.verdict === 'block') {
           return { deny: `Mnemosyne: the save guard blocked this save (${guardIds.join(', ')}). ${guard.hits.map(hit => hit.message).join(' ')}` }
         }
+        // Before the warnings, so a warned save without a kind is fixed in one retry, not two.
+        if (missingKind) return { deny: `Mnemosyne: ${missingKindMessage('memory_remember')}` }
         if (nearRefused) {
           return { deny: `Mnemosyne: the save guard warns about this save (G3). ${nearDuplicateMessage(near)} Or resend with confirm: true if a new memory is wanted.` }
         }
         if (needsConfirm) {
           return { deny: `Mnemosyne: the save guard warns about this save (${guardIds.join(', ')}). ${guard!.hits.map(hit => hit.message).join(' ')} Resend with confirm: true if the save is wanted.` }
         }
-        if (missingKind) return { deny: `Mnemosyne: ${missingKindMessage('memory_remember')}` }
         if (tool === 'memory_remember') {
           const badKind = kindProblem(input.kind)
           if (badKind !== undefined) return { deny: `Mnemosyne: ${badKind}` }
@@ -1669,7 +1670,7 @@ export const register: Register = (on, options) => {
       // The save itself is Claude's memory_remember call, logged with origin tool.
       logged.push({ action: 'remember', origin: 'trigger', text: remember, ok: true })
       context.push(
-        `The user invoked a Mnemosyne remember trigger. Call mcp__mnemosyne__memory_remember exactly once with a self-contained version of:\n${remember}\nIf it is a secret or credential, do not save it; say so.`,
+        `The user invoked a Mnemosyne remember trigger. Call mcp__mnemosyne__memory_remember exactly once, with a kind, with a self-contained version of:\n${remember}\nIf it is a secret or credential, do not save it; say so.`,
       )
     }
     // A recall term is the reason for the recall, even on a first prompt.
