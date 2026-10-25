@@ -111,17 +111,19 @@ export interface NearMatch {
 }
 
 /**
- * The matches that are real near-duplicates. A match that is the save's own text again (score about 1 and the
- * same first 80 characters) is the engine's dedupe: the same memory written again, no new row, so no warning.
+ * The matches that are real near-duplicates. A match that is the save's own text again (score about 1 and the same
+ * first 80 characters) in the saver's own rows is the engine's dedupe: the same memory written again, no new row, so
+ * no warning. The same text in another owner's row is a different memory (the engine's dedupe is per owner), so it
+ * is still a near-duplicate; without the saver's owner nothing is skipped.
  */
-export function nearMatchesOf(matches: unknown, content: string): NearMatch[] {
+export function nearMatchesOf(matches: unknown, content: string, saver?: string): NearMatch[] {
   if (!Array.isArray(matches)) return []
   const out: NearMatch[] = []
   for (const item of matches) {
     const m = item as Partial<NearMatch> | null
     if (m === null || typeof m !== 'object' || typeof m.id !== 'string' || typeof m.owner !== 'string' || typeof m.score !== 'number' || typeof m.preview !== 'string') continue
     if (m.score < NEAR_DUPLICATE_SCORE) continue
-    if (m.score >= 0.9999 && m.preview === content.slice(0, 80)) continue
+    if (m.score >= 0.9999 && m.preview === content.slice(0, 80) && saver !== undefined && m.owner === saver) continue
     out.push({ id: m.id, owner: m.owner, score: m.score, preview: m.preview })
   }
   return out

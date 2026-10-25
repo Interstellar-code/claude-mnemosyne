@@ -13,7 +13,8 @@ import type { Vocabulary } from './vocab'
 
 // The model, how many calls run at once, and what one call may take.
 export const BACKFILL_MODEL = 'haiku'
-export const BACKFILL_CONCURRENCY = 4
+// VOCAB.4: two at a time (was four), so a long run stays under the rate limit.
+export const BACKFILL_CONCURRENCY = 2
 export const BACKFILL_MAX_TOKENS = 120
 export const BACKFILL_CALL_TIMEOUT_MS = 60_000
 
@@ -33,7 +34,7 @@ export const BACKFILL_TEXT_LIMIT = 4000
 // Where the dry run saves its proposals, in <root>.
 export const PROPOSALS_FILE = 'tags-proposed.json'
 // apply asks bin/memories.ts for this many rows per process.
-export const GET_BATCH = 40
+export const GET_BATCH = 20
 
 /**
  * A stored memory as bin/memories.ts prints it. `sha256` is of the whole stored
@@ -41,7 +42,18 @@ export const GET_BATCH = 40
  * false when metadata_json holds something other than a JSON object (broken
  * JSON, a list, a string): a metadata merge cannot be trusted on such a row.
  */
-export type Row = { id: string; owner: string; metadata: Record<string, unknown> | null; content: string; sha256: string; taggable: boolean }
+export type Row = {
+  id: string
+  owner: string
+  metadata: Record<string, unknown> | null
+  content: string
+  sha256: string
+  taggable: boolean
+  /** The row's memory_type; absent when bin/memories.ts did not say (then no kind is ever written). */
+  kind?: string | null
+  /** sha256 of the row's stored tags; absent when bin/memories.ts did not say. */
+  tagsSha256?: string
+}
 
 /**
  * A memory id as the proposals and `bin/memories.ts get` take it: at most 64
@@ -52,7 +64,16 @@ export type Row = { id: string; owner: string; metadata: Record<string, unknown>
 export const isProposalId = (id: unknown): id is string => typeof id === 'string' && /^[^\u0000-\u001f\u007f]{1,64}$/.test(id) && !id.startsWith('-')
 
 /** One proposal: never the memory's text, only its hash. */
-export type Proposal = { id: string; owner: string; tags: string[]; sha256: string; kind?: Kind; candidates?: string[] }
+export type Proposal = {
+  id: string
+  owner: string
+  tags: string[]
+  sha256: string
+  kind?: Kind
+  candidates?: string[]
+  /** A retag proposal: sha256 of the tags the row had at the dry run, so apply can tell they changed since. */
+  prior?: string
+}
 
 /** At most this many admitted tags are listed in the prompt. */
 export const TAG_LIST_LIMIT = 150
@@ -195,7 +216,16 @@ export function parseRows(stdout: string): Row[] {
     if (!isObject(row) || typeof row.id !== 'string' || typeof row.owner !== 'string' || typeof row.content !== 'string' || typeof row.sha256 !== 'string' || typeof row.taggable !== 'boolean') {
       throw new Error(`bin/memories.ts row ${i} has the wrong shape`)
     }
-    return { id: row.id, owner: row.owner, metadata: isObject(row.metadata) ? row.metadata : null, content: row.content, sha256: row.sha256, taggable: row.taggable }
+    return {
+      id: row.id,
+      owner: row.owner,
+      metadata: isObject(row.metadata) ? row.metadata : null,
+      content: row.content,
+      sha256: row.sha256,
+      taggable: row.taggable,
+      ...(typeof row.kind === 'string' || row.kind === null ? { kind: row.kind } : {}),
+      ...(typeof row.tagsSha256 === 'string' ? { tagsSha256: row.tagsSha256 } : {}),
+    }
   })
 }
 
@@ -207,6 +237,14 @@ export function hasTags(metadata: Record<string, unknown> | null | undefined): b
 
 /** The saved proposals file's text. Rejects with a reason when it is not a proposals file. */
 export function parseProposals(text: string): Proposal[] {
+  return parseProposalsFile(text).proposals
+}
+
+/** What the proposals file proposes: new tags for untagged rows ('tags'), or tags and kinds for every row ('retag'). */
+export type ProposalsMode = 'tags' | 'retag'
+
+/** The proposals file: its mode and proposals. Rejects with a reason when it is not a proposals file. */
+export function parseProposalsFile(text: string): { mode: ProposalsMode; proposals: Proposal[] } {
   let value: unknown
   try {
     value = JSON.parse(text)
@@ -215,7 +253,7 @@ export function parseProposals(text: string): Proposal[] {
   }
   const list = isObject(value) ? value.proposals : undefined
   if (!Array.isArray(list)) throw new Error('the proposals file has no proposals list')
-  return list.map((item, i) => {
+  const proposals = list.map((item, i): Proposal => {
     if (!isObject(item) || !isProposalId(item.id) || typeof item.owner !== 'string' || !item.owner || typeof item.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(item.sha256) || !Array.isArray(item.tags)) {
       throw new Error(`proposal ${i} has the wrong shape`)
     }
@@ -225,11 +263,13 @@ export function parseProposals(text: string): Proposal[] {
     // The kind and the proposed new tags travel with the proposal; anything else is dropped.
     const kind = isKind(item.kind) ? item.kind : undefined
     const candidates = Array.isArray(item.candidates) ? [...new Set(item.candidates.map(normalizeTag).filter((tag): tag is string => tag !== undefined))].slice(0, 1) : []
-    return { id: item.id, owner: item.owner, tags, sha256: item.sha256, ...(kind === undefined ? {} : { kind }), ...(candidates.length === 0 ? {} : { candidates }) }
+    const prior = typeof item.prior === 'string' && /^[0-9a-f]{64}$/.test(item.prior) ? item.prior : undefined
+    return { id: item.id, owner: item.owner, tags, sha256: item.sha256, ...(kind === undefined ? {} : { kind }), ...(candidates.length === 0 ? {} : { candidates }), ...(prior === undefined ? {} : { prior }) }
   })
+  return { mode: isObject(value) && value.mode === 'retag' ? 'retag' : 'tags', proposals }
 }
 
-export type Verdict = 'write' | 'gone' | 'tagged' | 'untaggable' | 'changed'
+export type Verdict = 'write' | 'gone' | 'tagged' | 'untaggable' | 'changed' | 'same'
 
 /**
  * What apply does with one proposal, given the row as it is now (undefined: no
@@ -242,6 +282,61 @@ export function judge(proposal: Proposal, row: Row | undefined): Verdict {
   if (!row.taggable) return 'untaggable'
   if (row.sha256 !== proposal.sha256 || row.owner !== proposal.owner) return 'changed'
   return 'write'
+}
+
+/** True when the row has no kind yet, so a retag may fill one: never an existing kind, and never when the row's kind is unknown to us. */
+export const kindIsOpen = (row: Row) => row.kind === null || row.kind === '' || row.kind === 'unknown'
+
+/** The tags a row has now, as a list of strings. */
+export const tagsOf = (row: Row): string[] => (Array.isArray(row.metadata?.tags) ? (row.metadata.tags as unknown[]).filter((tag): tag is string => typeof tag === 'string') : [])
+
+/**
+ * What apply does with one proposal of a retag, given the row as it is now. A retag replaces tags that exist, so it
+ * writes only when the row is still what the dry run saw: the same text and owner (sha256) and the same tags
+ * (`prior`). A gone row, one that cannot take a metadata merge, one that changed, and one already as proposed
+ * ('same': same tags, and no kind to fill) are never written.
+ */
+export function judgeRetag(proposal: Proposal, row: Row | undefined): Verdict {
+  if (row === undefined) return 'gone'
+  if (!row.taggable) return 'untaggable'
+  if (row.sha256 !== proposal.sha256 || row.owner !== proposal.owner) return 'changed'
+  if (proposal.prior === undefined || row.tagsSha256 !== proposal.prior) return 'changed'
+  const now = tagsOf(row)
+  const same = now.length === proposal.tags.length && now.every((tag, i) => tag === proposal.tags[i])
+  if (same && !(proposal.kind !== undefined && kindIsOpen(row))) return 'same'
+  return 'write'
+}
+
+// ---- A rate-limited call waits and tries again ----
+
+/** How long to wait before each retry of a rate-limited call; its length is how many retries there are. */
+export const RATE_LIMIT_WAITS_MS: readonly number[] = [2000, 5000, 10_000]
+
+/** True when a model reply is the API saying "too many requests". */
+export const isRateLimited = (reply: { isAnswered: boolean; reason?: unknown; status?: unknown; error?: unknown }) =>
+  !reply.isAnswered && reply.reason === 'api-error' && (reply.status === 429 || reply.error === 'rate_limit')
+
+/**
+ * Makes the call; while the reply is rate-limited, waits (`sleep`) and makes it again, up to one retry for each of
+ * `waits`. The last reply is returned, so a call still rate-limited after the retries counts as failed. A wait that
+ * rejects (the run was aborted) ends the loop with the reply it has.
+ */
+export async function withRateLimitRetry<T extends { isAnswered: boolean; reason?: unknown; status?: unknown; error?: unknown }>(
+  call: () => Promise<T>,
+  sleep: (ms: number) => Promise<void>,
+  waits: readonly number[] = RATE_LIMIT_WAITS_MS,
+): Promise<T> {
+  let reply = await call()
+  for (const wait of waits) {
+    if (!isRateLimited(reply)) break
+    try {
+      await sleep(wait)
+    } catch {
+      break
+    }
+    reply = await call()
+  }
+  return reply
 }
 
 /**

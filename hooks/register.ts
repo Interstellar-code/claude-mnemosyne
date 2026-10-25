@@ -26,14 +26,18 @@ import {
   extractionOff,
   GET_BATCH,
   judge,
-  parseProposals,
+  judgeRetag,
+  kindIsOpen,
+  parseProposalsFile,
   parseRows,
   parseTags,
   pool,
   PROPOSALS_FILE,
+  withRateLimitRetry,
   systemPrompt,
   tagContext,
   tagPrompt,
+  tagsOf,
 } from './backfill'
 import type { Proposal, Row } from './backfill'
 import { extractMany, extractOne, reasonLine, storedCount } from './knowledge'
@@ -552,12 +556,13 @@ async function call($: EngineInterface, options: PluginOptions, name: string, ar
  * needs the matches for its metadata.guard and, in strict mode, may have to be refused.)
  */
 async function nearDuplicates($: EngineInterface, options: PluginOptions, content: string, as?: string): Promise<NearMatch[]> {
+  const saver = as ?? (await owner($, options).catch(() => GLOBAL_OWNER))
   try {
     if (!(await isInstalled($, options)) || !(await isCurrent($, options)) || !(await embeddingsOn($, options))) return []
     const [answer] = await runAll($, options, [['mnemopi_similar', { content, top_k: 3, min_score: NEAR_DUPLICATE_SCORE }]], as)
     if (typeof answer !== 'string') return []
     const reply = JSON.parse(answer) as { embeddings?: unknown; matches?: unknown }
-    return reply.embeddings === true ? nearMatchesOf(reply.matches, content) : []
+    return reply.embeddings === true ? nearMatchesOf(reply.matches, content, saver) : []
   } catch {
     return []
   }
@@ -703,7 +708,7 @@ async function record($: EngineInterface, options: PluginOptions, entries: reado
 
 // ---- /mnemosyne-tags: the one-time tag backfill (hooks/backfill.ts, bin/memories.ts) ----
 
-const TAGS_USAGE = 'Usage: /mnemosyne-tags (a dry run: Haiku proposes tags, nothing is written) or /mnemosyne-tags apply (writes the saved proposals).'
+const TAGS_USAGE = 'Usage: /mnemosyne-tags (a dry run: Haiku proposes tags for the untagged memories, nothing is written), /mnemosyne-tags retag (a dry run: tags and a kind for every memory, from the vocabulary, nothing is written) or /mnemosyne-tags apply (backs the store up, then writes the saved proposals).'
 // apply's one engine process per owner may carry every proposal of that owner.
 const APPLY_TIMEOUT_MS = 120_000
 const MEMORIES_TIMEOUT_MS = 60_000
@@ -783,14 +788,15 @@ async function recordCandidates($: EngineInterface, root: string, tags: readonly
 }
 
 // The dry run: one Haiku call per untagged memory, saved as proposals; no memory changes.
-export async function tagsDryRun($: EngineInterface, options: PluginOptions, signal: AbortSignal) {
+export async function tagsDryRun($: EngineInterface, options: PluginOptions, signal: AbortSignal, retag = false) {
   const { root } = await paths($, options)
-  const listed = parseRows(await memoriesCli($, options, ['list', '--untagged']))
+  // A retag proposes for every memory, tagged or not (VOCAB.4); the plain dry run only for the untagged.
+  const listed = parseRows(await memoriesCli($, options, ['list', retag ? '--all' : '--untagged']))
   // A row whose metadata is not a JSON object cannot take a metadata merge: no model call for it, and it is named below.
   const rows = listed.filter(row => row.taggable)
   const blocked = listed.filter(row => !row.taggable)
   const blockedNote = blocked.length === 0 ? '' : `${plural(blocked.length, 'memory', 'memories')} cannot be tagged (their metadata is not a JSON object): ${blocked.slice(0, 10).map(row => row.id).join(', ')}${blocked.length > 10 ? ', …' : ''}.`
-  if (rows.length === 0) return [blocked.length === 0 ? 'Every memory already has tags; nothing to propose.' : 'No memory can be tagged; nothing to propose.', blockedNote].filter(Boolean).join('\n')
+  if (rows.length === 0) return [blocked.length === 0 ? (retag ? 'There are no memories to retag.' : 'Every memory already has tags; nothing to propose.') : 'No memory can be tagged; nothing to propose.', blockedNote].filter(Boolean).join('\n')
   const proposed: (Proposal | undefined)[] = rows.map(() => undefined)
   const skipped = { failed: 0, empty: 0, aborted: 0 }
   let firstError = ''
@@ -799,14 +805,17 @@ export async function tagsDryRun($: EngineInterface, options: PluginOptions, sig
   if (extractionOff(model)) return 'Knowledge extraction is off (extractionModel in the plugin settings is "off"): no tags proposed. Set extractionModel, then try again.'
   // VOCAB.3: the tagger chooses from the vocabulary when there is one; without it the tags are free-form.
   const vocabulary = await readVocabulary($, root)
+  // A retag exists to bring tags onto the vocabulary; without one it would only swap free-form tags for others.
+  if (retag && vocabulary === undefined) return `A retag needs the tag vocabulary (${root}/vocabulary.json): create it once with  bun ${slashes($.plugin.root)}/bin/vocab.ts --store <your store folder> init  and check it with  list , then run /mnemosyne-tags retag again.`
   const system = systemPrompt(vocabulary)
   progress($, `tagging 0/${rows.length}`)
   await pool(rows, BACKFILL_CONCURRENCY, signal, async (row, i) => {
     try {
       // The memory's text goes in the prompt as a quoted string, to a model that is told it is data.
-      const reply = await $.model.complete(
-        { model, system, prompt: tagPrompt(row.content), maxTokens: BACKFILL_MAX_TOKENS, timeoutMs: BACKFILL_CALL_TIMEOUT_MS },
-        { signal },
+      // A rate-limited call waits and tries again (up to three times) before it counts as failed.
+      const reply = await withRateLimitRetry(
+        () => $.model.complete({ model, system, prompt: tagPrompt(row.content), maxTokens: BACKFILL_MAX_TOKENS, timeoutMs: BACKFILL_CALL_TIMEOUT_MS }, { signal }),
+        ms => $.clock.sleep(ms, { signal }),
       )
       if (!reply.isAnswered) {
         if (reply.reason === 'aborted') skipped.aborted++
@@ -817,7 +826,7 @@ export async function tagsDryRun($: EngineInterface, options: PluginOptions, sig
       } else {
         const { tags, kind, candidates } = parseTags(reply.text, vocabulary === undefined ? {} : tagContext(vocabulary, row.owner))
         if (tags.length === 0) skipped.empty++
-        else proposed[i] = { id: row.id, owner: row.owner, tags, sha256: row.sha256, ...(kind === undefined ? {} : { kind }), ...(candidates.length === 0 ? {} : { candidates }) }
+        else proposed[i] = { id: row.id, owner: row.owner, tags, sha256: row.sha256, ...(kind === undefined ? {} : { kind }), ...(candidates.length === 0 ? {} : { candidates }), ...(retag && row.tagsSha256 !== undefined ? { prior: row.tagsSha256 } : {}) }
       }
     } catch (err) {
       skipped.failed++
@@ -831,7 +840,7 @@ export async function tagsDryRun($: EngineInterface, options: PluginOptions, sig
   }
   const proposals = proposed.filter((p): p is Proposal => p !== undefined)
   const byId = new Map(rows.map(row => [row.id, row]))
-  const lines = proposals.map(p => `${p.id}  ${p.owner}  [${p.tags.join(', ')}]${p.kind === undefined ? '' : `  ${p.kind}`}  ${Array.from(byId.get(p.id)?.content ?? '').slice(0, 60).join('').replace(/\s+/g, ' ')}`)
+  const lines = proposals.map(p => `${p.id}  ${p.owner}  [${p.tags.join(', ')}]${p.kind === undefined ? '' : `  ${p.kind}`}${retag ? `  (was: [${tagsOf(byId.get(p.id)!).join(', ')}]${byId.get(p.id)!.kind && byId.get(p.id)!.kind !== 'unknown' ? `, kind ${byId.get(p.id)!.kind} stays` : ''})` : ''}  ${Array.from(byId.get(p.id)?.content ?? '').slice(0, 60).join('').replace(/\s+/g, ' ')}`)
   const notes = [
     skipped.empty > 0 ? `${plural(skipped.empty, 'memory', 'memories')} got no usable tags` : '',
     skipped.failed > 0 ? `${plural(skipped.failed, 'call')} failed (${firstError})` : '',
@@ -841,16 +850,16 @@ export async function tagsDryRun($: EngineInterface, options: PluginOptions, sig
     progress($, 'tagging found nothing')
     return `No tags were proposed for ${plural(rows.length, 'memory', 'memories')}${notes.length > 0 ? `: ${notes.join('; ')}` : ''}. Nothing was saved.${blockedNote ? `\n${blockedNote}` : ''}`
   }
-  await memoriesCli($, options, ['save', `${root}/${PROPOSALS_FILE}`], JSON.stringify({ proposals }))
+  await memoriesCli($, options, ['save', `${root}/${PROPOSALS_FILE}`], JSON.stringify({ proposals, ...(retag ? { mode: 'retag' } : {}) }))
   progress($, `${proposals.length} tag proposals saved`)
   return [
-    `Proposed tags for ${proposals.length} of ${plural(rows.length, 'untagged memory', 'untagged memories')}; no memory was changed.`,
+    retag ? `Proposed tags and kinds for ${proposals.length} of ${plural(rows.length, 'memory', 'memories')} (a retag); no memory was changed.` : `Proposed tags for ${proposals.length} of ${plural(rows.length, 'untagged memory', 'untagged memories')}; no memory was changed.`,
     ...lines,
     ...(notes.length > 0 ? [`Skipped: ${notes.join('; ')}.`] : []),
     ...(blockedNote ? [blockedNote] : []),
     ...(proposals.some(p => p.candidates !== undefined) ? [`New tags proposed (counted when you apply; a tag proposed for ${AUTO_ADMIT_COUNT} memories is admitted): ${[...new Set(proposals.flatMap(p => p.candidates ?? []))].join(', ')}.`] : []),
     ...(vocabulary === undefined ? [`No tag vocabulary yet, so these tags are free-form. Create it once with: bun ${slashes($.plugin.root)}/bin/vocab.ts --store <your store folder> init`] : []),
-    `Saved to ${root}/${PROPOSALS_FILE} (ids, owners, tags and a hash of each text; never the text). Run /mnemosyne-tags apply to write them.`,
+    `Saved to ${root}/${PROPOSALS_FILE} (ids, owners, tags and a hash of each text; never the text). Run /mnemosyne-tags apply to write them.${retag ? ' Apply backs the store up first, replaces tags only on memories unchanged since this run, and fills a kind only where a memory has none.' : ''}`,
   ].join('\n')
 }
 
@@ -858,6 +867,8 @@ export async function tagsDryRun($: EngineInterface, options: PluginOptions, sig
 
 // One engine process answers a batch of prompts or stores; the longest wait is the batch's.
 const KNOWLEDGE_ENGINE_TIMEOUT_MS = 120_000
+// The knowledge backfill keeps its own batch size (40 memories to a prompt batch and to a read); VOCAB.4 lowered only the tag backfill's.
+const KNOWLEDGE_BATCH = 40
 
 // The memory id a remember/update reply names, or undefined when it names none.
 function savedId(reply: string): string | undefined {
@@ -1005,8 +1016,8 @@ export async function knowledgeDryRun($: EngineInterface, options: PluginOptions
   // A pending entry whose memory is gone (or is not that owner's) waits for nothing: apply only drops it.
   const alive = new Map<string, string>()
   const pendingIds = [...new Set(pending.map(entry => entry.id))]
-  for (let at = 0; at < pendingIds.length; at += GET_BATCH) {
-    for (const row of parseRows(await memoriesCli($, options, ['get', ...pendingIds.slice(at, at + GET_BATCH)]))) alive.set(row.id, row.owner)
+  for (let at = 0; at < pendingIds.length; at += KNOWLEDGE_BATCH) {
+    for (const row of parseRows(await memoriesCli($, options, ['get', ...pendingIds.slice(at, at + KNOWLEDGE_BATCH)]))) alive.set(row.id, row.owner)
   }
   for (const entry of pending) bump(entry.owner, alive.get(entry.id) === entry.owner ? 'pending' : 'forgotten')
   if (perOwner.size === 0) return 'Every memory has knowledge, and no pending entry waits. Nothing to do.'
@@ -1024,7 +1035,7 @@ export async function knowledgeDryRun($: EngineInterface, options: PluginOptions
 /**
  * /mnemosyne-knowledge apply: finishes the pending entries first (each from its
  * current content and current sha256, so a changed memory is redone), then the
- * older memories with no knowledge. Per owner, in batches of GET_BATCH memories:
+ * older memories with no knowledge. Per owner, in batches of KNOWLEDGE_BATCH memories:
  * one engine process for the prompts, one memories call writing the pending
  * entries, the model calls in a pool, one engine process for the stores, one
  * memories call removing the finished entries. Never edits or deletes a
@@ -1054,12 +1065,15 @@ export async function knowledgeApply($: EngineInterface, options: PluginOptions,
     targets.push({ id: row.id, owner: row.owner })
   }
   if (targets.length === 0) return 'Nothing to extract: every memory has knowledge, and no pending entry waits.'
+  // C9: the backup comes before the first model call and write; a failed backup stops the run.
+  const stopped = await backupFirst($, options, '/mnemosyne-knowledge apply')
+  if (stopped !== undefined) return stopped
 
-  // Per owner, in the order found, GET_BATCH memories to a batch.
+  // Per owner, in the order found, KNOWLEDGE_BATCH memories to a batch.
   const byOwner = new Map<string, typeof targets>()
   for (const target of targets) byOwner.set(target.owner, [...(byOwner.get(target.owner) ?? []), target])
   const batches: { owner: string; list: typeof targets }[] = []
-  for (const [who, list] of byOwner) for (let at = 0; at < list.length; at += GET_BATCH) batches.push({ owner: who, list: list.slice(at, at + GET_BATCH) })
+  for (const [who, list] of byOwner) for (let at = 0; at < list.length; at += KNOWLEDGE_BATCH) batches.push({ owner: who, list: list.slice(at, at + KNOWLEDGE_BATCH) })
 
   progress($, `extracting 0/${targets.length}`)
   let called = 0
@@ -1134,8 +1148,11 @@ export async function tagsApply($: EngineInterface, options: PluginOptions, sign
   const file = `${root}/${PROPOSALS_FILE}`
   if (!(await $.fs.stat(file).then(() => true, () => false))) return 'No saved proposals: run /mnemosyne-tags (the dry run) first.'
   let proposals: Proposal[]
+  let retag = false
   try {
-    proposals = parseProposals(await $.fs.read(file))
+    const saved = parseProposalsFile(await $.fs.read(file))
+    proposals = saved.proposals
+    retag = saved.mode === 'retag'
   } catch (err) {
     return `The saved proposals cannot be used (${(err as Error).message}): run /mnemosyne-tags again.`
   }
@@ -1145,7 +1162,7 @@ export async function tagsApply($: EngineInterface, options: PluginOptions, sign
   if (stopped !== undefined) return stopped
   const byOwner = new Map<string, Proposal[]>()
   for (const proposal of proposals) byOwner.set(proposal.owner, [...(byOwner.get(proposal.owner) ?? []), proposal])
-  const counts = { gone: 0, tagged: 0, untaggable: 0, changed: 0 }
+  const counts = { gone: 0, tagged: 0, untaggable: 0, changed: 0, same: 0 }
   let written = 0
   let failed = 0
   let notReached = 0
@@ -1167,14 +1184,16 @@ export async function tagsApply($: EngineInterface, options: PluginOptions, sign
     }
     const list: Proposal[] = []
     for (const proposal of proposed) {
-      const verdict = judge(proposal, current.get(proposal.id))
+      // A retag replaces tags that exist, so it judges by the tags the row had at the dry run too (VOCAB.4).
+      const verdict = (retag ? judgeRetag : judge)(proposal, current.get(proposal.id))
       if (verdict === 'write') list.push(proposal)
       else counts[verdict]++
     }
     checked += proposed.length
     if (list.length === 0) continue
     let ownerError = ''
-    const requests: EngineRequest[] = list.map(p => ['mnemopi_update', { memory_id: p.id, metadata: { tags: p.tags } }])
+    // mnemopi_update with metadata.tags and, in a retag, a kind only where the row has none; never content, importance, source or trust tier.
+    const requests: EngineRequest[] = list.map(p => ['mnemopi_update', { memory_id: p.id, metadata: { tags: p.tags }, ...(retag && p.kind !== undefined && kindIsOpen(current.get(p.id)!) ? { memory_type: p.kind } : {}) }])
     const answers = await runAll($, options, requests, id, APPLY_TIMEOUT_MS).catch(err => requests.map(() => err as Error))
     const done = list.filter((_, i) => {
       const answer = answers[i]
@@ -1204,8 +1223,10 @@ export async function tagsApply($: EngineInterface, options: PluginOptions, sign
   progress($, `${plural(written, 'memory', 'memories')} tagged`)
   const counted = await recordCandidates($, root, offered)
   return [
-    `Tagged ${plural(written, 'memory', 'memories')} of ${proposals.length} proposed.`,
-    `Skipped: ${counts.gone} gone, ${counts.tagged} already tagged, ${counts.untaggable} cannot be tagged (metadata is not a JSON object), ${counts.changed} changed since the dry run.`,
+    retag ? `Retagged ${plural(written, 'memory', 'memories')} of ${proposals.length} proposed.` : `Tagged ${plural(written, 'memory', 'memories')} of ${proposals.length} proposed.`,
+    retag
+      ? `Skipped: ${counts.gone} gone, ${counts.same} already as proposed, ${counts.untaggable} cannot be tagged (metadata is not a JSON object), ${counts.changed} changed since the dry run (text or tags).`
+      : `Skipped: ${counts.gone} gone, ${counts.tagged} already tagged, ${counts.untaggable} cannot be tagged (metadata is not a JSON object), ${counts.changed} changed since the dry run.`,
     ...(failed > 0 ? [`${plural(failed, 'update')} failed (${firstError}).`] : []),
     ...(notReached > 0 ? [`Stopped early: ${plural(notReached, 'memory', 'memories')} not reached; run /mnemosyne-tags apply again to finish.`] : []),
     ...counted,
@@ -1374,13 +1395,13 @@ export const register: Register = (on, options) => {
   // The tag backfill: no argument is a dry run (the only mode that calls a model); apply writes the saved proposals.
   on('command.run', { command: 'mnemosyne-tags' }, async ($, e, next) => {
     const mode = e.args.trim().toLowerCase()
-    if (mode !== '' && mode !== 'apply') return { text: TAGS_USAGE }
+    if (mode !== '' && mode !== 'apply' && mode !== 'retag') return { text: TAGS_USAGE }
     const bun = await $.process.run(['bun', '--version']).catch(() => null)
     if (bun?.exitCode !== 0) return { text: 'The tag backfill needs Bun on PATH: https://bun.sh' }
     try {
       if (!(await isInstalled($, options))) return { text: 'The tag backfill needs the engine: run /mnemosyne-setup first.' }
       if (!(await isCurrent($, options))) return { text: 'The Mnemosyne engine is out of date (the backfill needs memory_update): run /mnemosyne-setup, then try again.' }
-      return { text: mode === 'apply' ? await tagsApply($, options, next.signal) : await tagsDryRun($, options, next.signal) }
+      return { text: mode === 'apply' ? await tagsApply($, options, next.signal) : await tagsDryRun($, options, next.signal, mode === 'retag') }
     } catch (err) {
       return { text: `Mnemosyne tag backfill failed: ${(err as Error).message}` }
     }
@@ -1413,6 +1434,11 @@ export const register: Register = (on, options) => {
       const { cli, store } = await paths($, options)
       if (!(await embeddingsOn($, options))) {
         return { text: 'Embeddings are off: set the embeddings option to on (or run /mnemosyne-setup on macOS arm64 to download the model), then try again.' }
+      }
+      // C9: apply and rebuild write vectors (rebuild wipes them first), so the store is backed up first; a failed backup stops the run.
+      if (mode !== '') {
+        const stopped = await backupFirst($, options, `/mnemosyne-embed ${mode}`)
+        if (stopped !== undefined) return { text: stopped }
       }
       // Run the engine's own reembed command with the same local-only pins the hooks send.
       const ran = await $.process.run(['bun', cli, 'reembed', ...(mode === '' ? [] : [mode])], {

@@ -1,6 +1,7 @@
 // Claude Mnemosyne — a read-only look at the store, for the tag backfill (plan
 // phase TAGS). A hook cannot read SQLite, so /mnemosyne-tags runs this file:
 //   bun bin/memories.ts --store <dir> list --untagged   untagged memories, as JSON
+//   bun bin/memories.ts --store <dir> list --all        every memory, as JSON (what a retag proposes for)
 //   bun bin/memories.ts --store <dir> get <id>...       those memories, as JSON
 //   bun bin/memories.ts save <root>/tags-proposed.json  the proposals on stdin, saved 0600
 //   bun bin/memories.ts --store <dir> backup [<root>]    a VACUUM INTO copy of the store in <root>/backups (C9)
@@ -43,7 +44,18 @@ export const hasTagSql = (column = 'metadata_json') =>
 export const untaggedSql = (column = 'metadata_json') =>
   `NOT EXISTS (SELECT 1 FROM json_each(${tagsSql(column)}) WHERE json_each.type = 'text' AND json_each.value <> '')`
 
-export type StoredRow = { id: string; owner: string; metadata: Record<string, unknown> | null; content: string; sha256: string; taggable: boolean }
+export type StoredRow = {
+  id: string
+  owner: string
+  metadata: Record<string, unknown> | null
+  content: string
+  sha256: string
+  taggable: boolean
+  /** The row's memory_type ('unknown' when none was ever given), so a retag can fill a kind but never overwrite one. */
+  kind: string | null
+  /** sha256 of the row's tags as stored (JSON of the list; `[]` when none), so a retag can tell that the tags changed after its dry run. */
+  tagsSha256: string
+}
 
 export const sha256 = (text: string) => createHash('sha256').update(text, 'utf8').digest('hex')
 
@@ -56,7 +68,7 @@ export function openReadOnly(store: string): Database | null {
   return db
 }
 
-type Raw = { id: string; owner: string | null; content: string | null; metadata_json: string | null }
+type Raw = { id: string; owner: string | null; content: string | null; metadata_json: string | null; memory_type: string | null }
 
 function shape(raw: Raw): StoredRow {
   let metadata: Record<string, unknown> | null = null
@@ -71,15 +83,32 @@ function shape(raw: Raw): StoredRow {
     }
   }
   const content = raw.content ?? ''
-  return { id: raw.id, owner: raw.owner ?? '', metadata, content: Array.from(content).slice(0, BACKFILL_TEXT_LIMIT).join(''), sha256: sha256(content), taggable }
+  const stored = Array.isArray(metadata?.tags) ? (metadata.tags as unknown[]).filter((tag): tag is string => typeof tag === 'string') : []
+  return {
+    id: raw.id,
+    owner: raw.owner ?? '',
+    metadata,
+    content: Array.from(content).slice(0, BACKFILL_TEXT_LIMIT).join(''),
+    sha256: sha256(content),
+    taggable,
+    kind: raw.memory_type,
+    tagsSha256: sha256(JSON.stringify(stored)),
+  }
 }
 
-const COLUMNS = 'id, session_id AS owner, content, metadata_json'
+const COLUMNS = 'id, session_id AS owner, content, metadata_json, memory_type'
 
 /** Every memory with no tags, in a steady order (owner, saved time, id). */
 export function listUntagged(db: Database | null): StoredRow[] {
   if (db === null) return []
   const rows = db.query(`SELECT ${COLUMNS} FROM working_memory WHERE ${untaggedSql()} ORDER BY session_id, timestamp, id`).all() as Raw[]
+  return rows.map(shape)
+}
+
+/** Every memory, tagged or not, in the same steady order: what a retag proposes for. */
+export function listAll(db: Database | null): StoredRow[] {
+  if (db === null) return []
+  const rows = db.query(`SELECT ${COLUMNS} FROM working_memory ORDER BY session_id, timestamp, id`).all() as Raw[]
   return rows.map(shape)
 }
 
@@ -113,9 +142,11 @@ export function proposalsText(input: string): string {
     // The kind (one of hooks/kinds.ts) and the one proposed new tag travel with the proposal; never any text.
     const kind = isKind(item.kind) ? item.kind : undefined
     const candidates = Array.isArray(item.candidates) ? [...new Set(item.candidates.map(normalizeTag).filter((tag): tag is string => tag !== undefined))].slice(0, 1) : []
-    return { id: item.id, owner: item.owner, tags, sha256: item.sha256, ...(kind === undefined ? {} : { kind }), ...(candidates.length === 0 ? {} : { candidates }) }
+    // A retag proposal also holds the hash of the tags the row had at the dry run (never the tags' text).
+    const prior = typeof item.prior === 'string' && /^[0-9a-f]{64}$/.test(item.prior) ? item.prior : undefined
+    return { id: item.id, owner: item.owner, tags, sha256: item.sha256, ...(kind === undefined ? {} : { kind }), ...(candidates.length === 0 ? {} : { candidates }), ...(prior === undefined ? {} : { prior }) }
   })
-  return `${JSON.stringify({ version: 1, created: new Date().toISOString(), proposals }, null, 2)}\n`
+  return `${JSON.stringify({ version: 1, ...(value?.mode === 'retag' ? { mode: 'retag' } : {}), created: new Date().toISOString(), proposals }, null, 2)}\n`
 }
 
 /** Saves `text` at `file` (named tags-proposed.json): a new 0600 file renamed over the old one. */
@@ -335,11 +366,14 @@ async function main(argv: readonly string[]) {
     if (rest.length === 1 && rest[0] === '--untagged') {
       if (!store) throw new Error('--store <dir> is required')
       process.stdout.write(`${JSON.stringify(listUntagged(openReadOnly(store)))}\n`)
+    } else if (rest.length === 1 && rest[0] === '--all') {
+      if (!store) throw new Error('--store <dir> is required')
+      process.stdout.write(`${JSON.stringify(listAll(openReadOnly(store)))}\n`)
     } else if (rest.length === 1 && rest[0] === '--no-knowledge') {
       if (!store) throw new Error('--store <dir> is required')
       process.stdout.write(`${JSON.stringify(listNoKnowledge(openReadOnly(store)))}\n`)
     } else {
-      throw new Error('usage: --store <dir> list --untagged | --store <dir> list --no-knowledge')
+      throw new Error('usage: --store <dir> list --untagged | --store <dir> list --all | --store <dir> list --no-knowledge')
     }
   } else if (command === 'get') {
     if (!store) throw new Error('--store <dir> is required')
