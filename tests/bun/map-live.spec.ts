@@ -3,7 +3,7 @@
 import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { demoId, RECALL_HITS, simulate, toMapEvent, topicOf, WRITE_MIX } from '../../ui/map-live'
+import { demoId, drawsOnMap, noduleFor, RECALL_HITS, simulate, toMapEvent, topicOf, WRITE_MIX } from '../../ui/map-live'
 import type { GalaxyLike } from '../../ui/map-live'
 import { ROOT } from './helpers'
 
@@ -164,4 +164,22 @@ describe('EVT.2: the demo source', () => {
     expect(topicOf({ id: 'm', tags: ['', 3, ' veg '] })).toBe('veg')
     expect(demoId(seeded(5))).toMatch(/^demo-[0-9a-f]{16}$/)
   })
+})
+
+test('MAPX.5: an event finds its nodule by exact source, then mcp:<client>, else the sun\'s centre', () => {
+  const sources = ['claude-code', 'mcp:cursor', 'import:doc']
+  expect(noduleFor('claude-code', sources)).toBe('claude-code')
+  expect(noduleFor('cursor', sources)).toBe('mcp:cursor')
+  expect(noduleFor('mcp:cursor', sources)).toBe('mcp:cursor')
+  expect(noduleFor('dashboard', sources)).toBeNull()
+  expect(noduleFor('claude-code', [])).toBeNull()
+  // The exact source wins over the mcp: form.
+  expect(noduleFor('cursor', ['cursor', 'mcp:cursor'])).toBe('cursor')
+})
+
+test('MAPX.5: the dashboard\'s own recall draws nothing, every other event draws', () => {
+  expect(drawsOnMap({ kind: 'recall', client: 'dashboard' })).toBe(false)
+  expect(drawsOnMap({ kind: 'recall', client: 'claude-code' })).toBe(true)
+  expect(drawsOnMap({ kind: 'forget', client: 'dashboard' })).toBe(true)
+  expect(drawsOnMap({ kind: 'save', client: 'dashboard' })).toBe(true)
 })

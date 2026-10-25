@@ -68,6 +68,22 @@ export function toMapEvent(line: Record<string, unknown>): MapEvent | null {
   }
 }
 
+/**
+ * The writer nodule an event's client belongs to (plan MAPX.5, risk 9): the source that
+ * equals the client, else `mcp:<client>`, else null, which the scene draws from the sun's centre.
+ */
+export function noduleFor(client: string, sources: readonly string[]): string | null {
+  if (sources.includes(client)) return client
+  const outside = `mcp:${client}`
+  return sources.includes(outside) ? outside : null
+}
+
+/**
+ * Whether the map draws an event at all. The dashboard's own Find logs a recall (client
+ * 'dashboard'); searching must not light the map, so that line draws nothing (risk 10).
+ */
+export const drawsOnMap = (event: Pick<MapEvent, 'kind' | 'client'>): boolean => !(event.kind === 'recall' && event.client === 'dashboard')
+
 /** A topic's name as the galaxy groups it: the first non-empty string tag, else Untagged. */
 export function topicOf(memory: GalaxyMemoryLike): string {
   for (const tag of memory.tags ?? []) {
