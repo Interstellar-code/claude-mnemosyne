@@ -1533,6 +1533,10 @@ banks. Claims marked *verified* were observed directly; the rest are marked as
 inference where they appear. Re-probed on 2026-10-20 with `pi-mnemopi` 18.12.3:
 remember, owner-scoped recall, owner-only forget and stats behave the same.
 
+## v0.8.4: the Galaxy page placement
+
+The Galaxy layout follows the mockup's placement: the map runs to the right edge with the Bodies strip under it, and one full-width row holds Details beside Live activity (no right column). The two Simulate buttons moved into Live activity and draw on the solar scene; the Glow card shows only for Timeline and Meaning; the Bodies strip is tall enough for both rows of chips. No data, contract or engine change.
+
 ## v0.8.3: the solar-system map
 
 The Map tab is rebuilt as a solar system (MAPX.1 to MAPX.11). `README.md` describes the view; this section records the contracts and the port.
