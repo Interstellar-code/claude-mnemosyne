@@ -36,6 +36,14 @@ const NODE_MODULES = join(ROOT, 'node_modules')
 // What the page imports from the bundle: nothing else is exported.
 const ENTRY = `export { default as ForceGraph3D } from '3d-force-graph'
 export { default as SpriteText } from 'three-spritetext'
+export {
+  Scene, PerspectiveCamera, WebGLRenderer, Group, Mesh, Points, Line, LineLoop, Sprite,
+  SphereGeometry, BoxGeometry, CylinderGeometry, TorusGeometry, RingGeometry, BufferGeometry, BufferAttribute,
+  MeshBasicMaterial, MeshStandardMaterial, LineBasicMaterial, PointsMaterial, SpriteMaterial,
+  CanvasTexture, Color, Vector2, Vector3, Raycaster, PointLight, AmbientLight,
+  AdditiveBlending, NormalBlending, DoubleSide, SRGBColorSpace
+} from 'three'
+export { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 export { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js'
 export { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js'
 export { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js'
@@ -274,6 +282,39 @@ export declare class UnrealBloomPass implements PassLike {
   setSize(width: number, height: number): void
   dispose(): void
 }
+export declare class Scene { constructor(...args: any[]); [key: string]: any }
+export declare class PerspectiveCamera { constructor(fov?: number, aspect?: number, near?: number, far?: number); [key: string]: any }
+export declare class WebGLRenderer { constructor(params?: { canvas?: HTMLCanvasElement; antialias?: boolean; [key: string]: any }); domElement: HTMLCanvasElement; setSize(width: number, height: number, updateStyle?: boolean): void; setPixelRatio(ratio: number): void; setClearColor(color: number, alpha?: number): void; dispose(): void; [key: string]: any }
+export declare class Group { constructor(...args: any[]); [key: string]: any }
+export declare class Mesh { constructor(geometry?: any, material?: any); [key: string]: any }
+export declare class Points { constructor(geometry?: any, material?: any); [key: string]: any }
+export declare class Line { constructor(geometry?: any, material?: any); [key: string]: any }
+export declare class LineLoop { constructor(geometry?: any, material?: any); [key: string]: any }
+export declare class Sprite { constructor(material?: any); [key: string]: any }
+export declare class SphereGeometry { constructor(radius?: number, widthSegments?: number, heightSegments?: number); [key: string]: any }
+export declare class BoxGeometry { constructor(...args: any[]); [key: string]: any }
+export declare class CylinderGeometry { constructor(...args: any[]); [key: string]: any }
+export declare class TorusGeometry { constructor(...args: any[]); [key: string]: any }
+export declare class RingGeometry { constructor(...args: any[]); [key: string]: any }
+export declare class BufferGeometry { constructor(); [key: string]: any; setFromPoints(points: any[]): any; setAttribute(name: string, attr: any): void }
+export declare class BufferAttribute { constructor(array: any, itemSize: number); [key: string]: any }
+export declare class MeshBasicMaterial { constructor(params?: any); [key: string]: any }
+export declare class MeshStandardMaterial { constructor(params?: any); [key: string]: any }
+export declare class LineBasicMaterial { constructor(params?: any); [key: string]: any }
+export declare class PointsMaterial { constructor(params?: any); [key: string]: any }
+export declare class SpriteMaterial { constructor(params?: any); [key: string]: any }
+export declare class CanvasTexture { constructor(canvas: any); [key: string]: any }
+export declare class Color { constructor(...args: any[]); [key: string]: any; r: number; g: number; b: number }
+export declare class Vector2 { constructor(x?: number, y?: number); x: number; y: number; [key: string]: any }
+export declare class Vector3 { constructor(x?: number, y?: number, z?: number); clone(): Vector3; multiplyScalar(s: number): Vector3; set(x: number, y: number, z: number): Vector3; add(v: Vector3): Vector3; [key: string]: any }
+export declare class Raycaster { constructor(); [key: string]: any; setFromCamera(coords: any, camera: any): void; params: any }
+export declare class PointLight { constructor(...args: any[]); [key: string]: any }
+export declare class AmbientLight { constructor(...args: any[]); [key: string]: any }
+export declare const AdditiveBlending: number
+export declare const NormalBlending: number
+export declare const DoubleSide: number
+export declare const SRGBColorSpace: string
+export declare class OrbitControls { constructor(camera: any, domElement: any); [key: string]: any; target: Vector3; enableDamping: boolean; autoRotateSpeed: number; minDistance: number; maxDistance: number }
 export declare class OutputPass implements PassLike {
   constructor()
   enabled: boolean
@@ -421,7 +462,7 @@ export async function buildMapLib(): Promise<Built> {
     bytes,
     gzip_bytes: gzipBytes,
     sha256: sha256(bundle),
-    exports: ['ForceGraph3D', 'SpriteText', 'EffectComposer', 'RenderPass', 'UnrealBloomPass', 'OutputPass'],
+    exports: ['ForceGraph3D', 'SpriteText', 'Scene', 'PerspectiveCamera', 'WebGLRenderer', 'Group', 'Mesh', 'Points', 'Line', 'LineLoop', 'Sprite', 'SphereGeometry', 'BoxGeometry', 'CylinderGeometry', 'TorusGeometry', 'RingGeometry', 'BufferGeometry', 'BufferAttribute', 'MeshBasicMaterial', 'MeshStandardMaterial', 'LineBasicMaterial', 'PointsMaterial', 'SpriteMaterial', 'CanvasTexture', 'Color', 'Vector2', 'Vector3', 'Raycaster', 'PointLight', 'AmbientLight', 'AdditiveBlending', 'NormalBlending', 'DoubleSide', 'SRGBColorSpace', 'OrbitControls', 'EffectComposer', 'RenderPass', 'UnrealBloomPass', 'OutputPass'],
     packages,
     patches: PATCHES.map(({ id, package: pkg, file, what, find, replace, count }) => ({
       id,
