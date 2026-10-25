@@ -922,3 +922,96 @@ describe('MAPX.2: the real server passes the dashboard root through to the galax
     expect(reply.writers).toEqual([{ source: 'claude-code', count: 2, inferred: 0 }])
   })
 })
+
+/** Every key path of `value` with the value types seen there; arrays add `[]` to the path. Values are never compared. */
+function shapeOf(value: unknown, path = '', into = new Map<string, Set<string>>()): Map<string, Set<string>> {
+  const type = value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value
+  const seen = into.get(path) ?? new Set<string>()
+  seen.add(type)
+  into.set(path, seen)
+  if (Array.isArray(value)) for (const item of value) shapeOf(item, `${path}[]`, into)
+  else if (value !== null && typeof value === 'object') for (const [key, item] of Object.entries(value)) shapeOf(item, `${path}.${key}`, into)
+  return into
+}
+
+/** Fixture paths the reply lacks, fixture types the reply never shows, and reply paths or types the fixture does not know. */
+function shapeGaps(fixture: Map<string, Set<string>>, reply: Map<string, Set<string>>, skip: (path: string) => boolean = () => false): string[] {
+  const gaps: string[] = []
+  for (const [path, types] of fixture) {
+    if (skip(path)) continue
+    for (const type of types) if (!reply.get(path)?.has(type)) gaps.push(`missing ${path}: ${type}`)
+  }
+  for (const [path, types] of reply) {
+    if (skip(path)) continue
+    for (const type of types) if (!fixture.get(path)?.has(type)) gaps.push(`extra ${path}: ${type}`)
+  }
+  return gaps
+}
+
+describe('MAPX.2b: the real reply has the shape of tests/bun/fixtures/galaxy-c11.json', () => {
+  const temp = tempDir('mapx2-shape')
+  const fixture = shapeOf(JSON.parse(readFileSync(join(import.meta.dir, 'fixtures', 'galaxy-c11.json'), 'utf8')))
+  const A = 'project-alpha-1a2b'
+  const B = 'project-beta-9z8y'
+  let db: Database
+  let root: string
+
+  beforeAll(() => {
+    root = join(temp.dir, 'root')
+    mkdirSync(root, { recursive: true })
+    writeFileSync(join(root, 'projects.json'), JSON.stringify({ version: 1, projects: { [A]: { name: 'alpha', kind: 'repo', remoteHost: 'github.com' }, [B]: { name: 'beta', kind: 'folder', remoteHost: null } } }))
+    writeFileSync(join(root, 'activity-daily.json'), JSON.stringify({ version: 1, days: { [A]: { [dayKey(40)]: { writes: 1, recalls: 1 }, [dayKey(0)]: { writes: 3, recalls: 4 } }, [B]: { [dayKey(0)]: { writes: 1, recalls: 0 } } } }))
+    db = seedStore(join(temp.dir, 'store'), [
+      { id: 'a1', owner: A, ts: daysBefore(10), kind: 'instruction', scope: 'global', importance: 0.9, recalls: 4, lastRecalled: daysBefore(2), validUntil: '2099-01-01T00:00:00.000Z', metadata: { tags: ['fruit', 'veg'] } },
+      { id: 'a2', owner: A, ts: daysBefore(20), kind: 'fact', recalls: 0 },
+      { id: 'a3', owner: A, ts: daysBefore(30), kind: 'fact', source: null },
+      { id: 'b1', owner: B, ts: daysBefore(5), kind: 'decision', recalls: 1, lastRecalled: daysBefore(1), metadata: { tags: ['veg'], source: 'imported' } },
+      { id: 'b2', owner: B, ts: daysBefore(3), kind: 'fact' },
+    ])
+  })
+  afterAll(() => {
+    db.close()
+    temp.dispose()
+  })
+
+  test('MAPX.2 reply matches the C11 fixture shape: galaxyLevel, every key path and value type, no values compared', () => {
+    const meaning: Meaning = {
+      meaning: true,
+      positions: {},
+      similar: {},
+      pairs: [
+        { a: 'a1', b: 'b1', score: 0.9 },
+        { a: 'a2', b: 'b2', score: 0.8 },
+      ],
+    }
+    const reply = galaxyLevel(db, GALAXY_LIMIT, meaning, { now: NOW, root })
+    expect(reply.status).toBe(200)
+    const body = reply.body as Galaxy
+    // the seed really fills the fields the check relies on
+    expect(body.links!.length).toBe(1)
+    expect(body.links![0]!.pairs.length).toBe(2)
+    expect(body.projects.map(project => project.activitySource)).toEqual(['tally', 'tally'])
+    // `knowledge` is an empty array in the fixture, so nothing under it is compared
+    const gaps = shapeGaps(fixture, shapeOf(JSON.parse(JSON.stringify(body))), path => path.startsWith('.knowledge[]'))
+    expect(gaps).toEqual([])
+  })
+
+  test('MAPX.2 GET /api/galaxy matches the C11 fixture shape too (no vectors in the store, so no links)', async () => {
+    const dir = tempDir('mapx2-shape-server')
+    const store = join(dir.dir, 'store')
+    seedStore(store, [{ id: 'a1', owner: A, metadata: { tags: ['fruit'] }, recalls: 2, lastRecalled: daysBefore(1) }, { id: 'a2', owner: A, validUntil: '2099-01-01T00:00:00.000Z' }]).close()
+    const started = await startServer({ root, store, cli: CLI, activityLog: '', pluginRoot: ROOT })
+    try {
+      const response = await get(`http://127.0.0.1:${started.port}`, '/api/galaxy', started.token)
+      expect(response.status).toBe(200)
+      const reply = shapeOf(await response.json())
+      // paths absent here by design: links (needs vectors), and values the one project cannot show as both null and set
+      const gaps = shapeGaps(fixture, reply, path => path.startsWith('.links') || path.startsWith('.knowledge[]'))
+      expect(gaps.filter(gap => gap.startsWith('extra'))).toEqual([])
+      expect(gaps.filter(gap => /missing \.(projects\[\]\.(?!remoteHost)|memories\[\]\.(?!validUntil|lastRecalled)|writers|globalLive|total|shown|meaning)/.test(gap))).toEqual([])
+    } finally {
+      started.stop()
+      dir.dispose()
+    }
+  }, 60_000)
+})
