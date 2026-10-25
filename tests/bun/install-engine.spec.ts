@@ -6,7 +6,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync,
 import { join } from 'node:path'
 import { cliOf, installStep, installStepEnv, type Runner } from '../../bin/install-engine'
 import { ENGINE_BUILD } from '../../hooks/engine-build'
-import { body, engineCall, ROOT, runInstaller, tempDir, toolCall } from './helpers'
+import { body, engineCall, isolatedEnv, ROOT, runInstaller, tempDir, toolCall } from './helpers'
 
 const INSTALL_TIMEOUT = 300_000
 
@@ -68,8 +68,8 @@ describe('a real install, then one that cannot reach the registry', () => {
     const parser = join(engine, 'node_modules', 'onnxruntime-node', 'script', 'install-utils.js')
     expect(existsSync(parser)).toBe(true)
     const probe = `process.stdout.write(String(require(${JSON.stringify(parser)}).parseInstallFlag()))`
-    const base = { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' }
-    const flagWith = (env: Record<string, string>) => Bun.spawnSync([process.execPath, '-e', probe], { env, stdout: 'pipe' }).stdout.toString()
+    const base = { PATH: process.env.PATH ?? '', ...isolatedEnv() }
+    const flagWith = (env: Record<string, string>) => Bun.spawnSync([process.execPath, '-e', probe], { env: { ...env, ...isolatedEnv() }, stdout: 'pipe' }).stdout.toString()
     // `false` is the parser's "skip": install.js then exits 0 before any download.
     expect(flagWith(installStepEnv(base))).toBe('false')
     // Unset, the parser keeps the metadata default, which asks for cuda12 on linux/x64.
@@ -254,7 +254,7 @@ for (const line of lines) {
     const listing = readdirSync(engine).sort()
     const child = Bun.spawn(
       [process.execPath, join(import.meta.dir, '..', '..', 'bin', 'install-engine.ts'), stubRoot.dir, engine, store, 'embeddings'],
-      { env: process.env as Record<string, string>, stdout: 'pipe', stderr: 'pipe' },
+      { env: { ...(process.env as Record<string, string>), ...isolatedEnv() }, stdout: 'pipe', stderr: 'pipe' },
     )
     const [stdout, stderr, code] = await Promise.all([
       new Response(child.stdout).text(),
@@ -311,7 +311,7 @@ for (const line of lines) {
     const listing = readdirSync(engine).sort()
     const child = Bun.spawn(
       [process.execPath, join(import.meta.dir, '..', '..', 'bin', 'install-engine.ts'), stubRoot.dir, engine, store, 'embeddings'],
-      { env: process.env as Record<string, string>, stdout: 'pipe', stderr: 'pipe' },
+      { env: { ...(process.env as Record<string, string>), ...isolatedEnv() }, stdout: 'pipe', stderr: 'pipe' },
     )
     const [stdout, stderr, code] = await Promise.all([
       new Response(child.stdout).text(),

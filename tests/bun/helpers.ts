@@ -1,10 +1,11 @@
 // Shared helpers for the Bun specs: temporary folders, the real installer, and
 // one-shot calls to a real engine cli.
-import { mkdtempSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { engineEnv } from '../../hooks/engine'
 
+const REAL_HOME = homedir()
 export const ROOT = join(import.meta.dir, '..', '..')
 export const INSTALLER = join(ROOT, 'bin', 'install-engine.ts')
 
@@ -13,9 +14,38 @@ export function tempDir(prefix: string) {
   return { dir, dispose: () => rmSync(dir, { recursive: true, force: true }) }
 }
 
+const _isolatedHomes = new Set<string>()
+export function isolatedEnv(prefix = 'isolated') {
+  const home = mkdtempSync(join(tmpdir(), `mnemosyne-${prefix}-`))
+  const piConfig = join(home, '.claude', 'mnemosyne', 'model-cache')
+  mkdirSync(piConfig, { recursive: true })
+  mkdirSync(join(piConfig, 'logs'), { recursive: true })
+  // Reuse the already-downloaded model cache (a cache, not user data) via a
+  // symlink so tests do not re-download it; `logs/` stays a real folder in the
+  // temp home and is removed with it. rmSync(home, { recursive: true }) deletes
+  // the symlink, never its target.
+  const realCache = join(REAL_HOME, '.claude', 'mnemosyne', 'model-cache', 'cache')
+  const link = join(piConfig, 'cache')
+  try { if (existsSync(realCache)) symlinkSync(realCache, link, 'dir') } catch {}
+  _isolatedHomes.add(home)
+  // The package cache is a download cache, not user data; reusing it keeps
+  // tests offline-fast and writes no logs to the real home.
+  return { HOME: home, PI_CONFIG_DIR: piConfig, BUN_INSTALL_CACHE_DIR: process.env.BUN_INSTALL_CACHE_DIR || join(REAL_HOME, '.bun', 'install', 'cache') }
+}
+// Removes every temp home isolatedEnv() made (rmSync removes the cache symlink, not its target).
+// `bun test` never fires process 'exit', so tests/bun/cleanup-preload.ts (bunfig.toml) calls this
+// from an afterAll once the whole run is done; a plain script still gets it from 'exit'.
+export function cleanupIsolated() {
+  for (const home of _isolatedHomes) {
+    try { rmSync(home, { recursive: true, force: true }) } catch {}
+  }
+  _isolatedHomes.clear()
+}
+process.on('exit', cleanupIsolated)
+
 export async function runInstaller(engineDir: string, storeDir: string, env: Record<string, string> = {}) {
   const child = Bun.spawn([process.execPath, INSTALLER, ROOT, engineDir, storeDir], {
-    env: { ...(process.env as Record<string, string>), ...env },
+    env: { ...(process.env as Record<string, string>), ...isolatedEnv(), ...env },
     stdout: 'pipe',
     stderr: 'pipe',
   })
@@ -29,7 +59,7 @@ export { engineEnv } from '../../hooks/engine'
 /** One engine process answering raw JSON-RPC messages; the parsed replies by id. */
 export async function engineCall(cli: string, store: string, owner: string, messages: readonly object[]) {
   const child = Bun.spawn([process.execPath, cli, 'mcp'], {
-    env: { ...(process.env as Record<string, string>), ...engineEnv(store, owner) },
+    env: { ...(process.env as Record<string, string>), ...engineEnv(store, owner), ...isolatedEnv('enginehome') },
     stdin: 'pipe',
     stdout: 'pipe',
     stderr: 'pipe',

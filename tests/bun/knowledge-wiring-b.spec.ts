@@ -10,7 +10,7 @@ import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { GOOD_REPLY, makeHost, until } from './knowledge-host'
 import type { Host, ModelAnswer, Ran } from './knowledge-host'
-import { body, engineCall, engineEnv, ROOT, tempDir, toolCall } from './helpers'
+import { body, engineCall, engineEnv, isolatedEnv, ROOT, tempDir, toolCall } from './helpers'
 
 setDefaultTimeout(30_000)
 const hosts: Host[] = []
@@ -418,7 +418,7 @@ describe('finding 6: the real proxy never accepts veracity or a trust tier from 
       control.close()
 
       const child = Bun.spawn([process.execPath, join(ROOT, 'bin', 'mcp-proxy.ts')], {
-        env: { ...(process.env as Record<string, string>), ...engineEnv(store, 'global'), MNEMOSYNE_CLI: CLI, MNEMOSYNE_ACTIVITY_LOG: '' },
+        env: { ...(process.env as Record<string, string>), ...isolatedEnv(), ...engineEnv(store, 'global'), MNEMOSYNE_CLI: CLI, MNEMOSYNE_ACTIVITY_LOG: '' },
         stdin: 'pipe',
         stdout: 'pipe',
         stderr: 'pipe',
