@@ -162,6 +162,7 @@ function updateTally(logPath: string, normalizedLines: readonly string[], limits
       if (!isWindows) chmodSync(folder, 0o700)
     }
     const data = readTally(tally)
+    if (!data.days || typeof data.days !== 'object' || Array.isArray(data.days)) data.days = Object.create(null)
     const now = new Date()
     const cutoff = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - 90))
     const cutoffStr = cutoff.toISOString().slice(0, 10)
@@ -178,7 +179,7 @@ function updateTally(logPath: string, normalizedLines: readonly string[], limits
       const owner = (typeof entry.owner === 'string' && entry.owner !== '') ? entry.owner : 'global'
       const day = utcDay(entry.t)
       const count = (typeof entry.count === 'number' && Number.isInteger(entry.count) && entry.count > 0) ? entry.count : 1
-      if (!data.days[owner] || typeof data.days[owner] !== 'object' || Array.isArray(data.days[owner])) data.days[owner] = {}
+      if (!data.days[owner] || typeof data.days[owner] !== 'object' || Array.isArray(data.days[owner])) data.days[owner] = Object.create(null)
       const days = data.days[owner] as Record<string, any>
       if (!days[day] || typeof days[day] !== 'object' || Array.isArray(days[day])) days[day] = { writes: 0, recalls: 0 }
       if (typeof days[day].writes !== 'number') days[day].writes = 0
@@ -196,15 +197,19 @@ function updateTally(logPath: string, normalizedLines: readonly string[], limits
       if (Object.keys(days).length === 0) delete data.days[owner]
     }
     const tmp = `${tally}.${process.pid}.${Date.now().toString(36)}${Math.random().toString(36).slice(2)}.tmp`
-    const tfd = openSync(tmp, 'w', 0o600)
     try {
-      if (!isWindows) fchmodSync(tfd, 0o600)
-      writeSync(tfd, JSON.stringify(data))
+      const tfd = openSync(tmp, 'w', 0o600)
+      try {
+        if (!isWindows) fchmodSync(tfd, 0o600)
+        writeSync(tfd, JSON.stringify(data))
+      } finally {
+        closeSync(tfd)
+      }
+      renameSync(tmp, tally)
+      if (!isWindows) chmodSync(tally, 0o600)
     } finally {
-      closeSync(tfd)
+      try { unlinkSync(tmp) } catch {}
     }
-    renameSync(tmp, tally)
-    if (!isWindows) chmodSync(tally, 0o600)
   } finally {
     try { unlinkSync(held) } catch {}
   }
@@ -214,12 +219,20 @@ function readTally(path: string): { version: number; days: Record<string, any> }
   try {
     const raw = readFileSync(path, 'utf8')
     const parsed = JSON.parse(raw)
-    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return { version: 1, days: {} }
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return { version: 1, days: Object.create(null) }
     const version = (typeof parsed.version === 'number') ? parsed.version : 1
-    const days = (parsed.days !== null && typeof parsed.days === 'object' && !Array.isArray(parsed.days)) ? parsed.days : {}
+    const rawDays = (parsed.days !== null && typeof parsed.days === 'object' && !Array.isArray(parsed.days)) ? parsed.days : {}
+    const days = Object.create(null)
+    for (const owner of Object.keys(rawDays)) {
+      const rawOwnerDays = rawDays[owner]
+      if (rawOwnerDays === null || typeof rawOwnerDays !== 'object' || Array.isArray(rawOwnerDays)) { days[owner] = Object.create(null); continue }
+      const ownerDays = Object.create(null)
+      for (const day of Object.keys(rawOwnerDays)) ownerDays[day] = rawOwnerDays[day]
+      days[owner] = ownerDays
+    }
     return { version, days }
   } catch {
-    return { version: 1, days: {} }
+    return { version: 1, days: Object.create(null) }
   }
 }
 
