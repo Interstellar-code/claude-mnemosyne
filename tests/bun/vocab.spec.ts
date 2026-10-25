@@ -8,14 +8,14 @@ import { join } from 'node:path'
 import { admitTag, aliasTag, countTags, listVocabulary, projectNames, readVocabulary, recordCandidates, writeVocabulary } from '../../bin/vocab'
 import { proposalsText } from '../../bin/memories'
 import { AGENT_SEEDS, parseVocabulary } from '../../hooks/vocab'
-import { body, engineCall, engineEnv, ROOT, tempDir, toolCall } from './helpers'
+import { body, engineCall, engineEnv, isolatedEnv, ROOT, tempDir, toolCall } from './helpers'
 
 const CLI = join(ROOT, 'engine', 'src', 'cli.ts')
 const SCRIPT = join(ROOT, 'bin', 'vocab.ts')
 
 /** Runs bin/vocab.ts as the hooks do. */
 async function vocab(args: readonly string[]) {
-  const child = Bun.spawn([process.execPath, SCRIPT, ...args], { stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' })
+  const child = Bun.spawn([process.execPath, SCRIPT, ...args], { env: { ...(process.env as Record<string, string>), ...isolatedEnv() }, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' })
   const [stdout, stderr, exitCode] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
   return { stdout, stderr, exitCode }
 }
@@ -289,7 +289,7 @@ describe('VOCAB.2: tags through the real proxy and the real store', () => {
   /** One proxy process for `owner`: sends the calls, returns the replies by id. */
   async function proxy(owner: string, calls: readonly [string, Record<string, unknown>][], env: Record<string, string> = {}) {
     const child = Bun.spawn([process.execPath, PROXY], {
-      env: { ...(process.env as Record<string, string>), ...engineEnv(store, owner), MNEMOSYNE_CLI: CLI, MNEMOSYNE_ACTIVITY_LOG: '', MNEMOSYNE_VOCABULARY: file, ...env },
+      env: { ...(process.env as Record<string, string>), ...engineEnv(store, owner), MNEMOSYNE_CLI: CLI, MNEMOSYNE_ACTIVITY_LOG: '', MNEMOSYNE_VOCABULARY: file, ...env, ...isolatedEnv() },
       stdin: 'pipe',
       stdout: 'pipe',
       stderr: 'pipe',
@@ -347,7 +347,7 @@ describe('VOCAB.2: tags through the real proxy and the real store', () => {
     // Written the old way, straight through the engine: spaces, capitals, a project name, an emoji.
     const reply = body((await engineCall(CLI, store, 'global', [toolCall(1, 'mnemopi_remember', { content: 'An older note with free-form tags on it.', scope: 'global', metadata: { tags: ['Old Style Tag', 'my repo', '🚀 launch', 'abcdefghijklmnopqrstuvwxyz0123456789'] } })])).get(1))
     const id = reply!.memory_id as string
-    const ran = Bun.spawn([process.execPath, join(ROOT, 'bin', 'memories.ts'), '--store', store, 'get', id], { stdout: 'pipe', stderr: 'pipe' })
+    const ran = Bun.spawn([process.execPath, join(ROOT, 'bin', 'memories.ts'), '--store', store, 'get', id], { env: { ...(process.env as Record<string, string>), ...isolatedEnv() }, stdout: 'pipe', stderr: 'pipe' })
     const out = JSON.parse(await new Response(ran.stdout).text()) as { metadata: { tags: string[] } }[]
     await ran.exited
     expect(out[0]!.metadata.tags).toEqual(['Old Style Tag', 'my repo', '🚀 launch', 'abcdefghijklmnopqrstuvwxyz0123456789'])
@@ -364,7 +364,7 @@ describe('VOCAB.3: candidates', () => {
   const read = () => JSON.parse(readFileSync(file, 'utf8')) as { tags: Record<string, any>; candidates: Record<string, any> }
   /** bin/vocab.ts candidates with `stdin` on its standard input. */
   async function candidates(stdin: string, rootArg = root) {
-    const child = Bun.spawn([process.execPath, SCRIPT, '--root', rootArg, 'candidates'], { stdin: new Blob([stdin]), stdout: 'pipe', stderr: 'pipe' })
+    const child = Bun.spawn([process.execPath, SCRIPT, '--root', rootArg, 'candidates'], { env: { ...(process.env as Record<string, string>), ...isolatedEnv() }, stdin: new Blob([stdin]), stdout: 'pipe', stderr: 'pipe' })
     const [stdout, stderr, exitCode] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
     return { stdout, stderr, exitCode }
   }
