@@ -8,13 +8,13 @@ This plan was split out of phase MAPX of `docs/plans/mnemosyne-v3.md` on 2026-10
 
 The Galaxy view of the dashboard's Map tab becomes a solar system. The memory store is a sun, each writer is a nodule on its surface, each project is a planet, tags are land on the planet, memory kinds are moons, and each memory is an asteroid. Belts hold the untyped, global and no-longer-live memories, and black-hole pairs link similar memories across projects. Timeline and Meaning stay as they are. The look and behaviour are fixed by an approved mockup (Mnemosyne Dashboard canvas, version 31, exported to `docs/plans/mapx-design/`), so the work is a port of that code onto real data, the dashboard's security policy and the repo's tests, not a redesign.
 
-The plan has 11 tasks (MAPX.0 to MAPX.10) in 6 waves. MAPX.0 (the design) is done. The first release is read-only: the Details panel shows everything about a memory but does not change it. Edit, Pin and Retire from the Details panel are MAPX.9, which waits for the 0.9.0 write routes and forms.
+The plan has 12 tasks (MAPX.0 to MAPX.11): MAPX.0 is done, four build waves follow, and MAPX.9 comes later. The build is laid out for speed (Rohit, 2026-10-25): the rules port starts in wave 1 against a fixture, the page shell is built beside the scene against a fixed scene interface (C13), and the docs are drafted early, so the serial path is the rules, the scene, the wiring and the Details panel. MAPX.0 (the design) is done. The first release is read-only: the Details panel shows everything about a memory but does not change it. Edit, Pin and Retire from the Details panel are MAPX.9, which waits for the 0.9.0 write routes and forms.
 
 ## How to use this plan (for the coordinator)
 
 1. Orchestration is Orca: Orca worktrees and the `orchestration` skill. This plan uses no other orchestrator.
 2. Each task below is written to be pasted as a worker prompt. A worker prompt is: the "Standing constraints for every worker" section, the "Phase block" (file scope, hazards, review level), and the task block (goal, acceptance, refs, gate).
-3. Task ids are stable and are not in build order; the build order is the wave table. MAPX.1 to MAPX.7 keep the ids they had in the 0.9.0 plan; MAPX.8, MAPX.9 and MAPX.10 are new.
+3. Task ids are stable and are not in build order; the build order is the wave table. MAPX.1 to MAPX.7 keep the ids they had in the 0.9.0 plan; MAPX.8 to MAPX.11 are new (MAPX.11, the page shell, was split out of MAPX.6 for speed).
 4. Tasks marked "Rohit" are manual: do not dispatch them to a worker.
 5. One task cannot start until 0.9.0 work lands: MAPX.9 (needs CRUDX and CRUD). Everything else needs nothing from the 0.9.0 plan (see "Dependencies on the 0.9.0 plan").
 6. The three Orca lanes (`v3-lane-a`, `v3-lane-b`, `v3-lane-c`, under `/Users/rohits/orca/workspaces/claude-mnemosyne/`) were created at `2f1a104`, which is behind `main`. Before a lane starts a task it creates a fresh short branch off `main`. The old lane branches (`v3/crudx`, `v3/import`) hold no commits of their own on 2026-10-25 and are left to the 0.9.0 plan.
@@ -63,7 +63,7 @@ What changes in the port:
 3. The 3D library. The mockup reads a global `window.THREE`. The dashboard imports `ui/vendor/map-lib.js`, so MAPX.1 adds the needed three.js classes and `OrbitControls` to its export list, with no new package. Timeline and Meaning stay on `ForceGraph3D`. Switching views disposes one renderer before creating the other, so there is at most one WebGL context.
 4. The data. The hard-coded `PROJECTS`, `LINKS` and `WRITERS` become `GET /api/galaxy` (MAPX.2), `<root>/activity-daily.json` (MAPX.3) and `<root>/projects.json` (MAPX.8).
 5. Live events. The simulated events become the real activity stream (`ui/stream.ts` carries the stream; `toMapEvent` is in `ui/map-live.ts:47`), with the same visuals. The dashboard's two Simulate buttons ("Simulate a recall" and "Simulate a write", `ui/index.html`, backed by `simulate()` at `ui/map-live.ts:115`) stay and keep drawing demo events; the mockup's four per-kind buttons are not added.
-6. Find. Memory results come from `POST /api/search` (keyword plus meaning); bodies, moons and tags stay local. That route writes a 'recall' line to the activity log and is single-flight; MAPX.6 says how Find handles both.
+6. Find. Memory results come from `POST /api/search` (keyword plus meaning); bodies, moons and tags stay local. That route writes a 'recall' line to the activity log and is single-flight; MAPX.11 says how Find handles both.
 7. Tests. The rules become a pure module (`ui/solar-layout.ts`), the scene goes into `ui/solar.ts`, and a spec drives every hover, click, flight, Find and filter on the vendored three.js with stubbed browser parts.
 8. No sample data ships. The mockup's six sample folders, "(sample)" labels, sample outer-belt dust, sample memory text and sample satellites are demo data; the real view shows only what the store, `projects.json` and the stream hold.
 9. Names and seeds. The mockup keys every project's look on `fnv(p.id)` where `p.id` is the project name (`matrixkoder`). The real id is the owner (`project-matrixkoder-<hash>`), so hashing it would give different styles, angles and land masses than the approved canvas. MAPX.4 hashes the project label (`projectLabel(owner)`, `ui/server.ts:673`, which gives `matrixkoder`), with the owner as the tie-break, so the real five projects look as they do on the canvas.
@@ -147,14 +147,14 @@ Rules and caps from the spec sheet, which the build keeps:
 3. `bin/activity.ts` is changed by MAPX.3.
 4. `ui/solar-layout.ts` (new, pure) is changed by MAPX.4.
 5. `ui/solar.ts` (new) and `ui/map-live.ts` (event mapping only) are changed by MAPX.5.
-6. `ui/index.html`, `ui/style.css`, `ui/map.ts`, `ui/map-state.ts`, `ui/app.ts` (`takeToken()` and the `createMap` call only) and `ui/tsconfig.json` are changed by MAPX.6; MAPX.7 changes the Details panel in `ui/map.ts`, `ui/index.html` and `ui/style.css`.
+6. `ui/index.html`, `ui/style.css`, `ui/map.ts`, `ui/map-state.ts`, `ui/app.ts` (`takeToken()` and the `createMap` call only) and `ui/tsconfig.json` are changed by MAPX.11 (the page shell, `takeToken()`) and MAPX.6 (the wiring, the `createMap` call); MAPX.7 changes the Details panel in `ui/map.ts`, `ui/index.html` and `ui/style.css`.
 7. `hooks/projects.ts` and `bin/projects.ts` (new) and three small hunks of `hooks/register.ts` (an import, a spawn helper beside `record()`, one call in `session.start`) are changed by MAPX.8.
 8. The Details panel's write controls are changed by MAPX.9 (`ui/app.ts`, `ui/map.ts`, `ui/style.css`).
 9. `README.md`, `DESIGN.md`, `.claude-plugin/plugin.json` are changed by MAPX.10.
 
 ### Contracts
 
-Contract numbers C1 to C10 belong to the 0.9.0 plan and are not restated here. C11 moves here with the same id so references stay valid; C12 is new.
+Contract numbers C1 to C10 belong to the 0.9.0 plan and are not restated here. C11 moves here with the same id so references stay valid; C12 and C13 are new.
 
 1. C11: the solar-system map's data, written by MAPX.2 and MAPX.3, read only by the map (`activitySource` in item 2 has one value for the whole reply, see MAPX.2):
    1. `GET /api/galaxy` adds per memory `source`, `sourceInferred`, `kind`, `scope`, `importance`, `pinned`, `state` and `validUntil`;
@@ -163,6 +163,12 @@ Contract numbers C1 to C10 belong to the 0.9.0 plan and are not restated here. C
    4. the state rule, written once as an exported helper `memoryState` in `ui/server.ts`: a row is live when `superseded_by` is NULL and `valid_until` is NULL or still in the future. Otherwise take the newest 'retire' or 'expire' row among the audit rows (the table keeps only the last 3 per memory, and a later 'update' row is skipped, not read as the state): 'expire' gives 'expired', 'retire' gives 'retired'; with neither, a row with `superseded_by` set is 'retired' and any other is 'lapsed' (its own expiry date passed). The engine's retire sets `valid_until` to now and `superseded_by` to the replacement or NULL (`engine/src/core/beam/store.ts`, `invalidateRows`) and writes an audit row only when a `validator` was passed, so a retire with no validator and no replacement reads 'lapsed' (a known limit; the dashboard's retire passes `validator: 'dashboard'`). Restore clears both columns (`restoreWorking`), so a restored row is live again whatever its audit rows say. The 0.9.0 plan's CRUDX.3 reuses this helper (see the dependency table);
    5. `<root>/activity-daily.json`, mode 0600, `{ version, days: { <owner>: { <day>: { writes, recalls } } } }`, 90 days, counts only, written only by `appendActivity` (MAPX.3).
 2. C12: `<root>/projects.json`, mode 0600, written only by `bin/projects.ts` (MAPX.8) and read by MAPX.2: `{ version, projects: { <owner>: { name, kind: 'repo' | 'folder', remoteHost: <host> | null, firstSeen, lastSeen } } }`. `remoteHost` is the remote's host only (for example `github.com`), never the full URL, a user name, a port or a token. A repo with no remote has `remoteHost: null`; a remote with no network host (a local path or a `file://` URL) records `'local'` (plan default, MAPX.8).
+3. C13: the scene interface between `ui/solar.ts` (MAPX.5) and the page around it (MAPX.11, MAPX.6), fixed here so both can be built at the same time. `ui/solar.ts` exports `createSolarScene(options)` where `options` holds `canvas`, `three` (the module from `ui/vendor/map-lib.js`), optional `createRenderer` and `clock` (so specs can stub them), and the callbacks `onHover(tip | null, x, y)` (`tip` is a list of lines, the first the title), `onPick(target)` and `onLevel(level)`. It returns `{ setData(galaxy), setView(view), flyTo(target), showView(name), zoom(factor), event(mapEvent), dispose() }`:
+   1. `galaxy` is the C11 reply of `GET /api/galaxy`; `view` is `{ arrange, colour, hidden: { <owner>: true }, query, rotate, sample, legend }`; `name` is 'top', 'below', 'side' or 'reset'; `mapEvent` is what `toMapEvent` returns (`ui/map-live.ts:47`);
+   2. `target` and `level` share one shape: `{ level: 'galaxy' } | { level: 'planet', owner } | { level: 'moon', owner, kind } | { level: 'memory', owner, kind, id }`;
+   3. the page never reaches into the scene's three.js objects, and the scene never touches DOM outside its canvas; Find's matching (`searchResults`) lives in `ui/solar-layout.ts` (MAPX.4) and is shared by both;
+   4. a test fake of this interface, `tests/bun/solar-scene-fake.ts` (MAPX.11), records every call, so the page shell is tested without WebGL.
+
 
 ### Out of scope
 
@@ -178,14 +184,14 @@ Contract numbers C1 to C10 belong to the 0.9.0 plan and are not restated here. C
 
 1. The port drifts from the mockup. Guards: `tests/bun/solar-scene.spec.ts` drives the same behaviours the mockup was approved on, and Rohit compares the build side by side with the canvas (manual QA). Phases: MAPX.5, MAPX.6.
 2. The frame rate with up to 2000 memories. Guard: MAPX.1's measurement before the scene is built, with the part to change named if it is under 50 fps (`Points` per planet, labels or bloom).
-3. Inline styles refused by the page's policy. Guard: MAPX.6 moves all styling to `ui/style.css`, and a spec scans the built page for `style=` attributes.
+3. Inline styles refused by the page's policy. Guard: MAPX.11 moves all styling to `ui/style.css`, and a spec scans the built page for `style=` attributes.
 4. The links computation is slow. Black holes need cosine scores between memories of different projects; with 2000 vectors that is about 2 million comparisons. It must not run on the server's event loop (it would stall `/api/health` and the activity stream, which is why `ui/semantic-worker.ts` exists). Guard: MAPX.2 has the existing worker emit the cross-project pairs in the same pass that already finds each memory's neighbours, and caches them in `meaning.json` under a bumped `MEANING_VERSION`; the cold time is measured and reported.
 5. The daily tally is written by several processes at once (the hooks' detached script, the MCP proxy and the dashboard server), and a read-modify-write file can lose a count or be corrupted. Guard: MAPX.3 takes a lock like `rotate()` does, writes to a temp file and renames, skips the tally rather than wait, and never lets the log line fail.
 6. `hooks/register.ts` is on every save path. Guard: MAPX.8 keeps its change to three small hunks (an import, a spawn helper beside `record()`, and one call in the `session.start` handler), leaves `owner()` untouched, puts the logic in `hooks/projects.ts` and `bin/projects.ts`, runs the write detached with the same spawn pattern the activity log uses, and specs that a failing or slow registry write changes no save.
-7. The URL hash is shared with the sign-in token. `ui/app.ts:606-607` reads `#token=...` and clears the whole hash on load. Guard: MAPX.6 reads `#level=` before `takeToken()` clears the fragment (or clears it only when `token=` is present), writes the level with `history.replaceState`, uses a different key, and specs that a `#token=` link still signs in, a reload keeps the level, and a bad level falls back to Galaxy.
+7. The URL hash is shared with the sign-in token. `ui/app.ts:606-607` reads `#token=...` and clears the whole hash on load. Guard: MAPX.11 reads `#level=` before `takeToken()` clears the fragment (or clears it only when `token=` is present), writes the level with `history.replaceState`, uses a different key, and specs that a `#token=` link still signs in, a reload keeps the level, and a bad level falls back to Galaxy.
 8. Retired rows read as live on the old views. `/api/galaxy` and the Memories tab ignore `valid_until` today, and the 0.9.0 plan fixes the Memories tab (CRUDX.3, CRUD.2). This plan fixes the new Galaxy view only and leaves Timeline and Meaning as they are (open question O3).
 9. Writer names do not match between rows and events. A row's `source` is `claude-code`, `dashboard`, `import:doc`, `mcp:<client>` and so on; an activity line's `client` is `claude-code`, `dashboard`, `mnemosyne-knowledge`, `mnemosyne-tags` or an outside client's name. Guard: MAPX.5 maps a client to a nodule by exact `source` match, then by `mcp:<client>`, and an event whose client has no nodule starts at the sun's centre (plan default, open question O5). Events whose owner is missing or 'global' (an outside agent with no project, or the dashboard's multi-project search) have no planet: they draw as a pulse on the sun and the nodule, not a comet to a planet.
-10. Find writes to the activity log and is single-flight. `POST /api/search` appends a 'recall' line (origin 'ui', client 'dashboard', owner the single owner searched, else 'global'; `ui/server.ts:1623-1630`), answers 429 while another search runs (`:1616`) and 400 for `mode: 'hybrid'` without embeddings (`:1605`). Guard: MAPX.6 searches memories on Enter or after a pause, never per keystroke, sends `mode: 'keyword'` when embeddings are off, and treats 429 quietly; MAPX.3 does not count those lines and MAPX.5 draws nothing for them, so searching does not light the map.
+10. Find writes to the activity log and is single-flight. `POST /api/search` appends a 'recall' line (origin 'ui', client 'dashboard', owner the single owner searched, else 'global'; `ui/server.ts:1623-1630`), answers 429 while another search runs (`:1616`) and 400 for `mode: 'hybrid'` without embeddings (`:1605`). Guard: MAPX.11 searches memories on Enter or after a pause, never per keystroke, sends `mode: 'keyword'` when embeddings are off, and treats 429 quietly; MAPX.3 does not count those lines and MAPX.5 draws nothing for them, so searching does not light the map.
 
 ---
 
@@ -198,7 +204,7 @@ Every link between this plan and `docs/plans/mnemosyne-v3.md`. Soft means this p
 | D1 | Memory `state` (CRUDX.3) | soft | the map's data route computes it from the store's columns (C11.4) | MAPX.2 |
 | D2 | Project kind (SESSION.5, `projects.json`) | soft | this plan owns the registry (Decision 3); until a project is recorded it is a planet marked "kind unknown" | MAPX.8, MAPX.2 |
 | D3 | The `pinned` flag (IMPORT.3) | soft | read `metadata.pinned`; missing means not pinned; the halo appears once pins exist | MAPX.2, MAPX.5 |
-| D4 | Shared UI files with CRUD (`ui/index.html`, `ui/style.css`; `ui/app.ts` only at `takeToken()` and the `createMap` call) | merge order | whichever branch lands second rebases onto `main`; no task waits; MAPX.7 touches none of `ui/app.ts` | MAPX.6 |
+| D4 | Shared UI files with CRUD (`ui/index.html`, `ui/style.css`; `ui/app.ts` only at `takeToken()` and the `createMap` call) | merge order | whichever branch lands second rebases onto `main`; no task waits; MAPX.7 touches none of `ui/app.ts` | MAPX.11, MAPX.6 |
 | D5 | Edit, Pin and Retire in the Details panel (CRUDX.1, CRUDX.2 routes; CRUD.1, CRUD.2 forms and confirm) | hard | the Details panel ships read-only; MAPX.9 adds the controls after those tasks are merged | MAPX.9 |
 | D6 | `hooks/register.ts` (IMPORT.3, SESSION.1, SESSION.2, SESSION.4 edit it) | merge order | MAPX.8 lands first and changes three small hunks of `hooks/register.ts` (an import, a spawn helper beside `record()`, one call in the `session.start` handler); the 0.9.0 lanes branch from `main` after it | MAPX.8 |
 | D7 | `ui/server.ts` (CRUDX edits `post()`, `MAX_BODY_BYTES`, the route table; MAPX.2 edits `galaxyLevel` and `getMemory`) | merge order | different regions; second to land rebases | MAPX.2 |
@@ -233,22 +239,23 @@ This is the checklist for the step that removes MAPX from `docs/plans/mnemosyne-
 | Wave | Task | Needs first | Notes |
 |---|---|---|---|
 | 0 | MAPX.0 | nothing | done 2026-10-25 |
+| 1 | MAPX.4 | nothing | the rules, against the C11 fixture; starts the serial path |
 | 1 | MAPX.1 | nothing | vendor exports and frame-rate check |
-| 1 | MAPX.2 | nothing | builds against fixtures of C11.5 and C12; no wait |
-| 1 | MAPX.3 | nothing | the daily tally |
-| 1 | MAPX.8 | nothing, runs after MAPX.3 on the same lane | the project registry (moved SESSION.5) |
-| 2 | MAPX.4 | MAPX.2 | the rules |
-| 3 | MAPX.5 | MAPX.1, MAPX.4 | the scene |
-| 4 | MAPX.6 | MAPX.5, MAPX.3, MAPX.8 | the page |
-| 4 | MAPX.7 | MAPX.6 | the Details panel, read-only |
-| 5 | MAPX.10 | MAPX.7 | docs and version (release of the read-only map) |
+| 1 | MAPX.2 | nothing | the data route; builds against fixtures of C11.5 and C12 |
+| 1 | MAPX.3 | nothing, runs after MAPX.1 on the same lane | the daily tally |
+| 1 | MAPX.8 | nothing, runs after MAPX.2 on the same lane | the project registry (moved SESSION.5) |
+| 2 | MAPX.5 | MAPX.1, MAPX.4 | the scene, behind the C13 interface |
+| 2 | MAPX.11 | MAPX.4 (for `searchResults`) | the page shell, against a fake scene (C13) |
+| 2 to 4 | MAPX.10 | draft: nothing; final pass: MAPX.7 | docs drafted early, finished and versioned last |
+| 3 | MAPX.6 | MAPX.5, MAPX.11, MAPX.2, MAPX.3, MAPX.8 | wiring the shell to the scene and the real data |
+| 3 | MAPX.7 | MAPX.6 | the Details panel, read-only |
 | later | MAPX.9 | MAPX.7, and from the 0.9.0 plan: CRUDX.1, CRUDX.2, CRUD.1, CRUD.2 | Edit, Pin and Retire |
 
-Only wave 1 has parallel build tasks (three lanes). MAPX.6 needs MAPX.3 and MAPX.8 merged so the page can be tried on real activity numbers and real project kinds.
+The serial path is MAPX.4, MAPX.5, MAPX.6, MAPX.7 (four build steps, all on lane A), then the short final pass of MAPX.10. All three lanes build in waves 1 and 2. MAPX.6 needs MAPX.3 and MAPX.8 merged so the page can be tried on real activity numbers and real project kinds.
 
-Task-level notes: MAPX.2 reads the tally and registry formats from C11.5 and C12 and tests with fixture files, so it does not wait for MAPX.3 or MAPX.8; the real files meet the route in MAPX.6's manual check. In-phase order is the order of the table.
+Task-level notes: MAPX.4 writes `tests/bun/fixtures/galaxy-c11.json` from C11 and builds against it, so it does not wait for MAPX.2; MAPX.2's spec checks the real reply has the fixture's shape. MAPX.2 reads the tally and registry formats from C11.5 and C12 and tests with fixture files, so it does not wait for MAPX.3 or MAPX.8; the real files meet the route in MAPX.6's manual check. MAPX.5 and MAPX.11 meet only through C13. In-phase order is the order of the table.
 
-Task counts: 11 tasks (MAPX.0 to MAPX.10), 1 done, 1 later (MAPX.9).
+Task counts: 12 tasks (MAPX.0 to MAPX.11), 1 done, 1 later (MAPX.9).
 
 ---
 
@@ -266,18 +273,17 @@ Who builds and who reviews (a proposal; the coordinator may swap lanes A and B, 
 
 | Wave | Lane A (Sonnet high) | Lane B (Sonnet) | Lane C (OMP) |
 |---|---|---|---|
-| 1 | builds MAPX.2 | builds MAPX.3, then MAPX.8 | builds MAPX.1 |
-| 2 | reviews MAPX.3 and MAPX.8 while MAPX.2 is in review, then builds MAPX.4 | reviews MAPX.2, then MAPX.1 | idle |
-| 3 | builds MAPX.5 | reviews MAPX.4 | idle |
-| 4 | builds MAPX.6, then MAPX.7 | reviews MAPX.5, then MAPX.6 and MAPX.7 | idle |
-| 5 | reviews MAPX.10 | idle | builds MAPX.10 |
+| 1 | builds MAPX.4 | builds MAPX.2, then MAPX.8 (high) | builds MAPX.1, then MAPX.3; reviews MAPX.2 |
+| 2 | builds MAPX.5; reviews MAPX.8 | reviews MAPX.1, MAPX.3 and MAPX.4; builds MAPX.11 | drafts MAPX.10; reviews MAPX.11 |
+| 3 | builds MAPX.6, then MAPX.7 | reviews MAPX.5, then MAPX.6 and MAPX.7 | idle |
+| 4 | reviews MAPX.10 | idle | finishes MAPX.10 |
 | later | reviews MAPX.9 | builds MAPX.9 (high) | idle |
 
 Rules:
 
-1. A task group is reviewed by a lane that did not build any task in it. The builder never approves its own work. Lane C may build only MAPX.1 and MAPX.10 (standard-risk, reversible work), and never gives the approving review of MAPX.8 or MAPX.9.
-2. One worker builds MAPX.4 to MAPX.7 (lane A), because the rules, scene and page share one API and the work is serial anyway; lane B reviews each step.
-3. Review groups: R1 = MAPX.1; R2 = MAPX.2; R3 = MAPX.3 and MAPX.8; R4 = MAPX.4; R5 = MAPX.5; R6 = MAPX.6 and MAPX.7; R7 = MAPX.10; R8 = MAPX.9.
+1. A task group is reviewed by a lane that did not build any task in it. The builder never approves its own work. Lane C may build MAPX.1, MAPX.3 and MAPX.10 (standard-risk, reversible work), and never gives the approving review of MAPX.8 or MAPX.9.
+2. One worker builds the serial path MAPX.4, MAPX.5, MAPX.6 and MAPX.7 (lane A), because the rules, scene and wiring share one API; lane B builds the page shell (MAPX.11) beside it against C13, and reviews lane A's steps.
+3. Review groups: R1 = MAPX.1 (lane B); R2 = MAPX.2 (lane C); R3 = MAPX.3 (lane B); R3b = MAPX.8 (lane A, data-loss depth for the `hooks/register.ts` hunks); R4 = MAPX.4 (lane B); R5 = MAPX.5 (lane B); R5b = MAPX.11 (lane C); R6 = MAPX.6 and MAPX.7 (lane B, plus Rohit's manual QA); R7 = MAPX.10 (lane A); R8 = MAPX.9 (lane A).
 4. Workers do not choose models, efforts or agents and do not dispatch other workers; the coordinator alone does that.
 5. MAPX.1's frame-rate step needs a real browser with a GPU. If the worker has no browser tool, the step ends with a manual handoff: Rohit opens the throwaway page and reads the on-screen frame counter (the worker adds one).
 
@@ -290,7 +296,7 @@ Paste this ahead of each task block.
 1. Delivers: C11 and C12 and the solar-system Galaxy view, ported from the mockup.
 2. Needs first: nothing from the 0.9.0 plan, except MAPX.9.
 3. Read first: `docs/plans/mapx-design/README.md`, `MapSolarSpec.dc.html` and `solar-scene.js` (the mockup, method by method); `DESIGN.md` §3.5, §3.7 and §3.8 (the map today); `ui/map.ts` (how the page loads `map-lib.js`, line 239 and 2086, and builds the Map tab, `createMap` line 371); `ui/map-state.ts` (the state pattern); `ui/stream.ts` and `ui/map-live.ts` (live events; `toMapEvent` at line 47); `ui/server.ts:72-73` (the Content Security Policy), `galaxyLevel` (line 1124) and the `/api/galaxy` route (line 1857); `bin/activity.ts:115` (`appendActivity`); `hooks/register.ts:344-351` (`owner()`) and `:654-700` (`record()`, the spawn pattern).
-4. May touch (the union of all tasks; each task block narrows it): `scripts/vendor-map.ts`, `ui/vendor/map-lib.js`, `ui/vendor/map-lib.d.ts`, `ui/vendor/map-lib.inputs.json`, `ui/vendor/scan-allow.json`, `ui/solar-layout.ts` and `ui/solar.ts` (new), `ui/map.ts`, `ui/map-state.ts`, `ui/map-live.ts`, `ui/index.html`, `ui/style.css`, `ui/app.ts` (`takeToken()` and the `createMap` call only), `ui/tsconfig.json` (to list the new files), `ui/server.ts` (`galaxyLevel`, `getMemory` and their helpers only), `ui/semantic-worker.ts` (MAPX.2), `bin/activity.ts`, `bin/projects.ts` and `hooks/projects.ts` (new), `hooks/register.ts` (MAPX.8's three small hunks only), `tests/bun/map-state.spec.ts`, `tests/bun/map-live.spec.ts`, `tests/bun/galaxy-api.spec.ts`, `tests/bun/semantic.spec.ts`, `tests/bun/activity.spec.ts`, `tests/bun/vendor-scan.spec.ts`, `tests/bun/solar-*.spec.ts` and `tests/bun/solar-fakes.ts` (new), `tests/projects.test.ts` (new), `tests/register.test.ts` (MAPX.8 only), `README.md`, `DESIGN.md`, `.claude-plugin/plugin.json` (MAPX.10 only).
+4. May touch (the union of all tasks; each task block narrows it): `scripts/vendor-map.ts`, `ui/vendor/map-lib.js`, `ui/vendor/map-lib.d.ts`, `ui/vendor/map-lib.inputs.json`, `ui/vendor/scan-allow.json`, `ui/solar-layout.ts` and `ui/solar.ts` (new), `ui/map.ts`, `ui/map-state.ts`, `ui/map-live.ts`, `ui/index.html`, `ui/style.css`, `ui/app.ts` (`takeToken()` and the `createMap` call only), `ui/tsconfig.json` (to list the new files), `ui/server.ts` (`galaxyLevel`, `getMemory` and their helpers only), `ui/semantic-worker.ts` (MAPX.2), `bin/activity.ts`, `bin/projects.ts` and `hooks/projects.ts` (new), `hooks/register.ts` (MAPX.8's three small hunks only), `tests/bun/map-state.spec.ts`, `tests/bun/map-live.spec.ts`, `tests/bun/galaxy-api.spec.ts`, `tests/bun/semantic.spec.ts`, `tests/bun/activity.spec.ts`, `tests/bun/vendor-scan.spec.ts`, `tests/bun/solar-*.spec.ts`, `tests/bun/solar-fakes.ts`, `tests/bun/solar-scene-fake.ts` and `tests/bun/fixtures/galaxy-c11.json` (new), `tests/projects.test.ts` (new), `tests/register.test.ts` (MAPX.8 only), `README.md`, `DESIGN.md`, `.claude-plugin/plugin.json` (MAPX.10 only).
 5. Must not touch: `engine/`, `ui/review.ts`, `ui/health.ts`, `tests/bun/helpers.ts`, the write routes in `ui/server.ts`, and `docs/plans/mapx-design/` (the reference stays as approved), and `docs/plans/mnemosyne-v3.md` (the cleanup step owns it).
 6. Review level: standard. The map reads; the only things it writes are the two derived files (tally and registry). MAPX.8 is reviewed with one extra check (a registry failure cannot block or change a save). MAPX.9 is reviewed at data-loss depth, because it triggers retire and pin writes.
 7. Hazards: the risks list above (items 1 to 10), each with its guard.
@@ -318,7 +324,7 @@ Paste this ahead of each task block.
 
 ---
 
-## Wave 1: vendor exports, the data route, the tally and the registry
+## Wave 1: the rules, vendor exports, the data route, the tally and the registry
 
 #### MAPX.1: Vendor exports and a frame-rate check (lane C)
 
@@ -333,7 +339,7 @@ Paste this ahead of each task block.
 4. Gate: `bun scripts/vendor-map.ts --check && bun run test:bun` (timeout 900 s, must exit 0).
 5. Scope: `scripts/vendor-map.ts`, `ui/vendor/*` (the files above), `tests/bun/vendor-scan.spec.ts` only if a reviewed count needs a new case. Do not touch `ui/` source files; if MAPX.5 later needs another class, the coordinator sends a one-line change back here.
 
-#### MAPX.2: GET /api/galaxy and GET /api/memories/<id> carry what the solar system needs (C11) (lane A)
+#### MAPX.2: GET /api/galaxy and GET /api/memories/<id> carry what the solar system needs (C11) (lane B)
 
 1. Goal: the read-only data for the new view and its Details panel.
 2. Acceptance:
@@ -346,9 +352,9 @@ Paste this ahead of each task block.
    7. read-only, within the existing 2000-memory cap; `memories` still lists newest first; the existing fields and the existing `count` and `recalls` per project keep their meaning, so older pages ignore the additions; `tests/bun/galaxy-api.spec.ts` covers each field, a store without vectors, a store with fewer than 10 vectors, a store without `metadata.source_backfill`, a store without `memory_validations`, a retired row, an expired row, a lapsed row, a restored row (live again), a retire followed by an update (still 'retired'), a retire with no validator and no replacement ('lapsed'), a pinned row, a corrupt `projects.json`, the `getMemory` additions, and four tally fixtures: one with 30 or more days of history (`activitySource: 'tally'`), one with fewer (`'lifetime'`), no file, and a corrupt file (both `'lifetime'`); `tests/bun/semantic.spec.ts` covers the cross-owner pairs and the cache version bump.
 3. Refs: `ui/server.ts:1124` (`galaxyLevel`), `:1161-1183` (the `knowledge` list), `:722-734` (`GalaxyMemory`, `GalaxyProject`), `:690-694` (`GALAXY_LIMIT`, `GALAXY_WHERE`), `:744` and `:767` (`MEANING_VERSION`, `meaningKey`), `:817` (`readVectorIndex`), `:652` (`getMemory`), `:673` (`projectLabel`), `:1857` (the route); `ui/semantic-worker.ts:30` (`MeaningInput`), `:149` (`meaningOf`); `engine/src/core/beam/schema.ts:26-55` (columns), `:275` (`memory_embeddings`), `:318` (`memory_validations`, trimmed to the newest 3 per memory); `engine/src/core/beam/store.ts:660` (`AuditAction`), `invalidateRows`, `restoreWorking`.
 4. Gate: `bun run test:bun && bun run typecheck` (timeout 900 s, must exit 0).
-5. Scope: `ui/server.ts` (`galaxyLevel`, `getMemory`, `memoryState`, the meaning cache version and helpers only), `ui/semantic-worker.ts`, `tests/bun/galaxy-api.spec.ts`, `tests/bun/semantic.spec.ts`. The write routes are untouched.
+5. Scope: `ui/server.ts` (`galaxyLevel`, `getMemory`, `memoryState`, the meaning cache version and helpers only), `ui/semantic-worker.ts`, `tests/bun/galaxy-api.spec.ts`, `tests/bun/semantic.spec.ts`. The write routes are untouched. Its spec also checks the real reply has the shape of `tests/bun/fixtures/galaxy-c11.json` (written by MAPX.4; read here, never edited).
 
-#### MAPX.3: A daily activity tally per project (lane B)
+#### MAPX.3: A daily activity tally per project (lane C)
 
 1. Goal: "how often in the last 30 days", which the 1 MB activity log cannot answer.
 2. Acceptance:
@@ -378,7 +384,7 @@ Paste this ahead of each task block.
 
 ---
 
-## Wave 2: the rules
+## Wave 1 (continued): the rules, first on the serial path
 
 #### MAPX.4: Port the rules into `ui/solar-layout.ts` (lane A)
 
@@ -391,11 +397,11 @@ Paste this ahead of each task block.
    5. writer colours: writers are sorted by count (then name) and take colours in order from the colour-blind-safe palette `#56B4E9`, `#CC79A7`, `#E69F00`, `#009E73`, `#0072B2`, `#D55E00` (wrapping after six); the nodule's place on the sun comes from a hash of the writer's name, not a hard-coded latitude and longitude; the event colours (`EVENT_COLOUR`) stay as in the mockup;
    6. `tests/bun/solar-layout.spec.ts` checks the mockup's numbers on its own data (the 11 bodies of `solar-scene.js` give 10 rings with one shared pair under each arrange option; the orbit times of about 11, 10, 5.5, 5 and 2.6 minutes; the styles Saturn, Jupiter, Mars, Mercury and Pluto), that the real owners `project-<name>-<hash>` give the same styles and angles as the mockup's names, two projects with the same label, the owner 'global' skipped, writer colours for the real two writers (`claude-code`, `imported`) equal to the mockup's, plus one project, no global memories, an owner with no `projects.json` record, a local-only repo, and 25 bodies.
 3. Gate: `bun run test:bun && bun run typecheck` (timeout 900 s, must exit 0).
-4. Scope: `ui/solar-layout.ts`, `ui/tsconfig.json` (list the new file), `tests/bun/solar-layout.spec.ts`. Do after MAPX.2.
+4. Scope: `ui/solar-layout.ts`, `ui/tsconfig.json` (list the new file), `tests/bun/solar-layout.spec.ts`, `tests/bun/fixtures/galaxy-c11.json` (new). Needs nothing: this task writes the fixture from C11 (every field of C11.1 to C11.3, for the mockup's 11 bodies) and builds against it, so it starts in wave 1 without waiting for MAPX.2.
 
 ---
 
-## Wave 3: the scene
+## Wave 2: the scene and the page shell, side by side
 
 #### MAPX.5: Port the scene into `ui/solar.ts`, on live data and the live stream (lane A)
 
@@ -406,30 +412,42 @@ Paste this ahead of each task block.
    3. live events come from the stream the page already holds (`ui/stream.ts`, mapped by `toMapEvent` in `ui/map-live.ts`): a recall is a gold comet between the body and the caller's nodule, a save a blue comet from the writer's nodule, an update a green beam, a forget a red laser with the memory fading; the nodule is found from the event's `client` as in risk 9 (exact `source` match, then `mcp:<client>`, else the sun's centre); an event whose owner is missing or 'global' has no planet and draws as a pulse on the sun and the nodule; a 'recall' event whose client is 'dashboard' (the dashboard's own Find, which logs a recall) draws nothing; the dashboard's two Simulate buttons keep the demo events (`simulate`, `ui/map-live.ts:115`), which never call the server;
    4. the items "beyond the mockup" (Design, items 1 to 5): the pinned halo, fading in the last 7 days, asteroid size from importance and brightness from recalls, the ice cap, the "no remote" and "kind unknown" marks, and a fainter row for an inferred writer; the halo reads `pinned` and shows once pins exist. Binary pairs are not built (deferred);
    5. reduced motion stops orbits, pulses and flights (views switch instantly); auto-rotate is off by default;
-   6. `tests/bun/solar-scene.spec.ts` (with stand-ins for the canvas, its 2d context and the document in `tests/bun/solar-fakes.ts`) runs the scene on the vendored three.js with a stub renderer and checks every hover kind, planet, moon and memory clicks, a black hole flying to its partner, Find results and Enter, hiding and showing a body, all four live event kinds, an event from an unknown client, an event with owner 'global', a dashboard 'recall' drawing nothing, satellites from a `knowledge` list, `dispose()` calling `forceContextLoss`, and 35 seconds of simulated clock time in frames (a fake clock, not a real wait) without an error.
+   6. `tests/bun/solar-scene.spec.ts` (with stand-ins for the canvas, its 2d context and the document in `tests/bun/solar-fakes.ts`) runs the scene on the vendored three.js with a stub renderer and checks every hover kind, planet, moon and memory clicks, a black hole flying to its partner, Find results and Enter, hiding and showing a body, all four live event kinds, an event from an unknown client, an event with owner 'global', a dashboard 'recall' drawing nothing, satellites from a `knowledge` list, `dispose()` calling `forceContextLoss`, and 35 seconds of simulated clock time in frames (a fake clock, not a real wait) without an error;
+   7. `ui/solar.ts` exposes exactly the C13 interface (`createSolarScene` and its methods and callbacks), so MAPX.11's shell plugs in unchanged; a spec checks the returned object's method names against C13.
 3. Refs: `docs/plans/mapx-design/solar-scene.js` (every method named above); `ui/map.ts:226-239` (`MapHost`, `LIB_URL`), `:2086` (the library import); `ui/map-live.ts:47` (`toMapEvent`), `:82-115` (`simulate`).
 4. Gate: `bun run test:bun && bun run typecheck` (timeout 900 s, must exit 0).
 5. Scope: `ui/solar.ts`, `ui/map-live.ts` (event-to-nodule mapping only), `ui/tsconfig.json`, `tests/bun/solar-scene.spec.ts`, `tests/bun/solar-fakes.ts`, `tests/bun/map-live.spec.ts`. The hosting by `createMap` is MAPX.6. Do after MAPX.4 and MAPX.1.
 
----
+#### MAPX.11: The page shell around the map, against a fake scene (lane B)
 
-## Wave 4: the page and the Details panel
-
-#### MAPX.6: Port the page around the map into the dashboard's DOM (lane A)
-
-1. Goal: the mockup's page (rail, legend, Find, Bodies strip, Details placeholder, Live activity) built the dashboard's way, with the solar scene as the Galaxy layout.
+1. Goal: the mockup's page (rail, legend, Find, Bodies strip, Details placeholder, Live activity) built the dashboard's way, before the scene exists; it talks to the scene only through C13.
 2. Acceptance:
    1. the Map tab's markup in `ui/index.html` (the `view-map` section) and its builders in `ui/map.ts` gain the mockup's page, built with `createElement` and `textContent`, the state in `ui/map-state.ts`'s pattern (read once per frame), no framework; the Layout card (`#map-card-layout`, `ui/index.html:32`, with the Galaxy, Meaning and Timeline buttons) stays visible in every layout, because it is the only way back out of Galaxy; in the Galaxy layout the other rail cards become Arrange by, Colour dots by and Show, and Timeline and Meaning keep today's rail cards unchanged; in the Galaxy layout the Details panel takes the place of `#map-inspector` and `#map-overview` (MAPX.7 fills it), and the 0.6.0 Live strip (`#map-live-strip`) stays; the other layouts keep their inspector and overview;
    2. no inline `style` attributes (the page's policy is `style-src 'self'`, `ui/server.ts:72-73`): every style is a class in `ui/style.css`; dynamic values (tooltip position, a chip's dimmed state) are set through `element.style` or a class; the page keeps its own fonts (no Google Fonts); a spec scans the built `index.html` and the DOM the builders make for `style=` attributes;
    3. the layout matches the mockup: the rail, the map with the path bar, Find at the top centre, the two collapsible legend cards in the top corners, the view buttons (Top, Below, Side, Reset, auto-rotate), the fixed Bodies strip of two rows under the map, and the full-width row of Details and Live activity; the Galaxy layout's existing Find box (`#map-find`) is reused;
    4. Find searches memories through `POST /api/search` on Enter or after a pause of about 400 ms with at least 3 characters, never per keystroke, one request at a time; the request sends `mode: 'keyword'` when the server's embeddings are off (otherwise the Search tab's mode, `ui/app.ts:1605`), so there is no 400; a 429 ("a search is already running") is handled quietly (local results stay, the next Enter retries) and shows no error; the search logs a 'recall' line, which MAPX.3 does not count and MAPX.5 does not draw (risk 10); bodies, moons and tags are matched locally as you type;
    5. the URL hash holds the level (`#level=galaxy`, `planet:<owner>`, `moon:<owner>:<kind>`, `memory:<id>`; the exact spelling is the worker's), under the key `level`; `takeToken()` (`ui/app.ts:605-612`) clears the whole fragment on load (line 607), so it is changed to read `#level=` first, or to clear the fragment only when it holds `token=`; the level is written with `history.replaceState` (no history entries); a reload keeps the level (the Map is already the page's first tab, `ui/app.ts:660`); a bad or stale hash (an owner or id that is not in the data) falls back to Galaxy; a `#token=` link still signs in;
-   6. renderer teardown: today `ui/map.ts` creates `ForceGraph3D` once (line 2092) and never frees it. Switching layouts now disposes the active renderer before creating the other: leaving Timeline or Meaning tears the force graph down (the library's own teardown if the bundled version has one, which the worker checks in `ui/vendor/map-lib.d.ts` and the bundle, plus `renderer().forceContextLoss()`); leaving Galaxy calls the solar scene's `dispose()` (MAPX.5); the other one is created when its layout is picked again; at most one WebGL context exists at any time; a spec with counted fakes checks creations equal disposals after Galaxy, Timeline, Galaxy, Meaning, Galaxy;
-   7. Arrange by, Colour dots by and the Show toggles are remembered per viewer in `localStorage`, as the layout is today (wrapped in try/catch); Tab moves through sun, planets, moons and memories in order, with a visible focus and an `aria-live` announcement of the level;
-   8. a store with no memories, a store with no `projects.json`, and no WebGL show the existing empty and no-WebGL messages instead of a blank map;
-   9. `tests/bun/map-state.spec.ts` and `tests/bun/solar-page.spec.ts` cover the controls, Find's keys (typing, Enter, Escape), the debounce, a 429 and a keyword-only mode, the strip's show and hide, the Layout card visible in all three layouts, the hash round trip and the `#token=` case, the teardown count, the three empty cases, and that the Timeline and Meaning rails are unchanged.
+   6. Arrange by, Colour dots by and the Show toggles are remembered per viewer in `localStorage`, as the layout is today (wrapped in try/catch); Tab moves through sun, planets, moons and memories in order, with a visible focus and an `aria-live` announcement of the level;
+   7. every call to the scene goes through C13; the shell is driven in specs by `tests/bun/solar-scene-fake.ts`, which records calls (`setView` on each control, `flyTo` on a Find pick or a hash level, `showView` and `zoom` on the view buttons) and fires `onHover`, `onPick` and `onLevel` back;
+   8. `tests/bun/map-state.spec.ts` and `tests/bun/solar-page.spec.ts` cover the controls, Find's keys (typing, Enter, Escape), the debounce, a 429 and a keyword-only mode, the strip's show and hide, the Layout card visible in all three layouts, the hash round trip and the `#token=` case, and that the Timeline and Meaning rails are unchanged.
+3. Gate: `bun run test:bun && bun run typecheck` (timeout 900 s, must exit 0).
+4. Scope: `ui/index.html`, `ui/style.css`, `ui/map.ts` (the Galaxy layout's page builders only), `ui/map-state.ts`, `ui/app.ts` (`takeToken()` only), `ui/tsconfig.json`, `tests/bun/map-state.spec.ts`, `tests/bun/solar-page.spec.ts`, `tests/bun/solar-scene-fake.ts` (new). Needs MAPX.4 (for `searchResults`); built beside MAPX.5. It does not create a renderer or import `ui/solar.ts`. `ui/index.html` and `ui/style.css` are also edited by 0.9.0's CRUD phase (dependency D4): whichever lands second rebases.
+
+---
+
+## Wave 3: wiring the page and the Details panel
+
+#### MAPX.6: Wire the page shell to the scene and the real data (lane A)
+
+1. Goal: the shell (MAPX.11) drives the real scene (MAPX.5) on real data, with one WebGL context at a time.
+2. Acceptance:
+   1. `createMap` (`ui/app.ts:690`) hosts the solar scene as the Galaxy layout through C13: it creates the scene with the vendored three.js, passes `GET /api/galaxy` to `setData`, forwards the live stream's events to `event`, and swaps the fake for the real scene with no change to the shell's code;
+   2. renderer teardown: today `ui/map.ts` creates `ForceGraph3D` once (line 2092) and never frees it. Switching layouts now disposes the active renderer before creating the other: leaving Timeline or Meaning tears the force graph down (the library's own teardown if the bundled version has one, which the worker checks in `ui/vendor/map-lib.d.ts` and the bundle, plus `renderer().forceContextLoss()`); leaving Galaxy calls the solar scene's `dispose()` (MAPX.5); the other one is created when its layout is picked again; at most one WebGL context exists at any time; a spec with counted fakes checks creations equal disposals after Galaxy, Timeline, Galaxy, Meaning, Galaxy;
+   3. a store with no memories, a store with no `projects.json`, and no WebGL show the existing empty and no-WebGL messages instead of a blank map;
+   4. Find's picks, the hash level, the Bodies strip and the view buttons behave on the real scene as they did on the fake (the shell's specs run again against a stubbed real scene);
+   5. `tests/bun/solar-page.spec.ts` gains the teardown count, the three empty cases and the real-scene run.
 3. Gate: `bun run test:bun && bun run typecheck` (timeout 900 s, must exit 0). Rohit's manual QA runs once, after MAPX.7 (review group R6), not here.
-4. Scope: `ui/index.html`, `ui/style.css`, `ui/map.ts`, `ui/map-state.ts`, `ui/app.ts` (`takeToken()` and the `createMap` call at line 690 only), `ui/tsconfig.json`, `tests/bun/map-state.spec.ts`, `tests/bun/solar-page.spec.ts`. Do after MAPX.5, MAPX.3 and MAPX.8. `ui/index.html` and `ui/style.css` are also edited by 0.9.0's CRUD phase (dependency D4): whichever lands second rebases.
+4. Scope: `ui/map.ts`, `ui/app.ts` (the `createMap` call at line 690 only), `ui/style.css` (only if wiring needs a class), `tests/bun/solar-page.spec.ts`. Do after MAPX.5, MAPX.11, MAPX.2, MAPX.3 and MAPX.8.
 
 #### MAPX.7: The Details panel on real memories, read-only (lane A)
 
@@ -444,11 +462,11 @@ Paste this ahead of each task block.
 
 ---
 
-## Wave 5: docs and the release of the read-only map
+## Waves 2 to 4: docs and the release of the read-only map
 
 #### MAPX.10: README, DESIGN and the version 0.8.3 (lane C)
 
-1. Goal: document the map and set the release version, 0.8.3 (Rohit, confirmed 2026-10-25).
+1. Goal: document the map and set the release version, 0.8.3 (Rohit, confirmed 2026-10-25). Two passes on one branch: a draft in wave 2 from the mockup, this plan and the design README; a final pass after MAPX.7 merges, matched to what was built, with the version bump. Only the final pass is reviewed and merged.
 2. Acceptance:
    1. README: the Dashboard section's Map bullet (line 228) and "The galaxy" section (line 246 on) describe the solar-system Galaxy view: the mapping table, Arrange by, Find, the Bodies strip, the Details panel, the live events, and that Timeline and Meaning are unchanged; they say the Details panel is read-only until the dashboard writes (0.9.0) land; they name the two new files in the Mnemosyne root (`activity-daily.json`, counts only; `projects.json`, project names and the remote's host only) and say a project is recorded the next time a Claude session starts in it;
    2. `DESIGN.md` gains a v0.8.3 section with contracts C11 and C12, the state rule, the port approach (what carries over from the mockup, seeds from the project label) and the dashboard's policy notes (no inline styles, one WebGL context); it replaces §3.7's galaxy description where it changed (§3.7 starts at line 663);
