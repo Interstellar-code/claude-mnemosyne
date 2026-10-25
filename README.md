@@ -225,7 +225,8 @@ That is a dry run: it counts the memories with no vector. Then `/mnemosyne-embed
 
 Starts a small local web page for your memories and opens it in your default browser. The reply shows the full link, with its key after `#`, and the link is on the clipboard too, so you can open it in another browser. The page has seven tabs and opens on Map:
 
-- **Map:** every memory as a star in a glowing 3D galaxy that fills the window, with what was learned from each as moons, a Timeline layout, a Meaning layout, Similar memories links and live sparks (see [The galaxy](#the-galaxy)). The controls on the left fold away, a clicked star's details show under the graph, and the overview, the live feed and how to read the map sit on the right.
+- **Map:** the solar-system Galaxy view (draft). New files: activity-daily.json, projects.json. <!-- MAPX.10 final: check against the build -->
+- **Map (old):** every memory as a star in a glowing 3D galaxy that fills the window, with what was learned from each as moons, a Timeline layout, a Meaning layout, Similar memories links and live sparks (see [The galaxy](#the-galaxy)). The controls on the left fold away, a clicked star's details show under the graph, and the overview, the live feed and how to read the map sit on the right.
 - **Memories:** every memory, with a project filter, sorting (newest, most recalled, never recalled), a text and tag filter. A memory opens in a panel that slides up from the bottom, with a Forget button that asks before it deletes. Knowledge and Search open memories in the same panel.
 - **Activity:** the activity log, live, one plain sentence per call, with the app and the session that made it; click a line for its details (see [Activity log](#activity-log)).
 - **Search:** the same recall Claude uses, with scores and the top 20 results. Match by Keyword, or Keyword + meaning when embeddings are on; each result says whether it matched on words, meaning or both. Searching here does not change any memory's recall count.
@@ -243,9 +244,11 @@ The dashboard and the activity log are tested on macOS and Linux, not on Windows
 
 **Working on the dashboard.** From a checkout of this repo, `bun run dev:ui` starts a second dashboard straight from the checkout on `127.0.0.1:47175` (another port with `MNEMOSYNE_UI_PORT`) and opens it. It reads the same store as the installed one, which keeps running, and keeps its own `ui.json` under `~/.claude/mnemosyne/dev-ui`. The page reloads itself within a second when a file in `ui/` changes, and an edit to `ui/server.ts` restarts the server on the same port and token, so there is no plugin update between edits. The footer shows "Mode: dev". Ctrl-C stops it.
 
-### The galaxy
+### The galaxy (solar system, v0.8.3 draft)
 
-The Map tab draws every memory as a star in a glowing galaxy (the newest 2000; past that the inspector says "showing 2000 of N"). Each project is a bright core, and a memory sits in a cluster around it for its topic: its first tag, or Untagged. A star grows with each recall, newer stars are brighter, and a hollow ring marks a memory that was never recalled. A soft bloom (a glow pass) makes it shine. The white star in the middle is Claude: recalls and saves start there.
+<!-- MAPX.10 final: check against the build -->
+
+Draft of the solar-system Galaxy view. The Map tab draws every memory as a star in a glowing galaxy (the newest 2000; past that the inspector says "showing 2000 of N"). Each project is a bright core, and a memory sits in a cluster around it for its topic: its first tag, or Untagged. A star grows with each recall, newer stars are brighter, and a hollow ring marks a memory that was never recalled. A soft bloom (a glow pass) makes it shine. The white star in the middle is Claude: recalls and saves start there.
 
 1. Links. Topic threads join each project core to its topics and each topic to its stars. Gold bridges join the same topic name in two different projects; Untagged never bridges. Both can be switched off in the left rail.
 2. Moving around. Drag to orbit, scroll to zoom, click a project, a topic or a star to fly in. The path bar above the map (All memories › project › topic) goes back up and Reset view returns to everything. Find dims every star except those whose tag, project or label holds the text. Colour by switches between project, recalls and age, and the project toggles hide a project. Auto-rotate turns the map on its own; it starts off when your system asks for reduced motion, and in the Timeline.

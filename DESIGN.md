@@ -1533,3 +1533,7 @@ Probes run against a real machine on 2026-10-16: `bun` 1.x, Node 24.13.0,
 banks. Claims marked *verified* were observed directly; the rest are marked as
 inference where they appear. Re-probed on 2026-10-20 with `pi-mnemopi` 18.12.3:
 remember, owner-scoped recall, owner-only forget and stats behave the same.
+
+## v0.8.3 (draft)
+
+Contracts C11 and C12 (activity-daily.json, projects.json), the state rule, the port approach (carries over from the mockup, seeds from the project label) and policy notes (no inline styles, one WebGL context). <!-- MAPX.10 final: check against the build -->
