@@ -653,7 +653,7 @@ describe('META.2: the save paths write honest source, trust tier and veracity', 
     }
   })
 
-  test('META.2.a4 / (c): rows saved before v3 are not relabelled; only a row whose exact text is saved again takes the new path\'s values', async () => {
+  test('META.2.a4 / (c): rows saved before v3 are not relabelled; only a row whose exact text is saved again takes the new path\'s kind and scope, and keeps its source and trust tier', async () => {
     const host = await open()
     // Two rows written the pre-v3 way, straight through the engine.
     const old = async (content: string) => {
@@ -668,9 +668,10 @@ describe('META.2: the save paths write honest source, trust tier and veracity', 
     // Other saves, an update of a different row and a kind-less save: none of them relabels it.
     await host.tool('memory_remember', { content: 'a brand new memory saved after the old ones', kind: 'fact' })
     expect(snapshot('an older memory that stays exactly as it is')).toEqual(untouched)
-    // Saving the exact text again is the same memory written again: it takes the new path's values.
+    // Saving the exact text again is the same memory written again: it keeps the first writer's source and
+    // trust tier (MODEL.8) and takes the kind and scope the new path names.
     await host.tool('memory_remember', { content: 'an older memory that is saved a second time', kind: 'fact' })
-    expect(snapshot('an older memory that is saved a second time')).toMatchObject({ source: 'claude-code', trust_tier: 'DERIVED', scope: 'global', memory_type: 'fact' })
+    expect(snapshot('an older memory that is saved a second time')).toMatchObject({ source: 'imported', trust_tier: 'IMPORTED', scope: 'global', memory_type: 'fact' })
     expect(snapshot('an older memory that stays exactly as it is')).toEqual(untouched)
   })
 
