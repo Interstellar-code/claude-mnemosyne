@@ -3608,3 +3608,178 @@ describe('SEM: Meaning layout, similar links, inspector list', () => {
     expect(map).not.toMatch(/innerHTML|insertAdjacentHTML|outerHTML/)
   })
 })
+
+// ---- MAPX.11: the solar page's rules (the page itself is in solar-page.spec.ts) ----
+
+import {
+  bodyChips as solarChips,
+  closeFind,
+  fragmentAfterToken,
+  FIND_PAUSE_MS,
+  SEARCH_MEMORY_MIN,
+  SOLAR_KEY,
+  TAB_MEMORIES,
+  type ChipRow,
+  type DetailsView,
+  type LegendRow,
+  type MemorySearchDeps,
+  type SolarCrumb,
+  type SolarSceneOptions,
+  type SolarView,
+  type SolarViewName,
+  createMemorySearch,
+  findMode,
+  findRows,
+  initialSolarPage,
+  solarAnnouncement,
+  readSolarPage,
+  resolveHash,
+  saveSolarPage,
+  setArrange,
+  setColour,
+  setSolarQuery,
+  shownText,
+  tabOrder,
+  toggleBody,
+  toggleShow,
+  viewOf,
+} from '../../ui/map-state'
+import { buildBodies } from '../../ui/solar-layout'
+
+describe('the solar page state (MAPX.11)', () => {
+  const c11 = JSON.parse(readFileSync(join(ROOT, 'tests', 'bun', 'fixtures', 'galaxy-c11.json'), 'utf8')) as Parameters<typeof buildBodies>[0] & { memories: { id: string; owner: string; kind: string; label: string; state: 'live' }[] }
+  const bodies = buildBodies(c11, Date.parse('2026-10-25T12:00:00Z'))
+
+  test('Arrange by, Colour dots by and the Show toggles change one field; an unknown value changes nothing', () => {
+    const page = initialSolarPage()
+    expect(setArrange(page, 'size').arrange).toBe('size')
+    expect(setArrange(page, 'bogus' as never)).toBe(page)
+    expect(setArrange(page, 'activity')).toBe(page)
+    expect(setColour(page, 'age').colour).toBe('age')
+    expect(toggleShow(page, 'rotate').rotate).toBe(false)
+    expect(toggleShow(toggleShow(page, 'sample'), 'sample').sample).toBe(true)
+  })
+
+  test('the strip hides and shows a body, and view() is a fresh copy for the scene', () => {
+    const hidden = toggleBody(initialSolarPage(), 'a')
+    expect(hidden.hidden).toEqual({ a: true })
+    expect(toggleBody(hidden, 'a').hidden).toEqual({})
+    const view = viewOf(hidden)
+    view.hidden.b = true
+    expect(hidden.hidden).toEqual({ a: true })
+    expect(Object.keys(viewOf(initialSolarPage())).sort()).toEqual(['arrange', 'colour', 'hidden', 'legend', 'query', 'rotate', 'sample'])
+    expect(setSolarQuery(hidden, 'ab').findOpen).toBe(true)
+    expect(setSolarQuery(hidden, 'a').findOpen).toBe(false)
+    expect(closeFind(setSolarQuery(hidden, 'abc'))).toMatchObject({ query: '', findOpen: false })
+  })
+
+  test('the settings are remembered per viewer; junk, a missing store and a throwing store fall back to the defaults', () => {
+    const store = new Map<string, string>()
+    const storage = { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => void store.set(k, v) }
+    saveSolarPage(storage, toggleShow(setColour(setArrange(initialSolarPage(), 'recalls'), 'age'), 'legend'))
+    expect(readSolarPage(storage)).toMatchObject({ arrange: 'recalls', colour: 'age', legend: false, rotate: true })
+    store.set('mnemosyne.map.solar', '{"arrange":"nope","colour":7,"rotate":"yes"}')
+    expect(readSolarPage(storage)).toEqual(initialSolarPage())
+    store.set('mnemosyne.map.solar', 'not json')
+    expect(readSolarPage(storage)).toEqual(initialSolarPage())
+    expect(readSolarPage(undefined)).toEqual(initialSolarPage())
+    const throwing = { getItem: () => { throw new Error('x') }, setItem: () => { throw new Error('x') } }
+    expect(readSolarPage(throwing)).toEqual(initialSolarPage())
+    expect(() => saveSolarPage(throwing, initialSolarPage())).not.toThrow()
+  })
+
+  test('chips follow the Arrange by order, dim when hidden, and the count says how many show', () => {
+    const chips = solarChips(bodies, { arrange: 'size', hidden: {} })
+    expect(chips.map(chip => chip.owner)[0]).toBe('project-hermes-switchui-4d5e6f')
+    const off = solarChips(bodies, { arrange: 'size', hidden: { 'project-hermes-switchui-4d5e6f': true } })
+    expect(off[0]!.pressed).toBe(false)
+    expect(off[0]!.title).toContain('hidden: click to show')
+    expect(shownText(bodies, { 'project-hermes-switchui-4d5e6f': true })).toBe(`${bodies.length - 1} of ${bodies.length} shown`)
+  })
+
+  test('a level from the URL is checked against the data', () => {
+    const memory = c11.memories[0]!
+    expect(resolveHash({ level: 'planet', owner: memory.owner }, bodies, c11.memories)).toEqual({ level: 'planet', owner: memory.owner })
+    expect(resolveHash({ level: 'planet', owner: 'gone' }, bodies, c11.memories)).toEqual({ level: 'galaxy' })
+    expect(resolveHash({ level: 'memory', id: memory.id }, bodies, c11.memories)).toEqual({ level: 'memory', owner: memory.owner, kind: memory.kind, id: memory.id })
+    expect(resolveHash({ level: 'memory', id: 'gone' }, bodies, c11.memories)).toEqual({ level: 'galaxy' })
+    expect(resolveHash(null, bodies, c11.memories)).toEqual({ level: 'galaxy' })
+    expect(solarAnnouncement({ level: 'galaxy' }, bodies)).toContain('Galaxy')
+  })
+
+  test('Find rows: local matches first, then memories the map can place; Tab order lists the sun, planets, moons and memories', () => {
+    const memory = c11.memories[0]!
+    const rows = findRows(bodies, 'matrix', [{ id: memory.id, content: 'first line\nsecond' }, { id: 'unknown-id', owner: 'gone', content: 'x' }], c11.memories)
+    expect(rows[0]!.type).toBe('Planet')
+    expect(rows.at(-1)).toMatchObject({ type: 'Memory', label: 'first line', target: { level: 'memory', id: memory.id } })
+    expect(rows.length).toBe(rows.filter(row => row.type !== 'Memory').length + 1)
+    const order = tabOrder({ level: 'moon', owner: memory.owner, kind: memory.kind }, bodies, c11.memories)
+    expect(order[0]!.target).toEqual({ level: 'galaxy' })
+    expect(order.map(stop => stop.target.level)).toContain('moon')
+    expect(order.at(-1)!.target.level === 'memory' || order.at(-1)!.target.level === 'planet').toBe(true)
+    expect(tabOrder({ level: 'galaxy' }, bodies, c11.memories, { [memory.owner]: true }).length).toBe(bodies.length)
+  })
+
+  test('the numbers the page uses: memory search starts at 3 characters after 400 ms, the Tab order shows 30 memories, one key holds the settings', () => {
+    expect([SEARCH_MEMORY_MIN, FIND_PAUSE_MS, TAB_MEMORIES, SOLAR_KEY]).toEqual([3, 400, 30, 'mnemosyne.map.solar'])
+    expect(fragmentAfterToken('#token=abc')).toBe('')
+    // The row types the page builds from, named so a change to them shows here.
+    const chip: ChipRow = solarChips(bodies, { arrange: 'size', hidden: {} })[0]!
+    const view: SolarView = viewOf(initialSolarPage())
+    const name: SolarViewName = 'top'
+    const crumb: SolarCrumb = { label: 'Galaxy', target: { level: 'galaxy' }, current: true }
+    const legend: LegendRow = { colour: '#fff', name: 'Sun', means: 'the store' }
+    const details: DetailsView = { kicker: '', title: '', facts: [], hint: '' }
+    const options: Pick<SolarSceneOptions, 'canvas'> = { canvas: { width: 1, height: 1 } }
+    const deps: Pick<MemorySearchDeps, 'pause'> = { pause: 400 }
+    expect([chip.owner.length > 0, view.arrange, name, crumb.current, legend.name, details.hint, options.canvas.width, deps.pause]).toEqual([true, 'activity', 'top', true, 'Sun', '', 1, 400])
+  })
+
+  test('findMode is keyword while embeddings are off', () => {
+    expect(findMode(false, 'hybrid')).toBe('keyword')
+    expect(findMode(true, 'hybrid')).toBe('hybrid')
+  })
+
+  test('the memory search: a pause, never under 3 characters, one at a time, Escape forgets, a 429 and a failure give null', async () => {
+    const timers: { run: () => void; ms: number; live: boolean }[] = []
+    const sent: string[] = []
+    const answers: ((response: Response) => void)[] = []
+    const done: [string, unknown][] = []
+    const search = createMemorySearch({
+      post: (_path, body) => {
+        sent.push((body as { query: string }).query)
+        return new Promise<Response>(resolve => answers.push(resolve))
+      },
+      mode: () => 'keyword',
+      done: (query, hits) => void done.push([query, hits]),
+      setTimer: (run, ms) => {
+        const timer = { run, ms, live: true }
+        timers.push(timer)
+        return timer
+      },
+      clearTimer: timer => void ((timer as { live: boolean }).live = false),
+    })
+    search.type('ab')
+    expect(timers.length).toBe(0)
+    search.type('abc')
+    search.type('abcd')
+    expect(timers.map(t => t.live)).toEqual([false, true])
+    expect(timers[1]!.ms).toBe(400)
+    timers[1]!.run()
+    expect(sent).toEqual(['abcd'])
+    search.enter('abcde')
+    expect(sent).toEqual(['abcd'])
+    answers[0]!(new Response('{"results":[{"id":"m1"}]}', { status: 200 }))
+    await Bun.sleep(5)
+    expect(sent).toEqual(['abcd', 'abcde'])
+    expect(done.find(([q]) => q === 'abcd')).toBeUndefined()
+    answers[1]!(new Response('{}', { status: 429 }))
+    await Bun.sleep(5)
+    expect(done.at(-1)).toEqual(['abcde', null])
+    search.enter('abcde')
+    search.cancel()
+    answers[2]!(new Response('{"results":[{"id":"late"}]}', { status: 200 }))
+    await Bun.sleep(5)
+    expect(done.some(([, hits]) => JSON.stringify(hits).includes('late'))).toBe(false)
+  })
+})
