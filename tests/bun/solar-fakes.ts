@@ -102,6 +102,8 @@ export class FakeContext2d {
   textBaseline = 'alphabetic'
   globalAlpha = 1
   calls: string[] = []
+  // The fill style each fillRect was drawn with (a spec reads what a texture painted, e.g. a polar ice cap).
+  rectFills: unknown[] = []
 
   private note(name: string): void {
     this.calls.push(name)
@@ -117,7 +119,10 @@ export class FakeContext2d {
     return { addColorStop() {} }
   }
 
-  fillRect(..._args: number[]): void { this.note('fillRect') }
+  fillRect(..._args: number[]): void {
+    this.note('fillRect')
+    this.rectFills.push(this.fillStyle)
+  }
   clearRect(..._args: number[]): void { this.note('clearRect') }
   beginPath(): void { this.note('beginPath') }
   moveTo(..._args: number[]): void { this.note('moveTo') }
@@ -369,6 +374,8 @@ type ChangeListener = (event: { matches: boolean }) => void
 
 export type InstalledFakeDom = {
   document: FakeDocument
+  /** How many reduced-motion change listeners are registered right now. */
+  mediaListenerCount(): number
   setReducedMotion(on: boolean): void
   restore(): void
 }
@@ -407,6 +414,7 @@ export function installFakeDom(options: { reducedMotion?: boolean } = {}): Insta
 
   return {
     document,
+    mediaListenerCount: () => changeListeners.size,
     setReducedMotion(on: boolean): void {
       reduced = on
       for (const fn of [...changeListeners]) fn({ matches: on })

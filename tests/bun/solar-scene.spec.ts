@@ -2,10 +2,12 @@
 // renderer and composer, a fake canvas and a fake clock (tests/bun/solar-fakes.ts). No WebGL,
 // no DOM, no real wait: frames are run by the fake clock. The galaxy is the C11 fixture.
 import { afterAll, describe, expect, test } from 'bun:test'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import fixture from './fixtures/galaxy-c11.json'
 import { FakeCanvas, FakeClock, FakeComposer, FakeRenderer, installFakeDom } from './solar-fakes'
-import { buildBodies, searchResults } from '../../ui/solar-layout'
+import type { FakeContext2d } from './solar-fakes'
+import { buildBodies, searchResults, STYLES } from '../../ui/solar-layout'
 import { ROOT } from './helpers'
 
 // The vendored bundle reads window at load time, and ui/solar.ts is DOM code (checked by
@@ -572,14 +574,11 @@ describe('MAPX.5 Find and the show/hide filter', () => {
     r.scene.dispose()
   })
 
-  test('hiding the body you are inside flies home; a hidden body cannot be flown to', () => {
+  test('hiding the body you are inside flies home', () => {
     const r = rig()
     r.scene.flyTo({ level: 'planet', owner: MATRIX })
     r.scene.setView({ hidden: { [MATRIX]: true } })
     expect(r.lastLevel()).toEqual({ level: 'galaxy' })
-    const count = r.levels.length
-    r.scene.flyTo({ level: 'planet', owner: MATRIX })
-    expect(r.levels.length).toBe(count)
     r.scene.dispose()
   })
 
@@ -839,7 +838,7 @@ describe('MAPX.5 satellites, data and extras', () => {
 
     const now = Date.parse('2026-10-25T12:00:00Z')
     const base = { recalls: 0, importance: 0.5, pinned: false, sourceInferred: false, validUntil: null }
-    expect(memoryLook(null, now)).toEqual({ size: 1, brightness: 0.8, pinned: false, fading: false })
+    expect(memoryLook(null, now)).toEqual({ size: 1, brightness: 0.85, pinned: false, fading: false })
     expect(memoryLook({ ...base, importance: 1 }, now).size).toBeGreaterThan(memoryLook({ ...base, importance: 0 }, now).size)
     expect(memoryLook({ ...base, recalls: 20 }, now).brightness).toBeGreaterThan(memoryLook({ ...base, recalls: 0 }, now).brightness)
     expect(memoryLook({ ...base, sourceInferred: true }, now).brightness).toBeLessThan(memoryLook(base, now).brightness)
@@ -896,18 +895,18 @@ describe('MAPX.5 satellites, data and extras', () => {
     r.run(0.5)
     expect(r.lastLevel()).toEqual({ level: 'memory', owner: MATRIX, kind: 'instruction', id: 'mem-001' })
     expect(r.all(o => o.userData?.kind === 'satellite')).toHaveLength(1)
+    // The opened memory or moon that is gone takes the camera home (the R5 fixes below test the camera).
     const lost = galaxy()
     lost.memories = lost.memories.filter((m: any) => m.id !== 'mem-001')
     r.scene.setData(lost)
-    expect(r.lastLevel()).toEqual({ level: 'moon', owner: MATRIX, kind: 'instruction' })
-    // A moon that disappears drops back to the planet.
+    expect(r.lastLevel()).toEqual({ level: 'galaxy' })
     r.scene.flyTo({ level: 'moon', owner: MATRIX, kind: 'fact' })
     expect(r.lastLevel()).toEqual({ level: 'moon', owner: MATRIX, kind: 'fact' })
     const noFact = galaxy()
     const matrix = noFact.projects.find((p: any) => p.owner === MATRIX)
     matrix.kinds = matrix.kinds.filter((k: any) => k.kind !== 'fact')
     r.scene.setData(noFact)
-    expect(r.lastLevel()).toEqual({ level: 'planet', owner: MATRIX })
+    expect(r.lastLevel()).toEqual({ level: 'galaxy' })
     r.scene.dispose()
   })
 
@@ -1127,5 +1126,449 @@ describe('MAPX.5 motion and dispose', () => {
     r.scene.zoom(2)
     r.scene.showView('top')
     r.canvas.emit('click', { clientX: 10, clientY: 10 })
+  })
+})
+
+// ---- review R5 fixes (round 2) ----
+
+describe('MAPX.5 review R5 fixes', () => {
+  const ev = (kind: string, extra: Record<string, unknown> = {}) => ({ kind, ids: [], client: 'claude-code', t: '2026-10-25T10:00:00.000Z', owner: MATRIX, ...extra })
+  /** The colour a memory's dot has in its moon's swarm. */
+  const dotColour = (r: ReturnType<typeof rig>, id: string): number[] => {
+    const swarm = r.all(o => o.userData?.kind === 'points' && o.userData.items.some((i: any) => i.id === id && i.tip[0].includes(' of ')))[0]
+    const at = swarm.userData.items.findIndex((i: any) => i.id === id)
+    const c = swarm.geometry.attributes.color
+    return [c.getX(at), c.getY(at), c.getZ(at)]
+  }
+  const ratio = (a: number[], b: number[]): number => Math.max(...a) / Math.max(...b)
+  const quiet = (data: any, ids: string[]): void => {
+    for (const m of data.memories) {
+      if (!ids.includes(m.id)) continue
+      m.source = 'claude-code'
+      m.sourceInferred = false
+      m.validUntil = null
+      m.recalls = 0
+    }
+  }
+  /** The camera's place once the Galaxy is framed: a fresh scene on the same data, never flown. */
+  const homeOf = (data: any): any => {
+    const ref = rig({ reduced: true, data })
+    const home = ref.camera.position.clone()
+    ref.scene.dispose()
+    return home
+  }
+
+  // F1
+  test('F1 dot brightness: 0.7 with no recalls, 1.0 (the mockup\'s own) from 20 recalls', () => {
+    const now = Date.now()
+    const base = { recalls: 0, importance: 0.5, pinned: false, sourceInferred: false, validUntil: null }
+    expect(memoryLook(base, now).brightness).toBeCloseTo(0.7, 6)
+    expect(memoryLook({ ...base, recalls: 20 }, now).brightness).toBeCloseTo(1, 6)
+    expect(memoryLook({ ...base, recalls: 500 }, now).brightness).toBe(1)
+    expect(memoryLook(null, now).brightness).toBeCloseTo(0.85, 6)
+    // In the scene: the most recalled dot is the writer's own colour, untouched; a never recalled one is 0.7 of it.
+    const data = galaxy()
+    quiet(data, ['mem-001', 'mem-002'])
+    data.memories.find((m: any) => m.id === 'mem-001').recalls = 20
+    const r = rig({ data })
+    const writer = r.all(o => o.userData?.kind === 'nodule' && o.userData.tip[0].startsWith('claude-code'))[0].material.color
+    const top = dotColour(r, 'mem-001')
+    expect(top[0]).toBeCloseTo(writer.r, 5)
+    expect(top[1]).toBeCloseTo(writer.g, 5)
+    expect(top[2]).toBeCloseTo(writer.b, 5)
+    expect(ratio(dotColour(r, 'mem-002'), top)).toBeCloseTo(0.7, 4)
+    r.scene.dispose()
+  })
+
+  // F3
+  test('F3 flying to a hidden owner shows it first and reports the level (planet, moon and memory)', () => {
+    const r = rig({ reduced: true, view: { hidden: { [MATRIX]: true } } })
+    expect(visibleChain(r.planet(MATRIX))).toBe(false)
+    r.scene.flyTo({ level: 'planet', owner: MATRIX })
+    r.clock.tick()
+    expect(r.levels).toEqual([{ level: 'planet', owner: MATRIX }])
+    expect(visibleChain(r.planet(MATRIX))).toBe(true)
+    r.scene.flyTo({ level: 'galaxy' })
+    r.scene.setView({ hidden: { [MATRIX]: true } })
+    r.clock.tick()
+    expect(visibleChain(r.planet(MATRIX))).toBe(false)
+    r.scene.flyTo({ level: 'moon', owner: MATRIX, kind: 'decision' })
+    r.clock.tick()
+    expect(r.lastLevel()).toEqual({ level: 'moon', owner: MATRIX, kind: 'decision' })
+    expect(visibleChain(r.planet(MATRIX))).toBe(true)
+    r.scene.flyTo({ level: 'galaxy' })
+    r.scene.setView({ hidden: { [MATRIX]: true } })
+    r.scene.flyTo({ level: 'memory', owner: MATRIX, kind: 'decision', id: 'mem-002' })
+    r.clock.tick()
+    expect(r.lastLevel()).toEqual({ level: 'memory', owner: MATRIX, kind: 'decision', id: 'mem-002' })
+    expect(visibleChain(r.planet(MATRIX))).toBe(true)
+    r.scene.dispose()
+  })
+
+  test('F3 a flyTo before the first setData is kept (the last one wins) and applied once data arrives', () => {
+    // Where the camera lands when the same flight is asked for after the data.
+    const twin = rig({ reduced: true })
+    twin.scene.flyTo({ level: 'planet', owner: HERMES })
+    const arrival = twin.camera.position.clone()
+    twin.scene.dispose()
+
+    const r = rig({ withData: false, reduced: true })
+    r.scene.flyTo({ level: 'planet', owner: MATRIX })
+    r.scene.flyTo({ level: 'planet', owner: HERMES })
+    expect(r.levels).toEqual([])
+    r.scene.setData(galaxy())
+    expect(r.levels).toEqual([{ level: 'planet', owner: HERMES }])
+    expect(r.camera.position.distanceTo(arrival)).toBeLessThan(1)
+    // It is applied once: a second setData does not fly there again.
+    r.scene.setData(galaxy())
+    expect(r.levels).toHaveLength(1)
+    r.scene.dispose()
+  })
+
+  // F4
+  test('F4 reduced motion: satellites hold still, and move when motion is allowed', () => {
+    const data = galaxy()
+    data.knowledge = [
+      { id: 'k1', kind: 'fact', text: 'a', memory: 'mem-001' },
+      { id: 'k2', kind: 'fact', text: 'b', memory: 'mem-001' },
+      { id: 'k3', kind: 'fact', text: 'c', memory: 'mem-001' },
+    ]
+    const drift = (reduced: boolean): number => {
+      const r = rig({ data, reduced })
+      r.scene.flyTo({ level: 'memory', owner: MATRIX, kind: 'instruction', id: 'mem-001' })
+      r.run(5)
+      const sats = r.all(o => o.userData?.kind === 'satellite')
+      expect(sats).toHaveLength(3)
+      const before = sats.map((s: any) => s.position.clone())
+      r.run(1.5)
+      const moved = Math.max(...sats.map((s: any, i: number) => s.position.distanceTo(before[i])))
+      r.scene.dispose()
+      return moved
+    }
+    expect(drift(true)).toBeLessThan(0.001)
+    expect(drift(false)).toBeGreaterThan(1)
+  })
+
+  test('F4 reduced motion: a beam and a pulse are drawn at a steady strength, not faded in and out', () => {
+    const strengths = (reduced: boolean): { beam: number[]; pulse: number[] } => {
+      const r = rig({ reduced })
+      r.scene.event(ev('update'))
+      const beam = r.fx().children.find((o: any) => o.isLine)
+      const beamSeen: number[] = []
+      for (let i = 0; i < 3; i++) {
+        r.run(0.25)
+        beamSeen.push(beam.material.opacity)
+      }
+      r.run(1)
+      r.scene.event(ev('save', { owner: 'global' }))
+      const glow = r.fx().children[0]
+      const pulseSeen: number[] = []
+      for (let i = 0; i < 3; i++) {
+        r.run(0.25)
+        pulseSeen.push(glow.material.opacity)
+      }
+      r.scene.dispose()
+      return { beam: beamSeen, pulse: pulseSeen }
+    }
+    const still = strengths(true)
+    expect(new Set(still.beam).size).toBe(1)
+    expect(still.beam[0]).toBeGreaterThan(0.5)
+    expect(new Set(still.pulse).size).toBe(1)
+    expect(still.pulse[0]).toBeGreaterThan(0.1)
+    const moving = strengths(false)
+    expect(new Set(moving.beam).size).toBeGreaterThan(1)
+    expect(new Set(moving.pulse).size).toBeGreaterThan(1)
+  })
+
+  test('F4 reduced motion: the writer nodule does not flare and the black-hole line does not breathe', () => {
+    const r = rig({ reduced: true })
+    const nodule = r.all(o => o.userData?.kind === 'nodule' && o.userData.tip[0].startsWith('claude-code'))[0]
+    r.scene.event(ev('save'))
+    r.clock.tick()
+    expect(nodule.scale.x).toBe(1)
+    const line = r.all(o => o.isLine && o.material.blending === three.AdditiveBlending && o.geometry.attributes.position.count === 61)[0]
+    const seen = new Set<number>()
+    for (let i = 0; i < 6; i++) {
+      r.run(2)
+      seen.add(line.material.opacity)
+    }
+    expect(seen.size).toBe(1)
+    r.scene.dispose()
+  })
+
+  test('F4 switching reduced motion on ends a running flight at once, with the controls on and the lens at 50', () => {
+    const twin = rig({ reduced: false })
+    twin.scene.flyTo({ level: 'planet', owner: MATRIX })
+    twin.run(2)
+    const arrival = twin.camera.position.clone()
+    twin.scene.dispose()
+
+    const r = rig({ reduced: false })
+    r.scene.flyTo({ level: 'planet', owner: MATRIX })
+    r.run(0.5)
+    expect(r.camera.fov).toBeGreaterThan(50)
+    expect(r.camera.position.distanceTo(arrival)).toBeGreaterThan(5)
+    dom.setReducedMotion(true)
+    // No frame has run since: the flight is over already.
+    expect(r.camera.position.distanceTo(arrival)).toBeLessThan(0.01)
+    expect(r.camera.fov).toBe(50)
+    r.run(0.1)
+    expect(r.camera.position.distanceTo(arrival)).toBeLessThan(0.01)
+    r.scene.dispose()
+  })
+
+  test('F4 the reduced-motion listener is removed on dispose (and added once)', () => {
+    const baseline = dom.mediaListenerCount()
+    const r = rig()
+    expect(dom.mediaListenerCount()).toBe(baseline + 1)
+    r.scene.dispose()
+    expect(dom.mediaListenerCount()).toBe(baseline)
+  })
+
+  // F5
+  test('F5 setData that removes the open moon flies the camera home and reports the Galaxy', () => {
+    const without = galaxy()
+    const matrix = without.projects.find((p: any) => p.owner === MATRIX)
+    matrix.kinds = matrix.kinds.filter((k: any) => k.kind !== 'fact')
+    const home = homeOf(without)
+    const r = rig({ reduced: false })
+    r.scene.flyTo({ level: 'moon', owner: MATRIX, kind: 'fact' })
+    r.run(2)
+    expect(r.camera.position.distanceTo(home)).toBeGreaterThan(100)
+    r.scene.setData(without)
+    expect(r.lastLevel()).toEqual({ level: 'galaxy' })
+    // It flies (not a jump): still away at the start, home when the 1.4 s are over.
+    r.clock.tick()
+    expect(r.camera.position.distanceTo(home)).toBeGreaterThan(50)
+    r.run(2)
+    expect(r.camera.position.distanceTo(home)).toBeLessThan(1)
+    r.scene.dispose()
+  })
+
+  test('F5 setData that removes the open memory goes home too; under reduced motion the camera jumps', () => {
+    const lost = galaxy()
+    lost.memories = lost.memories.filter((m: any) => m.id !== 'mem-001')
+    const home = homeOf(lost)
+    const r = rig({ reduced: true })
+    r.scene.flyTo({ level: 'memory', owner: MATRIX, kind: 'instruction', id: 'mem-001' })
+    expect(r.camera.position.distanceTo(home)).toBeGreaterThan(100)
+    r.scene.setData(lost)
+    expect(r.lastLevel()).toEqual({ level: 'galaxy' })
+    expect(r.camera.position.distanceTo(home)).toBeLessThan(1)
+    r.scene.dispose()
+  })
+
+  test('F5 setData and dispose hide the tooltip, so the orbits leave the 15% slow-down', () => {
+    const lead = (r: ReturnType<typeof rig>) => angleOf(r.worldPos(r.planet(MATRIX)))
+    const free = rig({ reduced: false })
+    const f0 = lead(free)
+    free.run(4)
+    const freeMove = Math.abs(lead(free) - f0)
+    free.scene.dispose()
+
+    const held = rig({ reduced: false })
+    const sun = held.screen(held.all(o => o.userData?.kind === 'sun')[0])
+    const found = held.locate(t => kindOf(t) === 'sun' || kindOf(t) === 'nodule', { x0: sun.x - 6, y0: sun.y - 6, x1: sun.x + 6, y1: sun.y + 6 }, 2)
+    expect(found).not.toBeNull()
+    expect(held.hovers[held.hovers.length - 1]?.tip).not.toBeNull()
+    held.scene.setData(galaxy())
+    expect(held.hovers[held.hovers.length - 1]?.tip).toBeNull()
+    held.clock.tick()
+    const h0 = lead(held)
+    held.run(4)
+    expect(Math.abs(lead(held) - h0) / freeMove).toBeGreaterThan(0.9)
+
+    const again = held.locate(t => kindOf(t) === 'sun' || kindOf(t) === 'nodule', { x0: sun.x - 6, y0: sun.y - 6, x1: sun.x + 6, y1: sun.y + 6 }, 2)
+    expect(again).not.toBeNull()
+    held.scene.dispose()
+    expect(held.hovers[held.hovers.length - 1]?.tip).toBeNull()
+  })
+
+  // F6
+  test('F6 a frame that throws stops the loop and is reported once, not every frame', () => {
+    const canvas = new FakeCanvas(dom.document)
+    const clock = new FakeClock()
+    let renders = 0
+    const logged: unknown[][] = []
+    const original = console.error
+    console.error = (...args: unknown[]) => {
+      logged.push(args)
+    }
+    try {
+      const scene = createSolarScene({
+        canvas,
+        three,
+        clock,
+        createRenderer: (c: any) => new FakeRenderer(c),
+        createComposer: (r: any, s: any, c: any) => {
+          const composer = new FakeComposer(r, s, c)
+          composer.render = () => {
+            renders++
+            if (renders === 3) throw new Error('boom')
+          }
+          return composer
+        },
+      })
+      scene.setData(galaxy())
+      clock.run(1)
+      expect(renders).toBe(3)
+      expect(logged).toHaveLength(1)
+      expect(String(logged[0]?.[1])).toContain('boom')
+      expect(clock.pending()).toBe(false)
+      clock.run(1)
+      expect(renders).toBe(3)
+      expect(logged).toHaveLength(1)
+      scene.dispose()
+    } finally {
+      console.error = original
+    }
+  })
+
+  test('F6 a constructor that fails late frees everything made so far', () => {
+    class FlakyCanvas extends FakeCanvas {
+      override addEventListener(type: string, fn: any, opts?: unknown): void {
+        if (type === 'click') throw new Error('no click')
+        super.addEventListener(type, fn, opts)
+      }
+    }
+    const canvas = new FlakyCanvas(dom.document)
+    const baseline = dom.mediaListenerCount()
+    const renderer = new FakeRenderer(canvas)
+    let composer!: FakeComposer
+    let root: any
+    const disposed = new Set<unknown>()
+    const original = three.CanvasTexture.prototype.dispose
+    three.CanvasTexture.prototype.dispose = function (this: unknown, ...args: unknown[]) {
+      disposed.add(this)
+      return original.apply(this, args)
+    }
+    try {
+      expect(() =>
+        createSolarScene({
+          canvas,
+          three,
+          clock: new FakeClock(),
+          createRenderer: () => renderer,
+          createComposer: (r: any, s: any, c: any) => {
+            root = s
+            return (composer = new FakeComposer(r, s, c))
+          },
+        }),
+      ).toThrow('no click')
+    } finally {
+      three.CanvasTexture.prototype.dispose = original
+    }
+    expect(canvas.listenerCount()).toBe(0)
+    expect(dom.mediaListenerCount()).toBe(baseline)
+    expect(composer.disposed).toBe(true)
+    expect(renderer.disposed).toBe(true)
+    expect(renderer.contextLost).toBe(true)
+    // The world, the effects and the sky are out of the scene; only its two lights (no resources) are left.
+    expect(root.children.every((child: any) => child.isLight)).toBe(true)
+    expect(disposed.size).toBeGreaterThanOrEqual(2)
+  })
+
+  // F7
+  test('F7 an event already flying to a body that gets hidden stops drawing', () => {
+    const r = rig({ reduced: false })
+    r.scene.event(ev('save'))
+    r.run(0.4)
+    expect(r.fx().children.length).toBeGreaterThan(0)
+    r.scene.setView({ hidden: { [MATRIX]: true } })
+    r.clock.tick()
+    expect(r.fx().children).toHaveLength(0)
+    r.scene.dispose()
+  })
+
+  test('F7 a forget\'s dimming survives the next setData while the reply still lists the memory live', () => {
+    const data = galaxy()
+    quiet(data, ['mem-001'])
+    const r = rig({ reduced: false, data })
+    const bright = dotColour(r, 'mem-001')
+    r.scene.event(ev('forget', { ids: ['mem-001'] }))
+    r.run(2)
+    expect(ratio(dotColour(r, 'mem-001'), bright)).toBeCloseTo(0.1, 4)
+    // The same (stale) reply again: still dim. Forgetting it twice does not dim it twice.
+    r.scene.setData(structuredClone(data))
+    expect(ratio(dotColour(r, 'mem-001'), bright)).toBeCloseTo(0.1, 4)
+    r.scene.event(ev('forget', { ids: ['mem-001'] }))
+    r.run(2)
+    expect(ratio(dotColour(r, 'mem-001'), bright)).toBeCloseTo(0.1, 4)
+    // A reply that no longer lists it live lets the dimming go; if it is live again later, it is bright.
+    const gone = structuredClone(data)
+    gone.memories.find((m: any) => m.id === 'mem-001').state = 'retired'
+    r.scene.setData(gone)
+    r.scene.setData(structuredClone(data))
+    expect(ratio(dotColour(r, 'mem-001'), bright)).toBeCloseTo(1, 4)
+    r.scene.dispose()
+  })
+
+  // F9
+  test('F9 the polar ice cap is painted on an idle project\'s planet and on no other', () => {
+    const data = galaxy()
+    const old = new Date(Date.now() - 90 * DAY).toISOString()
+    const fresh = new Date().toISOString()
+    for (const p of data.projects) p.lastActive = p.owner === HERMES || p.owner === MNEMOSYNE ? old : fresh
+    const r = rig({ data })
+    const bodies = buildBodies(data, Date.now())
+    const capped = (owner: string): boolean => {
+      const mesh = r.planet(owner)
+      const ctx = mesh.material.map.image.getContext('2d') as FakeContext2d
+      return ctx.rectFills.includes('rgba(244,248,255,0.85)')
+    }
+    let withCap = 0
+    let without = 0
+    for (const b of bodies) {
+      if (b.craft !== null) continue
+      const own = STYLES[b.style as keyof typeof STYLES]
+      const expected = b.iceCap && !(own.kind === 'rock' && own.extra === 'cap')
+      expect(capped(b.owner)).toBe(expected)
+      if (expected) withCap++
+      else without++
+    }
+    expect(withCap).toBeGreaterThan(0)
+    expect(without).toBeGreaterThan(0)
+    r.scene.dispose()
+  })
+
+  test('F9 a memory in its last 7 days is dimmed to 0.45, and one an inferred writer wrote to 0.75', () => {
+    const data = galaxy()
+    quiet(data, ['mem-002'])
+    const mem = () => data.memories.find((m: any) => m.id === 'mem-002')
+    const r = rig({ data })
+    const plain = dotColour(r, 'mem-002')
+
+    mem().validUntil = new Date(Date.now() + 3 * DAY).toISOString()
+    r.scene.setData(data)
+    expect(ratio(dotColour(r, 'mem-002'), plain)).toBeCloseTo(0.45, 4)
+
+    mem().validUntil = new Date(Date.now() + 30 * DAY).toISOString()
+    r.scene.setData(data)
+    expect(ratio(dotColour(r, 'mem-002'), plain)).toBeCloseTo(1, 4)
+
+    mem().validUntil = null
+    mem().sourceInferred = true
+    r.scene.setData(data)
+    expect(ratio(dotColour(r, 'mem-002'), plain)).toBeCloseTo(0.75, 4)
+    r.scene.dispose()
+  })
+
+  test('F9 the per-dot size patch matches the vendored three.js points shader', () => {
+    const lib = readFileSync(join(ROOT, 'ui', 'vendor', 'map-lib.js'), 'utf8')
+    const start = lib.indexOf('uniform float size;\nuniform float scale;')
+    expect(start).toBeGreaterThan(-1)
+    const vertex = lib.slice(start, lib.indexOf('`', start))
+    // The two strings the patch looks for each occur once in the vendored points vertex shader.
+    expect(vertex.split('uniform float size;').length - 1).toBe(1)
+    expect(vertex.split('gl_PointSize = size;').length - 1).toBe(1)
+    const r = rig()
+    const dots = r.all(o => o.userData?.kind === 'points' && o.geometry.attributes.aSize)[0]
+    const shader = { vertexShader: vertex }
+    dots.material.onBeforeCompile(shader)
+    expect(shader.vertexShader).not.toBe(vertex)
+    expect(shader.vertexShader).toContain('uniform float size;\nattribute float aSize;')
+    expect(shader.vertexShader).toContain('gl_PointSize = size * aSize;')
+    expect(shader.vertexShader).not.toContain('gl_PointSize = size;')
+    r.scene.dispose()
   })
 })

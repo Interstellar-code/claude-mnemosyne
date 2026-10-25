@@ -62,7 +62,10 @@ export type SceneGalaxy = SolarGalaxy & { knowledge?: readonly SolarKnowledge[] 
 export type SolarView = {
   arrange: Arrange
   colour: ColourMode
-  /** An owner set to true is hidden (label, orbit line when alone, black holes and live events go with it). */
+  /**
+   * An owner set to true is hidden (label, orbit line when alone, black holes and live events go with it).
+   * flyTo into a hidden owner shows it first, as the mockup did, and reports it through `onLevel`: the page shows that owner's chip.
+   */
   hidden: Record<string, boolean>
   query: string
   /** Auto-rotate: off by default; a turning camera cancels out the planets' own slow orbits. */
@@ -129,24 +132,30 @@ const REDUCED_MOTION = '(prefers-reduced-motion: reduce)'
 const FLIGHT_SECONDS = 1.4
 const MAX_STEP = 0.05
 const HOVER_SLOW = 0.15
+// A port choice, not in the mockup: at most this many live events are drawn at once; the oldest end early.
 const MAX_EVENTS = 40
+// A port choice, not in the mockup: an opened memory shows at most this many knowledge satellites.
+const MAX_SATELLITES = 12
 const FADE_DAYS = 7
+// A forgotten memory's dot keeps this share of its colour.
+const FORGET_DIM = 0.1
 const DAY_MS = 86400000
 const PULSE_EVERY = 30
 
 // ---- What a memory looks like (beyond the mockup, items 1 to 5) -------------------------
 
 /**
- * A memory's look as an asteroid: bigger with importance, brighter with recalls, a little
- * fainter when its writer was inferred, dim in its last 7 days before expiry. A slot with
- * no listed memory (the list holds the newest 2000) gets the middle of every range.
+ * A memory's look as an asteroid: bigger with importance, brighter with recalls (0.7 with none
+ * up to 1.0, the mockup's own brightness, at 20 or more), a little fainter when its writer was
+ * inferred, dim in its last 7 days before expiry. A slot with no listed memory (the list holds
+ * the newest 2000) gets the middle of every range.
  */
 export function memoryLook(memory: SolarMemory | null, now: number): { size: number; brightness: number; pinned: boolean; fading: boolean } {
-  if (memory === null) return { size: 1, brightness: 0.8, pinned: false, fading: false }
+  if (memory === null) return { size: 1, brightness: 0.85, pinned: false, fading: false }
   const left = memory.validUntil === null ? Number.NaN : Date.parse(memory.validUntil) - now
   const fading = left > 0 && left <= FADE_DAYS * DAY_MS
   const importance = Math.max(0, Math.min(1, memory.importance))
-  let brightness = 0.55 + 0.45 * Math.min(1, Math.log1p(Math.max(0, memory.recalls)) / Math.log1p(20))
+  let brightness = 0.7 + 0.3 * Math.min(1, Math.log1p(Math.max(0, memory.recalls)) / Math.log1p(20))
   if (memory.sourceInferred) brightness *= 0.75
   if (fading) brightness *= 0.45
   return { size: 0.6 + 0.8 * importance, brightness, pinned: memory.pinned, fading }
@@ -221,7 +230,10 @@ function defaultComposer(renderer: SolarRenderer, scene: O3, camera: O3, T: Thre
   return { bloom, render: () => composer.render(), setSize: (w, h) => composer.setSize(w, h), dispose: () => composer.dispose() }
 }
 
-/** The scene. Create one per canvas; `dispose()` frees it. Throws when the renderer cannot be made (no WebGL). */
+/**
+ * The scene. Create one per canvas; `dispose()` frees it. Throws when the renderer cannot be made (no WebGL).
+ * Give each scene a fresh canvas; dispose() ends this canvas's WebGL context (a later scene on the same canvas can draw black).
+ */
 export function createSolarScene(options: SolarOptions): SolarScene {
   const impl = new SolarImpl(options)
   return {
@@ -248,7 +260,7 @@ class SolarImpl {
   private readonly ray: O3
   private readonly glowTex: O3
   private readonly dotTex: O3
-  private readonly sharedTextures: O3[]
+  private readonly sharedTextures: O3[] = []
   private readonly sky: O3
   /** Everything the data decides: rebuilt by setData. */
   private world: O3
@@ -285,6 +297,10 @@ class SolarImpl {
   private lastQuery: string | null = null
   private memTarget: { obj: O3; i: number } | null = null
   private satKey = ''
+  /** Forgotten ids: their dots stay dim over a setData while the reply still lists them live. */
+  private forgotten = new Set<string>()
+  /** A flyTo that came before the first setData: applied once data arrives. */
+  private pendingFly: Target | null = null
 
   private S: Level = { level: 'galaxy', planet: null, kind: null, mem: null, memId: null }
   private reduced = false
@@ -301,6 +317,8 @@ class SolarImpl {
   private mediaQuery: any = null
   private readonly onMedia = (event: { matches: boolean }): void => {
     this.reduced = event.matches
+    // Plan 2.5: a flight running when reduced motion turns on finishes at once.
+    if (this.reduced) this.finishFlight()
   }
   private readonly onDown = (e: any): void => {
     this.down = { x: e.clientX, y: e.clientY }
@@ -327,9 +345,16 @@ class SolarImpl {
     this.act(this.pick(e))
   }
   private readonly loop = (ms: number): void => {
+    this.handle = null
     if (this.disposed) return
-    this.handle = this.clockSource.request(this.loop)
-    this.frame(ms)
+    try {
+      this.frame(ms)
+    } catch (err) {
+      // As the mockup did, a frame that throws stops the loop; it is reported once, not every frame.
+      console.error('solar scene: a frame threw and the loop has stopped', err)
+      return
+    }
+    if (!this.disposed) this.handle = this.clockSource.request(this.loop)
   }
 
   constructor(opts: SolarOptions) {
@@ -358,8 +383,9 @@ class SolarImpl {
       this.applyBloom()
       this.ray = new T.Raycaster()
       this.glowTex = this.glowTexture()
+      this.sharedTextures.push(this.glowTex)
       this.dotTex = this.dotTexture()
-      this.sharedTextures = [this.glowTex, this.dotTex]
+      this.sharedTextures.push(this.dotTex)
       this.world = new T.Group()
       this.fx = new T.Group()
       this.scene.add(this.world, this.fx)
@@ -383,9 +409,13 @@ class SolarImpl {
       canvas.addEventListener('click', this.onClick)
       this.handle = this.clockSource.request(this.loop)
     } catch (err) {
-      // Do not leak the context when the rest of the set-up fails.
-      renderer.dispose()
-      renderer.forceContextLoss?.()
+      // Free everything made so far (listeners, controls, textures, composer, the context), then fail.
+      this.disposed = true
+      try {
+        this.release()
+      } catch {
+        // the set-up error below is the one to report
+      }
       throw err
     }
   }
@@ -406,7 +436,11 @@ class SolarImpl {
   }
 
   flyTo(target: Target): void {
-    if (this.disposed || this.galaxy === null) return
+    if (this.disposed) return
+    if (this.galaxy === null) {
+      this.pendingFly = target
+      return
+    }
     if (target.level === 'galaxy') this.flyHome()
     else if (target.level === 'planet') this.flyPlanet(target.owner)
     else if (target.level === 'moon') this.flyMoon(target.owner, target.kind)
@@ -438,23 +472,33 @@ class SolarImpl {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
-    if (this.handle !== null) this.clockSource.cancel(this.handle)
-    this.handle = null
-    const canvas = this.canvas
-    canvas.removeEventListener('pointerdown', this.onDown)
-    canvas.removeEventListener('pointermove', this.onMove)
-    canvas.removeEventListener('pointerleave', this.onLeave)
-    canvas.removeEventListener('click', this.onClick)
-    this.mediaQuery?.removeEventListener?.('change', this.onMedia)
-    this.controls.dispose?.()
-    this.clearWorld()
-    this.clearFx()
-    this.disposeTree(this.sky)
-    for (const texture of this.sharedTextures) texture.dispose?.()
-    this.scene.remove(this.world, this.fx, this.sky)
-    this.composer.dispose?.()
-    this.renderer.dispose()
-    this.renderer.forceContextLoss?.()
+    this.hideTip()
+    this.release()
+  }
+
+  /** Frees what exists, so it also serves a constructor that failed half way. The renderer goes last, whatever fails before. */
+  private release(): void {
+    try {
+      if (this.handle !== null) this.clockSource.cancel(this.handle)
+      this.handle = null
+      const canvas = this.canvas
+      canvas.removeEventListener('pointerdown', this.onDown)
+      canvas.removeEventListener('pointermove', this.onMove)
+      canvas.removeEventListener('pointerleave', this.onLeave)
+      canvas.removeEventListener('click', this.onClick)
+      this.mediaQuery?.removeEventListener?.('change', this.onMedia)
+      this.controls?.dispose?.()
+      if (this.world) this.clearWorld()
+      this.clearFx()
+      this.forgotten.clear()
+      this.disposeTree(this.sky)
+      for (const texture of this.sharedTextures) texture.dispose?.()
+      this.scene?.remove(...[this.world, this.fx, this.sky].filter(Boolean))
+      this.composer?.dispose?.()
+    } finally {
+      this.renderer.dispose()
+      this.renderer.forceContextLoss?.()
+    }
   }
 
   // ---------- textures and sprites ----------
@@ -808,7 +852,7 @@ class SolarImpl {
 
   private rgb(item: Item, mode: ColourMode): [number, number, number] {
     const c = new this.T.Color(this.colourOf(item, mode))
-    const k = memoryLook(item.mem, this.now).brightness
+    const k = memoryLook(item.mem, this.now).brightness * (item.id !== null && this.forgotten.has(item.id) ? FORGET_DIM : 1)
     return [c.r * k, c.g * k, c.b * k]
   }
 
@@ -1240,6 +1284,7 @@ class SolarImpl {
       const owner = this.bodies.find(b => b.owner === memory.owner)?.label ?? projectLabel(memory.owner)
       items.push({ tip: [`Outer belt · ${memory.state === 'expired' ? 'an expired' : `a ${memory.state}`} memory`, what, `from ${owner} · ${this.firstLine(memory)}`, 'Restore in Review sends it back to its planet'] })
     }
+    // A port choice, not in the mockup: the outer belt's dots are 3 wide (the mockup's belt has no size of its own to match).
     this.outer = this.pointsObject(pos, col, 3, items, 0.45, true)
     this.world.add(this.outer)
     this.pickables.push(this.outer)
@@ -1253,8 +1298,13 @@ class SolarImpl {
     const sunTurn = this.sunG ? this.sunG.rotation.y : 0
     const pivots = new Map<string, number>()
     for (const owner in before) for (const m of (before[owner] as PlanetRec).moons) pivots.set(`${owner}|${m.kind}`, m.pivot.rotation.y)
+    // A tooltip over the old world would keep the orbits slowed; the new world has none yet.
+    this.hideTip()
     this.clearWorld()
     this.now = Date.now()
+    // A forget's dimming survives while the reply still lists the memory live; once it does not, it is let go.
+    const live = new Set(galaxy.memories.filter(memory => memory.state === 'live').map(memory => memory.id))
+    for (const id of [...this.forgotten]) if (!live.has(id)) this.forgotten.delete(id)
     this.bodies = buildBodies(galaxy, this.now)
     this.orbits = targets(this.bodies, this.view.arrange)
     this.links = linkInfos(galaxy, this.bodies)
@@ -1272,6 +1322,11 @@ class SolarImpl {
     this.sunG.rotation.y = sunTurn
     for (const b of this.bodies) this.P[b.owner] = this.makePlanet(b, this.orbits.radius[b.owner] as number, before[b.owner])
     for (const owner in this.P) for (const m of (this.P[owner] as PlanetRec).moons) m.pivot.rotation.y = pivots.get(`${owner}|${m.kind}`) ?? m.pivot.rotation.y
+    // Place the bodies now, so a flyTo straight after setData flies to where each one is, not to the origin.
+    for (const owner in this.P) {
+      const P = this.P[owner] as PlanetRec
+      P.pG.position.set(Math.cos(P.angle) * P.r, 0, Math.sin(P.angle) * P.r)
+    }
     this.makeOuter()
     this.holes = []
     this.links.forEach((link, i) => this.makeHoles(link, i))
@@ -1285,14 +1340,14 @@ class SolarImpl {
       this.camera.position.copy(this.homePos)
       this.controls.target.copy(this.homeTarget)
     }
-    // A level whose body or moon is gone falls back to what is left.
+    // A place that is gone (the body, the opened moon or the opened memory) takes the camera home:
+    // it flies there, or jumps under reduced motion, and onLevel reports the Galaxy.
     const S = this.S
     if (S.level !== 'galaxy') {
       const P = S.planet === null ? undefined : this.P[S.planet]
-      if (!P) this.flyHome()
-      else if ((S.level === 'moon' || S.level === 'memory') && !P.moons.some(m => m.kind === S.kind)) this.setLevel('planet', P.body.owner, null, null, null)
+      if (!P || ((S.level === 'moon' || S.level === 'memory') && !P.moons.some(m => m.kind === S.kind))) this.flyHome()
     }
-    // The opened memory keeps its satellites if it is still there; else the level drops to its moon.
+    // The opened memory keeps its satellites if it is still there.
     this.memTarget = null
     if (this.S.level === 'memory' && this.S.planet !== null && this.S.kind !== null && this.S.memId !== null) {
       const mo = this.P[this.S.planet]?.moons.find(m => m.kind === this.S.kind)
@@ -1300,9 +1355,13 @@ class SolarImpl {
       if (mo && item) {
         this.S.mem = item.i
         this.memTarget = { obj: mo.swarm, i: item.i }
-      } else this.setLevel('moon', this.S.planet, this.S.kind, null, null)
+      } else this.flyHome()
     }
     this.applyView()
+    // A flyTo that came before the data is applied now that the bodies exist.
+    const pending = this.pendingFly
+    this.pendingFly = null
+    if (pending !== null) this.flyTo(pending)
   }
 
   /** Applies everything in `view` that is not read each frame: labels, colours, Find's dimming. */
@@ -1441,8 +1500,32 @@ class SolarImpl {
     this.flight = { p0: this.camera.position.clone(), t0: this.controls.target.clone(), p1: pos.clone(), t1: target.clone(), start: this.clock, dur: FLIGHT_SECONDS, after }
   }
 
+  /** Ends a running flight where it was going (reduced motion turned on, or the flight arrived). */
+  private finishFlight(): void {
+    const f = this.flight
+    if (f === null) return
+    this.flight = null
+    this.camera.position.copy(f.p1)
+    this.controls.target.copy(f.t1)
+    this.controls.enabled = true
+    this.camera.fov = 50
+    this.camera.updateProjectionMatrix()
+    f.after?.()
+  }
+
   private hiddenOwner(owner: string): boolean {
     return this.view.hidden[owner] === true
+  }
+
+  /**
+   * Flying to a hidden owner shows it first, as the mockup did. The page learns of it through the
+   * `onLevel` that follows (it names the owner), and shows that owner's chip.
+   */
+  private reveal(owner: string): void {
+    if (!this.hiddenOwner(owner)) return
+    const hidden = { ...this.view.hidden }
+    delete hidden[owner]
+    this.view = { ...this.view, hidden }
   }
 
   private setLevel(level: Level['level'], planet: string | null, kind: string | null, mem: number | null, memId: string | null): void {
@@ -1463,8 +1546,9 @@ class SolarImpl {
 
   private flyPlanet(owner: string): void {
     const P = this.P[owner]
-    if (!P || this.hiddenOwner(owner)) return
+    if (!P) return
     const T = this.T
+    this.reveal(owner)
     this.setLevel('planet', owner, null, null, null)
     const c = this.worldOf(P.pG)
     const out = c.clone().setY(0)
@@ -1477,10 +1561,11 @@ class SolarImpl {
 
   private flyMoon(owner: string, kind: string): void {
     const P = this.P[owner]
-    if (!P || this.hiddenOwner(owner)) return
+    if (!P) return
     const mo = P.moons.find(m => m.kind === kind)
     if (!mo) return
     const T = this.T
+    this.reveal(owner)
     this.setLevel('moon', owner, kind, null, null)
     const c = this.worldOf(mo.mesh)
     const dir = this.camera.position.clone().sub(c).normalize()
@@ -1504,7 +1589,7 @@ class SolarImpl {
   /** Fly to a memory by id, to where its dot will sit once the swarm has spread into a ring. */
   private flyMemoryById(owner: string, kind: string, id: string): void {
     const P = this.P[owner]
-    if (!P || this.hiddenOwner(owner)) return
+    if (!P) return
     const mo = P.moons.find(m => m.kind === kind)
     const items = mo ? (mo.swarm.userData.items as Item[]) : []
     const item = items.find(x => x.id === id)
@@ -1516,7 +1601,9 @@ class SolarImpl {
     const T = this.T
     const rp = mo.swarm.userData.ringPos as number[]
     const v = new T.Vector3(rp[item.i * 3], rp[item.i * 3 + 1], rp[item.i * 3 + 2])
+    mo.swarm.updateWorldMatrix(true, false)
     mo.swarm.localToWorld(v)
+    this.reveal(owner)
     this.setLevel('memory', owner, kind, item.i, id)
     this.memTarget = { obj: mo.swarm, i: item.i }
     const dir = this.camera.position.clone().sub(v).normalize()
@@ -1584,6 +1671,9 @@ class SolarImpl {
   private fadesOf(ids: readonly string[]): Fade[] {
     const out: Fade[] = []
     for (const id of ids) {
+      // Already dimmed by an earlier forget: not dimmed twice.
+      if (this.forgotten.has(id)) continue
+      this.forgotten.add(id)
       for (const { obj, index } of this.byId.get(id) ?? []) {
         const col = obj.geometry.attributes.color
         out.push({ obj, index, rgb: [col.getX(index), col.getY(index), col.getZ(index)] })
@@ -1603,13 +1693,15 @@ class SolarImpl {
     for (const ev of this.events) {
       const u = (this.clock - ev.start) / ev.dur
       const P = ev.owner === null ? undefined : this.P[ev.owner]
-      if (u >= 1 || (ev.owner !== null && !P)) {
+      // An event bound for a body that is gone or hidden since it started stops drawing.
+      if (u >= 1 || (ev.owner !== null && (!P || this.hiddenOwner(ev.owner)))) {
         this.endEvent(ev)
         if (u >= 1 && ev.type === 'recall') this.flares.set(ev.source ?? '', this.clock)
         continue
       }
       keep.push(ev)
-      const al = Math.sin(Math.PI * u)
+      // Reduced motion: beams, pulses and flashes are drawn at full strength for their time, not faded in and out.
+      const al = this.reduced ? 1 : Math.sin(Math.PI * u)
       const nod = this.noduleAt(ev.source)
       if (ev.type === 'pulse') {
         ;(ev.flash as O3).position.set(0, 0, 0)
@@ -1632,7 +1724,7 @@ class SolarImpl {
         ev.beam.material.opacity = al
         ev.flash.position.copy(pp)
         ev.flash.material.opacity = 0.7 * al
-        if (ev.fade) this.setFade(ev.fade, u)
+        if (ev.fade) this.setFade(ev.fade, this.reduced ? 1 : u)
         continue
       }
       const from = ev.type === 'recall' ? pp : nod
@@ -1649,7 +1741,7 @@ class SolarImpl {
 
   /** A forgotten memory's dots dim to a tenth of their colour as the laser lands. */
   private setFade(fades: Fade[], u: number): void {
-    const f = 1 - 0.9 * Math.min(1, u)
+    const f = 1 - (1 - FORGET_DIM) * Math.min(1, u)
     const touched = new Set<O3>()
     for (const { obj, index, rgb } of fades) {
       obj.geometry.attributes.color.setXYZ(index, rgb[0] * f, rgb[1] * f, rgb[2] * f)
@@ -1679,7 +1771,7 @@ class SolarImpl {
     if (this.satKey !== S.memId) {
       this.clearSats()
       this.satKey = S.memId
-      for (const item of (this.knowledge.get(S.memId) ?? []).slice(0, 12)) {
+      for (const item of (this.knowledge.get(S.memId) ?? []).slice(0, MAX_SATELLITES)) {
         const g = this.glow('#F0E442', 2.2, 1)
         g.userData = { kind: 'satellite', tip: [`Knowledge · ${item.kind}`, text(item.text, '(no text)'), 'mined from this memory'] }
         this.fx.add(g)
@@ -1692,7 +1784,7 @@ class SolarImpl {
     o.localToWorld(v)
     const n = this.sats.length
     for (let i = 0; i < n; i++) {
-      const ang = (i * Math.PI * 2) / n + this.clock * 0.6
+      const ang = (i * Math.PI * 2) / n + (this.reduced ? 0 : this.clock * 0.6)
       this.sats[i].position.set(v.x + Math.cos(ang) * 3.2, v.y + Math.sin(ang * 2) * 0.6, v.z + Math.sin(ang) * 3.2)
     }
   }
@@ -1724,7 +1816,7 @@ class SolarImpl {
     if (this.sunG) this.sunG.rotation.y += dt * 0.12 * motion
     for (const [source, mesh] of this.nodules) {
       const at = this.flares.get(source)
-      mesh.scale.setScalar(1 + (at === undefined ? 0 : Math.max(0, 1 - (this.clock - at) * 1.5)) * 0.8)
+      mesh.scale.setScalar(1 + (at === undefined || this.reduced ? 0 : Math.max(0, 1 - (this.clock - at) * 1.5)) * 0.8)
     }
 
     // Arrange: planets glide to their rings; they orbit only in the Galaxy view.
@@ -1831,7 +1923,7 @@ class SolarImpl {
         pts.push(q)
       }
       H.line.geometry.attributes.position.needsUpdate = true
-      H.line.material.opacity = 0.14 + 0.06 * (0.5 + 0.5 * Math.sin(this.clock * 0.5 + H.phase))
+      H.line.material.opacity = 0.14 + 0.06 * (this.reduced ? 0.5 : 0.5 + 0.5 * Math.sin(this.clock * 0.5 + H.phase))
       const local = (((this.clock + H.phase) % PULSE_EVERY) + PULSE_EVERY) % PULSE_EVERY
       const on = local < 7 && !this.reduced && !gone
       for (let k = 0; k < H.pulse.length; k++) {
@@ -1857,13 +1949,7 @@ class SolarImpl {
       this.camera.fov = 50 + 14 * Math.sin(Math.PI * uf)
       this.camera.updateProjectionMatrix()
       this.controls.enabled = false
-      if (uf >= 1) {
-        this.flight = null
-        this.controls.enabled = true
-        this.camera.fov = 50
-        this.camera.updateProjectionMatrix()
-        if (f.after) f.after()
-      }
+      if (uf >= 1) this.finishFlight()
     }
     this.controls.autoRotate = this.autoRotates()
     this.controls.update()
