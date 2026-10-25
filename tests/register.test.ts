@@ -20,7 +20,8 @@ const isAppend = (argv: readonly string[]) => (argv[1] ?? '').endsWith('/bin/act
 // The world beneath the plugin: an installed engine of build `build` whose
 // every call answers `reply`, and a record of each process run. Activity log
 // appends (`bun bin/activity.ts <log>`, by $.process.spawn or $.process.run) are
-// kept apart, in `runs.appends`, with `via` and the lines as `init.stdin`;
+// kept apart, in `runs.appends`, with `via` and the lines as `init.stdin`; the project
+// registry's spawns (`bun bin/projects.ts write <path>`) in `runs.projects`;
 // `extra.append` makes each append hang forever or throw, `extra.env` sets
 // variables, `extra.darwinArm64` answers the uname platform probe.
 type Extra = {
@@ -36,12 +37,18 @@ type Extra = {
   replyFor?: (name: string, args: Record<string, unknown>) => string | undefined
   // VOCAB.2: files the hooks may read, by path (the vocabulary).
   files?: Record<string, string>
+  // MAPX.8: what $.session.repo() answers (null: a plain folder; default: a repo at /work/My Repo with no remote), whether it throws, and the folder $.session.cwd() names.
+  repo?: { root: string; remote?: string | null } | null
+  repoThrows?: boolean
+  cwd?: string
+  // MAPX.8: each `bun bin/projects.ts write <path>` spawn finishes (default), never finishes, or throws.
+  projects?: 'ok' | 'hang' | 'throw'
 }
 const MODEL_DIR = '/home/u/.claude/mnemosyne/model-cache/cache/fastembed/Qdrant_bge-small-en-v1.5-onnx-Q'
 const MARKER = '/home/u/.claude/mnemosyne/embeddings.json'
 
 function world(on: On, reply: string, isInstalled = true, exitCode = 0, build: string = ENGINE_BUILD, extra: Extra = {}) {
-  const runs: Run[] & { appends: Run[] } = Object.assign([] as Run[], { appends: [] as Run[] })
+  const runs: Run[] & { appends: Run[]; projects: Run[] } = Object.assign([] as Run[], { appends: [] as Run[], projects: [] as Run[] })
   on('env.get', (_$, e) => ({ value: extra.env?.[(e as { name: string }).name] ?? '/home/u' }))
   // A file for the installed engine; an empty embedding cache unless extra.embeddingsReady.
   on(
@@ -64,7 +71,11 @@ function world(on: On, reply: string, isInstalled = true, exitCode = 0, build: s
     if (extra.session === 'throw') throw new Error('session store unavailable')
     return { value: 's1' }
   })
-  on('session.repo', () => ({ value: { root: '/work/My Repo' } }) as never)
+  on('session.repo', () => {
+    if (extra.repoThrows) throw new Error('git unavailable')
+    return { value: extra.repo === undefined ? { root: '/work/My Repo', remote: null } : extra.repo } as never
+  })
+  on('session.cwd', () => ({ value: extra.cwd ?? '/work/scratch' }) as never)
   on('process.run', (_$, e) => {
     if (isAppend(e.argv)) {
       runs.appends.push({ ...e, via: 'run' })
@@ -88,6 +99,12 @@ function world(on: On, reply: string, isInstalled = true, exitCode = 0, build: s
     return { value: { exitCode, stdout, stderr: '' } } as never
   })
   on('process.spawn', async function* (_$: unknown, e: { argv: readonly string[]; input?: string }) {
+    if ((e.argv[1] ?? '').endsWith('/bin/projects.ts')) {
+      runs.projects.push({ argv: e.argv, init: { stdin: e.input }, via: 'spawn' })
+      if (extra.projects === 'hang') await new Promise(() => {})
+      if (extra.projects === 'throw') throw new Error('registry failed')
+      return { value: { code: 0, signal: null } }
+    }
     runs.appends.push({ argv: e.argv, init: { stdin: e.input }, via: 'spawn' })
     if (extra.append === 'hang') await new Promise(() => {})
     if (extra.append === 'throw') throw new Error('append failed')
@@ -2959,4 +2976,108 @@ test('GUARD.3: the cmd wrapper sets MNEMOSYNE_GUARD_MODE', { options: { external
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   await $.session.start({ cwd: 'C:\\w', surface: null, isInteractive: false } as never)
   expect(runs.find(r => r.argv[2]?.includes('writeFileSync'))?.argv[4]).toContain('set "MNEMOSYNE_GUARD_MODE=warn"\r\n')
+})
+
+// MAPX.8 / C12: at session start the plugin hands the project registry one record,
+// { owner, name, kind, remoteHost }, to `bun bin/projects.ts write <root>/projects.json`
+// (a detached spawn, as the activity log does it). The remote never leaves the hook as
+// anything but its host. Tests pass the fixed /home/u root only: no real home is touched.
+
+const PROJECTS_PATH = '/home/u/.claude/mnemosyne/projects.json'
+const REPO_OWNER = 'project-My-Repo-apu5fc'
+const perProject = { options: { scope: 'per-project' } } as const
+
+/** Registers what a session start needs and starts one; resolves to the start's result. */
+async function startSession($: Engine, on: On) {
+  on('command.register', () => ({ value: {} }) as never)
+  on('tool.register', () => ({ value: {} }) as never)
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  return $.session.start({ cwd: '/w', surface: null, isInteractive: false } as never)
+}
+
+const registered = (runs: { projects: Run[] }) => runs.projects.map(run => JSON.parse(run.init?.stdin ?? '{}'))
+
+test('MAPX.8: owner() still gives project-My-Repo-<hash> for the fixture root /work/My Repo', perProject, async ($, on) => {
+  const runs = world(on, '{"status":"stored"}')
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', kind: 'fact', content: 'a local project fact' })
+  expect(runs[0]!.init?.env?.MNEMOPI_SESSION_ID).toBe(REPO_OWNER)
+})
+
+test('MAPX.8: a repo is registered at session start through one detached spawn of bin/projects.ts', perProject, async ($, on) => {
+  const runs = world(on, '{}', true, 0, ENGINE_BUILD, { repo: { root: '/work/My Repo', remote: 'git@github.com:o/r.git' } })
+  await startSession($, on)
+
+  expect(runs.projects.length).toBe(1)
+  const run = runs.projects[0]!
+  expect(run.via).toBe('spawn')
+  expect(run.argv[0]).toBe('bun')
+  expect(run.argv[1]?.endsWith('/bin/projects.ts')).toBe(true)
+  expect(run.argv.slice(2)).toEqual(['write', PROJECTS_PATH])
+  expect(registered(runs)).toEqual([{ owner: REPO_OWNER, name: 'My Repo', kind: 'repo', remoteHost: 'github.com' }])
+  expect(runs.appends).toEqual([]) // the activity log's spawn is a different one
+})
+
+// Every remote form gives its host and nothing else on the way out of the hook.
+for (const [remote, host] of [
+  ['git@github.com:o/r.git', 'github.com'],
+  ['https://hunter2user:ghp_sEcReTtOkEn0123456789@GitHub.com/o/r.git', 'github.com'],
+  ['ssh://git@git.example.org:2222/o/r', 'git.example.org'],
+  ['/srv/git/r.git', 'local'],
+  ['file:///srv/git/r.git', 'local'],
+  [null, null],
+] as const) {
+  test(`MAPX.8: the remote ${remote === null ? 'null' : 'form ' + remote.replace(/:[^@/]*@/, ':…@')} is recorded as host ${host === null ? 'null' : host}, never as the remote`, perProject, async ($, on) => {
+    const runs = world(on, '{}', true, 0, ENGINE_BUILD, { repo: { root: '/work/My Repo', remote } })
+    await startSession($, on)
+
+    const sent = runs.projects[0]?.init?.stdin ?? ''
+    expect(registered(runs)).toEqual([{ owner: REPO_OWNER, name: 'My Repo', kind: 'repo', remoteHost: host }])
+    for (const secret of ['hunter2user', 'ghp_', '2222', '/o/r', '/srv/git', 'file:']) expect(sent).not.toContain(secret)
+  })
+}
+
+test('MAPX.8: a plain folder is registered as kind folder, named by the working folder', perProject, async ($, on) => {
+  const runs = world(on, '{}', true, 0, ENGINE_BUILD, { repo: null, cwd: '/work/scratch' })
+  await startSession($, on)
+  expect(registered(runs)).toEqual([{ owner: 'project-scratch-6s2iew', name: 'scratch', kind: 'folder', remoteHost: null }])
+})
+
+test('MAPX.8: the global owner is never registered (scope global)', async ($, on) => {
+  const runs = world(on, '{}')
+  await startSession($, on)
+  expect(runs.projects).toEqual([])
+})
+
+test('MAPX.8: at most one registry write per owner per process', perProject, async ($, on) => {
+  const runs = world(on, '{}', true, 0, ENGINE_BUILD, { repo: { root: '/work/My Repo', remote: 'git@github.com:o/r.git' } })
+  await startSession($, on)
+  await $.session.start({ cwd: '/w', surface: null, isInteractive: false } as never)
+  expect(runs.projects.length).toBe(1)
+})
+
+// A registry spawn that throws and one that never finishes each leave the session
+// start's result and a save exactly as they are without a registry.
+for (const [label, extra] of [
+  ['a spawn that throws', { projects: 'throw' }],
+  ['a spawn that never finishes', { projects: 'hang' }],
+] as const) {
+  test(`MAPX.8: ${label} changes neither the session start nor a save`, perProject, async ($, on) => {
+    const runs = world(on, '{"status":"stored"}', true, 0, ENGINE_BUILD, { repo: { root: '/work/My Repo', remote: 'git@github.com:o/r.git' }, ...extra })
+    const started = await startSession($, on)
+    const saved = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', kind: 'fact', content: 'a local project fact' })
+
+    expect(started).toMatchObject({ cwd: '/w' })
+    expect(JSON.parse(String(saved.result))).toEqual({ status: 'stored' })
+    expect(saved.deny).toBeUndefined()
+    expect(runs[runs.length - 1]!.init?.env?.MNEMOPI_SESSION_ID).toBe(REPO_OWNER)
+    expect(runs.projects.length).toBe(1)
+  })
+}
+
+test('MAPX.8: a repo lookup that throws leaves the session start as it is and records nothing', perProject, async ($, on) => {
+  const runs = world(on, '{}', true, 0, ENGINE_BUILD, { repoThrows: true })
+  const started = await startSession($, on)
+  expect(started).toMatchObject({ cwd: '/w' })
+  expect(runs.projects).toEqual([])
 })
