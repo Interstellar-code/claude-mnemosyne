@@ -116,7 +116,7 @@ export declare class UnrealBloomPass implements PassLike {
 }
 export declare class Scene { constructor(...args: any[]); [key: string]: any }
 export declare class PerspectiveCamera { constructor(fov?: number, aspect?: number, near?: number, far?: number); [key: string]: any }
-export declare class WebGLRenderer { constructor(params?: { canvas?: HTMLCanvasElement; antialias?: boolean; [key: string]: any }); domElement: HTMLCanvasElement; setSize(width: number, height: number): void; setPixelRatio(ratio: number): void; setClearColor(color: number, alpha?: number): void; dispose(): void; [key: string]: any }
+export declare class WebGLRenderer { constructor(params?: { canvas?: HTMLCanvasElement; antialias?: boolean; [key: string]: any }); domElement: HTMLCanvasElement; setSize(width: number, height: number, updateStyle?: boolean): void; setPixelRatio(ratio: number): void; setClearColor(color: number, alpha?: number): void; dispose(): void; [key: string]: any }
 export declare class Group { constructor(...args: any[]); [key: string]: any }
 export declare class Mesh { constructor(geometry?: any, material?: any); [key: string]: any }
 export declare class Points { constructor(geometry?: any, material?: any); [key: string]: any }
@@ -145,8 +145,8 @@ export declare class AmbientLight { constructor(...args: any[]); [key: string]: 
 export declare const AdditiveBlending: number
 export declare const NormalBlending: number
 export declare const DoubleSide: number
-export declare const SRGBColorSpace: number
-export declare class OrbitControls { constructor(camera: any, domElement: any); [key: string]: any; target: { clone(): any }; enableDamping: boolean; autoRotateSpeed: number; minDistance: number; maxDistance: number }
+export declare const SRGBColorSpace: string
+export declare class OrbitControls { constructor(camera: any, domElement: any); [key: string]: any; target: Vector3; enableDamping: boolean; autoRotateSpeed: number; minDistance: number; maxDistance: number }
 export declare class OutputPass implements PassLike {
   constructor()
   enabled: boolean
