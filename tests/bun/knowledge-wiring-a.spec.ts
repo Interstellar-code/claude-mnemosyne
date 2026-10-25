@@ -116,10 +116,10 @@ describe('a memory forgotten mid-flight', () => {
 })
 
 describe('a stale engine', () => {
-  test('KNOWX stale engine: a save on a not-current engine writes no pending file, makes no model call, and logs one failed "engine out of date" line', async () => {
+  test('UPGRADE.1 (was KNOWX stale engine): a save on a not-current engine is refused with /mnemosyne-setup: no row, no pending file, no model call, no extract line', async () => {
     const host = await open({ model: () => ({ isAnswered: true, text: GOOD_REPLY }) })
-    // The host's fake engine (engineBuild) has an empty cli.ts, so the save itself would be denied. To drive a
-    // save that works on a not-current engine, put a package.json of an old build next to the REAL engine sources.
+    // The host's fake engine (engineBuild) has an empty cli.ts. To drive a save on a not-current engine, put a
+    // package.json of an old build next to the REAL engine sources (so a save would work if it were not refused).
     const scope = join(host.root, 'engine', 'node_modules', '@oh-my-pi')
     rmSync(join(scope, 'pi-mnemopi'), { recursive: true, force: true })
     mkdirSync(join(scope, 'pi-mnemopi'), { recursive: true })
@@ -127,16 +127,18 @@ describe('a stale engine', () => {
     expect('0.0.1').not.toBe(ENGINE_BUILD)
     symlinkSync(join(ROOT, 'engine', 'src'), join(scope, 'pi-mnemopi', 'src'), 'dir')
 
-    const id = savedId(await host.tool('memory_remember', { content: 'Saved on an old engine' }))
-    const line = await until('the extract line', () => host.extractLines()[0])
-    expect(line).toMatchObject({ action: 'extract', origin: 'tool', ok: false, error: 'engine out of date', ids: [id], count: 0 })
-    expect(host.extractLines()).toHaveLength(1)
+    // An older engine's 24 h trim would delete the save, so it is refused before any engine process.
+    const refused = await host.tool('memory_remember', { content: 'Saved on an old engine' })
+    expect(refused.deny).toContain('/mnemosyne-setup')
+    expect(refused.deny).toContain('out of date')
+    expect(refused.result).toBeUndefined()
+    expect(host.engineRuns()).toEqual([])
+    expect(existsSync(join(host.store, 'mnemopi.db'))).toBe(false)
+    expect(host.extractLines()).toEqual([])
     expect(host.model.length).toBe(0)
     expect(host.pending()).toEqual([])
     expect(host.memoriesRuns().filter(run => run.argv.includes('pending'))).toEqual([])
     expect(existsSync(host.pendingDir)).toBe(false)
-    // The save itself worked.
-    expect(memoryCount(host, id)).toBe(1)
   })
 })
 

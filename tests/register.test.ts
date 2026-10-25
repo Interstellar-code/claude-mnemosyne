@@ -431,11 +431,11 @@ test('META.3: saving the same text again is the engine\'s dedupe, not a near-dup
   expect(ran.result).toBe(STORED_REPLY)
 })
 
-test('META.3: a stale engine skips the check (mnemopi_similar needs this build) and the save still goes', async ($, on) => {
+test('META.3: a stale engine runs no similar check: the save is refused first (UPGRADE.1), with no engine process', async ($, on) => {
   const runs = world(on, STORED_REPLY, true, 0, '18.12.3', { embeddingsReady: true })
   const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: NEAR_TEXT, kind: 'fact' })
-  expect(ran.deny).toBeUndefined()
-  expect(names(runs)).toEqual(['mnemopi_remember'])
+  expect(ran.deny).toContain('/mnemosyne-setup')
+  expect(runs.length).toBe(0)
 })
 
 // ---- META.4: replaces retires the superseded row ----
@@ -958,7 +958,7 @@ test('memory_update with nothing to change, or tags that are not an array, is de
   expect(runs.length).toBe(0)
 })
 
-test('on a stale engine memory_update is denied with /mnemosyne-setup, and the four other tools still run', async ($, on) => {
+test('on a stale engine memory_update is denied with /mnemosyne-setup, and recall, forget and stats still run', async ($, on) => {
   const runs = world(on, '{"results":[]}', true, 0, '18.12.3')
   const update = await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1', tags: ['a'] })
   expect(update.deny).toContain('/mnemosyne-setup')
@@ -966,10 +966,44 @@ test('on a stale engine memory_update is denied with /mnemosyne-setup, and the f
   expect(runs.length).toBe(0)
 
   await $.tool.call({ tool: 'mcp__mnemosyne__memory_recall', query: 'x' })
-  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'a durable test fact' })
   await $.tool.call({ tool: 'mcp__mnemosyne__memory_forget', memory_id: 'm1' })
   await $.tool.call({ tool: 'mcp__mnemosyne__memory_stats' })
-  expect(runs.map(run => request(run).name)).toEqual(['mnemopi_recall', 'mnemopi_remember', 'mnemopi_forget', 'mnemopi_stats'])
+  expect(runs.map(run => request(run).name)).toEqual(['mnemopi_recall', 'mnemopi_forget', 'mnemopi_stats'])
+})
+
+// UPGRADE.1: an engine older than the plugin's build still has the 24 h trim that deletes every row whose trust tier is not
+// IMPORTED, and the new saves are not IMPORTED. So a save on it is refused, like an update, before any engine run.
+test('UPGRADE.1: memory_remember on a stale engine is denied with /mnemosyne-setup and starts no engine process', async ($, on) => {
+  const runs = world(on, STORED_REPLY, true, 0, '18.12.3')
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'A durable note that the old engine would delete after a day.', kind: 'fact' })
+  expect(ran.deny).toContain('/mnemosyne-setup')
+  expect(ran.deny).toContain('out of date')
+  expect(ran.deny).toContain('memory_remember')
+  expect(ran.deny).toContain(ENGINE_BUILD)
+  expect(ran.result).toBeUndefined()
+  expect(runs.length).toBe(0)
+})
+
+test('UPGRADE.1: the same text is saved once the engine is current: the refusal is only the build', async ($, on) => {
+  const runs = world(on, STORED_REPLY)
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'A durable note that the current engine keeps.', kind: 'fact' })
+  expect(ran.deny).toBeUndefined()
+  expect(names(runs)).toEqual(['mnemopi_remember'])
+})
+
+test('UPGRADE.1: a refused stale save is logged ok false with the refusal and no memory text, and does not use up the remember trigger', async ($, on) => {
+  const runs = world(on, STORED_REPLY, true, 0, '18.12.3')
+  on('prompt.submit', (_$, e) => ({ text: e.text, context: e.context }))
+  await $.prompt.submit(trigger() as never)
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'A note with a distinctive phrase: marmalade-zeppelin.', kind: 'fact', tags: ['ops'] })
+  expect(ran.deny).toContain('/mnemosyne-setup')
+  const got = lines(runs).filter(entry => entry.origin === 'tool')
+  expect(got).toHaveLength(1)
+  expect(got[0]).toMatchObject({ action: 'remember', origin: 'tool', ok: false })
+  expect(got[0].error).toContain('out of date')
+  expect(JSON.stringify(got[0])).not.toContain('marmalade')
+  expect(got[0].text).toBe('')
+  expect(got[0].author_type).toBeUndefined()
 })
 
 // Session start in a world whose installed engine is `build`; the toasts it raised.
