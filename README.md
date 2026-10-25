@@ -32,7 +32,7 @@ claude plugin update mnemosyne@mnemosyne
 
 Restart Claude Code afterwards. The plugin carries its own copy of the engine; when an update brings a new engine build, session start shows a notice, and `/mnemosyne-setup` installs it. Until then the older engine keeps working, and only `memory_update` asks for the setup.
 
-After updating to 0.7.0, run `/mnemosyne-setup` once: it installs engine build `18.12.3-mnemosyne.7`, which has the knowledge tools, local embeddings and `/mnemosyne-embed`. Without it, extraction, `/mnemosyne-knowledge` and the dashboard stay off and say so, and embeddings stay off (see [What 0.7.0 does not do yet](#what-070-does-not-do-yet)). Then, if you want meaning-based recall for the memories you already have, run `/mnemosyne-embed apply` (see [Embeddings](#embeddings-meaning-based-recall)).
+After updating to 0.8.0, run `/mnemosyne-setup` once: it installs engine build `18.12.3-mnemosyne.10`. Without it the plugin still starts and the older tools keep working, but the 0.8.0 changes that live in the engine are missing: the trim that spares durable memories by scope, the memory kind and expiry, the near-duplicate check, `replaces`, the audit trail and the first-writer rule, and `memory_update` asks for the setup. The same build carries what 0.7.0 added (the knowledge tools, local embeddings and `/mnemosyne-embed`); without it extraction, `/mnemosyne-knowledge` and the dashboard stay off and say so, and embeddings stay off (see [What 0.7.0 does not do yet](#what-070-does-not-do-yet)). Then, if you want meaning-based recall for the memories you already have, run `/mnemosyne-embed apply` (see [Embeddings](#embeddings-meaning-based-recall)). What changes for you in 0.8.0 is in [What 0.8.0 adds](#what-080-adds).
 
 ## Uninstall
 
@@ -68,15 +68,140 @@ If you use the memory from other MCP clients (see below), restart them after set
 | `we now deploy on Thursdays` | Claude updates the saved fact in place (`memory_update`). |
 | `forget the memory about deploys` | Claude finds it and deletes it. |
 
-Claude also saves and recalls on its own: lasting preferences, conventions, decisions. To change a fact, or give it topic tags, Claude updates it in place with `memory_update`; it keeps its id and recall history, and no duplicate is saved.
+Claude also saves and recalls on its own: lasting preferences, conventions, decisions. Each save names its kind and passes the [save guard](#the-save-guard). To change a fact, or give it topic tags or another kind, Claude updates it in place with `memory_update`; it keeps its id and recall history, and no duplicate is saved. A fact that replaces an older one is saved with `replaces` (see [Near-duplicates and replacing a memory](#near-duplicates-and-replacing-a-memory)).
 
 With embeddings off, recall matches words, not meaning: "deploy Fridays" finds the fact above, "release schedule" does not. With embeddings on (see below), a memory can also be found by what it says.
+
+## What 0.8.0 adds
+
+0.8.0 is about what goes into the memory. Every save now passes one check, every memory says what kind it is and where it came from, project-state notes expire, and tags come from a shared vocabulary. **Run `/mnemosyne-setup` once after updating**: the changes below need engine build `18.12.3-mnemosyne.10`. Until you do, the old engine keeps answering, but it does not know the new rules, and session start shows a notice asking for the setup. In particular its 24-hour trim deletes any memory that is not labelled `imported`, and 0.8.0 stops labelling saves that way (see [How long a memory lasts](#how-long-a-memory-lasts)). So a memory saved between the plugin update and the setup can be deleted by the old engine, the next time it saves anything. Memories saved before the update carry the `imported` label and are safe. Run the setup first, before you save anything new.
+
+Dashboard writes (create, edit, retire and restore on the page), the Review queue's actions, importers for documents and past sessions, session summaries and the sweep that expires unused memories are not in 0.8.0; they are planned for 0.9.0 (see [What 0.8.0 does not do yet](#what-080-does-not-do-yet)).
+
+### The save guard
+
+Every save made through Claude (`memory_remember`, and `memory_update` when it changes the text) and every save from an outside agent (through the MCP proxy) is checked before it reaches the engine. Four rules:
+
+| Rule | Looks for | What happens |
+|---|---|---|
+| G1 secret | an AWS key, GitHub token, `sk-` API key, Slack token, JWT, private key header, `Bearer` token, a URL with `user:password@`, or `password`, `secret`, `api_key` or `token` set to a value of 12 or more characters | refused, always |
+| G2 size | empty text, or under 15 characters | refused, always |
+| G2 size | over 4000 characters | refused, always |
+| G2 size | over 1500 characters | warning |
+| G3 near-duplicate | a stored memory that says almost the same (cosine score 0.88 or more) | warning |
+| G4 chatter | text that reads like dated progress (a date next to `released`, `merged`, `done`, `next`, `overnight` or `round`, or the words `today`, `tonight`, `this session`) | warning |
+
+A refusal or warning names the rule and says what to do; it never repeats the matched text. A secret refusal says to remove the credential and save the fact without it. A chatter warning suggests saving the note as kind `context`, which expires.
+
+Settings → `guardMode` picks what a warning does:
+
+1. `strict` (the default): the save is refused, with the rules named, until the same call is sent again with `confirm: true`. Claude does that only when the memory is wanted as it is.
+2. `warn`: the save goes in at once, the rule ids are stored in the memory's metadata (`guard`), and the reply shows the warnings.
+
+Secret and size refusals cannot be confirmed in either mode, and any other value of the setting counts as `strict`. A refused save does not use up a remember phrase, so the retry still counts as yours. An update that changes only tags, importance or kind is not checked, and a clean rewrite of a warned memory clears its flag.
+
+G3 needs embeddings on (it asks the engine's local `mnemopi_similar` tool, which does not change any memory's recall count). With embeddings off, an engine that is not current, or any engine error, it says nothing and the save goes on. It applies to Claude's saves only: outside agents get G1, G2 and G4. Saving the same text again is the engine's own duplicate check (one row, no warning), not a near-duplicate; and a text that is already stored by a different owner counts as a near-duplicate. When Claude is told about a near-duplicate it is asked to update that memory (`memory_update` with the id and owner shown) or to save the new one with `replaces`.
+
+The refusals show in the activity log as a failed call with the rule ids and no text.
+
+The rules are patterns, not understanding. An unusual secret can pass, and some prose is refused: a note such as `token: refreshAccessToken is the function that rotates it` looks like a secret assignment to G1, and a plain sentence with `today` warns under G4. Memories saved before 0.8.0 are not checked again. To see what the guard would say about your own store, run `bun bin/guard-audit.ts --store ~/.claude/mnemosyne/store` from the plugin folder: it opens the database read-only and prints counts per rule (G1, G2, G4) and per verdict, never a memory's text, id or owner.
+
+### Kinds
+
+A save names what kind of memory it is (`kind`). The rules text Claude gets asks for it, and outside agents see the same `kind` argument.
+
+| Kind | Plain label |
+|---|---|
+| `fact` | fact |
+| `preference` | preference |
+| `instruction` | rule or runbook |
+| `decision` | decision |
+| `context` | project state |
+| `error` | bug note |
+| `artifact` | reference |
+| `event` | session summary |
+
+A save with no kind goes in as `unknown`, with a warning in the reply that says to pass one; it is never refused for that. A kind that is not in the list is refused. Memories saved before 0.8.0 stay `unknown`. `memory_update` can change a kind. The kinds `fact`, `preference`, `instruction` and `decision` are protected: saving the same text again never relabels them or gives them an expiry.
+
+### Where a memory comes from
+
+Since 0.8.0 a save says honestly who wrote it and through what. The engine's `source`, `trust_tier` and `veracity` fields are filled per write path:
+
+| Path | source | trust tier | veracity |
+|---|---|---|---|
+| Claude saves on its own | `claude-code` | `DERIVED` | `unknown` |
+| You, with a remember phrase | `user` | `STATED` | `stated` |
+| An outside agent through the proxy | `mcp:<client name>` | `EXTERNAL_WRITE` | `unknown` |
+
+Memories saved before 0.8.0 keep `source` `imported` (that was the only label the old trim allowed); they are not relabelled, and a later retag changes tags and, where the kind is `unknown`, the kind, nothing else. An outside agent cannot set its own trust tier, veracity or an expiry date. The dashboard and the importers will add rows for their own paths in 0.9.0.
+
+If the same text is saved again, the first writer's `source` and trust tier stay (and the first author and veracity, as before); the scope only widens, and a protected kind keeps its kind. So a fact you stated and an agent later repeats still reads as yours. The reverse also holds: if Claude saved a sentence first and you later say it with a remember phrase, the row keeps `claude-code` and `DERIVED` and only its veracity moves to `stated`.
+
+### How long a memory lasts
+
+1. **Trim by scope.** The engine used to delete any memory not labelled `imported` after 24 hours (or past 1000 per owner). That is why every save used to carry that label. Now the trim only touches memories whose scope is `session`. The plugin always saves with scope `global` (or `channel` in per-project mode), so none of its saves is trimmed, and each can carry its true source. A memory with no scope is also spared.
+2. **Project state expires.** A `context` note gets an expiry 14 days after the save. Any save can pass `expires_in_days` (1 to 365). Recall stops returning an expired memory; it is not deleted.
+3. **Restore.** The engine can bring a retired or expired memory back (`mnemopi_update` with `restore: true`, for the owner's own row). Neither the plugin's tools nor the outside-agent proxy offer it, and the dashboard has no button for it yet, so in 0.8.0 only a direct engine call restores. A Restore button is planned for 0.9.0.
+4. **Unused memories.** The engine also has `mnemopi_expire_unused`, which expires memories of the kinds `context`, `event`, `error` and `artifact` that nobody recalled for 90 days (a dry run by default). Nothing in the plugin calls it in 0.8.0. The sweep itself arrives in 0.9.0.
+
+### Near-duplicates and replacing a memory
+
+When a close memory exists, Claude is told to update it. When the new text supersedes an old one, Claude saves it with `replaces` (the old memory's id, and its `owner` from recall if it belongs to another project). After the new memory is saved, the old one is retired: recall stops returning it, nothing is deleted, and it can be restored through the engine. If the save is refused, or the old id cannot be found, nothing is retired. `replaces` is a Claude tool only; outside agents cannot retire a memory.
+
+### The audit trail
+
+Each retire, restore, text update, attest and expiry writes one row to the engine's `memory_validations` table: which memory, who did it, what was done and when. The row never holds memory text. The "who" is `claude-code` for Claude's own text updates and for retires made through `replaces`, `mcp:<client name>` for an outside agent's text update, and `unknown` otherwise. The engine keeps only the last 3 rows per memory, so it is the last three actions, not a full history. Forgetting a memory deletes its rows. The dashboard does not show the trail yet.
+
+### Backups
+
+`bun bin/memories.ts --store <store folder> backup` (run from the plugin folder) copies the database to `~/.claude/mnemosyne/backups/mnemopi-<time>.db` with `VACUUM INTO`, owner-only, checks the copy, and keeps the newest 10. It stops without copying when the disk has less free space than twice the store. You rarely need to run it: every command that changes the store in bulk backs it up first and stops if the backup fails, saying that no memory was changed. These are `/mnemosyne-tags apply` (a tag run and a retag), `/mnemosyne-knowledge apply` and `/mnemosyne-embed apply` or `rebuild`. Try each on a copy of the store first, as before.
+
+### Tags: vocabulary and namespaces
+
+Tags now follow one format, and Claude, the tagger and outside agents all use it:
+
+1. A tag is `value` or `ns:value`. `ns` is `entity`, `agent` or `asset` (for example `agent:codex`); any other prefix is just punctuation inside the value.
+2. `value` is lowercase, hyphen-separated, 1 to 31 characters: `Code Review` becomes `code-review`.
+3. A tag that is only the project's own name is dropped, a memory keeps at most 5 tags, and duplicates are removed.
+4. An alias in the vocabulary folds into its tag (`CR` into `code-review`).
+
+Tags already stored are not rewritten when read; they change only when you retag or update a memory.
+
+The shared vocabulary is `~/.claude/mnemosyne/vocabulary.json` (owner-only). Create it once from the tags your memories already use:
+
+```sh
+bun bin/vocab.ts --store ~/.claude/mnemosyne/store init
+```
+
+It starts with the agents `agent:claude-code`, `agent:codex`, `agent:opencode` and `agent:agy`, plus every tag that is on at least 2 memories once names are folded (never a project name). `init` will not overwrite an existing file unless you pass `--force`, which keeps the tags and aliases you added by hand. Then `list` prints it, `admit <tag>` adds a tag and `alias <from> <to>` adds an alias. Nothing reads the memories' text to build it. `/mnemosyne-tags` prints the exact command for your paths when the file is missing.
+
+The tagger is shown up to 150 admitted tags by namespace, asked for 2 to 5 tags and one kind, and may propose at most one new tag per memory. A proposed new tag is counted, not written; once it is proposed for 3 memories it is admitted. A vocabulary file with a bad entry is ignored whole without a message, so alias folding is off until the file is fixed.
+
+`/mnemosyne-tags retag` re-proposes tags and a kind for every memory, not only the untagged ones (see [Topic tags](#topic-tags-mnemosyne-tags)).
+
+### What leaves your machine
+
+Nothing new leaves it in 0.8.0. The guard, the near-duplicate check, the vocabulary, the backup and the audit trail all run on your machine. Memory text goes to one place, as before: the `extractionModel` (Haiku by default), through Claude Code's own model channel, for the tag dry runs, the retag dry run and knowledge extraction. A retag dry run sends the text of every memory (a plain tag run sends only the untagged ones), so it costs one model call per memory. `extractionModel` set to `off` stops all of it.
+
+### Saves cannot move to another bank
+
+A `.env` file in the folder where an agent runs used to be able to point the engine at a different bank, and so a different database folder. The engine environment, both `mnemosyne-mcp` wrappers and the installer now pin the bank to `default`, so a hostile or stray `.env` cannot divert saves.
+
+### What 0.8.0 does not do yet
+
+1. The dashboard is read-only apart from Forget: no create, edit, retire or restore, no tag vocabulary page, and the Review tab keeps its list with Open and Forget. All of that is planned for 0.9.0.
+2. No importers for documents or past sessions, and no session summaries.
+3. No expiry sweep for unused memories; the engine tool exists but nothing runs it.
+4. Nothing restores a retired or expired memory from the plugin, the proxy or the dashboard. Only a direct engine call does.
+5. The Health tab still shows the engine's unused tables (`episodic_memory`, `consolidation_log`, `gists`, `facts`, `graph_edges`, `triples`, `scratchpad` and their search indexes) as plain "empty". They stay empty on purpose, because the plugin never uses the engine tools that fill them (see [DESIGN.md](DESIGN.md)).
+6. An outside agent's tag update that leaves no usable tag (for example only the project name) removes the memory's tags and still reports success; Claude's own update refuses it.
+7. Embeddings, and so G3, are tested on macOS on Apple Silicon only.
 
 ## Embeddings (meaning-based recall)
 
 Since 0.7.0 the engine can also compare memories by meaning, using a small local model, BAAI/bge-small-en-v1.5 (384 dimensions, about 63 MB). It runs on your machine. The engine's route to a remote embedding API is closed: it needs an engine-only opt-in (`MNEMOPI_EMBEDDINGS_API_OPT_IN`) that the plugin pins to `0`, so memory text is never sent to an embedding API. The API URL and key, `OPENROUTER_BASE_URL`, `OPENROUTER_API_KEY` and `OPENAI_API_KEY` are also emptied, and the model name, the download host and the cache folder are pinned to fixed values. A `.env` file or a shell variable cannot send text to an embedding API, change the model or move the model cache.
 
-- **Where it comes from.** `/mnemosyne-setup` downloads the model once from `huggingface.co` (the `Qdrant/bge-small-en-v1.5-onnx-Q` repository; setup prints the host and size first). The model is cached under `~/.claude/mnemosyne/model-cache/`, not the shared `~/.omp` cache, and is only ever downloaded during setup. After updating to this version, run `/mnemosyne-setup` once to install the engine build `18.12.3-mnemosyne.7` and fetch the model; until then embeddings stay off and recall is keyword-only. A later update that brings a new engine build also needs a fresh `/mnemosyne-setup`.
+- **Where it comes from.** `/mnemosyne-setup` downloads the model once from `huggingface.co` (the `Qdrant/bge-small-en-v1.5-onnx-Q` repository; setup prints the host and size first). The model is cached under `~/.claude/mnemosyne/model-cache/`, not the shared `~/.omp` cache, and is only ever downloaded during setup. After updating to this version, run `/mnemosyne-setup` once to install the engine build `18.12.3-mnemosyne.10` and fetch the model; until then embeddings stay off and recall is keyword-only. A later update that brings a new engine build also needs a fresh `/mnemosyne-setup`.
 - **The option.** `embeddings` in the plugin settings is `auto` by default: on only on macOS on Apple Silicon (the tested platform), off elsewhere unless you set it to `on`. `off` keeps recall keyword-only. Changing it needs `/mnemosyne-setup` (to download the model) and a dashboard restart. Windows and Linux are not verified.
 - **The install check.** With embeddings on, setup proves the model works before it swaps the engine in: it saves and recalls a test memory in a throwaway store and requires a stored vector for it. If the model cannot produce a vector (for example the download failed), setup refuses to swap the engine, keeps the old one, writes no setup marker, and says embeddings are off. Then set `embeddings` to `off` and run `/mnemosyne-setup` again, or run `/mnemosyne-setup` again when you are online.
 - **The cost.** Embedding a memory adds about 0.3 s per engine call that embeds, and each engine process that embeds uses about 0.4 GB of memory (peak, from the EMB research). The engine install grows by about 280 MB (fastembed and its ONNX runtime, which overrides onnxruntime-node to 1.26.0 so the process no longer aborts on exit under Bun). On Linux x64, setup also skips the GPU (CUDA) download from `api.nuget.org` that onnxruntime-node would otherwise try on every install: only those CUDA/TensorRT files are skipped, the CPU runtime ships inside the package.
@@ -106,7 +231,7 @@ Starts a small local web page for your memories and opens it in your default bro
 - **Review:** memories to look at again: never recalled, no tags, not recalled in 30 days, or low importance, each with Open and Forget.
 - **Health:** how much of your memory is used, how much has never been recalled, and which features are switched on.
 
-The Theme button in the header switches the whole dashboard between Auto (follows your system), Light and Dark, and remembers your choice. The header shows the plugin version the dashboard runs (for example `v0.7.6`) beside the engine's. The block at the bottom of the Health tab shows the store, the server process and whether the activity log is on.
+The Theme button in the header switches the whole dashboard between Auto (follows your system), Light and Dark, and remembers your choice. The header shows the plugin version the dashboard runs (for example `v0.8.0`) beside the engine's. The block at the bottom of the Health tab shows the store, the server process and whether the activity log is on.
 
 One dashboard runs at a time: running `/mnemosyne-ui` again, in this session or another, hands over the same link. It stops when the session that started it ends; `/clear` in that session counts as an end. Run `/mnemosyne-ui` again for a fresh one.
 
@@ -140,7 +265,7 @@ Health shows four numbers (memories, never recalled, recalls in the log, store s
 
 ### Topic tags: /mnemosyne-tags
 
-Claude is asked to add 2 to 5 topic tags when it saves a new memory. To tag the memories you saved before, run:
+Claude is asked to add 2 to 5 topic tags when it saves a new memory, in the format and from the vocabulary described in [Tags: vocabulary and namespaces](#tags-vocabulary-and-namespaces). To tag the memories you saved before, run:
 
 ```
 /mnemosyne-tags
@@ -152,7 +277,15 @@ This is a dry run: it sends the text of each untagged memory to the `extractionM
 /mnemosyne-tags apply
 ```
 
-`apply` makes no model call. It writes the saved tags through `memory_update`, and skips any memory that was deleted, already got tags, or whose text changed since the dry run.
+`apply` makes no model call. It backs the store up first (see [Backups](#backups)) and stops if that fails. It writes the saved tags through `memory_update`, and skips any memory that was deleted, already got tags, or whose text changed since the dry run.
+
+To bring the tags you already have onto the vocabulary, create the vocabulary file once (see above) and run:
+
+```
+/mnemosyne-tags retag
+```
+
+Another dry run, now for every memory, tagged or not: it proposes tags from the vocabulary and a kind, and shows each memory's current tags beside the proposal. It sends the text of every memory to the model, a few at a time, and waits and retries when the model channel is rate-limited. `/mnemosyne-tags apply` then backs up, replaces the tags only on memories unchanged since the dry run, and sets the proposed kind only on a memory whose kind is `unknown`. It never changes text, importance, source or trust tier.
 
 ### Knowledge extraction: what Claude learned
 
@@ -185,12 +318,12 @@ The extracted items are stored in the engine's own tables (facts, preferences, i
 1. Moons for a memory saved or extracted after the page loaded show only after you reload the dashboard page: the map reads the knowledge once, when the page loads.
 2. The dashboard keeps the `extractionModel` and the `embeddings` setting it started with. After you change either, `/mnemosyne-ui` on the running dashboard says it must be restarted: end the session that started it, then run `/mnemosyne-ui` again.
 3. Saves by outside agents (Codex, Cursor and others, through the proxy) get no automatic extraction. They need `/mnemosyne-knowledge apply`.
-4. This update needs the plugin's newer engine build (`18.12.3-mnemosyne.7`, which has the knowledge tools, local embeddings and `reembed`): run `/mnemosyne-setup` once after updating. Until then extraction stays off and says so in the activity log (`engine out of date`), and embeddings are off: they switch on only after setup has downloaded the model.
+4. This update needs the plugin's newer engine build (`18.12.3-mnemosyne.10`, which has the knowledge tools, local embeddings and `reembed`): run `/mnemosyne-setup` once after updating. Until then extraction stays off and says so in the activity log (`engine out of date`), and embeddings are off: they switch on only after setup has downloaded the model.
 5. Embeddings are tested on macOS on Apple Silicon only. On Windows and Linux they are off under `auto`, and turning them on is not verified there.
 
 ### Who wrote a memory
 
-A save records who wrote it. When a prompt starts with a remember term, the first save that turn is yours: it is stored with `author_type` `human` and veracity `stated`. Claude's own saves are `agent`; so are outside agents' saves, named by their MCP client. `stated` ranks a little higher in recall than the default `unknown` (1.0 against 0.8), which is why a fact you asked for is found first.
+A save records who wrote it (and, since 0.8.0, through what: see [Where a memory comes from](#where-a-memory-comes-from)). When a prompt starts with a remember term, the first save that turn is yours: it is stored with `author_type` `human` and veracity `stated`. Claude's own saves are `agent`; so are outside agents' saves, named by their MCP client. `stated` ranks a little higher in recall than the default `unknown` (1.0 against 0.8), which is why a fact you asked for is found first.
 
 ### Activity log
 
@@ -211,6 +344,7 @@ Change any time from `/plugin` → Mnemosyne → configure.
 | `recallTerms` | `recall:`, `what do you remember about`, `check memory` | A prompt that starts with one of these looks up memories. `none` turns it off. |
 | `showActivity` | `on` | `on`: a dim line in the conversation when Mnemosyne recalls, plus a status line under the prompt. `status`: the status line only. `off`: silent. |
 | `activityLog` | `on` | `on`: each memory call adds one line to `~/.claude/mnemosyne/activity.jsonl` (see [Activity log](#activity-log)). `off`: nothing is written. |
+| `guardMode` | `strict` | `strict`: a save the guard warns about (dated task chatter, text over 1500 characters, a near-duplicate) is refused until it is sent again with `confirm: true`. `warn`: it is saved at once, flagged, and the reply shows the warnings. Secrets and empty, very short or over-4000-character text are refused in both (see [The save guard](#the-save-guard)). |
 | `memoryDir` | `~/.claude/mnemosyne/store` | Where memories are stored. |
 | `externalMcp` | off | Lets other MCP clients use the same memory (see below). |
 | `extractionModel` | `haiku` | The model that pulls facts, preferences, instructions, dated events and relations out of each saved memory in the background (an alias or a full model id). It also drives `/mnemosyne-tags`. `off` turns extraction off: no model call, and `/mnemosyne-tags` and `/mnemosyne-knowledge` say so. |
@@ -226,7 +360,7 @@ claude mcp add mnemosyne-memory -- ~/.claude/mnemosyne/bin/mnemosyne-mcp
 
 On Windows the file is `%USERPROFILE%\.claude\mnemosyne\bin\mnemosyne-mcp.cmd`.
 
-For Cursor, Codex and others, use the same path as the server command. It offers the same five tools as the plugin (`memory_remember`, `memory_recall`, `memory_update`, `memory_forget`, `memory_stats`) and nothing else of the engine's. Remember and update take topic `tags`; a client cannot pick an engine bank or write other metadata. `memory_update` needs the engine build this plugin ships, so after a plugin update run `/mnemosyne-setup` once, then restart your other MCP clients: a server that is already running keeps the engine it started with. It reads and writes `global` memories by default; set `MNEMOSYNE_OWNER` to a `project-…` owner to use a project's. Turning the option off deletes the file.
+For Cursor, Codex and others, use the same path as the server command. It offers the same five tools as the plugin (`memory_remember`, `memory_recall`, `memory_update`, `memory_forget`, `memory_stats`) and nothing else of the engine's. Remember and update take topic `tags` (in the [vocabulary format](#tags-vocabulary-and-namespaces)), a `kind` and `confirm`; remember also takes `expires_in_days`. Every save passes the [save guard](#the-save-guard) (G1, G2 and G4; not the near-duplicate check) and is recorded as written by `mcp:<your client's name>`. A client cannot pick an engine bank, set its own trust tier or write other metadata, and it has no `replaces`. `memory_update` needs the engine build this plugin ships, so after a plugin update run `/mnemosyne-setup` once, then restart your other MCP clients: a server that is already running keeps the engine it started with. It reads and writes `global` memories by default; set `MNEMOSYNE_OWNER` to a `project-…` owner to use a project's. Turning the option off deletes the file.
 
 **Security.** There is no token because there is no network port: the client starts the server itself over stdin/stdout, and nothing listens on the network. Access is whoever can run programs as your user, the same people who could read the database file directly. To keep other accounts on the machine out, the plugin sets `~/.claude/mnemosyne` and the store to owner-only (`700`) on macOS and Linux; on Windows your user profile's permissions already do. Don't wrap the server in an HTTP bridge without adding authentication there.
 
@@ -237,7 +371,7 @@ The plugin hooks into Claude Code at four points:
 - **Session start:** adds the memory tools and the `/mnemosyne-setup`, `/mnemosyne-ui`, `/mnemosyne-tags`, `/mnemosyne-knowledge` and `/mnemosyne-embed` commands, and says so if the installed engine is older than the plugin's.
 - **System prompt:** adds a short, fixed set of rules telling Claude when to save and recall.
 - **Your prompt:** on the first prompt (again after a compaction), or one starting with a term above, looks up memories and attaches them to that prompt.
-- **Tool calls:** when Claude calls a memory tool, runs the engine once and returns the answer.
+- **Tool calls:** when Claude calls a memory tool, checks a save with the guard, runs the engine and returns the answer.
 
 Mnemosyne shows a dim line in the conversation when it recalls and a status line under the prompt; `showActivity` quiets them.
 

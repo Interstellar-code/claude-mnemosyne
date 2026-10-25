@@ -165,10 +165,11 @@ of the plugin:
   (default true); change 3, the build number in `engine/package.json`; change 4,
   the two knowledge tools `mnemopi_knowledge_prompt` and
   `mnemopi_knowledge_store` (v0.6.0, §3.7); change 5, a dedupe re-save keeps the
-  first author and veracity (v0.6.0). The build 0.6.0 expects is
-  `18.12.3-mnemosyne.4` (`.1` had changes 1 to 3, `.2` a metadata-merge fix, `.3` added 4 and 5, `.4` is
-  their review fix round; `engine/UPSTREAM.md` lists the `engine/src` hash of
-  each build).
+  first author and veracity (v0.6.0). Changes 6 to 11 came with v0.7.0 (§3.8)
+  and changes 12 to 18 with v0.8.0 (§3.9). The build v0.8.0 expects is
+  `18.12.3-mnemosyne.10`; each earlier build number was a revision of the
+  changes then listed, and `engine/UPSTREAM.md` lists the `engine/src` hash of
+  each build.
 - `bun scripts/engine-diff.ts` downloads the tarball, checks its integrity, and
   fails unless every file that differs from `engine/` is listed in a change and
   the recorded `engine/src` hash for the current build is the real one. So an
@@ -475,7 +476,8 @@ Keep the browser console open throughout: no error and no CSP violation.
 
 A memory's topics live in one place: `metadata.tags`, a list of short
 lowercase strings cleaned by `hooks/tags.ts` (trimmed, lowercased, unique, at
-most 5, each at most 24 characters). There is no side file of tags and no tag
+most 5; since v0.8.0 each is `value` or `ns:value`, kebab-case, 1 to 31
+characters, with aliases folded from a shared vocabulary, §3.9). There is no side file of tags and no tag
 text inside a memory. Tags are written only through the engine:
 `memory_remember` takes `tags` for a new fact, and `memory_update` merges them
 into an existing one (engine change 1, a shallow metadata merge in one
@@ -890,8 +892,9 @@ console open throughout (no error and no CSP violation):
 v0.7.0 turns local embeddings on (C8 of the build plan `mnemosyne-070`), adds
 `/mnemosyne-embed` to fill vectors for older memories, and gives the dashboard
 a Meaning layout and Similar memories links over those vectors (SEMX on the
-server, SEM in the page). The engine build is `18.12.3-mnemosyne.7`
-(`engine/UPSTREAM.md`, changes 6 to 11). The code is what these notes record.
+server, SEM in the page). Its engine changes are 6 to 11 in
+`engine/UPSTREAM.md`; the build has since moved to `18.12.3-mnemosyne.10`
+(§3.9). The code is what these notes record.
 
 - C8, the runtime fix (engine changes 6 and 7, `engine/package.json`,
   `bin/install-engine.ts`, `engine/src/cli.ts`). fastembed 3.0.0 moves from an
@@ -1013,13 +1016,334 @@ Known limits of 0.7.0, recorded as they are:
    and, on Windows, `USERPROFILE` (`paths()`); the engine resolves the model
    cache against Node's `os.homedir()`. If the two differ on a machine, the model
    may be looked for in a folder other than the one setup wrote. Not verified.
-3. `MNEMOPI_MCP_BANK=''` is an empty-string pin, so a `.env` line can refill it
-   and move writes to `<store>/banks/<x>`. This is older than 0.7.0 (v3) and is
-   not fixed here; the non-empty pins above are not affected.
+3. `MNEMOPI_MCP_BANK=''` was an empty-string pin, so a `.env` line could refill
+   it and move writes to `<store>/banks/<x>`. This was older than 0.7.0 and was
+   left open here; v0.8.0 fixed it by pinning `default` (§3.9, decision 6).
 4. The API gate is an engine change: an engine without change 10 (the plain
    npm build) would take the API route from an inherited `OPENROUTER_BASE_URL`.
    The plugin refuses to use an engine that is not its own build for features
    that need the changes (`isCurrent`).
+
+### 3.9 v0.8.0: guardrails on what enters memory
+
+v0.8.0 is the first half of the v3 plan (`docs/plans/mnemosyne-v3.md`: phases
+MODEL, GUARD, META, VOCAB and the HARDEN fixes that came out of their reviews).
+Its goal: nothing enters memory without passing one check, every memory says
+what kind it is and where it came from, project state expires, and tags come
+from one vocabulary. The engine build is `18.12.3-mnemosyne.10`
+(`engine/UPSTREAM.md`, changes 12 to 18). A user must run `/mnemosyne-setup`
+after updating: `isCurrent` compares `ENGINE_BUILD`.
+
+Not in this release, and not described as if it were: the dashboard writes
+(create, edit, retire, restore), the Review tab's actions, the importers, the
+session summaries and the expiry sweep (all 0.9.0). Their engine side exists
+where noted below; nothing in the plugin calls it. The code is what these notes
+record; where it differs from the plan, the difference is stated.
+
+#### The trim-by-scope decision (replaces the IMPORTED note of section 5.2)
+
+Until 0.7.x the plugin labelled every save `source: 'imported'`, because the
+engine's `trimWorkingMemory` deleted unconsolidated rows older than 24 hours
+(or past 1000 per owner) unless their trust tier was `IMPORTED`. The cost was
+provenance: all 140 rows of the author's store read `imported` and `unknown`.
+
+Decision (UPSTREAM change 12, MODEL.1): the trim now selects a row only when its
+`scope` is `'session'`, in both the age test and the 1000-per-owner ranking. A
+row saved as `channel` or `global`, or with a NULL scope, is never trimmed,
+whatever its tier. The plugin always names the scope on every save (`global`, or
+`channel` in per-project mode), so a save is durable by its scope and can carry
+its true `source` and `trust_tier`.
+
+1. A NULL scope is spared, not trimmed. It fails safe: a row is kept, never
+   deleted. The column default is `'global'` and every plugin save writes a
+   scope, so a NULL scope essentially cannot occur; the spec pins the behaviour
+   and `mnemopi_expire_unused` skips NULL scope too, so the two tools agree. An
+   `IMPORTED` tier is still spared as before.
+2. Rows written before v3 keep `source: 'imported'` (Rohit's decision,
+   2026-10-24). They are not relabelled; only a retag (kind where it is
+   `unknown`) or the later tools touch their labels, and a re-save keeps them
+   (the first-writer rule below).
+3. Running a 0.8.0 plugin on an older engine is the one unsafe pairing: the old
+   trim deletes any row whose tier is not `IMPORTED`, and the plugin no longer
+   labels saves that way. Saves are not refused on a stale engine (only
+   `memory_update`, the dashboard and the backfills are), so the only guards are
+   the session-start notice and the README's instruction to run
+   `/mnemosyne-setup` first. Recorded as a known risk, not fixed here
+   (`hooks/` is outside this release's documentation task).
+4. Verified by the MODEL review, not assumed: a probe over every tier (STATED,
+   DERIVED, EXTERNAL_WRITE, IMPORTED) by scope (session, channel, global, NULL)
+   at 48 hours old found only a non-IMPORTED `session` row trimmed, and with
+   1005 `session` rows plus 1005 durable ones at a cap of 1000, exactly 1000
+   `session` rows were left and all 1005 durable ones kept. `engine/test/trim-scope.spec.ts`
+   holds both.
+
+#### The contracts as built
+
+C1, the guard (`hooks/guard.ts`, GUARD.1 to GUARD.3, META.3). `admit({ content,
+kind?, origin }) -> { verdict, hits }` imports nothing, so the hooks, the proxy
+and the specs all use it (a spec asserts there is no import line). Verdict
+`block` never reaches the engine; `warn` is saved with the hits shown and, in
+`strict` mode, refused until the call carries `confirm: true`; `allow` is
+silent. Rules:
+
+1. G1 secret blocks: AWS access keys, GitHub tokens, `sk-` keys, Slack tokens,
+   JWTs, private key headers, `Bearer` tokens that hold a digit, URLs with
+   `user:pass@`, and `password|passwd|secret|api_key|token` assigned a value of
+   12 or more characters that is not a path, an environment reference or a
+   placeholder. High-entropy runs alone are not secrets (the store is full of
+   paths and hashes); a 40-string negative corpus has no G1 hit.
+2. G2 size blocks text that is empty, under 15 or over 4000 characters (trimmed
+   length) and warns over 1500.
+3. G4 chatter warns when a date and a status word (`released`, `merged`,
+   `done`, `next`, `overnight`, `round`) appear together, or `today`,
+   `tonight` or `this session` appears; it suggests kind `context` and is
+   silent for that kind.
+4. G3 near-duplicate is not in `admit()`: it needs the engine's embeddings, so
+   the caller asks the engine (`mnemopi_similar`, top 3, cosine 0.88) and uses
+   the helpers at the end of `guard.ts`. It is advisory and fails open:
+   embeddings off, an engine that is not installed or not current, an engine
+   error, unreadable JSON or a thrown error all give no matches and the save
+   goes on. A match that is the save's own text again (score about 1, same first
+   80 characters, same owner) is the engine's dedupe, not a near-duplicate; the
+   same text under another owner is one, because the engine dedupes per owner.
+   A memory named in `replaces` is excluded from the warning.
+
+Messages name the rule and never the matched text, so a caller can log or show
+them. The guard runs in `hooks/register.ts` `tool.call` (for `memory_remember`
+and for `memory_update` when it changes `content`) before the trigger step and
+before any engine process, and in `bin/mcp-proxy.ts` before the engine (a block
+or a strict refusal is a JSON-RPC `-32602` with `data.rules`). A tags-only,
+importance-only or kind-only update is not checked. A refused save does not
+consume the remember-phrase trigger, so the retry is still the person's. The
+activity line of a refusal is `ok: false`, `error: guard:<rule ids>`, empty
+text. A warned save stores the rule ids in `metadata.guard` (G3 as
+`near-duplicate:<id>`); a content update that now passes clean sends
+`guard: null`, which removes the key through the engine's metadata merge. The
+wrappers export `MNEMOSYNE_GUARD_MODE` for the proxy. `guardMode` is `strict`
+(the default; any unknown value counts as strict) or `warn`; `confirm` is
+stripped before the engine in both paths. `bin/guard-audit.ts --store <dir>` is
+a read-only audit (`query_only`) that runs G1, G2 and G4 over every stored row
+and prints only counts.
+
+Differences from the plan, stated: (a) the guard is wired into Claude's tools
+and the proxy only; the dashboard and the importers that the plan lists do not
+exist until 0.9.0. (b) G3 does not run in the save's own engine process. The
+host's `$.process.run` takes its whole stdin up front, and the save needs the
+matches first (they go into `metadata.guard`, and in strict mode may refuse the
+save), so a remember with embeddings on starts a second engine process first
+(`similar`, then the save). The cost is a model load before each save and up to
+the 20 s run limit before it fails open. (c) The proxy does not run G3:
+outside agents get G1, G2 and G4 only.
+
+Known limits, recorded from the GUARD review: the G1 assignment rule is literal,
+so prose such as `token: refreshAccessToken is the function that rotates it`
+or `api_key = OPENAI_API_KEY_FROM_ENVIRONMENT` is refused for good (G1 cannot be
+confirmed); `redis://:secretpass@host` (empty user) is allowed; G4's
+`next`/`round`/`today` also warn on durable prose, which in strict mode is a
+refusal until `confirm: true`. The real-store audit that measures this
+(GUARD.4) is Rohit's manual step and is not part of this release's tests.
+
+C2, the engine tools (UPSTREAM changes 12 to 16; MODEL). `mnemopi_remember` takes
+`memory_type`, `trust_tier` (STATED, DERIVED, EXTERNAL_WRITE or IMPORTED; any
+other value is ignored) and `valid_until`. `mnemopi_update` takes `memory_type`,
+`valid_until` (`null` clears it) and `restore: true`, which, in one transaction,
+clears `valid_until` and `superseded_by` on the owner's own retired row, replies
+`unchanged` for a live one and `not_found` for another owner's. `mnemopi_similar
+{ content, top_k, min_score }` is one read-only SELECT over the owner's rows and
+global rows that have a vector of the active model, not superseded or expired
+(at most 50000 candidates, unordered); it writes nothing, not even a recall
+count. `mnemopi_expire_unused { days, kinds, dry_run, limit }` looks only at the
+caller's own rows of the kinds `context`, `event`, `error`, `artifact` (the
+protected kinds are stripped from any list), never pinned or unreadable-metadata
+rows, never scope `session` or NULL, 90 days unused by default and never under
+30; a dry run unless `dry_run` is the boolean `false`, and a real run sets only
+`valid_until` and the audit row. `mnemopi_invalidate`, `mnemopi_update`,
+`mnemopi_validate` and `mnemopi_expire_unused` take an optional `validator`.
+None of these is in the proxy's allow-list, which still serves five tools. In
+0.8.0 the plugin calls `mnemopi_similar` (G3) and `mnemopi_invalidate`
+(`replaces`); nothing calls `mnemopi_expire_unused`, and nothing in the plugin or
+the proxy sends `restore`.
+
+C3, kinds (`hooks/kinds.ts`, META.1). The engine's `memory_type` names, with
+plain labels: `fact`, `preference`, `instruction` (rule or runbook), `decision`,
+`context` (project state), `error` (bug note), `artifact` (reference), `event`
+(session summary), plus `unknown` for old rows, which a caller cannot choose.
+A save's `kind` is forwarded as `memory_type`; the proxy drops a client's own
+`memory_type`. A save with no kind is stored `unknown` with a `warning` key in
+the (still JSON) reply, never refused; a value outside the list is refused
+(`-32602` in the proxy, a deny in the plugin). A `context` note gets
+`valid_until` 14 days out unless `expires_in_days` (1 to 365) says otherwise.
+
+C4, provenance. The paths that exist in 0.8.0:
+
+| Path | source | trust_tier | veracity |
+|---|---|---|---|
+| Claude save | `claude-code` | DERIVED | unknown (the engine default) |
+| Trigger phrase | `user` | STATED | stated |
+| Outside agent | `mcp:<client>` | EXTERNAL_WRITE | unknown |
+
+The plan's dashboard (`dashboard`, STATED, stated), doc import and session import
+(`import:doc`, `import:session`, IMPORTED, imported) rows arrive with those
+paths in 0.9.0. A client's own tier and veracity are dropped by the proxy. Scope
+is explicit on all three paths (the trim reads it).
+
+The first-writer rule (UPSTREAM changes 17 and 18, MODEL.7 and MODEL.8). The
+META review found that because every path now names its `source` and
+`trust_tier`, the engine's dedupe (same text, same owner) overwrote them on a
+re-save, leaving a human `STATED` row with source `mcp:cursor` and tier
+`EXTERNAL_WRITE` and a human author: self-contradicting provenance. The MODEL
+review had found two siblings: a re-save with default arguments lowered a
+`global` row to scope `session`, and a re-save as `context` with an expiry made a
+fact expirable. The engine now: keeps the stored `source` and `trust_tier`
+(a NULL one is filled from the call); lets scope only widen (`session` takes
+what the call names, `channel` only `global`, anything else stays); never
+changes the kind of a `fact`, `preference`, `instruction` or `decision`, nor
+gives it an expiry; keeps the first author and never lowers veracity. A
+pre-v3 `imported` row therefore stays `imported` through normal use. One
+consequence, accepted: when Claude saves a sentence and the person later states
+it with a trigger phrase, the row stays `claude-code` and `DERIVED` and only its
+veracity moves to `stated`; a rule that lets a trigger save raise the tier would
+be a separate decision.
+
+C5 and C6, the vocabulary and the tag format (`hooks/vocab.ts`, `hooks/tags.ts`,
+`bin/vocab.ts`; VOCAB.1 to VOCAB.4). `<root>/vocabulary.json`, mode 0600, shape
+`{ version, tags, candidates }`; each tag has `ns`, `description`, `aliases`,
+`admitted` (`seed`, `init`, `manual` or `auto`) and `count`. It is written only
+by `bin/vocab.ts` (write a temp file with flag `wx`, then rename, so a reader
+never sees half a file) and read by the tagger, the cleaner and the proxy. `init`
+seeds `agent:claude-code`, `agent:codex`, `agent:opencode` and `agent:agy` and
+every tag that is on 2 or more memories once aliases are folded, never a project
+name; it reads only tags and counts from the store, through a read-only handle,
+and refuses to overwrite without `--force`, which keeps hand-admitted tags and
+aliases. A tag is `value` or `ns:value`, `ns` one of `entity`, `agent`, `asset`;
+`value` lowercase kebab-case of 1 to 31 characters (every run of anything but
+letters and digits becomes one hyphen; the 24-character limit of 0.5.0 is
+gone); an alias folds into its tag; a tag equal to the owner's readable project
+name is dropped; at most 5 per memory. Only writes are cleaned; stored tags are
+never rewritten on read, and `ui/` does not use the cleaner. The tagger prompt
+lists up to 150 admitted tags by namespace, asks for 2 to 5 tags and one kind,
+and allows one `new:<tag>` per memory; that goes to `candidates`, is not written
+as a tag, and is admitted as `auto` at 3 proposals. `/mnemosyne-tags retag`
+proposes tags and a kind for every memory; its apply runs `mnemopi_update` with
+`metadata.tags` (and `memory_type` only where the kind is `unknown`), skips a
+row whose text, owner or tags changed since the dry run, never touches text,
+importance, source or tier, and runs at concurrency 2, 20 rows a batch, waiting
+2, 5 and 10 s and retrying up to 3 times on a rate limit. Known limits: a
+vocabulary file with one bad entry is ignored whole and silently (alias folding
+turns off, and the dry run says there is no vocabulary); the writers take no
+lock, so two at once can lose one candidate count; an outside agent's tag update
+that cleans to nothing removes the row's tags with a success reply (the plugin's
+own update refuses it).
+
+C9, backups (`bin/memories.ts backup`, META.5). `VACUUM INTO
+<root>/backups/mnemopi-<UTC stamp>.db`, file mode 0600 (umask 077 and a chmod),
+the folder 0700 when the command makes it, refused before copying when free
+space is under twice the database plus WAL, the copy read back with
+`PRAGMA quick_check`, a partial file removed on any failure, the newest
+`BACKUP_KEEP = 10` kept by name pattern (other files in the folder are left
+alone). Output is the path and a count, never text. Every command that changes
+the store in bulk runs it first through `backupFirst` and stops, saying no
+memory was changed, if it fails: `/mnemosyne-tags apply` (tags and retag),
+`/mnemosyne-knowledge apply` and `/mnemosyne-embed apply|rebuild`. The first
+version covered only the tags apply; the other two were added in VOCAB.4 after
+the META review noted the gap against the plan's "every apply" rule. There is no
+slash command for a backup on its own.
+
+C10.1 to C10.4, the audit trail (UPSTREAM change 16, MODEL.6). The existing
+`memory_validations` table finally has a writer: retire (`mnemopi_invalidate`),
+restore, update (a change to `content` only), attest and expire each insert one
+row `{ memory_id, validator, action }` in the same transaction as the change and
+only when a row actually changed; a no-op, refused or not-found call writes
+nothing. `new_content` and `note` are always NULL, so memory text never enters
+the trail. `validator` defaults to `unknown` (at most 64 characters, else an
+error before the store opens); in 0.8.0 the plugin sends `claude-code` for its
+own text updates and for the retire done by `replaces`, and the proxy sends
+`mcp:<client>` for a client's text update (a client never picks its own). The
+engine's `trim_validations_to_3` trigger is unchanged, so the trail is the last
+3 actions per memory, not a history. `forgetWorking`, `mnemopi_validate delete`
+and the 24-hour trim purge a memory's rows in the same transaction
+(`purgeWorkingMemoryArtifacts`); the same purge means `import --force`
+replacing a row of the same id drops that id's trail. `attest` is
+owner-checked (see the decisions below). C10.5, the Health tab's "unused by
+design" labels, is 0.9.0.
+
+#### Why the seven engine tables stay unused
+
+`episodic_memory`, `consolidation_log`, `gists`, `facts`, `graph_edges`,
+`triples` and `scratchpad` (and their `fts_episodes*` and `fts_facts*` search
+indexes) are empty by design, not by fault. Only engine tools
+the plugin never exposes write them: `mnemopi_sleep`, `mnemopi_graph_link`,
+`mnemopi_triple_add`, `mnemopi_scratchpad_*`. Section 5.6 records why they stay
+out of reach: `mnemopi_sleep` widens a project's `channel` facts to `global`
+when one chunk holds a global row, and leaves episodes that `forget` cannot
+remove; triples carry no owner, so they would escape forget; making any of it
+safe is engine work (owners and forget-purge on episodes and triples, and
+stopping sleep from widening scope), and v3 does not do it. The eighth empty
+table, `memory_validations`, was different: dead schema (`handleValidate`
+returned a `validator` but inserted nothing); it has a writer now (C10). The
+Health tab still lists the seven as plain "empty" in 0.8.0; the labels come in
+0.9.0.
+
+#### Decisions made while building
+
+Recorded from the phase reviews; each was a ruling or an accepted deviation.
+
+1. The NULL-scope rule: spared by the trim and by the expiry tool (above).
+2. `mnemopi_validate action=attest` became owner-checked: a row of another
+   owner, or an episodic row, answers `not_found` and writes no audit row; it
+   used to reply `validation_attest` and do nothing. The plugin and the proxy
+   never call validate (not in the proxy's allow-list). One older oddity
+   remains: `handleValidate` still reads the row with `beam.get(id)` first, which
+   reads any owner's row, so the `not_found` reply can carry 200 characters of
+   `previous_content`.
+3. Two engine runs for G3, and no G3 in the proxy (above).
+4. The first-writer rule of C4, as engine changes 17 and 18 and builds `.9` and
+   `.10`, instead of a plugin-side workaround (answering an exact match from
+   `mnemopi_similar` without sending the save).
+5. `replaces` retires after a successful save, as the owner named in `owner`
+   (default this project), with `mnemopi_invalidate` and a replacement id: it
+   never retires on a refused save, and an unreadable answer, a not-found or a
+   save that answered with the old id itself leaves the old row alone and the
+   new one saved. The owner string is taken from the model, so Claude can retire
+   another project's private row if it knows its owner id, which is the same
+   trust as `memory_forget` and `memory_update`. It is a retire started by an
+   agent; it is in the plan on purpose, restorable at the engine, and the proxy
+   does not offer it. Until 0.9.0 nothing but a direct engine call restores.
+6. The bank pin (HARDEN.1). `MNEMOPI_MCP_BANK` was pinned to the empty string,
+   which a `.env` in an agent's working folder could refill, moving saves to
+   `<store>/banks/<x>`; this was the open item 3 of section 3.8. The engine
+   environment (`hooks/engine.ts`), both `mnemosyne-mcp` wrappers and the
+   installer now pin it to `default`, and a spec writes a hostile `.env`.
+7. Tests never touch the real home (HARDEN.2). A spawned engine writes its logs
+   (`omp.*.log`) and caches under `$HOME/.claude/mnemosyne/model-cache`, so every
+   spec that starts a process gets a temporary `HOME` and `PI_CONFIG_DIR` from
+   `isolatedEnv()` (`tests/bun/helpers.ts`; `engine/test/helpers.ts` does the
+   same with `testHome()`). The temp home links to the real, already
+   downloaded model cache (a cache, not user data) and `BUN_INSTALL_CACHE_DIR`
+   points at Bun's package cache, so tests stay offline-fast; removing a home
+   removes the link, never its target. A first version of the guard for this
+   was a spec that only grepped for `isolatedEnv()` in each spawn block, and it
+   passed on `{ ...isolatedEnv(), ...process.env }`, where the real `HOME` wins
+   because later spreads overwrite earlier ones. `tests/bun/no-real-home.spec.ts`
+   is the static check now: it masks comments and strings, finds each `spawn` and
+   `spawnSync` call, and requires an `env:` whose literal (or helper) has an
+   `isolatedEnv()` spread after the last `process.env` spread; a spawn with no
+   `env:` is an offender unless it is on a short, commented allow-list of spawns
+   that read no HOME (`file:line` keys), and a self-test feeds it a wrong-order,
+   a no-env and a correct snippet. It sees `spawn` and `spawnSync` only. `bun
+   test` never fires `process.on('exit')`, so a preload (`bunfig.toml`,
+   `tests/bun/cleanup-preload.ts`) removes the temp homes in an `afterAll`
+   with a long timeout.
+8. Backups before every apply, and the vocabulary-first retag, as C9 and C5
+   above; the plan's later phases (importers, session summaries) call the same
+   backup.
+
+Open items carried to 0.9.0: the dashboard writes and restore, the Review
+queue, the importers, session summaries, the expiry sweep (re-check the unused
+clock if consolidation is ever turned on: a recall served only by an episodic
+copy does not reset it), the Health labels for the unused tables, a refusal for
+an empty tag update in the proxy, a lock for the vocabulary writer, and a
+message that names what is wrong with a bad vocabulary file.
 
 ## 4. Why a plugin, and why mod tools rather than an MCP server
 
@@ -1066,14 +1390,17 @@ rows written elsewhere, §2.4).
    `memory_remember` with `global: true` writes `scope: 'global'`, which every
    owner recalls). Forget deletes `WHERE id = ? AND session_id = ?`, so recall
    reports each row's owner and `memory_forget` takes it.
-2. **Retain only explicit `memory_remember` calls**, written with
-   `source: 'imported'`. Any other source lands as trust tier STATED, and every
-   remember runs `trimWorkingMemory` (`core/beam/store.ts`), which deletes
-   unconsolidated STATED rows older than 24 hours (hard-coded
-   `workingMemoryTtlHours`) or past 1000 per owner. IMPORTED rows are never
-   trimmed. Verified: a row backdated weeks survived 5 more remembers in 3 of 3
-   scratch runs as IMPORTED; as STATED it was gone after one. Recall weight is
-   keyed on `veracity`, not trust tier, so it is unchanged.
+2. **Retain only explicit `memory_remember` calls, durable by scope (changed
+   in v0.8.0).** Every remember runs `trimWorkingMemory` (`core/beam/store.ts`),
+   which deletes unconsolidated rows older than 24 hours (hard-coded
+   `workingMemoryTtlHours`) or past 1000 per owner. Until 0.7.x that left only
+   one way to keep a save, the label `source: 'imported'` (tier `IMPORTED`, never
+   trimmed), at the cost of all provenance. Since v0.8.0 (engine change 12) the
+   trim touches only rows whose `scope` is `'session'`; the plugin always saves
+   with scope `global` (or `channel` in per-project mode), so its saves are never
+   trimmed and carry their true source and tier (§3.9, the trim-by-scope
+   decision). Rows saved before then keep their `imported` label. Recall weight
+   is keyed on `veracity`, not trust tier, so it is unaffected.
 3. **Recall once per session**, on the first non-command prompt, as
    `prompt.submit` context: that message never changes, so the prompt cache
    holds. `prompt.context` was not used: it fires before any prompt text
@@ -1104,12 +1431,13 @@ rows written elsewhere, §2.4).
    Reviewed by a Fable consult; a manual `/mnemosyne` skill is deferred until
    there is a store worth curating.
 
-6. **External clients get four tools only (v0.4.0).** `externalMcp`'s wrapper
-   runs `bin/mcp-proxy.ts`, which lists and serves only
-   `memory_remember/recall/forget/stats` (mapped to the engine's
-   `mnemopi_*`) and pins remember to
-   `source: 'imported'`. The engine's other tools were verified harmful for
-   this store: `mnemopi_sleep` widens a project's `channel` facts to `global`
+6. **External clients get a fixed set of tools only (v0.4.0; five since
+   v0.5.0).** `externalMcp`'s wrapper runs `bin/mcp-proxy.ts`, which lists and
+   serves only `memory_remember/recall/update/forget/stats` (mapped to the
+   engine's `mnemopi_*`). Until 0.7.x it pinned remember to `source: 'imported'`;
+   since v0.8.0 it writes `source: 'mcp:<client>'` with tier `EXTERNAL_WRITE`
+   (§3.9, C4) and runs the save guard first. The engine's other tools were
+   verified harmful for   this store: `mnemopi_sleep` widens a project's `channel` facts to `global`
    when a chunk holds one global row, and leaves episodes that `forget` cannot
    remove; `mnemopi_get` reads any owner's row; `mnemopi_export` writes every
    owner to any path; `mnemopi_shared_*` writes STATED rows the 24h trim
@@ -1136,7 +1464,8 @@ rows written elsewhere, §2.4).
    `memory_update`, changes a memory in place: `content`, `importance` (clamped
    to 0..1) or `tags`, by `memory_id` and `owner` (it runs as the row's owner,
    like forget). Tags are cleaned by `hooks/tags.ts` (no imports: trimmed,
-   lowercased, unique, at most 5 of at most 24 characters) and sent as
+   lowercased, unique, at most 5 of at most 24 characters in 0.5.0; the format is
+   `value` or `ns:value` of 1 to 31 characters since 0.8.0, §3.9) and sent as
    `metadata.tags`; `[]` sends `tags: null`, which removes the key. With none of
    content, importance and tags, or tags that are not an array, it is denied
    before any engine run; on a stale engine it is denied with a message to run
