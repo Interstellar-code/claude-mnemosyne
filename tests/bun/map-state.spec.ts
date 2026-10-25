@@ -3643,7 +3643,7 @@ import {
   toggleShow,
   viewOf,
 } from '../../ui/map-state'
-import { buildBodies } from '../../ui/solar-layout'
+import { buildBodies, searchResults } from '../../ui/solar-layout'
 
 describe('the solar page state (MAPX.11)', () => {
   const c11 = JSON.parse(readFileSync(join(ROOT, 'tests', 'bun', 'fixtures', 'galaxy-c11.json'), 'utf8')) as Parameters<typeof buildBodies>[0] & { memories: { id: string; owner: string; kind: string; label: string; state: 'live' }[] }
@@ -3717,6 +3717,20 @@ describe('the solar page state (MAPX.11)', () => {
     expect(order.map(stop => stop.target.level)).toContain('moon')
     expect(order.at(-1)!.target.level === 'memory' || order.at(-1)!.target.level === 'planet').toBe(true)
     expect(tabOrder({ level: 'galaxy' }, bodies, c11.memories, { [memory.owner]: true }).length).toBe(bodies.length)
+  })
+
+  test('Find rows are in one order: local rows by searchResults, then the memories in the order the server ranked them, whatever the order of the bodies', () => {
+    const [a, b] = [c11.memories[0]!, c11.memories[2]!]
+    const hits = [{ id: b.id, content: 'ranked first' }, { id: a.id, content: 'ranked second' }]
+    const rows = findRows(bodies, 'matrix', hits, c11.memories)
+    const local = searchResults(bodies, 'matrix').results.map(hit => hit.label)
+    expect(rows.slice(0, local.length).map(row => row.label)).toEqual(local)
+    expect(rows.slice(local.length).map(row => row.label)).toEqual(['ranked first', 'ranked second'])
+    expect(findRows(bodies.slice().reverse(), 'matrix', hits, c11.memories)).toEqual(rows)
+    // Reversing the hits reverses only the memory rows: the order is the hits' own, never sorted by anything else.
+    const flipped = findRows(bodies, 'matrix', hits.slice().reverse(), c11.memories)
+    expect(flipped.slice(0, local.length)).toEqual(rows.slice(0, local.length))
+    expect(flipped.slice(local.length).map(row => row.label)).toEqual(['ranked second', 'ranked first'])
   })
 
   test('the numbers the page uses: memory search starts at 3 characters after 400 ms, the Tab order shows 30 memories, one key holds the settings', () => {
