@@ -1,0 +1,1294 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Map v3: solar system</title>
+<script src="./support.js"></script>
+<script src="/_blob/69d5cb71bf757200e2f499b544338f1b"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#070b14}
+a{color:#8ec5ff}a:hover{color:#cfe6ff}
+</style>
+</helmet>
+<div style="min-height: 1080px; background: #070b14; color: #e6edf7; font-family: Inter, system-ui, sans-serif; font-size: 14px; display: flex; flex-direction: column">
+  <header style="display: flex; flex-wrap: wrap; align-items: center; gap: 12px 28px; padding: 14px 24px; border-bottom: 1px solid #1a2438; background: #0a0f1c">
+    <div style="display: flex; align-items: center; gap: 10px">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#56B4E9" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"></circle><ellipse cx="12" cy="12" rx="10" ry="4"></ellipse></svg>
+      <span style="font-weight: 700; font-size: 16px">Mnemosyne</span>
+    </div>
+    <nav aria-label="Dashboard" style="display: flex; flex-wrap: wrap; gap: 4px">
+      <a href="#" aria-current="page" style="padding: 10px 14px; border-radius: 8px; background: #12325a; color: #ffffff; font-weight: 600; text-decoration: none">Map</a>
+      <a href="#" style="padding: 10px 14px; border-radius: 8px; color: #b7c4d8; text-decoration: none">Memories</a>
+      <a href="#" style="padding: 10px 14px; border-radius: 8px; color: #b7c4d8; text-decoration: none">Activity</a>
+      <a href="#" style="padding: 10px 14px; border-radius: 8px; color: #b7c4d8; text-decoration: none">Search</a>
+      <a href="Knowledge.dc.html" style="padding: 10px 14px; border-radius: 8px; color: #b7c4d8; text-decoration: none">Knowledge</a>
+      <a href="#" style="padding: 10px 14px; border-radius: 8px; color: #b7c4d8; text-decoration: none">Review</a>
+      <a href="Health.dc.html" style="padding: 10px 14px; border-radius: 8px; color: #b7c4d8; text-decoration: none">Health</a>
+    </nav>
+    <div style="margin-left: auto; display: flex; flex-wrap: wrap; align-items: center; gap: 12px; color: #b7c4d8; font-size: 13px">
+      <span>123 memories · 5 projects · 6 sample folders</span>
+      <span style="font-family: 'JetBrains Mono', monospace; font-size: 12px">engine 18.12.3-mnemosyne.10</span>
+      <span style="padding: 4px 10px; border: 1px solid #2c3a57; border-radius: 999px; color: #8ec5ff; font-size: 12px">local only</span>
+    </div>
+  </header>
+
+  <main style="display: flex; flex-wrap: wrap; gap: 16px; padding: 16px 20px">
+    <aside aria-label="Map controls" style="flex: 1 1 220px; max-width: 260px; display: flex; flex-direction: column; gap: 12px">
+      <section style="background: #0d1424; border: 1px solid #1f2b43; border-radius: 12px; padding: 14px; display: flex; flex-direction: column; gap: 8px">
+        <h2 style="margin: 0; font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #9fb0c8">Arrange by</h2>
+        <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px">
+          <sc-for list="{{ arrangeItems }}" as="item" hint-placeholder-count="4">
+            <button type="button" onClick="{{ item.pick }}" aria-pressed="{{ item.pressed }}" style="{{ item.style }}">{{ item.label }}</button>
+          </sc-for>
+        </div>
+        <p style="margin: 0; font-size: 12px; color: #9fb0c8; line-height: 1.45">{{ arrangeHint }} Planet size is always the memory count.</p>
+      </section>
+      <section style="background: #0d1424; border: 1px solid #1f2b43; border-radius: 12px; padding: 14px; display: flex; flex-direction: column; gap: 8px">
+        <h2 style="margin: 0; font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #9fb0c8">Colour dots by</h2>
+        <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px">
+          <sc-for list="{{ colourItems }}" as="item" hint-placeholder-count="3">
+            <button type="button" onClick="{{ item.pick }}" aria-pressed="{{ item.pressed }}" style="{{ item.style }}">{{ item.label }}</button>
+          </sc-for>
+        </div>
+      </section>
+      <section style="background: #0d1424; border: 1px solid #1f2b43; border-radius: 12px; padding: 14px; display: flex; flex-direction: column; gap: 6px">
+        <h2 style="margin: 0; font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #9fb0c8">Show</h2>
+        <sc-for list="{{ toggles }}" as="item" hint-placeholder-count="4">
+          <button type="button" onClick="{{ item.pick }}" aria-pressed="{{ item.pressed }}" style="{{ item.style }}">{{ item.label }}</button>
+        </sc-for>
+      </section>
+    </aside>
+
+    <div style="flex: 999 1 560px; min-width: 0; display: flex; flex-direction: column; gap: 12px">
+    <section aria-label="Solar-system map" style="position: relative; height: 600px; border-radius: 14px; overflow: hidden; background: #010205; border: 1px solid #1a2438">
+      <canvas ref="{{ setCanvas }}" onClick="{{ onClick }}" onMouseMove="{{ onMove }}" onMouseDown="{{ onDown }}" onMouseLeave="{{ onLeave }}" role="img" aria-label="3D solar system of the memory store: the sun is the store, planets are projects" style="display: block; width: 100%; height: 100%; cursor: grab"></canvas>
+
+      <nav aria-label="Map path" style="position: absolute; top: 12px; left: 12px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; max-width: 50%">
+        <sc-for list="{{ crumbs }}" as="c" hint-placeholder-count="1">
+          <span style="display: flex; align-items: center; gap: 4px">
+            <span style="{{ c.sepStyle }}">›</span>
+            <button type="button" onClick="{{ c.go }}" style="{{ c.style }}">{{ c.label }}</button>
+          </span>
+        </sc-for>
+      </nav>
+
+      <div style="position: absolute; top: 12px; left: 50%; transform: translateX(-50%); width: min(360px, 40%); z-index: 4; display: flex; flex-direction: column; gap: 4px">
+        <label style="display: flex; align-items: center; gap: 8px; padding: 0 10px; min-height: 38px; border-radius: 8px; border: 1px solid #2c3a57; background: rgba(10, 15, 28, 0.92); color: #9fb0c8; font-size: 13px">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#9fb0c8" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path></svg>
+          <span>Find</span>
+          <input type="search" value="{{ query }}" onChange="{{ onSearch }}" onKeyDown="{{ onSearchKey }}" placeholder="project, tag, kind or words" aria-label="Find a project, tag, kind or memory" style="flex: 1 1 auto; min-width: 0; border: 0; outline: none; background: transparent; color: #e6edf7; font: inherit; font-size: 13px">
+          <span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #e8b04a">{{ matchText }}</span>
+        </label>
+        <sc-if value="{{ findOpen }}" hint-placeholder-val="{{ false }}">
+          <ul role="listbox" aria-label="Find results" style="margin: 0; padding: 6px; list-style: none; border-radius: 10px; border: 1px solid #2c3a57; background: rgba(10, 15, 28, 0.97); display: flex; flex-direction: column; gap: 2px; max-height: 330px; overflow-y: auto">
+            <sc-for list="{{ results }}" as="r" hint-placeholder-count="4">
+              <li>
+                <button type="button" onClick="{{ r.go }}" style="width: 100%; display: flex; align-items: baseline; gap: 8px; min-height: 36px; padding: 6px 8px; border: 0; border-radius: 6px; background: transparent; color: #e6edf7; font: inherit; font-size: 13px; text-align: left; cursor: pointer">
+                  <span style="{{ r.badge }}">{{ r.type }}</span>
+                  <span style="flex: 1 1 auto; min-width: 0">{{ r.label }}</span>
+                  <span style="font-size: 11px; color: #9fb0c8; white-space: nowrap">{{ r.sub }}</span>
+                </button>
+              </li>
+            </sc-for>
+          </ul>
+        </sc-if>
+      </div>
+
+      <sc-if value="{{ legendOn }}" hint-placeholder-val="{{ true }}">
+        <section aria-label="Legend: bodies" style="position: absolute; top: 56px; left: 12px; width: 236px; padding: 12px; border-radius: 12px; background: rgba(10, 15, 28, 0.82); border: 1px solid #22304a; display: flex; flex-direction: column; gap: 5px">
+          <button type="button" onClick="{{ toggleLeft }}" aria-expanded="{{ openLeft }}" style="display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 32px; padding: 0; border: 0; background: transparent; color: #9fb0c8; font: inherit; font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; cursor: pointer">
+            <span>Bodies</span><span style="font-size: 13px; letter-spacing: 0">{{ chevronLeft }}</span>
+          </button>
+          <sc-if value="{{ isOpenLeft }}" hint-placeholder-val="{{ true }}">
+            <sc-for list="{{ legendLeft }}" as="item" hint-placeholder-count="8">
+              <div style="display: flex; gap: 8px; align-items: baseline; font-size: 12px; line-height: 1.35">
+                <span style="{{ item.sw }}"></span>
+                <span style="flex: 0 0 86px; color: #e6edf7">{{ item.name }}</span>
+                <span style="flex: 1 1 auto; color: #a9b8cd">{{ item.means }}</span>
+              </div>
+            </sc-for>
+          </sc-if>
+        </section>
+        <section aria-label="Legend: belts, links and motion" style="position: absolute; top: 12px; right: 12px; width: 250px; padding: 12px; border-radius: 12px; background: rgba(10, 15, 28, 0.82); border: 1px solid #22304a; display: flex; flex-direction: column; gap: 5px">
+          <button type="button" onClick="{{ toggleRight }}" aria-expanded="{{ openRight }}" style="display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 32px; padding: 0; border: 0; background: transparent; color: #9fb0c8; font: inherit; font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; cursor: pointer">
+            <span>Belts, links and motion</span><span style="font-size: 13px; letter-spacing: 0">{{ chevronRight }}</span>
+          </button>
+          <sc-if value="{{ isOpenRight }}" hint-placeholder-val="{{ true }}">
+            <sc-for list="{{ legendRight }}" as="item" hint-placeholder-count="8">
+              <div style="display: flex; gap: 8px; align-items: baseline; font-size: 12px; line-height: 1.35">
+                <span style="{{ item.sw }}"></span>
+                <span style="flex: 0 0 92px; color: #e6edf7">{{ item.name }}</span>
+                <span style="flex: 1 1 auto; color: #a9b8cd">{{ item.means }}</span>
+              </div>
+            </sc-for>
+          </sc-if>
+        </section>
+      </sc-if>
+
+      <sc-if value="{{ tipShown }}" hint-placeholder-val="{{ false }}">
+        <div role="status" style="{{ tipStyle }}">
+          <div style="font-weight: 600; font-size: 13px; color: #ffffff">{{ tipTitle }}</div>
+          <sc-for list="{{ tipLines }}" as="line" hint-placeholder-count="2">
+            <div style="color: #b7c4d8; font-size: 12px">{{ line.text }}</div>
+          </sc-for>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ noWebgl }}" hint-placeholder-val="{{ false }}">
+        <p style="position: absolute; top: 45%; left: 0; right: 0; margin: 0; text-align: center; color: #b7c4d8">The 3D view needs WebGL and the bundled three.js; it did not load here.</p>
+      </sc-if>
+
+      <p style="position: absolute; left: 14px; bottom: 12px; margin: 0; color: #8193a6; font-size: 12px">Drag to orbit (see it from the top or below) · right-drag to pan · scroll to zoom · click a body to fly in</p>
+      <div style="position: absolute; right: 12px; bottom: 12px; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; max-width: 60%">
+        <sc-for list="{{ viewButtons }}" as="item" hint-placeholder-count="5">
+          <button type="button" aria-label="{{ item.aria }}" onClick="{{ item.pick }}" style="min-width: 44px; min-height: 40px; padding: 0 12px; border-radius: 8px; border: 1px solid #2c3a57; background: rgba(10, 15, 28, 0.9); color: #e6edf7; font: inherit; font-size: 13px; cursor: pointer">{{ item.label }}</button>
+        </sc-for>
+      </div>
+    </section>
+    <section aria-label="Show or hide bodies" style="height: 132px; box-sizing: border-box; background: #0d1424; border: 1px solid #1f2b43; border-radius: 12px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px">
+      <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px">
+        <h2 style="margin: 0; font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #9fb0c8">Bodies</h2>
+        <span style="font-size: 12px; color: #9fb0c8">{{ shownText }} · click a chip to show or hide it; click it on the map to fly in</span>
+        <button type="button" onClick="{{ showAll }}" style="margin-left: auto; min-height: 28px; padding: 0 10px; border-radius: 8px; border: 1px solid #2c3a57; background: transparent; color: #c9d6ea; font: inherit; font-size: 12px; cursor: pointer">Show all</button>
+      </div>
+      <div style="display: grid; grid-auto-flow: column; grid-template-rows: repeat(2, 38px); grid-auto-columns: 172px; gap: 6px; overflow-x: auto; overflow-y: hidden">
+        <sc-for list="{{ chips }}" as="item" hint-placeholder-count="11">
+          <button type="button" onClick="{{ item.pick }}" aria-pressed="{{ item.pressed }}" title="{{ item.title }}" style="{{ item.style }}">
+            <span style="{{ item.dot }}"></span>
+            <span style="flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left">{{ item.label }}</span>
+            <span style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #9fb0c8">{{ item.value }}</span>
+          </button>
+        </sc-for>
+      </div>
+    </section>
+    </div>
+  </main>
+
+  <section style="display: flex; flex-wrap: wrap; gap: 16px; padding: 0 20px 20px">
+    <section aria-label="Details" style="flex: 2 1 560px; min-width: 0; background: #0d1424; border: 1px solid #1f2b43; border-radius: 12px; padding: 16px 18px; display: flex; flex-direction: column; gap: 12px">
+      <div style="display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 14px">
+        <span style="font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #9fb0c8">{{ insp.kicker }}</span>
+        <h2 style="margin: 0; font-size: 20px; font-weight: 700; display: flex; align-items: center; gap: 8px"><span style="{{ insp.dot }}"></span>{{ insp.title }}</h2>
+      </div>
+      <sc-if value="{{ insp.hasBody }}" hint-placeholder-val="{{ false }}">
+        <p style="margin: 0; padding: 10px 12px; border-radius: 8px; background: #121b2e; line-height: 1.5; color: #d5deea">{{ insp.body }}</p>
+      </sc-if>
+      <dl style="margin: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px 16px">
+        <sc-for list="{{ insp.facts }}" as="k" hint-placeholder-count="8">
+          <div style="min-width: 0">
+            <dt style="font-size: 12px; color: #9fb0c8">{{ k.label }}</dt>
+            <dd style="margin: 2px 0 0; font-weight: 600; font-size: 14px">{{ k.value }}</dd>
+          </div>
+        </sc-for>
+      </dl>
+      <sc-if value="{{ insp.hasChips }}" hint-placeholder-val="{{ false }}">
+        <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 6px">
+          <span style="font-size: 12px; color: #9fb0c8">{{ insp.chipsLabel }}</span>
+          <sc-for list="{{ insp.chips }}" as="c" hint-placeholder-count="3">
+            <span style="{{ c.style }}">{{ c.name }}</span>
+          </sc-for>
+        </div>
+      </sc-if>
+      <sc-if value="{{ insp.hasLinks }}" hint-placeholder-val="{{ false }}">
+        <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 6px">
+          <span style="font-size: 12px; color: #9fb0c8">{{ insp.linksLabel }}</span>
+          <sc-for list="{{ insp.links }}" as="l" hint-placeholder-count="2">
+            <button type="button" onClick="{{ l.go }}" style="min-height: 36px; padding: 4px 12px; border-radius: 8px; border: 1px solid #5b4a7a; background: transparent; color: #e8b8ff; font: inherit; font-size: 12px; cursor: pointer">{{ l.label }}</button>
+          </sc-for>
+        </div>
+      </sc-if>
+      <sc-if value="{{ insp.isMemory }}" hint-placeholder-val="{{ false }}">
+        <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 16px; font-size: 13px">
+          <div style="display: flex; flex-direction: column; gap: 2px"><span style="font-size: 12px; color: #9fb0c8">Last 3 actions</span><span>[e.g. updated by claude-code, date]</span></div>
+          <div style="display: flex; flex-direction: column; gap: 2px"><span style="font-size: 12px; color: #9fb0c8">Similar memories</span><span>[near-duplicates here; a cross-project one links to its black hole]</span></div>
+        </div>
+        <div style="display: flex; flex-wrap: wrap; gap: 8px">
+          <button type="button" style="min-height: 44px; padding: 8px 16px; border-radius: 8px; border: 1px solid #56B4E9; background: #12325a; color: #ffffff; font: inherit; font-size: 13px">Edit</button>
+          <button type="button" style="min-height: 44px; padding: 8px 16px; border-radius: 8px; border: 1px solid #2c3a57; background: transparent; color: #e6edf7; font: inherit; font-size: 13px">Pin</button>
+          <button type="button" style="min-height: 44px; padding: 8px 16px; border-radius: 8px; border: 1px solid #2c3a57; background: transparent; color: #f5b38a; font: inherit; font-size: 13px">Retire…</button>
+        </div>
+      </sc-if>
+      <p style="margin: 0; color: #9fb0c8; font-size: 13px">{{ insp.hint }}</p>
+    </section>
+
+    <section aria-label="Live activity" style="flex: 1 1 320px; min-width: 0; background: #0d1424; border: 1px solid #1f2b43; border-radius: 12px; padding: 16px 18px; display: flex; flex-direction: column; gap: 10px">
+      <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 8px">
+        <h2 style="margin: 0; font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #9fb0c8">Live activity</h2>
+        <button type="button" aria-pressed="{{ liveOn }}" onClick="{{ toggleLive }}" style="{{ liveStyle }}">{{ liveLabel }}</button>
+      </div>
+      <p style="margin: 0; color: #9fb0c8; font-size: 12px">Lines from the activity log, drawn on the map as they happen. Here they are simulated.</p>
+      <div style="display: flex; flex-wrap: wrap; gap: 6px">
+        <button type="button" onClick="{{ simRecall }}" style="min-height: 36px; padding: 0 12px; border-radius: 8px; border: 1px solid #6b5f1a; background: transparent; color: #f0e442; font: inherit; font-size: 12px; cursor: pointer">Simulate recall</button>
+        <button type="button" onClick="{{ simSave }}" style="min-height: 36px; padding: 0 12px; border-radius: 8px; border: 1px solid #1f4f70; background: transparent; color: #8fd0f5; font: inherit; font-size: 12px; cursor: pointer">Simulate save</button>
+        <button type="button" onClick="{{ simUpdate }}" style="min-height: 36px; padding: 0 12px; border-radius: 8px; border: 1px solid #1f5a42; background: transparent; color: #7ff0bd; font: inherit; font-size: 12px; cursor: pointer">Simulate update</button>
+        <button type="button" onClick="{{ simForget }}" style="min-height: 36px; padding: 0 12px; border-radius: 8px; border: 1px solid #6b2424; background: transparent; color: #ff8a8a; font: inherit; font-size: 12px; cursor: pointer">Simulate forget</button>
+      </div>
+      <ol style="margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px">
+        <sc-for list="{{ feed }}" as="f" hint-placeholder-count="3">
+          <li style="display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; font-size: 13px">
+            <span style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #9fb0c8">{{ f.time }}</span>
+            <span style="{{ f.badge }}">{{ f.kind }}</span>
+            <span style="color: #d5deea">{{ f.text }}</span>
+          </li>
+        </sc-for>
+      </ol>
+    </section>
+  </section>
+
+  <footer style="display: flex; flex-wrap: wrap; gap: 4px 24px; padding: 12px 24px; border-top: 1px solid #1a2438; color: #9fb0c8; font-size: 12px">
+    <span>Store <span style="font-family: 'JetBrains Mono', monospace">~/.claude/mnemosyne/store</span></span>
+    <span>Server running</span>
+    <span>Activity log on</span>
+    <span>Real: projects, counts, kinds, tags, recalls, ages, writers, links (2026-10-25). Illustrative: memory text, per-memory sizes, satellites, outer-belt dust, live events.</span>
+  </footer>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1080}}'>
+var WRITERS = [
+  { source: 'claude-code', count: 121, color: '#56B4E9', lat: 0.35, lon: 0.6 },
+  { source: 'imported', count: 2, color: '#CC79A7', lat: -0.5, lon: 3.4 }
+];
+var KIND_LABEL = { fact: 'Facts', preference: 'Preferences', instruction: 'Instructions', decision: 'Decisions', context: 'Context', error: 'Errors', artifact: 'Artifacts', event: 'Events', unknown: 'Unknown kind' };
+var KIND_ONE = { fact: 'fact', preference: 'preference', instruction: 'instruction', decision: 'decision', context: 'context note', error: 'error note', artifact: 'artifact', event: 'event', unknown: 'untyped' };
+var PROJECTS = [
+  { id: 'matrixkoder', count: 48, recalls: 368, activity: 416, age: 8.8, unknown: 0, global: 3, tagsTotal: 27,
+    kinds: [['instruction', 33], ['decision', 7], ['preference', 5], ['context', 2], ['fact', 1]],
+    tags: [['workflow-rules', 38], ['planning', 20], ['user-preferences', 19], ['agent-lanes', 16], ['orchestration', 9], ['gates', 8], ['model-routing', 7], ['subagents', 6], ['dashboard-ui', 6], ['plan-template', 5], ['testing', 4], ['parked-work', 4]] },
+  { id: 'hermes-switchui', count: 62, recalls: 103, activity: 165, age: 8.8, unknown: 0, global: 0, tagsTotal: 33,
+    kinds: [['fact', 23], ['error', 15], ['instruction', 9], ['decision', 6], ['preference', 5], ['artifact', 3], ['context', 1]],
+    tags: [['hermes-platform', 37], ['debugging', 22], ['workflow-rules', 20], ['dashboard-ui', 17], ['api-gateway', 15], ['skills-plugins', 10], ['frontend-tooling', 10], ['release-deploy', 8], ['data-storage', 8], ['user-preferences', 7], ['chat-sessions', 7], ['git', 6]] },
+  { id: 'cc-workflows', count: 2, recalls: 93, activity: 95, age: 6.7, unknown: 0, global: 1, tagsTotal: 7,
+    kinds: [['preference', 1], ['artifact', 1]],
+    tags: [['model-routing', 2], ['daemons-scheduling', 1], ['orchestration', 1], ['code-review', 1], ['user-preferences', 1], ['workflow-rules', 1], ['agent:codex', 1]] },
+  { id: 'claude-mnemosyne', count: 7, recalls: 74, activity: 81, age: 1.8, unknown: 0, global: 1, tagsTotal: 15,
+    kinds: [['context', 3], ['preference', 2], ['instruction', 1], ['decision', 1]],
+    tags: [['memory-system', 3], ['agent-lanes', 3], ['workflow-rules', 3], ['orchestration', 2], ['agent:claude-code', 2], ['v3', 2], ['planning', 2], ['orca', 2], ['architecture-decisions', 1], ['skills-plugins', 1], ['parked-work', 1], ['user-preferences', 1]] },
+  { id: 'orca-matrixkoder', count: 4, recalls: 3, activity: 7, age: 0.6, unknown: 2, global: 1, tagsTotal: 12,
+    kinds: [['decision', 2], ['unknown', 2]],
+    tags: [['orca', 4], ['matrixkoder', 2], ['data-storage', 1], ['architecture-decisions', 1], ['orchestration', 1], ['planning', 1], ['workflow-rules', 1], ['plan-template', 1], ['agy', 1], ['panes', 1], ['worktrees', 1], ['lanes', 1]] }
+];
+// The real projects are git repos with a GitHub remote. The six below are SAMPLE plain folders (no git repo),
+// added to show space stations (a lasting workspace, 5+ memories) and starships (a small or new folder).
+PROJECTS.forEach(function (q) { q.repo = true; q.remote = 'github.com'; });
+PROJECTS.push(
+  { id: 'cowork', note: 'Claude Code Cowork working folder', sample: true, craft: 'station', count: 12, recalls: 40, activity: 52, age: 20, unknown: 0, global: 0, tagsTotal: 6,
+    kinds: [['context', 5], ['decision', 3], ['preference', 2], ['artifact', 2]], tags: [['workflow-rules', 5], ['planning', 4], ['documents', 3], ['research', 2], ['user-preferences', 2], ['notes', 1]] },
+  { id: 'notes', sample: true, craft: 'station', count: 8, recalls: 22, activity: 30, age: 35, unknown: 0, global: 0, tagsTotal: 4,
+    kinds: [['fact', 4], ['context', 2], ['preference', 2]], tags: [['notes', 5], ['research', 3], ['planning', 2], ['user-preferences', 1]] },
+  { id: 'research', sample: true, craft: 'station', count: 5, recalls: 9, activity: 14, age: 40, unknown: 0, global: 0, tagsTotal: 3,
+    kinds: [['fact', 3], ['artifact', 2]], tags: [['research', 4], ['documents', 2], ['data-storage', 1]] },
+  { id: 'scratch', sample: true, craft: 'ship', count: 3, recalls: 4, activity: 7, age: 2, unknown: 0, global: 0, tagsTotal: 2,
+    kinds: [['context', 2], ['error', 1]], tags: [['debugging', 2], ['testing', 1]] },
+  { id: 'sandbox', sample: true, craft: 'ship', count: 2, recalls: 6, activity: 8, age: 1, unknown: 0, global: 0, tagsTotal: 2,
+    kinds: [['context', 1], ['fact', 1]], tags: [['testing', 1], ['orchestration', 1]] },
+  { id: 'downloads', sample: true, craft: 'ship', count: 1, recalls: 1, activity: 2, age: 4, unknown: 0, global: 0, tagsTotal: 1,
+    kinds: [['artifact', 1]], tags: [['documents', 1]] }
+);
+var LINKS = [
+  { older: 'hermes-switchui', newer: 'matrixkoder', pairs: 3, best: 0.81 },
+  { older: 'hermes-switchui', newer: 'claude-mnemosyne', pairs: 3, best: 0.82 },
+  { older: 'matrixkoder', newer: 'claude-mnemosyne', pairs: 2, best: 0.81 }
+];
+var STYLES = {
+  earth: { kind: 'rock', a: '#2a6496', b: '#0b2140', extra: 'clouds', label: 'Earth-like' },
+  mars: { kind: 'rock', a: '#c8663a', b: '#5a2412', extra: 'cap', label: 'Mars-like' },
+  venus: { kind: 'rock', a: '#e8cb92', b: '#9a7a45', extra: 'haze', label: 'Venus-like' },
+  mercury: { kind: 'rock', a: '#a39e97', b: '#4a4642', extra: 'craters', label: 'Mercury-like' },
+  pluto: { kind: 'rock', a: '#dcc6a8', b: '#7d6650', extra: 'craters', label: 'Pluto-like' },
+  jupiter: { kind: 'gas', bands: ['#ead9be', '#c48a5a', '#f4e8d4', '#a8683f', '#dcc2a0', '#b9825a'], extra: 'spot', label: 'Jupiter-like' },
+  saturn: { kind: 'gas', bands: ['#f0e3ba', '#d9bf86', '#f6edd2', '#c9a865', '#e4d09c'], extra: 'rings', label: 'Saturn-like' },
+  neptune: { kind: 'gas', bands: ['#4f74e8', '#2c4bb8', '#6d8ff0', '#22398f'], extra: 'spot', label: 'Neptune-like' },
+  uranus: { kind: 'gas', bands: ['#a8ecef', '#86d6dc', '#c4f4f5', '#94e0e6'], extra: 'none', label: 'Uranus-like' }
+};
+var ARRANGE = [
+  { id: 'activity', label: 'Activity', hint: 'Closer = more writes and recalls (30 days; lifetime until the tally fills). At most 10 orbits: past 10 bodies, the least active share the outer rings.' },
+  { id: 'size', label: 'Size', hint: 'Closer = more memories.' },
+  { id: 'age', label: 'Age', hint: 'Closer = younger (median age of live memories).' },
+  { id: 'recalls', label: 'Recalls', hint: 'Closer = more lifetime recalls.' }
+];
+var COLOURS = [{ id: 'writer', label: 'Writer' }, { id: 'recalls', label: 'Recalls' }, { id: 'age', label: 'Age' }];
+var EVENT_COLOUR = { recall: '#F0E442', save: '#56B4E9', update: '#3DDC97', forget: '#FF4D4D' };
+
+function fnv(s) { var h = 2166136261; for (var i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; }
+function rng(seed) { var a = seed >>> 0; return function () { a = (a + 0x6d2b79f5) | 0; var t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+function proj(id) { for (var i = 0; i < PROJECTS.length; i++) if (PROJECTS[i].id === id) return PROJECTS[i]; return null; }
+function planetR(p) { return (p.count < 3 ? 6.5 : 7 + Math.sqrt(p.count) * 2.5) * 1.4; }
+// Orbit speed comes from size: the biggest planets crawl, the smallest move fastest (radians per second).
+function orbitSpeed(p) { return 0.04 * (planetR({ count: 2 }) / planetR(p)); }
+function extent(p) { return planetR(p) * (p.count < 3 ? 2 : 2.7); }
+function metric(p, a) { return a === 'activity' ? p.activity : a === 'size' ? p.count : a === 'age' ? -p.age : p.recalls; }
+function metricText(p, a) { return a === 'activity' ? p.activity + ' activity' : a === 'size' ? p.count + ' memories' : a === 'age' ? p.age + ' d median' : p.recalls + ' recalls'; }
+function sharedCount(tag, owner) { var n = 0; for (var i = 0; i < PROJECTS.length; i++) { if (PROJECTS[i].id === owner) continue; for (var j = 0; j < PROJECTS[i].tags.length; j++) if (PROJECTS[i].tags[j][0] === tag) { n++; break; } } return n; }
+function tagColour(name) {
+  var h = fnv(name);
+  if (name.indexOf('agent:') === 0) return 'hsl(' + (275 + h % 35) + ', 55%, 68%)';
+  if (name.indexOf('entity:') === 0) return 'hsl(' + (180 + h % 25) + ', 55%, 60%)';
+  if (name.indexOf('asset:') === 0) return 'hsl(' + (28 + h % 18) + ', 70%, 62%)';
+  return 'hsl(' + (62 + h % 92) + ', 40%, ' + (44 + (h >>> 8) % 16) + '%)';
+}
+function dotColour(mode, seed, kind) {
+  if (kind === 'unknown') return '#8b93a3';
+  if (mode === 'writer') return '#56B4E9';
+  var r = rng(seed)();
+  if (mode === 'recalls') return 'hsl(48, 95%, ' + Math.round(38 + r * 50) + '%)';
+  return 'hsl(' + Math.round(200 + r * 80) + ', 70%, 66%)';
+}
+var STYLE_CACHE = null;
+function styleClass(p) { return p.count < 3 ? ['pluto', 'mercury'] : p.count < 10 ? ['earth', 'mars', 'venus', 'mercury'] : p.count < 30 ? ['neptune', 'uranus'] : ['jupiter', 'saturn']; }
+function sizeClass(p) { return p.count < 3 ? 'dwarf (under 3 memories)' : p.count < 10 ? 'rocky world (under 10)' : p.count < 30 ? 'ice giant (10 to 29)' : 'gas giant (30 or more)'; }
+function styleOf(p) {
+  if (!STYLE_CACHE) {
+    STYLE_CACHE = {};
+    var used = {}, ids = PROJECTS.filter(function (q) { return !q.craft; }).sort(function (a, b) { return b.count - a.count || (a.id < b.id ? -1 : 1); });
+    for (var i = 0; i < ids.length; i++) {
+      var opts = styleClass(ids[i]), i0 = fnv(ids[i].id) % opts.length;
+      for (var k = 0; k < opts.length; k++) { var v = opts[(i0 + k) % opts.length]; if (!used[v]) { used[v] = 1; STYLE_CACHE[ids[i].id] = v; break; } }
+      if (!STYLE_CACHE[ids[i].id]) STYLE_CACHE[ids[i].id] = opts[i0];
+    }
+  }
+  return STYLE_CACHE[p.id];
+}
+function searchResults(q) {
+  q = (q || '').trim().toLowerCase();
+  var out = { results: [], match: {} };
+  if (q.length < 2) return out;
+  var bodies = [], moons = [], tags = [], mems = [];
+  PROJECTS.forEach(function (p) {
+    var hit = false;
+    if (p.id.toLowerCase().indexOf(q) >= 0 || (p.note && p.note.toLowerCase().indexOf(q) >= 0)) { hit = true; bodies.push({ type: p.craft ? (p.craft === 'station' ? 'Station' : 'Starship') : 'Planet', label: p.id, sub: p.count + ' memories', act: { planet: p.id } }); }
+    p.kinds.forEach(function (k) {
+      if (k[0] !== 'unknown' && !p.craft && p.count >= 3 && (KIND_LABEL[k[0]].toLowerCase().indexOf(q) >= 0 || k[0].indexOf(q) >= 0)) { hit = true; moons.push({ type: 'Moon', label: KIND_LABEL[k[0]] + ' of ' + p.id, sub: k[1] + ' memories', act: { planet: p.id, kind: k[0] } }); }
+    });
+    p.tags.forEach(function (t) {
+      if (t[0].indexOf(q) >= 0) {
+        hit = true;
+        tags.push({ type: 'Tag', label: t[0], sub: t[1] + '× on ' + p.id, n: t[1], act: { planet: p.id } });
+        var kind = p.kinds.filter(function (k) { return k[0] !== 'unknown'; })[0];
+        if (kind && !p.craft && p.count >= 3) mems.push({ type: 'Memory', label: '[a memory tagged ' + t[0] + ']', sub: p.id + ' · ' + KIND_LABEL[kind[0]] + ' · sample', n: t[1], act: { planet: p.id, kind: kind[0], mem: 0 } });
+      }
+    });
+    if (hit) out.match[p.id] = true;
+  });
+  tags.sort(function (a, b) { return b.n - a.n; }); mems.sort(function (a, b) { return b.n - a.n; });
+  out.results = bodies.concat(moons, mems.slice(0, 3), tags).slice(0, 10);
+  return out;
+}
+function describe(p) {
+  if (p.craft) return (p.craft === 'station' ? 'Space station' : 'Starship') + ': a plain folder, no git repo' + (p.note ? ' (' + p.note + ')' : '') + ' · sample';
+  return STYLES[styleOf(p)].label + ' ' + sizeClass(p) + (p.remote === null ? ' · no remote (local-only repo)' : ' · repo on ' + p.remote);
+}
+function labelName(p) { return p.craft ? p.id + ' · ' + (p.craft === 'station' ? 'station' : 'starship') + ' (sample)' : p.id + (p.count < 3 ? ' (dwarf)' : ''); }
+function linksOf(id) { var out = []; for (var i = 0; i < LINKS.length; i++) if (LINKS[i].older === id || LINKS[i].newer === id) out.push(LINKS[i]); return out; }
+function ease(t) { return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; }
+function clock() { var d = new Date(); var z = function (n) { return (n < 10 ? '0' : '') + n; }; return z(d.getHours()) + ':' + z(d.getMinutes()) + ':' + z(d.getSeconds()); }
+
+class Component extends DCLogic {
+  st() {
+    var d = { arrange: 'activity', colour: 'writer', level: 'galaxy', planet: null, kind: null, mem: null, live: true, sample: true, rotate: false, legend: true, legL: true, legR: true, hidden: {}, query: '', findOpen: false, feed: [], tip: null, noWebgl: false };
+    var s = this.state || {};
+    for (var k in s) d[k] = s[k];
+    return d;
+  }
+
+  componentDidMount() {
+    this.reduced = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+    this.last = null; this.clock = 0; this.events = []; this.nextEvent = 2; this.flight = null; this.down = null; this.spread = 0;
+    var self = this;
+    var loop = function (now) { self.frame(now); self.raf = requestAnimationFrame(loop); };
+    this.raf = requestAnimationFrame(loop);
+  }
+
+  componentWillUnmount() { cancelAnimationFrame(this.raf); if (this.renderer) this.renderer.dispose(); }
+
+  // ---------- textures and sprites ----------
+  canvas2d(w, h) { var c = document.createElement('canvas'); c.width = w; c.height = h; return c; }
+
+  texture(c) { var t = new this.T.CanvasTexture(c); t.colorSpace = this.T.SRGBColorSpace; return t; }
+
+  glowTexture() {
+    var c = this.canvas2d(128, 128), g = c.getContext('2d');
+    var r = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+    r.addColorStop(0, 'rgba(255,255,255,1)'); r.addColorStop(0.25, 'rgba(255,255,255,0.55)'); r.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = r; g.fillRect(0, 0, 128, 128);
+    return this.texture(c);
+  }
+
+  dotTexture() {
+    var c = this.canvas2d(64, 64), g = c.getContext('2d');
+    var r = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+    r.addColorStop(0, 'rgba(255,255,255,1)'); r.addColorStop(0.55, 'rgba(255,255,255,0.9)'); r.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = r; g.fillRect(0, 0, 64, 64);
+    return this.texture(c);
+  }
+
+  glow(colour, size, opacity) {
+    var T = this.T;
+    var s = new T.Sprite(new T.SpriteMaterial({ map: this.glowTex, color: new T.Color(colour), transparent: true, opacity: opacity === undefined ? 1 : opacity, depthWrite: false, blending: T.AdditiveBlending }));
+    s.scale.set(size, size, 1);
+    return s;
+  }
+
+  label(text, sub, colour, h) {
+    var T = this.T, c = this.canvas2d(8, 8), g = c.getContext('2d');
+    var f1 = '600 28px Inter, system-ui, sans-serif', f2 = '400 22px Inter, system-ui, sans-serif';
+    g.font = f1; var w = g.measureText(text).width;
+    if (sub) { g.font = f2; w = Math.max(w, g.measureText(sub).width); }
+    c.width = Math.ceil(w) + 24; c.height = sub ? 72 : 44;
+    g = c.getContext('2d'); g.textAlign = 'center'; g.textBaseline = 'middle'; g.lineJoin = 'round';
+    g.font = f1; g.lineWidth = 6; g.strokeStyle = 'rgba(4, 6, 11, 0.9)'; g.strokeText(text, c.width / 2, 22); g.fillStyle = colour; g.fillText(text, c.width / 2, 22);
+    if (sub) { g.font = f2; g.strokeText(sub, c.width / 2, 54); g.fillStyle = '#a9b8cd'; g.fillText(sub, c.width / 2, 54); }
+    var s = new T.Sprite(new T.SpriteMaterial({ map: this.texture(c), transparent: true, depthWrite: false, depthTest: false }));
+    s.renderOrder = 10;
+    s.scale.set(h * c.width / c.height, h, 1);
+    return s;
+  }
+
+  planetTexture(p) {
+    var W = 512, H = 256, c = this.canvas2d(W, H), g = c.getContext('2d');
+    var st = STYLES[styleOf(p)], blobs = [], maxC = p.tags[0][1], i, name, cnt, h, r;
+    var all = p.tags.slice();
+    for (var k = p.tags.length; k < p.tagsTotal; k++) all.push(['island-' + k, 0]);
+    if (st.kind === 'gas') {
+      var n = 14;
+      for (var j = 0; j < n; j++) {
+        g.fillStyle = st.bands[j % st.bands.length];
+        g.beginPath(); g.moveTo(0, j * H / n);
+        for (var x = 0; x <= W; x += 16) g.lineTo(x, j * H / n + Math.sin(x * 0.05 + j) * 3);
+        g.lineTo(W, H); g.lineTo(0, H); g.closePath(); g.fill();
+      }
+      for (i = 0; i < all.length; i++) {
+        name = all[i][0]; cnt = all[i][1]; h = fnv(p.id + '|' + name);
+        var v = 0.12 + ((h >>> 10) % 760) / 1000;
+        if (cnt > 0 && i < 6) {
+          var th = H * (0.03 + 0.07 * Math.sqrt(cnt / maxC));
+          g.globalAlpha = 0.82; g.fillStyle = tagColour(name);
+          g.beginPath(); g.moveTo(0, v * H - th / 2);
+          for (var x1 = 0; x1 <= W; x1 += 16) g.lineTo(x1, v * H - th / 2 + Math.sin(x1 * 0.04 + i) * th * 0.3);
+          for (var x2 = W; x2 >= 0; x2 -= 16) g.lineTo(x2, v * H + th / 2 + Math.sin(x2 * 0.05 + i + 1) * th * 0.3);
+          g.closePath(); g.fill(); g.globalAlpha = 1;
+          blobs.push({ u: 0.5, v: v, ru: 0.5, rv: th / H / 2 + 0.01, name: name, cnt: cnt, band: true });
+        } else {
+          var u = (h % 1000) / 1000, sz = cnt === 0 ? 3 : H * (0.03 + 0.06 * Math.sqrt(cnt / maxC));
+          g.fillStyle = cnt === 0 ? 'rgba(255,255,255,0.4)' : tagColour(name);
+          for (var wv = -1; wv <= 1; wv++) { g.beginPath(); g.ellipse(u * W + wv * W, v * H, sz * 1.8, sz, 0, 0, Math.PI * 2); g.fill(); }
+          if (cnt > 0) blobs.push({ u: u, v: v, ru: sz * 1.8 / W, rv: sz / H, name: name, cnt: cnt });
+        }
+      }
+      if (st.extra === 'spot') {
+        g.fillStyle = tagColour(p.tags[0][0]); g.strokeStyle = 'rgba(60,25,10,0.5)'; g.lineWidth = 3;
+        g.beginPath(); g.ellipse(W * 0.3, H * 0.64, 30, 14, 0, 0, Math.PI * 2); g.fill(); g.stroke();
+      }
+    } else {
+      g.fillStyle = st.a; g.fillRect(0, 0, W, H);
+      r = rng(fnv(p.id + 'noise'));
+      for (i = 0; i < 260; i++) { g.globalAlpha = 0.12 + r() * 0.25; g.fillStyle = st.b; g.beginPath(); g.ellipse(r() * W, r() * H, 4 + r() * 18, 2 + r() * 8, 0, 0, Math.PI * 2); g.fill(); }
+      g.globalAlpha = 1;
+      if (st.extra === 'craters') for (i = 0; i < 40; i++) { g.strokeStyle = 'rgba(30,25,20,0.45)'; g.lineWidth = 2; g.beginPath(); g.arc(r() * W, r() * H, 2 + r() * 7, 0, Math.PI * 2); g.stroke(); }
+      for (i = 0; i < all.length; i++) {
+        name = all[i][0]; cnt = all[i][1]; h = fnv(p.id + '|' + name);
+        var u2 = (h % 1000) / 1000, lat = (((h >>> 10) % 110) - 55), v2 = 0.5 - lat / 180;
+        var size = cnt === 0 ? 4 : H * (0.05 + 0.15 * Math.sqrt(cnt / maxC));
+        var r2 = rng(h);
+        g.fillStyle = cnt === 0 ? 'rgba(255,255,255,0.35)' : tagColour(name);
+        var blobsN = cnt === 0 ? 1 : 5;
+        var offs = [];
+        for (var b = 0; b < blobsN; b++) offs.push([(r2() - 0.5) * size * 1.6, (r2() - 0.5) * size * 0.8, size * (0.5 + r2() * 0.5)]);
+        for (var wv2 = -1; wv2 <= 1; wv2++) for (var o = 0; o < offs.length; o++) { g.beginPath(); g.ellipse(u2 * W + wv2 * W + offs[o][0], v2 * H + offs[o][1], offs[o][2] * 1.6, offs[o][2], 0, 0, Math.PI * 2); g.fill(); }
+        if (cnt > 0) blobs.push({ u: u2, v: v2, ru: size * 1.6 / W, rv: size * 0.8 / H, name: name, cnt: cnt });
+      }
+      if (st.extra === 'cap') { g.fillStyle = 'rgba(250,250,255,0.9)'; g.fillRect(0, 0, W, H * 0.07); g.fillRect(0, H * 0.95, W, H * 0.05); }
+      if (st.extra === 'haze') { g.fillStyle = 'rgba(245,225,180,0.3)'; g.fillRect(0, 0, W, H); }
+      if (st.extra === 'clouds') { g.fillStyle = 'rgba(255,255,255,0.28)'; for (i = 0; i < 18; i++) { g.beginPath(); g.ellipse(r() * W, r() * H, 20 + r() * 40, 3 + r() * 4, 0, 0, Math.PI * 2); g.fill(); } }
+    }
+    if (p.unknown / p.count > 0.25) {
+      var cr = rng(fnv(p.id + 'untidy'));
+      g.fillStyle = 'rgba(236,241,250,0.55)';
+      for (i = 0; i < 26; i++) { g.beginPath(); g.ellipse(cr() * W, cr() * H, 18 + cr() * 36, 4 + cr() * 6, 0, 0, Math.PI * 2); g.fill(); }
+    }
+    return { tex: this.texture(c), blobs: blobs };
+  }
+
+  sunTexture() {
+    var W = 512, H = 256, c = this.canvas2d(W, H), g = c.getContext('2d');
+    var lin = g.createLinearGradient(0, 0, 0, H);
+    lin.addColorStop(0, '#c9631c'); lin.addColorStop(0.5, '#e8942e'); lin.addColorStop(1, '#c4601a');
+    g.fillStyle = lin; g.fillRect(0, 0, W, H);
+    var r = rng(5), i;
+    for (i = 0; i < 2200; i++) { g.globalAlpha = 0.18 + r() * 0.3; g.fillStyle = r() < 0.5 ? '#a8480f' : '#ffc062'; g.beginPath(); g.ellipse(r() * W, r() * H, 2 + r() * 5, 1.5 + r() * 3.5, r() * 3, 0, Math.PI * 2); g.fill(); }
+    for (i = 0; i < 14; i++) { g.globalAlpha = 0.5; g.fillStyle = '#ffd88a'; g.beginPath(); g.ellipse(r() * W, H * (0.2 + r() * 0.6), 10 + r() * 22, 2 + r() * 3, r() * 0.6 - 0.3, 0, Math.PI * 2); g.fill(); }
+    for (i = 0; i < 5; i++) {
+      var x = r() * W, y = H * (0.3 + r() * 0.4), sz = 4 + r() * 7;
+      g.globalAlpha = 0.55; g.fillStyle = '#7a3208'; g.beginPath(); g.arc(x, y, sz * 1.7, 0, Math.PI * 2); g.fill();
+      g.globalAlpha = 0.9; g.fillStyle = '#3a1404'; g.beginPath(); g.arc(x, y, sz, 0, Math.PI * 2); g.fill();
+    }
+    g.globalAlpha = 1;
+    return this.texture(c);
+  }
+
+  // ---------- scene ----------
+  // At most MAX_RINGS orbits. Ranked by the Arrange-by metric; when there are more bodies than rings,
+  // the least significant share the outer rings (they travel together, evenly spaced).
+  targets(arrange) {
+    var MAX_RINGS = 10;
+    var list = PROJECTS.slice().sort(function (a, b) { return metric(b, arrange) - metric(a, arrange) || (a.id < b.id ? -1 : 1); });
+    var n = list.length, groups = [], i;
+    for (i = 0; i < n; i++) {
+      var ring = n <= MAX_RINGS ? i : MAX_RINGS - 1 - Math.floor((n - 1 - i) * MAX_RINGS / n);
+      (groups[ring] = groups[ring] || []).push(list[i]);
+    }
+    var out = {}, r = 0, prevExt = null;
+    this.ringGroups = [];
+    for (var g = 0; g < groups.length; g++) {
+      if (!groups[g]) continue;
+      var ext = 0; for (i = 0; i < groups[g].length; i++) ext = Math.max(ext, extent(groups[g][i]));
+      r = prevExt === null ? 140 + ext : r + prevExt + ext + 16;
+      for (i = 0; i < groups[g].length; i++) out[groups[g][i].id] = r;
+      this.ringGroups.push(groups[g].map(function (q) { return q.id; }));
+      prevExt = ext;
+    }
+    return out;
+  }
+
+  pointsObject(positions, colours, size, items, opacity, soft) {
+    var T = this.T, gm = new T.BufferGeometry();
+    gm.setAttribute('position', new T.BufferAttribute(new Float32Array(positions), 3));
+    gm.setAttribute('color', new T.BufferAttribute(new Float32Array(colours), 3));
+    var pts = new T.Points(gm, new T.PointsMaterial({ size: size, map: this.dotTex, vertexColors: true, transparent: true, opacity: opacity === undefined ? 1 : opacity, depthWrite: false, sizeAttenuation: true, blending: soft ? T.NormalBlending : T.AdditiveBlending }));
+    pts.userData = { kind: 'points', items: items };
+    pts.frustumCulled = false;
+    return pts;
+  }
+
+  initScene() {
+    var T = window.THREE;
+    if (!T || !this.canvas) return;
+    this.T = T;
+    var canvas = this.canvas, s = this.st();
+    try {
+      this.renderer = new T.WebGLRenderer({ canvas: canvas, antialias: true });
+    } catch (err) { this.setState({ noWebgl: true }); this.failed = true; return; }
+    var renderer = this.renderer;
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.setClearColor(0x010205, 1);
+    var scene = new T.Scene(); this.scene = scene;
+    var camera = new T.PerspectiveCamera(50, 1, 0.5, 9000); this.camera = camera;
+    var controls = new T.OrbitControls(camera, canvas); this.controls = controls;
+    controls.enableDamping = true; controls.dampingFactor = 0.08; controls.autoRotateSpeed = 0.3;
+    controls.minDistance = 6; controls.maxDistance = 4000;
+    var composer = new T.EffectComposer(renderer); this.composer = composer;
+    composer.addPass(new T.RenderPass(scene, camera));
+    this.bloom = new T.UnrealBloomPass(new T.Vector2(512, 512), 0.375, 0.3, 0.6);
+    composer.addPass(this.bloom);
+    composer.addPass(new T.OutputPass());
+    this.ray = new T.Raycaster();
+    this.glowTex = this.glowTexture(); this.dotTex = this.dotTexture();
+    this.pickables = [];
+
+    var light = new T.PointLight(0xfff2d6, 3.2, 0, 0); scene.add(light);
+    scene.add(new T.AmbientLight(0x8090c0, 0.22));
+
+    var sky = [], skyC = [], rs = rng(77);
+    for (var i = 0; i < 1000; i++) {
+      var u = rs() * 2 - 1, th = rs() * Math.PI * 2, rr = 3000 + rs() * 2000, q = Math.sqrt(1 - u * u), b = rs() < 0.07 ? 0.55 + rs() * 0.3 : 0.07 + rs() * 0.16;
+      sky.push(Math.cos(th) * q * rr, u * rr, Math.sin(th) * q * rr); skyC.push(b * 0.8, b * 0.88, b);
+    }
+    var skyPts = this.pointsObject(sky, skyC, 6, [], 0.8, true); skyPts.userData = {}; scene.add(skyPts);
+
+    // The sun: the store. It turns, and the writer nodules turn with it.
+    var sunG = new T.Group(); scene.add(sunG); this.sunG = sunG;
+    var sunMesh = new T.Mesh(new T.SphereGeometry(34, 48, 32), new T.MeshBasicMaterial({ map: this.sunTexture(), color: new T.Color(0.95, 0.9, 0.85) }));
+    sunMesh.userData = { kind: 'sun', tip: ['Memory store (the sun)', '123 live memories · 5 projects · 2 writers', 'it turns; the writer nodules turn with it'] };
+    sunG.add(sunMesh); this.pickables.push(sunMesh);
+    scene.add(this.glow('#ff9a3c', 190, 0.16)); scene.add(this.glow('#ffd28a', 92, 0.14));
+    this.nodules = {};
+    for (var w = 0; w < WRITERS.length; w++) {
+      var W0 = WRITERS[w], nr = 2.2 + Math.sqrt(W0.count) * 0.5;
+      var pos = new T.Vector3(Math.cos(W0.lat) * Math.cos(W0.lon), Math.sin(W0.lat), Math.cos(W0.lat) * Math.sin(W0.lon)).multiplyScalar(34.5);
+      var nm = new T.Mesh(new T.SphereGeometry(nr, 20, 14), new T.MeshBasicMaterial({ color: new T.Color(W0.color) }));
+      nm.position.copy(pos);
+      nm.userData = { kind: 'nodule', tip: [W0.source + ' (writer nodule)', 'wrote ' + W0.count + ' memories', W0.source === 'claude-code' ? '122 of them backfilled: drawn a little fainter' : 'the old pre-0.8.0 label'] };
+      var ng = this.glow(W0.color, nr * 7, 0.9); ng.position.copy(pos);
+      var nl = this.label(W0.source + ' · ' + W0.count, null, W0.color, 7); nl.position.copy(pos.clone().multiplyScalar(1.35));
+      sunG.add(nm, ng, nl); this.pickables.push(nm);
+      this.nodules[W0.source] = nm;
+    }
+
+    // The sun belt: global memories.
+    var gPos = [], gCol = [], gItems = [], gList = [];
+    for (i = 0; i < PROJECTS.length; i++) for (var gk = 0; gk < PROJECTS[i].global; gk++) gList.push(PROJECTS[i].id);
+    for (i = 0; i < gList.length; i++) {
+      var ga = i * Math.PI * 2 / gList.length;
+      gPos.push(Math.cos(ga) * 72, Math.sin(ga * 3) * 3, Math.sin(ga) * 72); gCol.push(1, 0.89, 0.64);
+      gItems.push({ tip: ['Global memory (scope global)', 'saved in ' + gList[i] + ', seen by every project', '[first line of the memory]'] });
+    }
+    this.sunBelt = this.pointsObject(gPos, gCol, 6, gItems); scene.add(this.sunBelt); this.pickables.push(this.sunBelt);
+    var sbLine = this.circle(72, 0xffd27a, 0.12); scene.add(sbLine);
+    var sbl = this.label('Sun belt · 6 global memories', null, '#e9c98a', 7); sbl.position.set(0, -14, 84); scene.add(sbl);
+
+    // Planets.
+    this.P = {};
+    var targets = this.targets(s.arrange), maxR = 0, id;
+    for (id in targets) maxR = Math.max(maxR, targets[id]);
+    this.maxR = maxR;
+    for (i = 0; i < PROJECTS.length; i++) this.makePlanet(PROJECTS[i], targets[PROJECTS[i].id]);
+
+    // The outer belt: retired, expired and lapsed memories (sample dust today).
+    var oPos = [], oCol = [], oItems = [], ro = rng(11);
+    for (i = 0; i < 220; i++) {
+      var oa = ro() * Math.PI * 2, oj = 1 + (ro() - 0.5) * 0.1, st3 = i % 3 === 0 ? 'retired' : i % 3 === 1 ? 'expired as unused' : 'lapsed';
+      oPos.push(Math.cos(oa) * oj, (ro() - 0.5) * 0.02, Math.sin(oa) * oj); oCol.push(0.66, 0.6, 0.84);
+      oItems.push({ tip: ['Outer belt · a ' + st3 + ' memory (sample)', st3 === 'retired' ? 'retired by hand in Review: [date]' : st3 === 'expired as unused' ? 'expired by the sweep: unused 90 days, last used [date]' : 'its own expiry date passed: [date]', 'from [project] · [first line of the memory]', 'Restore in Review sends it back to its planet'] });
+    }
+    this.outer = this.pointsObject(oPos, oCol, 0.006, oItems, 0.45, true); scene.add(this.outer); this.pickables.push(this.outer);
+    this.outerLabel = this.label('Outer belt · retired, expired, lapsed (sample dust; 0 today)', null, '#b9addf', 9); scene.add(this.outerLabel);
+
+    // Black holes and their energy lines.
+    this.holes = [];
+    for (i = 0; i < LINKS.length; i++) this.makeHoles(LINKS[i], i);
+
+    this.home();
+    this.camera.position.copy(this.homePos); this.controls.target.copy(this.homeTarget);
+  }
+
+  circle(r, colour, opacity) {
+    var T = this.T, pts = [];
+    for (var i = 0; i <= 128; i++) { var a = i / 128 * Math.PI * 2; pts.push(new T.Vector3(Math.cos(a) * r, 0, Math.sin(a) * r)); }
+    return new T.LineLoop(new T.BufferGeometry().setFromPoints(pts), new T.LineBasicMaterial({ color: colour, transparent: true, opacity: opacity, depthWrite: false }));
+  }
+
+  makePlanet(p, r) {
+    if (p.craft) return this.makeCraft(p, r);
+    var T = this.T, s = this.st(), R = planetR(p), seed = rng(fnv(p.id + 'orbit'));
+    var orbitG = new T.Group(); orbitG.rotation.x = (seed() - 0.5) * 0.12; orbitG.rotation.z = (seed() - 0.5) * 0.12; this.scene.add(orbitG);
+    var line = this.circle(1, 0x8caadc, 0.09); line.scale.set(r, 1, r); orbitG.add(line);
+    var pG = new T.Group(); orbitG.add(pG);
+    var tiltG = new T.Group(); tiltG.rotation.z = 0.1 + seed() * 0.35; pG.add(tiltG);
+    var pt = this.planetTexture(p);
+    var mesh = new T.Mesh(new T.SphereGeometry(R, 48, 32), new T.MeshStandardMaterial({ map: pt.tex, roughness: 0.85, metalness: 0 }));
+    mesh.userData = { kind: 'planet', id: p.id };
+    tiltG.add(mesh); this.pickables.push(mesh);
+    var atm = this.glow(STYLES[styleOf(p)].kind === 'gas' ? '#ffe6c0' : '#9cc8ff', R * 2.6, 0.06); pG.add(atm);
+    if (STYLES[styleOf(p)].extra === 'rings') {
+      var rings = [[1.25, 1.55, 0xe8dab4, 0.32], [1.6, 1.95, 0xcdb385, 0.22]];
+      for (var k = 0; k < rings.length; k++) {
+        var rm = new T.Mesh(new T.RingGeometry(R * rings[k][0], R * rings[k][1], 96), new T.MeshBasicMaterial({ color: rings[k][2], side: T.DoubleSide, transparent: true, opacity: rings[k][3], depthWrite: false }));
+        rm.rotation.x = -Math.PI / 2; tiltG.add(rm);
+      }
+    }
+    // Tag labels on the surface, shown at Planet level.
+    var tagLabels = [];
+    for (var b = 0; b < pt.blobs.length && tagLabels.length < 12; b++) {
+      var bl = pt.blobs[b], phi = bl.u * Math.PI * 2, theta = bl.v * Math.PI;
+      var sp = this.label(bl.name + ' ' + bl.cnt, null, '#ffffff', R * 0.16);
+      var dir = new T.Vector3(-Math.cos(phi) * Math.sin(theta), Math.cos(theta), Math.sin(phi) * Math.sin(theta));
+      sp.position.copy(dir.clone().multiplyScalar(R * 1.04)); sp.userData.dir = dir; sp.visible = false;
+      mesh.add(sp); tagLabels.push(sp);
+    }
+    // The ring of memories seen from afar (kind 'unknown' rows grey: the planet belt).
+    var ringG = new T.Group(); ringG.rotation.x = 0.35; pG.add(ringG);
+    var kl = [], kk, j;
+    for (kk = 0; kk < p.kinds.length; kk++) for (j = 0; j < p.kinds[kk][1]; j++) kl.push(p.kinds[kk][0]);
+    var rp = [], rc = [], ri = [], rr = rng(fnv(p.id + 'ring'));
+    for (j = 0; j < kl.length; j++) {
+      var a = rr() * Math.PI * 2, d = R * (1.3 + rr() * 0.4);
+      rp.push(Math.cos(a) * d, (rr() - 0.5) * 0.8, Math.sin(a) * d);
+      var col = new T.Color(dotColour(s.colour, fnv(p.id + j), kl[j])); rc.push(col.r, col.g, col.b);
+      ri.push({ kind: kl[j], i: j, planet: p.id, tip: [p.id + ' · ' + KIND_ONE[kl[j]] + ' memory', kl[j] === 'unknown' ? 'saved before kinds: the planet belt' : (p.count < 3 ? 'a dwarf planet has no moons' : 'in the ' + KIND_LABEL[kl[j]] + ' moon\'s swarm'), '[first line of the memory]'] });
+    }
+    var ring = this.pointsObject(rp, rc, 1.7, ri, 0.55, true); ring.userData.ringOf = p.id; ringG.add(ring); this.pickables.push(ring);
+    // Moons: one per kind, each with its swarm.
+    var moons = [], mk = p.count < 3 ? [] : p.kinds.filter(function (x) { return x[0] !== 'unknown'; }).slice(0, 8);
+    for (var m = 0; m < mk.length; m++) {
+      var c = mk[m][1], pivot = new T.Group(); pivot.rotation.y = (fnv(p.id + mk[m][0]) % 628) / 100; pivot.rotation.x = (rng(fnv(mk[m][0]))() - 0.5) * 0.4; pG.add(pivot);
+      var mr = Math.max(1.3, (1.2 + Math.sqrt(c) * 0.45) * R / 25), md = R * 1.95 + m * R * 0.2;
+      var moon = new T.Mesh(new T.SphereGeometry(mr, 20, 14), new T.MeshStandardMaterial({ color: 0xe9edf3, emissive: 0x2a2f38, roughness: 0.7 }));
+      moon.position.set(md, 0, 0); moon.userData = { kind: 'moon', planet: p.id, id: mk[m][0], tip: [KIND_LABEL[mk[m][0]] + ' moon of ' + p.id, c + ' memories · click to open its swarm'] };
+      var mg = this.glow('#dfe6f2', mr * 6, 0.45); mg.position.copy(moon.position);
+      var ml = this.label(KIND_LABEL[mk[m][0]] + ' · ' + c, null, '#ffffff', Math.max(2.2, R * 0.12)); ml.position.set(md, mr + Math.max(2.2, R * 0.12) * 0.9, 0); ml.visible = false;
+      pivot.add(moon, mg, ml); this.pickables.push(moon);
+      var swarmG = new T.Group(); swarmG.position.copy(moon.position); pivot.add(swarmG);
+      var sp2 = [], sc = [], si = [], base = [], ringPos = [], sr = rng(fnv(p.id + mk[m][0] + 'swarm'));
+      for (j = 0; j < c; j++) {
+        var v3 = new T.Vector3(sr() - 0.5, (sr() - 0.5) * 0.5, sr() - 0.5).normalize().multiplyScalar(mr + 1.5 + sr() * mr * 1.8);
+        base.push(v3.x, v3.y, v3.z); sp2.push(v3.x, v3.y, v3.z);
+        var ra = j / c * Math.PI * 2; ringPos.push(Math.cos(ra) * Math.max(10, mr * 4), 0, Math.sin(ra) * Math.max(10, mr * 4));
+        var cc = new T.Color(dotColour(s.colour, fnv(p.id + mk[m][0] + j), mk[m][0])); sc.push(cc.r, cc.g, cc.b);
+        si.push({ planet: p.id, kind: mk[m][0], i: j, tip: [KIND_LABEL[mk[m][0]] + ' · memory ' + (j + 1) + ' of ' + c, '[first line of the memory]', 'writer claude-code · [n] recalls'] });
+      }
+      var swarm = this.pointsObject(sp2, sc, Math.max(0.9, mr * 0.5), si, 0.85, true); swarm.userData.base = base; swarm.userData.ringPos = ringPos; swarm.visible = false;
+      swarmG.add(swarm); this.pickables.push(swarm);
+      moons.push({ kind: mk[m][0], c: c, pivot: pivot, mesh: moon, label: ml, swarm: swarm, speed: 0.6 / (m + 1) });
+    }
+    var lab = this.label(labelName(p), metricText(p, s.arrange), '#e6edf7', 14);
+    this.scene.add(lab);
+    this.P[p.id] = { p: p, R: R, orbitG: orbitG, line: line, pG: pG, mesh: mesh, ring: ring, moons: moons, label: lab, tagLabels: tagLabels, blobs: pt.blobs, r: r, angle: (fnv(p.id) % 6283) / 1000, pulse: 0 };
+  }
+
+  memoryRing(p, pG, R) {
+    var T = this.T, s = this.st();
+    var ringG = new T.Group(); ringG.rotation.x = 0.35; pG.add(ringG);
+    var kl = [], kk, j;
+    for (kk = 0; kk < p.kinds.length; kk++) for (j = 0; j < p.kinds[kk][1]; j++) kl.push(p.kinds[kk][0]);
+    var rp = [], rc = [], ri = [], rr = rng(fnv(p.id + 'ring'));
+    for (j = 0; j < kl.length; j++) {
+      var a = rr() * Math.PI * 2, d = R * (1.35 + rr() * 0.4);
+      rp.push(Math.cos(a) * d, (rr() - 0.5) * 0.8, Math.sin(a) * d);
+      var col = new T.Color(dotColour(s.colour, fnv(p.id + j), kl[j])); rc.push(col.r, col.g, col.b);
+      ri.push({ kind: kl[j], i: j, planet: p.id, tip: [p.id + ' · ' + KIND_ONE[kl[j]] + ' memory', p.craft ? (p.craft === 'station' ? 'docked at the station' : 'carried by the starship') : (kl[j] === 'unknown' ? 'saved before kinds: the planet belt' : (p.count < 3 ? 'a dwarf planet has no moons' : 'in the ' + KIND_LABEL[kl[j]] + ' moon\'s swarm')), '[first line of the memory]'] });
+    }
+    var ring = this.pointsObject(rp, rc, 1.7, ri, 0.55, true); ring.userData.ringOf = p.id; ringG.add(ring); this.pickables.push(ring);
+    return ring;
+  }
+
+  // A plain folder (no git repo): a space station when it is a lasting workspace (5+ memories), else a starship.
+  makeCraft(p, r) {
+    var T = this.T, s = this.st(), R = planetR(p) * (p.craft === 'ship' ? 1.5 : 1.15), seed = rng(fnv(p.id + 'orbit'));
+    var orbitG = new T.Group(); orbitG.rotation.x = (seed() - 0.5) * 0.12; orbitG.rotation.z = (seed() - 0.5) * 0.12; this.scene.add(orbitG);
+    var line = this.circle(1, 0x8caadc, 0.09); line.scale.set(r, 1, r); orbitG.add(line);
+    var pG = new T.Group(); orbitG.add(pG);
+    var body = new T.Group(); pG.add(body);
+    var hull = new T.MeshStandardMaterial({ color: 0xc3ccd8, metalness: 0.55, roughness: 0.38 });
+    var dark = new T.MeshStandardMaterial({ color: 0x5d6878, metalness: 0.6, roughness: 0.5 });
+    var parts = [], lights = [], i, a;
+    var add = function (geo, mat, x, y, z, rx, ry, rz) { var m = new T.Mesh(geo, mat); m.position.set(x, y, z); m.rotation.set(rx || 0, ry || 0, rz || 0); body.add(m); parts.push(m); return m; };
+    if (p.craft === 'station') {
+      add(new T.TorusGeometry(R, R * 0.12, 12, 64), hull, 0, 0, 0, Math.PI / 2);
+      add(new T.CylinderGeometry(R * 0.24, R * 0.24, R * 0.62, 20), hull, 0, 0, 0);
+      add(new T.BoxGeometry(R * 2, R * 0.07, R * 0.07), dark, 0, 0, 0);
+      add(new T.BoxGeometry(R * 0.07, R * 0.07, R * 2), dark, 0, 0, 0);
+      var panel = new T.MeshStandardMaterial({ color: 0x1d3f7a, metalness: 0.3, roughness: 0.4, emissive: 0x0a1630 });
+      add(new T.BoxGeometry(R * 0.32, R * 0.02, R * 1.4), panel, 0, R * 0.44, 0);
+      add(new T.BoxGeometry(R * 0.32, R * 0.02, R * 1.4), panel, 0, -R * 0.44, 0);
+      for (i = 0; i < Math.min(8, p.tags.length); i++) { a = (fnv(p.id + p.tags[i][0]) % 628) / 100; lights.push({ tag: p.tags[i], x: Math.cos(a) * R * 1.13, y: 0, z: Math.sin(a) * R * 1.13 }); }
+    } else {
+      add(new T.CylinderGeometry(R, R, R * 0.14, 40), hull, R * 0.55, R * 0.28, 0);
+      add(new T.SphereGeometry(R * 0.28, 16, 10), hull, R * 0.55, R * 0.36, 0).scale.set(1, 0.35, 1);
+      add(new T.BoxGeometry(R * 0.55, R * 0.3, R * 0.15), hull, -R * 0.02, R * 0.08, 0, 0, 0, -0.5);
+      add(new T.CylinderGeometry(R * 0.2, R * 0.15, R * 1.3, 18), hull, -R * 0.45, -R * 0.12, 0, 0, 0, Math.PI / 2);
+      add(new T.SphereGeometry(R * 0.08, 12, 8), new T.MeshBasicMaterial({ color: 0xffb35c }), R * 0.22, -R * 0.12, 0);
+      for (var side = -1; side <= 1; side += 2) {
+        add(new T.BoxGeometry(R * 0.1, R * 0.62, R * 0.05), dark, -R * 0.7, R * 0.14, side * R * 0.27, side * -0.75, 0, 0);
+        add(new T.CylinderGeometry(R * 0.09, R * 0.09, R * 1.25, 14), hull, -R * 0.72, R * 0.38, side * R * 0.5, 0, 0, Math.PI / 2);
+        add(new T.BoxGeometry(R * 1.0, R * 0.04, R * 0.04), new T.MeshBasicMaterial({ color: 0x6fb8ff }), -R * 0.74, R * 0.38, side * R * 0.41);
+        add(new T.SphereGeometry(R * 0.09, 12, 8), new T.MeshBasicMaterial({ color: 0xff4a3a }), -R * 0.1, R * 0.38, side * R * 0.5);
+        var ng = this.glow('#6fb8ff', R * 0.9, 0.35); ng.position.set(-R * 0.74, R * 0.38, side * R * 0.5); body.add(ng);
+      }
+      for (i = 0; i < Math.min(8, p.tags.length); i++) { a = -1.3 + (i + 0.5) * 2.6 / Math.min(8, p.tags.length); lights.push({ tag: p.tags[i], x: R * 0.55 + Math.cos(a) * R * 1.01, y: R * 0.28, z: Math.sin(a) * R * 1.01 }); }
+    }
+    for (i = 0; i < parts.length; i++) { parts[i].userData = { kind: 'planet', id: p.id }; this.pickables.push(parts[i]); }
+    for (i = 0; i < lights.length; i++) {
+      var L = lights[i], sh = sharedCount(L.tag[0], p.id);
+      var lm = new T.Mesh(new T.BoxGeometry(R * 0.17, R * 0.1, R * 0.1), new T.MeshBasicMaterial({ color: new T.Color(tagColour(L.tag[0])) }));
+      lm.position.set(L.x, L.y, L.z);
+      lm.userData = { kind: 'tag', tip: ['Tag: ' + L.tag[0], 'used ' + L.tag[1] + ' times here' + (sh ? ' · also on ' + sh + ' other bod' + (sh > 1 ? 'ies' : 'y') : ''), p.craft === 'station' ? 'a lit panel on the station' : 'a lit window on the starship'] };
+      body.add(lm); this.pickables.push(lm);
+    }
+    var ring = this.memoryRing(p, pG, R);
+    var lab = this.label(labelName(p), metricText(p, s.arrange), '#e6edf7', 14);
+    this.scene.add(lab);
+    this.P[p.id] = { p: p, R: R, orbitG: orbitG, line: line, pG: pG, mesh: body, ring: ring, moons: [], label: lab, tagLabels: [], blobs: [], r: r, angle: (fnv(p.id) % 6283) / 1000, pulse: 0, craft: p.craft };
+  }
+
+  makeHoles(L, i) {
+    var T = this.T, size = 2.2 + L.pairs * 0.6, pair = [];
+    for (var k = 0; k < 2; k++) {
+      var g = new T.Group();
+      var core = new T.Mesh(new T.SphereGeometry(size, 20, 14), new T.MeshBasicMaterial({ color: 0x000000 }));
+      var disc = new T.Mesh(new T.RingGeometry(size * 1.4, size * 2.4, 48), new T.MeshBasicMaterial({ color: 0xe8b8ff, side: T.DoubleSide, transparent: true, opacity: 0.45, depthWrite: false, blending: T.AdditiveBlending }));
+      disc.rotation.x = -Math.PI / 2 + 0.4;
+      var tip = ['Black hole: ' + L.pairs + ' similar memories', L.older + ' (older) → ' + L.newer + ' (newer) · best ' + L.best, 'a pulse of energy runs older → newer every 30 s'];
+      core.userData = { kind: 'hole', partner: k === 0 ? L.newer : L.older, tip: tip.concat(['click to fly to ' + (k === 0 ? L.newer : L.older)]) };
+      var catcher = new T.Mesh(new T.SphereGeometry(size * 3, 12, 8), new T.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false }));
+      catcher.userData = core.userData;
+      g.add(core, disc, catcher, this.glow('#e8b8ff', size * 4, 0.25));
+      this.scene.add(g); this.pickables.push(catcher);
+      pair.push({ g: g, disc: disc });
+    }
+    var geo = new T.BufferGeometry(); geo.setAttribute('position', new T.BufferAttribute(new Float32Array(61 * 3), 3));
+    var line = new T.Line(geo, new T.LineBasicMaterial({ color: 0xe8b8ff, transparent: true, opacity: 0.2, depthWrite: false, blending: T.AdditiveBlending }));
+    line.frustumCulled = false; this.scene.add(line);
+    var pulse = [];
+    for (var t = 0; t < 8; t++) { var sp = this.glow('#fff0ff', t === 0 ? 14 : 10 * (1 - t / 8) + 2, t === 0 ? 1 : 0.6 * (1 - t / 8)); sp.visible = false; this.scene.add(sp); pulse.push(sp); }
+    this.holes.push({ L: L, pair: pair, line: line, pulse: pulse, phase: 26 - i * 8, pts: [] });
+  }
+
+  home() {
+    var T = this.T, m = this.maxR || 700;
+    this.homePos = new T.Vector3(0, m * 0.72, m * 1.45); this.homeTarget = new T.Vector3(0, 0, 0);
+  }
+
+  worldOf(obj) { var v = new this.T.Vector3(); obj.getWorldPosition(v); return v; }
+
+  // ---------- flights ----------
+  flyTo(pos, target, after) {
+    var T = this.T;
+    if (this.reduced) { this.camera.position.copy(pos); this.controls.target.copy(target); if (after) after(); return; }
+    this.flight = { p0: this.camera.position.clone(), t0: this.controls.target.clone(), p1: pos.clone(), t1: target.clone(), start: this.clock, dur: 1.4, after: after };
+  }
+
+  flyPlanet(id) {
+    var P = this.P[id]; if (!P) return;
+    this.setState({ level: 'planet', planet: id, kind: null, mem: null, tip: null });
+    var c = this.worldOf(P.pG), out = c.clone().setY(0); if (out.length() < 1) out.set(0, 0, 1); out.normalize();
+    var side = new this.T.Vector3(-out.z, 0, out.x);
+    var pos = c.clone().add(out.multiplyScalar(0.55).add(side.multiplyScalar(0.75)).add(new this.T.Vector3(0, 0.5, 0)).normalize().multiplyScalar(P.R * 6.5 + 30));
+    this.flyTo(pos, c);
+  }
+
+  flyMoon(id, kind) {
+    var P = this.P[id]; if (!P) return;
+    var mo = null; for (var i = 0; i < P.moons.length; i++) if (P.moons[i].kind === kind) mo = P.moons[i];
+    if (!mo) return;
+    this.setState({ level: 'moon', planet: id, kind: kind, mem: null, tip: null });
+    var c = this.worldOf(mo.mesh), dir = this.camera.position.clone().sub(c).normalize();
+    var reach = Math.max(10, mo.mesh.geometry.parameters.radius * 4) * 3.2;
+    this.flyTo(c.clone().add(dir.multiplyScalar(reach)).add(new this.T.Vector3(0, reach * 0.6, 0)), c);
+  }
+
+  flyMemory(item, obj) {
+    var a = obj.geometry.attributes.position, v = new this.T.Vector3(a.getX(item.i), a.getY(item.i), a.getZ(item.i));
+    obj.localToWorld(v);
+    this.setState({ level: 'memory', planet: item.planet, kind: item.kind, mem: item.i, tip: null });
+    this.memTarget = { obj: obj, i: item.i };
+    var dir = this.camera.position.clone().sub(v).normalize();
+    this.flyTo(v.clone().add(dir.multiplyScalar(16)).add(new this.T.Vector3(0, 6, 0)), v);
+  }
+
+  flyMemoryDirect(id, kind, i) {
+    var P = this.P[id]; if (!P) return;
+    var mo = null; for (var k = 0; k < P.moons.length; k++) if (P.moons[k].kind === kind) mo = P.moons[k];
+    if (!mo) return this.flyPlanet(id);
+    var rp = mo.swarm.userData.ringPos, v = new this.T.Vector3(rp[i * 3], rp[i * 3 + 1], rp[i * 3 + 2]);
+    mo.swarm.localToWorld(v);
+    this.setState({ level: 'memory', planet: id, kind: kind, mem: i, tip: null });
+    this.memTarget = { obj: mo.swarm, i: i };
+    var dir = this.camera.position.clone().sub(v).normalize();
+    this.flyTo(v.clone().add(dir.multiplyScalar(16)).add(new this.T.Vector3(0, 6, 0)), v);
+  }
+
+  findGo(act) {
+    var s = this.st(), h = {};
+    for (var k in s.hidden) h[k] = s.hidden[k];
+    h[act.planet] = false;
+    this.setState({ findOpen: false, hidden: h });
+    if (act.mem !== undefined) this.flyMemoryDirect(act.planet, act.kind, act.mem);
+    else if (act.kind) this.flyMoon(act.planet, act.kind);
+    else this.flyPlanet(act.planet);
+  }
+
+  flyHome() { this.setState({ level: 'galaxy', planet: null, kind: null, mem: null, tip: null }); this.home(); this.flyTo(this.homePos, this.homeTarget); }
+
+  view(which) {
+    var T = this.T, m = this.maxR || 700, t = this.controls.target.clone();
+    if (which === 'top') this.flyTo(new T.Vector3(t.x, t.y + m * 2.2, t.z + 0.01), t);
+    else if (which === 'below') this.flyTo(new T.Vector3(t.x, t.y - m * 2.0, t.z + 0.01), t);
+    else if (which === 'side') this.flyTo(new T.Vector3(t.x, t.y + 30, t.z + m * 2.1), t);
+    else this.flyHome();
+  }
+
+  dolly(f) { var t = this.controls.target, c = this.camera.position; c.sub(t).multiplyScalar(f).add(t); }
+
+  // ---------- live events ----------
+  spawn(type, target) {
+    var T = this.T, P = this.P[target]; if (!target || !P || !this.scene) return;
+    var col = EVENT_COLOUR[type], ev = { type: type, P: P, start: this.clock, dur: type === 'update' || type === 'forget' ? 1.1 : 1.8, bend: Math.random() < 0.5 ? 1 : -1, objs: [] };
+    if (type === 'update' || type === 'forget') {
+      var geo = new T.BufferGeometry(); geo.setAttribute('position', new T.BufferAttribute(new Float32Array(6), 3));
+      ev.beam = new T.Line(geo, new T.LineBasicMaterial({ color: new T.Color(col), transparent: true, opacity: 0, depthWrite: false, blending: T.AdditiveBlending }));
+      ev.beam.frustumCulled = false;
+      ev.flash = this.glow(col, P.R * 4, 0);
+      this.scene.add(ev.beam, ev.flash); ev.objs.push(ev.beam, ev.flash);
+    } else {
+      ev.trail = [];
+      for (var k = 0; k < 14; k++) { var sp = this.glow(k === 0 ? '#ffffff' : col, k === 0 ? 9 : 7 * (1 - k / 14) + 2, k === 0 ? 1 : 0.8 * (1 - k / 14)); this.scene.add(sp); ev.trail.push(sp); ev.objs.push(sp); }
+    }
+    this.events.push(ev);
+    var s = this.st();
+    var text = type === 'recall' ? 'recall from ' + target + ' (planet → sun)' : type === 'save' ? 'save into ' + target + ' by claude-code (sun → planet)' : type === 'update' ? 'update in ' + target + ' by claude-code (green beam)' : 'forget in ' + target + ' (red laser; the memory fades)';
+    var badge = 'padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; background: ' + (type === 'recall' ? '#3a3410' : type === 'save' ? '#10304a' : type === 'update' ? '#0f3a2a' : '#4a1414') + '; color: ' + col;
+    this.setState({ feed: [{ time: clock(), kind: type, text: text, badge: badge }].concat(s.feed).slice(0, 7) });
+    if (type !== 'recall') this.flareAt = this.clock;
+  }
+
+  randomTarget() {
+    var hidden = this.st().hidden, live = PROJECTS.filter(function (q) { return !hidden[q.id]; });
+    if (!live.length) return null;
+    var total = 0, i; for (i = 0; i < live.length; i++) total += live[i].activity;
+    var pick = Math.random() * total; for (i = 0; i < live.length; i++) { pick -= live[i].activity; if (pick <= 0) return live[i].id; }
+    return live[0].id;
+  }
+
+  // ---------- frame ----------
+  frame(now) {
+    if (!this.scene && !this.failed) this.initScene();
+    if (!this.scene) return;
+    var T = this.T, c = this.canvas, s = this.st();
+    var dt = this.last === null ? 0 : Math.min(0.05, (now - this.last) / 1000); this.last = now; this.clock += dt;
+    var w = c.clientWidth, h = c.clientHeight;
+    if (w > 0 && h > 0 && (this.w !== w || this.h !== h)) { this.w = w; this.h = h; this.renderer.setSize(w, h, false); this.composer.setSize(w, h); this.camera.aspect = w / h; this.camera.updateProjectionMatrix(); }
+    var motion = this.reduced ? 0 : 1, i, k;
+    this.sunG.rotation.y += dt * 0.12 * motion;
+    var fl = this.flareAt !== undefined ? Math.max(0, 1 - (this.clock - this.flareAt) * 1.5) : 0;
+    var cn = this.nodules['claude-code']; cn.scale.setScalar(1 + fl * 0.8);
+
+    // Arrange: planets glide to their rings; they orbit only in the Galaxy view.
+    if (this.lastArrange !== s.arrange) {
+      this.lastArrange = s.arrange;
+      for (var id0 in this.P) { var Q = this.P[id0]; this.scene.remove(Q.label); Q.label = this.label(labelName(Q.p), metricText(Q.p, s.arrange), '#e6edf7', 14); this.scene.add(Q.label); }
+    }
+    if (this.lastColour !== s.colour) { this.lastColour = s.colour; this.recolour(s.colour); }
+    var targets = this.targets(s.arrange), maxR = 0;
+    for (var id in targets) maxR = Math.max(maxR, targets[id]);
+    this.maxR = maxR;
+    if (this.lastQuery !== s.query) {
+      this.lastQuery = s.query;
+      var found = searchResults(s.query), searching = (s.query || '').trim().length >= 2;
+      for (var fid in this.P) {
+        var FP = this.P[fid], dim = searching && !found.match[fid];
+        FP.mesh.traverse(function (o) { if (o.material && !o.isSprite) { o.material.transparent = true; o.material.opacity = dim ? 0.15 : 1; } });
+        FP.label.material.opacity = dim ? 0.2 : 1;
+        FP.ring.material.opacity = dim ? 0.08 : 0.55;
+      }
+    }
+    var hoverSlow = s.tip ? 0.15 : 1, self = this;
+    this.speedOf = {};
+    for (var gi = 0; gi < this.ringGroups.length; gi++) {
+      var members = this.ringGroups[gi].map(function (x) { return self.P[x]; }).sort(function (x, y) { return y.R - x.R || (x.p.id < y.p.id ? -1 : 1); });
+      var lead = members[0], speed = orbitSpeed(lead.p);
+      if (s.level === 'galaxy') lead.angle += dt * speed * motion * hoverSlow;
+      var tr = rng(fnv('ring' + gi)), tx = (tr() - 0.5) * 0.12, tz = (tr() - 0.5) * 0.12;
+      for (var mi = 0; mi < members.length; mi++) {
+        var og = members[mi].orbitG;
+        og.rotation.x += (tx - og.rotation.x) * Math.min(1, dt * 3); og.rotation.z += (tz - og.rotation.z) * Math.min(1, dt * 3);
+        members[mi].line.visible = mi === 0 && members.some(function (q) { return !s.hidden[q.p.id]; });
+        this.speedOf[members[mi].p.id] = speed;
+        if (mi === 0) continue;
+        var want = lead.angle + mi * Math.PI * 2 / members.length, diff = Math.atan2(Math.sin(want - members[mi].angle), Math.cos(want - members[mi].angle));
+        members[mi].angle += diff * Math.min(1, dt * 2);
+      }
+    }
+    for (id in this.P) {
+      var P = this.P[id];
+      P.r += (targets[id] - P.r) * Math.min(1, dt * 3);
+      P.line.scale.set(P.r, 1, P.r);
+      P.pG.position.set(Math.cos(P.angle) * P.r, 0, Math.sin(P.angle) * P.r);
+      if (P.craft === 'ship') P.mesh.rotation.y = -(P.angle + Math.PI / 2); else P.mesh.rotation.y += dt * (P.craft ? 0.2 : 0.15) * motion;
+      P.ring.parent.rotation.y += dt * 0.25 * motion;
+      var here = s.planet === id && s.level !== 'galaxy';
+      P.pG.visible = !s.hidden[id];
+      P.ring.visible = !here;
+      var wp = this.worldOf(P.pG);
+      P.label.position.set(wp.x, wp.y + P.R * 1.9 + 10, wp.z);
+      P.label.visible = !here && !s.hidden[id];
+      for (k = 0; k < P.moons.length; k++) {
+        var mo = P.moons[k], frozen = here && (s.level === 'moon' || s.level === 'memory');
+        if (!frozen) mo.pivot.rotation.y += dt * mo.speed * motion;
+        mo.label.visible = here;
+        mo.swarm.visible = here;
+        var spreadOn = here && s.kind === mo.kind && (s.level === 'moon' || s.level === 'memory');
+        this.spreadSwarm(mo.swarm, spreadOn, dt);
+      }
+      var camDir = this.camera.position.clone();
+      for (k = 0; k < P.tagLabels.length; k++) {
+        var tl = P.tagLabels[k];
+        if (!here || s.level !== 'planet') { tl.visible = false; continue; }
+        var wpos = this.worldOf(tl), facing = wpos.clone().sub(wp).normalize().dot(camDir.clone().sub(wp).normalize());
+        tl.visible = facing > 0.25;
+      }
+    }
+    var outerR = maxR + 70;
+    this.outer.scale.set(outerR, 1, outerR); this.outer.rotation.y += dt * 0.004 * motion; this.outer.visible = s.sample;
+    this.outer.material.size = 3;
+    this.outerLabel.position.set(0, 30, -outerR);
+    this.sunBelt.rotation.y += dt * 0.06 * motion;
+
+    // Black holes: a calm line from the older planet through both holes to the newer; one pulse every 30 s.
+    for (i = 0; i < this.holes.length; i++) {
+      var H = this.holes[i], A = this.P[H.L.older], B = this.P[H.L.newer], gone = !!(s.hidden[H.L.older] || s.hidden[H.L.newer]);
+      H.pair[0].g.visible = H.pair[1].g.visible = H.line.visible = !gone;
+      var a = this.worldOf(A.pG), b = this.worldOf(B.pG), dir = b.clone().sub(a), len = dir.length(); dir.normalize();
+      var ha = a.clone().add(dir.clone().multiplyScalar(A.R * 2.4 + 6)), hb = b.clone().sub(dir.clone().multiplyScalar(B.R * 2.4 + 6));
+      H.pair[0].g.position.copy(ha); H.pair[1].g.position.copy(hb);
+      H.pair[0].disc.rotation.z += dt * 0.15 * motion; H.pair[1].disc.rotation.z += dt * 0.15 * motion;
+      var ctl = ha.clone().add(hb).multiplyScalar(0.5).add(new T.Vector3(0, len * 0.16 + 10, 0));
+      var ea = a.clone().add(dir.clone().multiplyScalar(A.R)), eb = b.clone().sub(dir.clone().multiplyScalar(B.R));
+      var arr = H.line.geometry.attributes.position.array, pts = [];
+      for (k = 0; k <= 60; k++) {
+        var u = k / 60, q;
+        if (u < 0.12) q = ea.clone().lerp(ha, u / 0.12);
+        else if (u > 0.88) q = hb.clone().lerp(eb, (u - 0.88) / 0.12);
+        else { var tt = (u - 0.12) / 0.76; q = ha.clone().multiplyScalar((1 - tt) * (1 - tt)).add(ctl.clone().multiplyScalar(2 * (1 - tt) * tt)).add(hb.clone().multiplyScalar(tt * tt)); }
+        arr[k * 3] = q.x; arr[k * 3 + 1] = q.y; arr[k * 3 + 2] = q.z; pts.push(q);
+      }
+      H.line.geometry.attributes.position.needsUpdate = true;
+      H.line.material.opacity = 0.14 + 0.06 * (0.5 + 0.5 * Math.sin(this.clock * 0.5 + H.phase));
+      var local = ((this.clock + H.phase) % 30 + 30) % 30, on = local < 7 && !this.reduced && !gone;
+      for (k = 0; k < H.pulse.length; k++) {
+        H.pulse[k].visible = on;
+        if (on) { var e = ease(local / 7), idx = Math.max(0, Math.min(60, Math.round((e - k * 0.012) * 60))); H.pulse[k].position.copy(pts[idx]); }
+      }
+    }
+
+    // Live events: recalls fly planet → sun, saves sun → planet, updates are a laser beam.
+    if (s.live && !this.reduced && this.clock > this.nextEvent) {
+      var roll = Math.random();
+      this.spawn(roll < 0.55 ? 'recall' : roll < 0.78 ? 'save' : roll < 0.94 ? 'update' : 'forget', this.randomTarget());
+      this.nextEvent = this.clock + 3 + Math.random() * 3;
+    }
+    var nod = this.worldOf(cn), keep = [];
+    for (i = 0; i < this.events.length; i++) {
+      var ev = this.events[i], u2 = (this.clock - ev.start) / ev.dur, pp = this.worldOf(ev.P.pG);
+      if (u2 >= 1) { for (k = 0; k < ev.objs.length; k++) this.scene.remove(ev.objs[k]); if (ev.type === 'recall') this.flareAt = this.clock; continue; }
+      keep.push(ev);
+      if (ev.type === 'update' || ev.type === 'forget') {
+        var al = Math.sin(Math.PI * u2), ba = ev.beam.geometry.attributes.position.array;
+        ba[0] = nod.x; ba[1] = nod.y; ba[2] = nod.z; ba[3] = pp.x; ba[4] = pp.y; ba[5] = pp.z;
+        ev.beam.geometry.attributes.position.needsUpdate = true; ev.beam.material.opacity = al;
+        ev.flash.position.copy(pp); ev.flash.material.opacity = 0.7 * al;
+        continue;
+      }
+      var from = ev.type === 'recall' ? pp : nod, to = ev.type === 'recall' ? nod : pp;
+      var mid = from.clone().add(to).multiplyScalar(0.5).add(new T.Vector3(0, from.distanceTo(to) * 0.18 * ev.bend, 0));
+      for (k = 0; k < ev.trail.length; k++) {
+        var v = Math.max(0, u2 - k * 0.016);
+        ev.trail[k].position.copy(from.clone().multiplyScalar((1 - v) * (1 - v)).add(mid.clone().multiplyScalar(2 * (1 - v) * v)).add(to.clone().multiplyScalar(v * v)));
+      }
+    }
+    this.events = keep;
+
+    // Satellites around an opened memory.
+    this.satellites(s, dt);
+
+    // Camera flight.
+    if (this.flight) {
+      var f = this.flight, uf = Math.min(1, (this.clock - f.start) / f.dur), ef = ease(uf);
+      this.camera.position.lerpVectors(f.p0, f.p1, ef); this.controls.target.lerpVectors(f.t0, f.t1, ef);
+      this.camera.fov = 50 + 14 * Math.sin(Math.PI * uf); this.camera.updateProjectionMatrix();
+      this.controls.enabled = false;
+      if (uf >= 1) { this.flight = null; this.controls.enabled = true; this.camera.fov = 50; this.camera.updateProjectionMatrix(); if (f.after) f.after(); }
+    }
+    this.controls.autoRotate = s.rotate && !this.reduced && !this.flight && s.level === 'galaxy' && !s.tip;
+    this.controls.update();
+    this.bloom.strength = 0.375;
+    this.composer.render();
+  }
+
+  spreadSwarm(swarm, on, dt) {
+    var target = on ? 1 : 0, cur = swarm.userData.spread || 0;
+    if (Math.abs(target - cur) < 0.001) return;
+    cur += (target - cur) * Math.min(1, dt * 3); if (Math.abs(target - cur) < 0.002) cur = target;
+    swarm.userData.spread = cur;
+    var a = swarm.geometry.attributes.position.array, b = swarm.userData.base, r = swarm.userData.ringPos;
+    for (var i = 0; i < a.length; i++) a[i] = b[i] + (r[i] - b[i]) * cur;
+    swarm.geometry.attributes.position.needsUpdate = true;
+    swarm.geometry.computeBoundingSphere();
+  }
+
+  satellites(s, dt) {
+    var T = this.T;
+    if (s.level !== 'memory' || !this.memTarget) { if (this.sats) { for (var k = 0; k < this.sats.length; k++) this.scene.remove(this.sats[k]); this.sats = null; } return; }
+    if (!this.sats) { this.sats = []; for (var j = 0; j < 4; j++) { var g = this.glow('#F0E442', 2.2, 1); this.scene.add(g); this.sats.push(g); } }
+    var o = this.memTarget.obj, a = o.geometry.attributes.position, v = new T.Vector3(a.getX(this.memTarget.i), a.getY(this.memTarget.i), a.getZ(this.memTarget.i));
+    o.localToWorld(v);
+    for (var i = 0; i < this.sats.length; i++) { var ang = i * Math.PI / 2 + this.clock * 0.6; this.sats[i].position.set(v.x + Math.cos(ang) * 3.2, v.y + Math.sin(ang * 2) * 0.6, v.z + Math.sin(ang) * 3.2); }
+  }
+
+  recolour(mode) {
+    var T = this.T;
+    for (var id in this.P) {
+      var P = this.P[id], ring = P.ring, items = ring.userData.items, col = ring.geometry.attributes.color;
+      for (var i = 0; i < items.length; i++) { var c = new T.Color(dotColour(mode, fnv(id + i), items[i].kind)); col.setXYZ(i, c.r, c.g, c.b); }
+      col.needsUpdate = true;
+      for (var m = 0; m < P.moons.length; m++) {
+        var sw = P.moons[m].swarm, sc = sw.geometry.attributes.color;
+        for (var j = 0; j < sc.count; j++) { var c2 = new T.Color(dotColour(mode, fnv(id + P.moons[m].kind + j), P.moons[m].kind)); sc.setXYZ(j, c2.r, c2.g, c2.b); }
+        sc.needsUpdate = true;
+      }
+    }
+  }
+
+  // ---------- picking ----------
+  shown(o) { while (o) { if (!o.visible) return false; o = o.parent; } return true; }
+
+  pick(e) {
+    if (!this.scene || !this.canvas) return null;
+    var rect = this.canvas.getBoundingClientRect(), x = e.clientX - rect.left, y = e.clientY - rect.top;
+    var ndc = new this.T.Vector2(x / rect.width * 2 - 1, -(y / rect.height) * 2 + 1);
+    this.ray.setFromCamera(ndc, this.camera);
+    this.ray.params.Points.threshold = Math.max(0.6, this.camera.position.distanceTo(this.controls.target) * 0.006);
+    var all = this.ray.intersectObjects(this.pickables, false), self = this, firstSolid = null, firstDot = null;
+    for (var h0 = 0; h0 < all.length; h0++) {
+      if (!this.shown(all[h0].object)) continue;
+      if (all[h0].object.userData.kind === 'points') { if (!firstDot) firstDot = all[h0]; } else if (!firstSolid) firstSolid = all[h0];
+    }
+    var hits = firstSolid && (!firstDot || firstSolid.distance <= firstDot.distance + 40) ? [firstSolid] : all;
+    for (var i = 0; i < hits.length; i++) {
+      var hit = hits[i], o = hit.object;
+      if (!this.shown(o)) continue;
+      if (o.userData.kind === 'points') {
+        if (o === this.outer && !this.outer.visible) continue;
+        var item = o.userData.items[hit.index]; if (!item) continue;
+        return { x: x, y: y, obj: o, item: item, tip: item.tip };
+      }
+      if (o.userData.kind === 'planet') {
+        var P = this.P[o.userData.id], s = this.st();
+        if (!P.craft && s.planet === P.p.id && s.level === 'planet' && hit.uv) {
+          var u = hit.uv.x, v = 1 - hit.uv.y, best = null;
+          for (var b = 0; b < P.blobs.length; b++) {
+            var bl = P.blobs[b], du = Math.abs(u - bl.u); du = Math.min(du, 1 - du);
+            if ((bl.band || du <= bl.ru) && Math.abs(v - bl.v) <= bl.rv) { if (!best || bl.rv < best.rv) best = bl; }
+          }
+          if (best) {
+            var sh = sharedCount(best.name, P.p.id);
+            return { x: x, y: y, obj: o, tip: ['Tag: ' + best.name, 'used ' + best.cnt + ' times here' + (sh ? ' · also on ' + sh + ' other planet' + (sh > 1 ? 's' : '') : ' · only on this planet'), 'click: light its memories'] };
+          }
+        }
+        var p = P.p, ls = linksOf(p.id).map(function (L) { return (L.older === p.id ? 'to ' + L.newer : 'from ' + L.older) + ' (' + L.pairs + ')'; });
+        return { x: x, y: y, obj: o, planet: p.id, tip: [labelName(p), describe(p) + ' · one orbit every ' + Math.round(2 * Math.PI / ((this.speedOf && this.speedOf[p.id]) || orbitSpeed(p)) / 60) + ' min' + (this.ringGroups && this.ringGroups.some(function (g) { return g.length > 1 && g.indexOf(p.id) >= 0; }) ? ' (shared orbit)' : ''), p.count + ' memories · ' + p.tagsTotal + ' tags · ' + p.kinds.length + ' kinds', 'activity ' + p.activity + ' · recalls ' + p.recalls + ' · median age ' + p.age + ' d', 'top tags: ' + p.tags.slice(0, 3).map(function (t) { return t[0]; }).join(', '), ls.length ? 'similar memories: ' + ls.join(', ') : 'no black holes', 'click to fly in'] };
+      }
+      return { x: x, y: y, obj: o, tip: o.userData.tip };
+    }
+    return null;
+  }
+
+  act(hit) {
+    if (!hit || this.flight) return;
+    var o = hit.obj, k = o.userData.kind, s = this.st();
+    if (k === 'planet') { if (!(s.planet === o.userData.id && s.level === 'planet')) this.flyPlanet(o.userData.id); }
+    else if (k === 'moon') this.flyMoon(o.userData.planet, o.userData.id);
+    else if (k === 'hole') this.flyPlanet(o.userData.partner);
+    else if (k === 'sun' || k === 'nodule') this.flyHome();
+    else if (k === 'points' && hit.item) {
+      if (o.userData.ringOf) this.flyPlanet(o.userData.ringOf);
+      else if (hit.item.kind && hit.item.planet && s.level === 'planet') this.flyMoon(hit.item.planet, hit.item.kind);
+      else if (hit.item.kind && hit.item.planet) this.flyMemory(hit.item, o);
+    }
+  }
+
+  // ---------- page ----------
+  renderVals() {
+    var self = this, s = this.st();
+    var btn = function (on) { return 'min-height: 40px; padding: 6px 10px; border-radius: 8px; font: inherit; font-size: 13px; cursor: pointer; text-align: center; border: 1px solid ' + (on ? '#56B4E9' : '#24304a') + '; background: ' + (on ? '#12325a' : 'transparent') + '; color: ' + (on ? '#ffffff' : '#c9d6ea'); };
+    var hint = ''; for (var a = 0; a < ARRANGE.length; a++) if (ARRANGE[a].id === s.arrange) hint = ARRANGE[a].hint;
+    var ordered = PROJECTS.slice().sort(function (x, y) { return metric(y, s.arrange) - metric(x, s.arrange) || (x.id < y.id ? -1 : 1); });
+    var sw = function (c) { return 'flex: 0 0 10px; width: 10px; height: 10px; border-radius: 50%; border: 1px solid #3a4a68; background: ' + c; };
+    var row = function (r) { return { sw: sw(r[0]), name: r[1], means: r[2] }; };
+    var crumbs = [{ label: 'Galaxy', go: function () { self.flyHome(); }, here: s.level === 'galaxy' }];
+    if (s.planet) crumbs.push({ label: s.planet, go: function () { self.flyPlanet(s.planet); }, here: s.level === 'planet' });
+    if (s.kind) crumbs.push({ label: KIND_LABEL[s.kind], go: function () { self.flyMoon(s.planet, s.kind); }, here: s.level === 'moon' });
+    if (s.mem !== null) crumbs.push({ label: 'Memory ' + (s.mem + 1), go: function () {}, here: s.level === 'memory' });
+    crumbs = crumbs.map(function (c, i) { return { label: c.label, go: c.go, sepStyle: i === 0 ? 'display: none' : 'color: #5d6b85; font-size: 14px', style: 'min-height: 34px; padding: 4px 12px; border-radius: 8px; border: 1px solid ' + (c.here ? '#56B4E9' : '#2a3644') + '; background: rgba(10, 15, 28, 0.9); color: ' + (c.here ? '#ffffff' : '#c9d6ea') + '; font: inherit; font-size: 13px; cursor: pointer' }; });
+
+    var p = s.planet ? proj(s.planet) : null, insp;
+    var chip = function (t) { return { name: t, style: 'padding: 3px 10px; border-radius: 999px; border: 1px solid #3a4a68; color: ' + tagColour(t) + '; font-size: 12px' }; };
+    if (s.level === 'galaxy' || !p) {
+      insp = { kicker: 'Solar system', title: 'Your memory store', dot: 'width: 12px; height: 12px; border-radius: 50%; background: #ffd25a', hasBody: false, body: '',
+        facts: [['Memories', '123 live'], ['Projects (planets)', '5'], ['Writers (nodules)', 'claude-code 121 · imported 2'], ['Global (sun belt)', '6'], ['Black-hole pairs', '3'], ['Not live (outer belt)', '0'], ['Busiest planet', 'matrixkoder'], ['Plain folders (sample)', '3 stations · 3 starships']],
+        hasChips: false, chips: [], chipsLabel: '', hasLinks: false, links: [], linksLabel: '', isMemory: false, hint: 'Click a planet, a moon or a memory: its details show here. Hover anything for a quick look.' };
+    } else if (s.level === 'planet') {
+      var ls = linksOf(p.id);
+      insp = { kicker: (p.craft ? '' : 'Planet · ') + describe(p), title: p.id, dot: 'width: 12px; height: 12px; border-radius: 50%; background: #56B4E9', hasBody: false, body: '',
+        facts: [['Memories', String(p.count)], ['Tags (land)', String(p.tagsTotal)], ['Kinds (moons)', p.kinds.map(function (k) { return KIND_LABEL[k[0]] + ' ' + k[1]; }).join(', ')], ['Activity', String(p.activity)], ['Lifetime recalls', String(p.recalls)], ['Median age', p.age + ' days'], ['Global from here', String(p.global)], ['Kind unknown', String(p.unknown)]],
+        hasChips: true, chipsLabel: 'Top tags', chips: p.tags.slice(0, 6).map(function (t) { return chip(t[0]); }),
+        hasLinks: ls.length > 0, linksLabel: 'Black holes', links: ls.map(function (L) { var partner = L.older === p.id ? L.newer : L.older; return { label: (L.older === p.id ? 'out to ' : 'in from ') + partner + ' · ' + L.pairs + ' similar', go: function () { self.flyPlanet(partner); } }; }),
+        isMemory: false, hint: 'Hover the surface for tags; click a moon to open its memories.' };
+    } else if (s.level === 'moon') {
+      var c = 0; for (var q = 0; q < p.kinds.length; q++) if (p.kinds[q][0] === s.kind) c = p.kinds[q][1];
+      insp = { kicker: 'Moon · ' + KIND_ONE[s.kind] + ' memories', title: KIND_LABEL[s.kind] + ' of ' + p.id, dot: 'width: 12px; height: 12px; border-radius: 50%; background: #eef2f8', hasBody: false, body: '',
+        facts: [['Memories', String(c)], ['Share of the planet', Math.round(c / p.count * 100) + '%'], ['Planet', p.id], ['Writer', 'claude-code']],
+        hasChips: false, chips: [], chipsLabel: '', hasLinks: false, links: [], linksLabel: '', isMemory: false, hint: 'The swarm spreads into a ring. Click one memory to open it here.' };
+    } else {
+      insp = { kicker: 'Memory · ' + KIND_ONE[s.kind] + ' · ' + p.id, title: '[First line of the memory]', dot: 'width: 12px; height: 12px; border-radius: 50%; background: #56B4E9', hasBody: true, body: '[The memory\'s full text, from the store.]',
+        facts: [['Kind', KIND_LABEL[s.kind]], ['Writer', 'claude-code · inferred'], ['Source · trust · veracity', '[source] · [tier] · [veracity]'], ['State · pinned', 'live · not pinned'], ['Created', '[date]'], ['Last recalled · count', '[date] · [n]'], ['Expiry', '[none, or date]'], ['Importance', '[0 to 1]']],
+        hasChips: true, chipsLabel: 'Tags (click to light the land)', chips: p.tags.slice(0, 2).map(function (t) { return chip(t[0]); }),
+        hasLinks: false, links: [], linksLabel: '', isMemory: true, hint: 'Its knowledge satellites orbit it on the map.' };
+    }
+    insp.facts = insp.facts.map(function (f) { return { label: f[0], value: f[1] }; });
+
+    var tip = s.tip, tipStyle = '';
+    if (tip) {
+      var left = Math.max(120, Math.min((this.w || 900) - 140, tip.x));
+      tipStyle = 'position: absolute; left: ' + left + 'px; top: ' + Math.max(110, tip.y) + 'px; transform: translate(-50%, calc(-100% - 14px)); max-width: 300px; padding: 10px 12px; border-radius: 10px; background: rgba(14, 23, 34, 0.96); border: 1px solid #2c3a57; pointer-events: none; display: flex; flex-direction: column; gap: 2px; z-index: 3';
+    }
+    var toggle = function (label, key) { return { label: label + (s[key] ? ': on' : ': off'), pressed: String(!!s[key]), style: btn(s[key]), pick: function () { var o = {}; o[key] = !s[key]; self.setState(o); } }; };
+    return {
+      arrangeHint: hint,
+      arrangeItems: ARRANGE.map(function (o) { return { label: o.label, pressed: String(o.id === s.arrange), style: btn(o.id === s.arrange), pick: function () { self.setState({ arrange: o.id }); } }; }),
+      colourItems: COLOURS.map(function (o) { return { label: o.label, pressed: String(o.id === s.colour), style: btn(o.id === s.colour), pick: function () { self.setState({ colour: o.id }); } }; }),
+      toggles: [toggle('Auto-rotate', 'rotate'), toggle('Legend', 'legend'), toggle('Sample outer-belt dust', 'sample')],
+      query: s.query,
+      findOpen: s.findOpen && (s.query || '').trim().length >= 2,
+      matchText: (s.query || '').trim().length >= 2 ? Object.keys(searchResults(s.query).match).length + ' bodies' : '',
+      results: (function () {
+        var r = searchResults(s.query).results;
+        if (!r.length) return [{ type: '—', label: 'Nothing matches', sub: '', badge: 'font-size: 11px; color: #5d6b85', go: function () {} }];
+        return r.map(function (x) {
+          var c = x.type === 'Memory' ? '#56B4E9' : x.type === 'Tag' ? '#8fb07a' : x.type === 'Moon' ? '#eef2f8' : '#e8b04a';
+          return { type: x.type, label: x.label, sub: x.sub, badge: 'flex: 0 0 64px; font-size: 11px; font-weight: 600; color: ' + c, go: function () { self.findGo(x.act); } };
+        });
+      })(),
+      onSearch: function (e) { self.setState({ query: e.target.value, findOpen: true }); },
+      onSearchKey: function (e) {
+        if (e.key === 'Escape') self.setState({ query: '', findOpen: false });
+        else if (e.key === 'Enter') { var r = searchResults(self.st().query).results; if (r.length) self.findGo(r[0].act); }
+      },
+      shownText: (PROJECTS.length - Object.keys(s.hidden).filter(function (k) { return s.hidden[k]; }).length) + ' of ' + PROJECTS.length + ' shown',
+      showAll: function () { self.setState({ hidden: {} }); },
+      chips: ordered.map(function (q) {
+        var off = !!s.hidden[q.id], dot = q.craft === 'station' ? '#c3ccd8' : q.craft === 'ship' ? '#6fb8ff' : (STYLES[styleOf(q)].kind === 'gas' ? STYLES[styleOf(q)].bands[1] : STYLES[styleOf(q)].a);
+        return { label: q.id + (q.sample ? ' ·s' : ''), value: metricText(q, s.arrange).split(' ')[0], pressed: String(!off), title: labelName(q) + (off ? ' (hidden: click to show)' : ' (shown: click to hide)'),
+          dot: 'flex: 0 0 10px; width: 10px; height: 10px; border-radius: ' + (q.craft ? '2px' : '50%') + '; background: ' + dot + '; opacity: ' + (off ? 0.3 : 1),
+          style: 'display: flex; gap: 8px; align-items: center; height: 38px; padding: 0 10px; border-radius: 8px; border: 1px solid ' + (off ? '#1a2438' : '#2f4a72') + '; background: ' + (off ? 'transparent' : '#11203a') + '; color: ' + (off ? '#5d6b85' : '#e6edf7') + '; font: inherit; font-size: 13px; cursor: pointer' + (off ? '; text-decoration: line-through' : ''),
+          pick: function () { var h = {}; for (var k in s.hidden) h[k] = s.hidden[k]; h[q.id] = !off; self.setState({ hidden: h }); if (!off && s.planet === q.id) self.flyHome(); } };
+      }),
+      bodies: ordered.map(function (q) {
+        return { label: q.id + (q.sample ? ' (sample)' : ''), value: metricText(q, s.arrange), dot: 'flex: 0 0 10px; width: 10px; height: 10px; border-radius: 50%; background: #1d4673; border: 1px solid #56B4E9',
+          style: 'display: flex; gap: 8px; align-items: center; min-height: 40px; padding: 6px 10px; border-radius: 8px; border: 1px solid ' + (q.id === s.planet ? '#56B4E9' : '#1a2438') + '; background: transparent; color: #e6edf7; font: inherit; font-size: 13px; cursor: pointer',
+          pick: function () { self.flyPlanet(q.id); } };
+      }),
+      legendOn: s.legend,
+      isOpenLeft: s.legL, openLeft: String(s.legL), chevronLeft: s.legL ? '▾' : '▸', toggleLeft: function () { self.setState({ legL: !s.legL }); },
+      isOpenRight: s.legR, openRight: String(s.legR), chevronRight: s.legR ? '▾' : '▸', toggleRight: function () { self.setState({ legR: !s.legR }); },
+      legendLeft: [['#ffd25a', 'Sun', 'the store; it turns'], ['#56B4E9', 'Nodule', 'a writer, on the sun'], ['#c48a5a', 'Planet', 'a project; size = memories'], ['#e4d09c', 'Planet style', 'gas 30+, ice 10-29, rocky, dwarf <3'], ['#c3ccd8', 'Space station', 'plain folder, 5+ memories'], ['#6fb8ff', 'Starship', 'plain folder, under 5'], ['#8fb07a', 'Land, bands', 'tags; area = uses'], ['#eef2f8', 'Moon', 'a memory kind'], ['#56B4E9', 'Asteroid', 'a memory; colour = writer'], ['#ffffff', 'Brightness', 'recalls'], ['#9fb0c8', 'Asteroid size', 'importance'], ['#F0E442', 'Halo · satellite', 'pinned · knowledge item']].map(row),
+      legendRight: [['#56B4E9', 'Planet ring', 'its memories, from afar'], ['#8b93a3', 'Grey asteroid', 'kind unknown (planet belt)'], ['#ffe3a3', 'Sun belt', 'global memories'], ['#a99bd6', 'Outer belt', 'retired, expired, lapsed'], ['#000000', 'Black hole', 'similar across projects'], ['#E8B8FF', 'Energy line', 'older → newer; pulse /30 s'], ['#F0E442', 'Recall comet', 'planet → sun'], ['#56B4E9', 'Save comet', 'sun → planet'], ['#3DDC97', 'Update beam', 'green, writer → body'], ['#FF4D4D', 'Forget laser', 'red, writer → body'], ['#ecf1fa', 'Clouds · ice', 'needs review · idle 30 d']].map(row),
+      crumbs: crumbs,
+      insp: insp,
+      tipShown: !!tip, tipStyle: tipStyle, tipTitle: tip ? tip.tip[0] : '', tipLines: tip ? tip.tip.slice(1).map(function (t) { return { text: t }; }) : [],
+      noWebgl: s.noWebgl,
+      viewButtons: [
+        { label: '+', aria: 'Zoom in', pick: function () { self.dolly(0.72); } }, { label: '−', aria: 'Zoom out', pick: function () { self.dolly(1.38); } },
+        { label: 'Top', aria: 'View from the top', pick: function () { self.view('top'); } }, { label: 'Below', aria: 'View from below', pick: function () { self.view('below'); } },
+        { label: 'Side', aria: 'View from the side', pick: function () { self.view('side'); } }, { label: 'Reset', aria: 'Reset the view', pick: function () { self.view('reset'); } }
+      ],
+      feed: s.feed.length ? s.feed : [{ time: '--:--:--', kind: 'waiting', badge: 'padding: 1px 8px; border-radius: 999px; font-size: 11px; background: #1a2438; color: #9fb0c8', text: 'Recalls, saves and updates appear here as they happen.' }],
+      liveOn: String(s.live), liveStyle: btn(s.live), liveLabel: s.live ? 'Live: on' : 'Live: off',
+      toggleLive: function () { self.setState({ live: !s.live }); },
+      simRecall: function () { self.spawn('recall', self.randomTarget()); },
+      simSave: function () { self.spawn('save', self.randomTarget()); },
+      simUpdate: function () { self.spawn('update', self.randomTarget()); },
+      simForget: function () { self.spawn('forget', self.randomTarget()); },
+      setCanvas: function (el) { self.canvas = el; },
+      onDown: function (e) { self.down = { x: e.clientX, y: e.clientY }; },
+      onMove: function (e) {
+        if (self.down && Math.abs(e.clientX - self.down.x) + Math.abs(e.clientY - self.down.y) > 4) { if (self.st().tip) self.setState({ tip: null }); return; }
+        var hit = self.pick(e);
+        if (hit) self.setState({ tip: { x: hit.x, y: hit.y, tip: hit.tip } });
+        else if (self.st().tip) self.setState({ tip: null });
+      },
+      onLeave: function () { self.down = null; if (self.st().tip) self.setState({ tip: null }); },
+      onClick: function (e) {
+        var d = self.down; self.down = null;
+        if (d && Math.abs(e.clientX - d.x) + Math.abs(e.clientY - d.y) > 4) return;
+        self.act(self.pick(e));
+      }
+    };
+  }
+}
+</script>
+</body>
+</html>

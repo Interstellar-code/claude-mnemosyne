@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Map v3: mapping and rules</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+a{color:#8ec5ff}a:hover{color:#cfe6ff}
+</style>
+</helmet>
+<div style="width: 1440px; height: 1500px; box-sizing: border-box; padding: 56px 64px; background: #0a0f1c; color: #e6edf7; font-family: 'IBM Plex Sans', system-ui, sans-serif; display: flex; flex-direction: column; gap: 32px">
+  <header style="display: flex; flex-direction: column; gap: 8px">
+    <div style="font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase; color: #9fb0c8">Plan phase MAPX · release 0.9.0 · docs/plans/mnemosyne-v3.md</div>
+    <h1 style="margin: 0; font-size: 40px; font-weight: 600">The galaxy map becomes a solar system</h1>
+    <p style="margin: 0; font-size: 16px; color: #c9d6ea; max-width: 980px; line-height: 1.5">This sheet is the contract the build follows. The interactive board beside it shows the look and motion. Where the two disagree, this sheet and the plan win.</p>
+  </header>
+
+  <div style="display: flex; gap: 40px; align-items: flex-start">
+    <section style="flex: 1 1 760px; display: flex; flex-direction: column; gap: 10px">
+      <h2 style="margin: 0; font-size: 20px; font-weight: 600">Mapping</h2>
+      <div style="display: grid; grid-template-columns: 36px 170px 250px minmax(0, 1fr); font-size: 13px; line-height: 1.4; border-top: 1px solid #24304a">
+        <div style="padding: 8px 0; color: #9fb0c8; border-bottom: 1px solid #24304a">#</div><div style="padding: 8px 0; color: #9fb0c8; border-bottom: 1px solid #24304a">Object</div><div style="padding: 8px 0; color: #9fb0c8; border-bottom: 1px solid #24304a">Stands for</div><div style="padding: 8px 0; color: #9fb0c8; border-bottom: 1px solid #24304a">Visual</div>
+        <div style="padding: 7px 0; border-bottom: 1px solid #1a2438">1</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">Sun</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">the memory store</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438; color: #c9d6ea">size = live memory count</div>
+        <div style="padding: 7px 0; border-bottom: 1px solid #1a2438">2</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">Nodules on the sun</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">writers (source)</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438; color: #c9d6ea">size = memories written; flare on write</div>
+        <div style="padding: 7px 0; border-bottom: 1px solid #1a2438">3</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">Planets</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">projects (owners)</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438; color: #c9d6ea">size = memory count; style = size class</div>
+        <div style="padding: 7px 0; border-bottom: 1px solid #1a2438">3a</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">Planet style</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">gas 30+, ice 10-29, rocky, dwarf &lt;3</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438; color: #c9d6ea">Jupiter, Saturn, Neptune, Earth, Mars…</div>
+        <div style="padding: 7px 0; border-bottom: 1px solid #1a2438">3b</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">Planet vs craft</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">project kind</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438; color: #c9d6ea">git repo = planet (local-only: "no remote" mark); plain folder = craft</div>
+        <div style="padding: 7px 0; border-bottom: 1px solid #1a2438">3c</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">Space station</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">plain folder, 5+ memories</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438; color: #c9d6ea">ring station; tags = lit panels</div>
+        <div style="padding: 7px 0; border-bottom: 1px solid #1a2438">3d</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">Starship</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">plain folder, under 5</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438; color: #c9d6ea">saucer and nacelles; tags = lit windows</div>
+        <div style="padding: 7px 0; border-bottom: 1px solid #1a2438">4</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">Orbit distance</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">the Arrange by choice</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438; color: #c9d6ea">default activity: busier = closer</div>
+        <div style="padding: 7px 0; border-bottom: 1px solid #1a2438">5</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">Surface land masses</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">the project's tags</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438; color: #c9d6ea">area = times used; bands on gas giants</div>
+        <div style="padding: 7px 0; border-bottom: 1px solid #1a2438">6</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">Moons</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">memory kinds</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438; color: #c9d6ea">one per kind present; size = count</div>
+        <div style="padding: 7px 0; border-bottom: 1px solid #1a2438">7</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">Moon swarm</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">that kind's memories</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438; color: #c9d6ea">one asteroid per memory; a ring from afar</div>
+        <div style="padding: 7px 0; border-bottom: 1px solid #1a2438">8</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">Asteroid colour</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">writer (Colour dots by)</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438; color: #c9d6ea">or recalls, or age</div>
+        <div style="padding: 7px 0; border-bottom: 1px solid #1a2438">9</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">Asteroid size</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">importance</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438; color: #c9d6ea">bigger = more important</div>
+        <div style="padding: 7px 0; border-bottom: 1px solid #1a2438">10</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">Asteroid brightness</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">recalls</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438; color: #c9d6ea">brighter = recalled more</div>
+        <div style="padding: 7px 0; border-bottom: 1px solid #1a2438">11</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">Halo</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">pinned</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438; color: #c9d6ea">always visible</div>
+        <div style="padding: 7px 0; border-bottom: 1px solid #1a2438">12</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">Fading</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">expiry (valid_until)</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438; color: #c9d6ea">dims in its last 7 days</div>
+        <div style="padding: 7px 0; border-bottom: 1px solid #1a2438">13</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">Planet asteroid belt</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">kind 'unknown'</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438; color: #c9d6ea">old untyped rows; a dwarf's memories</div>
+        <div style="padding: 7px 0; border-bottom: 1px solid #1a2438">14</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">Sun asteroid belt</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">global memories</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438; color: #c9d6ea">scope global (6 today)</div>
+        <div style="padding: 7px 0; border-bottom: 1px solid #1a2438">15</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">Outer galaxy belt</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">retired, expired, lapsed</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438; color: #c9d6ea">faded; Restore pulls it back</div>
+        <div style="padding: 7px 0; border-bottom: 1px solid #1a2438">16</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">Black-hole pair</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">similar memories across projects</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438; color: #c9d6ea">pulsing energy: older planet → holes → newer</div>
+        <div style="padding: 7px 0; border-bottom: 1px solid #1a2438">17</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">Binary pair</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">near-duplicates in one project</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438; color: #c9d6ea">Review lens only</div>
+        <div style="padding: 7px 0; border-bottom: 1px solid #1a2438">18</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">Satellites</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">a memory's knowledge items</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438; color: #c9d6ea">around the selected memory</div>
+        <div style="padding: 7px 0; border-bottom: 1px solid #1a2438">19</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">Recall comet</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">a live recall</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438; color: #c9d6ea">planet → sun nodule (gold)</div>
+        <div style="padding: 7px 0; border-bottom: 1px solid #1a2438">19a</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">Save comet</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">a live save</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438; color: #c9d6ea">sun nodule → planet (blue)</div>
+        <div style="padding: 7px 0; border-bottom: 1px solid #1a2438">19b</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">Update beam</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">a live update</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438; color: #c9d6ea">green beam, writer → body</div>
+        <div style="padding: 7px 0; border-bottom: 1px solid #1a2438">19c</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">Forget laser</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">a live forget</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438; color: #c9d6ea">red laser, writer → body; the memory fades</div>
+        <div style="padding: 7px 0; border-bottom: 1px solid #1a2438">20</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">Clouds · ice cap</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438">needs review · idle 30+ days</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438; color: #c9d6ea">clouds when over 1/4 untidy</div>
+      </div>
+      <p style="margin: 0; font-size: 12px; color: #9fb0c8; line-height: 1.5">Shown in the detail panel only, not on the map: trust tier, veracity, author and the audit trail. Rows whose writer was backfilled (metadata.source_backfill = 'inferred') draw a little fainter.</p>
+    </section>
+
+    <div style="flex: 1 1 480px; display: flex; flex-direction: column; gap: 28px">
+      <section style="display: flex; flex-direction: column; gap: 10px">
+        <h2 style="margin: 0; font-size: 20px; font-weight: 600">Arrange by</h2>
+        <p style="margin: 0; font-size: 13px; color: #c9d6ea">It replaces the rail's Colour by card. Planet size is always the memory count; only orbit distance changes. Each planet keeps its angle, so you can still find it.</p>
+        <div style="display: grid; grid-template-columns: 110px minmax(0, 1fr); font-size: 13px; line-height: 1.4; border-top: 1px solid #24304a">
+          <div style="padding: 7px 0; border-bottom: 1px solid #1a2438">Activity</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438; color: #c9d6ea">writes + recalls in the last 30 days (default)</div>
+          <div style="padding: 7px 0; border-bottom: 1px solid #1a2438">Size</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438; color: #c9d6ea">memory count; biggest closest</div>
+          <div style="padding: 7px 0; border-bottom: 1px solid #1a2438">Age</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438; color: #c9d6ea">median age of live memories; youngest closest</div>
+          <div style="padding: 7px 0; border-bottom: 1px solid #1a2438">Recalls</div><div style="padding: 7px 0; border-bottom: 1px solid #1a2438; color: #c9d6ea">lifetime recalls; most recalled closest</div>
+        </div>
+        <p style="margin: 0; font-size: 12px; color: #9fb0c8; line-height: 1.5">Activity needs a daily tally per project (MAPX.3): the 1 MB activity log holds only about two days. Until the tally has 30 days, lifetime numbers stand in.</p>
+      </section>
+
+      <section style="display: flex; flex-direction: column; gap: 8px">
+        <h2 style="margin: 0; font-size: 20px; font-weight: 600">Drill-down</h2>
+        <ol style="margin: 0; padding-left: 20px; font-size: 13px; line-height: 1.55; color: #c9d6ea">
+          <li>Galaxy: sun and nodules (both turn), planets on orbits, belts, black holes with energy flows.</li>
+          <li>Planet: the camera flies in; land masses labelled, kind moons with swarms, black holes named by partner.</li>
+          <li>Moon: the swarm spreads into a readable ring.</li>
+          <li>Memory: knowledge satellites and the detail panel, with Edit, Pin and Retire from the dashboard writes.</li>
+        </ol>
+        <p style="margin: 0; font-size: 12px; color: #9fb0c8">Each step is a camera flight: it speeds into the body you clicked, with star streaks, and the next level settles in; the path bar flies back out. Wheel, +/− and drag zoom and pan at any level. The URL hash keeps the level across reloads.</p>
+      </section>
+
+      <section style="display: flex; flex-direction: column; gap: 8px">
+        <h2 style="margin: 0; font-size: 20px; font-weight: 600">Rules and caps</h2>
+        <ol style="margin: 0; padding-left: 20px; font-size: 13px; line-height: 1.55; color: #c9d6ea">
+          <li>Orbits are ordered rings by rank; ring gaps grow with planet size, so planets never overlap.</li>
+          <li>A project under 3 memories is a dwarf planet: small, no moons, its memories in its belt; it keeps its rank's ring.</li>
+          <li>At most 12 land masses per planet; the rest are small islands. At most 8 moons.</li>
+          <li>A black hole needs 2 or more similar pairs (cosine 0.80 or more) between two projects.</li>
+          <li>Asteroids appear only at Planet level and deeper; at Galaxy level a swarm is a haze.</li>
+          <li>Every body has a tooltip: planets (style, counts, top tags, black holes), land and bands (tag, uses, shared planets), moons, asteroids, belts, black holes, satellites.</li>
+          <li>Motion pauses on hover or selection; reduced motion stops orbits and flights; Tab moves sun, planets, moons, memories.</li>
+          <li>Colours from a colour-blind-safe palette; a tag's hue family comes from its namespace.</li>
+        </ol>
+      </section>
+
+      <section style="display: flex; flex-direction: column; gap: 8px">
+        <h2 style="margin: 0; font-size: 20px; font-weight: 600">Your store today (2026-10-25)</h2>
+        <ol style="margin: 0; padding-left: 20px; font-size: 13px; line-height: 1.55; color: #c9d6ea">
+          <li>5 planets, 123 live memories, 6 of them global (scope), 0 not live.</li>
+          <li>Writers: claude-code 121, imported 2.</li>
+          <li>Black holes: hermes-switchui to matrixkoder (3), hermes-switchui to claude-mnemosyne (3), matrixkoder to claude-mnemosyne (2). Two single-pair links stay hidden.</li>
+          <li>cc-workflows (2 memories) is a dwarf planet; orca-matrixkoder has clouds (2 of 4 kind unknown).</li>
+        </ol>
+      </section>
+
+      <section style="display: flex; flex-direction: column; gap: 8px">
+        <h2 style="margin: 0; font-size: 20px; font-weight: 600">Build order</h2>
+        <ol style="margin: 0; padding-left: 20px; font-size: 13px; line-height: 1.55; color: #c9d6ea">
+          <li>MAPX.0 this design, signed off. MAPX.1 a speed test with 2,000 moving memories.</li>
+          <li>MAPX.2 galaxy data from the server. MAPX.3 the daily tally.</li>
+          <li>MAPX.4 layout maths. MAPX.5 map rules. MAPX.6 drawing. MAPX.7 the detail panel.</li>
+        </ol>
+      </section>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1500}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

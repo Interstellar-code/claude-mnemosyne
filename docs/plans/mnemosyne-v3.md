@@ -2,11 +2,13 @@
 
 Status: decided, ready to build (Rohit's decisions 2026-10-24, see Decisions). Created 2026-10-24. Baseline: `main` at `247ea75` (0.7.6). Delivery: each phase on a short branch off `main`, merged straight into `main` after its review; nothing is pushed. Two releases: 0.8.0 after wave 3 (REL8), 0.9.0 at the end (REL9).
 
+Status 2026-10-25: waves 1-3b are shipped (0.8.0, then fixes 0.8.1 and 0.8.2; `main` at `2f1a104`). The 0.9.0 half (waves 4-7) was reviewed against the code on 2026-10-25 and corrected in place; see "0.9.0 review (2026-10-25)" before Wave 4. Not yet started; Rohit is still adding points before execution is planned.
+
 ## Summary
 
 Version 3 of the Mnemosyne plugin: control what goes into memory, and organise what is there. Every save, from Claude, outside agents, the dashboard or an importer, passes one guard that blocks secrets and oversize text and warns about near-duplicates and task chatter. Saves then record honest provenance and a kind instead of 'imported' and 'unknown'. Tags come from a small shared vocabulary with entity, agent and asset namespaces. The dashboard gains create, edit, retire and a review queue, and documents and session logs can be imported through the same guard. It matters because the store today holds 447 tags for 140 memories (407 used once), five rows marked SUPERSEDED that are still recalled, and no usable provenance at all.
 
-The plan has 12 phases (MODEL, GUARD, META, VOCAB, REL8, CRUDX, IMPORT, CRUD, SESSION, HARDEN, REL9, LATER) holding 47 tasks, in 9 waves. Waves 1-3 plus REL8 (wave 3b) are release 0.8.0: the guard, kinds and provenance, the audit trail and the vocabulary. Waves 4-7 are release 0.9.0: dashboard writes and review, the importers, session summaries and the expiry sweep. Wave 8 (LATER) is parked and starts only on Rohit's go.
+The plan has 13 phases (MODEL, GUARD, META, VOCAB, REL8, CRUDX, IMPORT, CRUD, SESSION, HARDEN, MAPX, REL9, LATER) holding 56 tasks, in 9 waves. Waves 1-3 plus REL8 (wave 3b) are release 0.8.0: the guard, kinds and provenance, the audit trail and the vocabulary. Waves 4-7 are release 0.9.0: dashboard writes and review, the importers, session summaries, the expiry sweep and the solar-system map (MAPX, added 2026-10-25). Wave 8 (LATER) is parked and starts only on Rohit's go.
 
 ## How to use this plan (for the coordinator)
 
@@ -83,10 +85,12 @@ File map:
 6. `hooks/tags.ts`, `hooks/vocab.ts` (new), `hooks/backfill.ts`, `bin/vocab.ts` (new) are changed by VOCAB.
 7. `bin/memories.ts` is changed by META (backup) and VOCAB.
 8. `ui/server.ts` is changed by CRUDX.
-9. `ui/app.ts`, `ui/index.html`, `ui/style.css`, `ui/review.ts` (new) are changed by CRUD.
+9. `ui/app.ts`, `ui/index.html`, `ui/style.css`, `ui/review.ts` (exists since 0.7.x: the Review tab with four filters) are changed by CRUD.
+9a. `hooks/activity-log.ts` (the activity action and origin names) is changed by CRUDX.0 only, before the wave 4 lanes start.
 10. `hooks/import.ts`, `bin/import.ts` (new) are changed by IMPORT.
 11. `hooks/session.ts` (new) is changed by SESSION.
 12. `hooks/engine.ts`, `tests/bun/helpers.ts`, `bin/install-engine.ts` are changed by HARDEN.
+13. `ui/map-layout.ts`, `ui/map-state.ts`, `ui/map.ts`, `ui/map-live.ts`, `bin/activity.ts` and `ui/server.ts`'s `galaxyLevel` are changed by MAPX (wave 6, after CRUDX and CRUD).
 
 ### Contracts
 
@@ -124,7 +128,8 @@ File map:
    1. `POST /api/memory/create`, `/update`, `/retire`, `/restore`, and `/api/vocabulary/admit`, `/alias`;
    2. `GET /api/review` and `/api/vocabulary`;
    3. every POST sits behind the existing `post()` guard;
-   4. answers: 422 means blocked, 409 means warned and needs `confirm: true`.
+   4. answers: 422 means blocked, 409 means warned (guard hits or near-duplicates) and needs `confirm: true`, 413 means the body is over the route's cap (24 KB for create and update);
+   5. update also takes `pinned` and `expires_in_days`; `/api/review` and `/api/memories` rows carry `state`: live, retired, expired or lapsed (0.9.0 review).
 8. C8: proposal files `tags-proposed.json` and `import-proposed.json` hold ids, sha256 and verdicts, never memory text, mode 0600. VOCAB and IMPORT write them.
 9. C9: `bin/memories.ts backup` (VACUUM INTO `<root>/backups/`, 0600, keeps 10). Every apply command runs it first and stops if it fails. META writes it; VOCAB, IMPORT and SESSION call it.
 10. C10: the audit trail and the unused tables (Rohit, 2026-10-24):
@@ -134,6 +139,11 @@ File map:
    4. forget deletes the memory's trail rows in the same transaction as the row (`purgeWorkingMemoryArtifacts`);
    5. `GET /api/health-report` gains `unusedByDesign: { <table>: <reason> }` for `episodic_memory`, `consolidation_log`, `gists`, `facts`, `graph_edges`, `triples`, `scratchpad` and the `fts_episodes*` and `fts_facts*` tables; the Health tab shows each as "unused by design" with its reason instead of "empty".
    MODEL writes 1-4; CRUDX writes 5 and the review history; CRUD shows both; SESSION passes 'expire-sweep'.
+11. C11: the solar-system map's data (MAPX, 2026-10-25):
+   1. `GET /api/galaxy` adds per memory `source`, `sourceInferred`, `kind`, `scope`, `importance`, `pinned`, `state`, `validUntil`; per project `activity30`, `activitySource`, `recallsTotal`, `medianAgeDays`, `firstSaved`, `tags`; and top-level `writers` and `links` (MAPX.2);
+   1a. `<root>/projects.json` (SESSION.5): owner → name, kind ('repo' or 'folder'), remote host only, first and last seen;
+   2. `<root>/activity-daily.json`, mode 0600, `{ version, days: { <owner>: { <day>: { writes, recalls } } } }`, 90 days, counts only, written only by `appendActivity` (MAPX.3).
+   MAPX writes both; only the map reads them.
 
 ### Out of scope
 
@@ -169,17 +179,18 @@ Phase-level dependencies ("Needs first" means every task of the listed phase is 
 | 2 | META | MODEL, GUARD | META.5, META.1, META.2, META.3, META.4 |
 | 3 | VOCAB | META | VOCAB.1, VOCAB.2, VOCAB.3, VOCAB.4 |
 | 3b | REL8 (0.8.0) | VOCAB, HARDEN part A | REL8.1 |
-| 4 | CRUDX | REL8 | CRUDX.1, CRUDX.2, CRUDX.3, CRUDX.4, CRUDX.5 |
-| 4 | IMPORT | REL8 | IMPORT.0, IMPORT.1, IMPORT.2, IMPORT.3 |
+| 4 | CRUDX | REL8 | CRUDX.0 (coordinator, on `main`, before both wave 4 lanes start), CRUDX.1, CRUDX.2, CRUDX.3, CRUDX.4, CRUDX.5 |
+| 4 | IMPORT | REL8, CRUDX.0 | IMPORT.0, IMPORT.1, IMPORT.2, IMPORT.3 |
 | 5 | CRUD | CRUDX | CRUD.1, CRUD.2, CRUD.3, CRUD.4 |
-| 5 | SESSION | IMPORT | SESSION.1, SESSION.2, SESSION.4 |
+| 5 | SESSION | IMPORT | SESSION.1, SESSION.2, SESSION.4, SESSION.5 |
 | 6 | HARDEN part B | CRUD, SESSION | HARDEN.3, then HARDEN.4 (Rohit), then HARDEN.5 (Rohit) |
-| 7 | REL9 (0.9.0) | HARDEN | REL9.1 |
-| 8 | LATER | REL9 (parked) | LATER.1 to LATER.5 (all manual until Rohit says go) |
+| 6 | MAPX | SESSION.5, CRUDX, CRUD (MAPX.0 is done; MAPX.1 needs nothing and runs from wave 4) | MAPX.0 (done), MAPX.1, MAPX.2, MAPX.3, MAPX.4, MAPX.5, MAPX.6, MAPX.7 |
+| 7 | REL9 (0.9.0) | HARDEN.3 and MAPX (HARDEN.4 and HARDEN.5 are Rohit's runs and no longer gate the release; 0.9.0 review) | REL9.1 |
+| 8 | LATER | REL9 (parked) | LATER.1, LATER.2, LATER.3, LATER.5 (all manual until Rohit says go; LATER.4 became MAPX) |
 
 Task-level dependencies beyond the in-phase order: IMPORT.2 depends on IMPORT.0 (the spike). SESSION.2 reads the transcript reader built in IMPORT. CRUDX.3 reads the `pinned` flag written by IMPORT.3 (both are wave 4 now; CRUDX.3 uses a fixture, so neither waits; see Notes for the reviewer, item 2).
 
-Task counts: MODEL 6, GUARD 4, META 5, VOCAB 4, REL8 1, CRUDX 5, IMPORT 4, CRUD 4, SESSION 3, HARDEN 5, REL9 1, LATER 5 = 47 tasks in 12 phases.
+Task counts: MODEL 6, GUARD 4, META 5, VOCAB 4, REL8 1, CRUDX 6, IMPORT 4, CRUD 4, SESSION 4, HARDEN 5, MAPX 8, REL9 1, LATER 4 = 56 tasks in 13 phases.
 
 ---
 
@@ -201,9 +212,9 @@ Who builds what (a proposal; the coordinator may swap lanes A and B between phas
 | 2 | META | reviews META | idle |
 | 3 | VOCAB | reviews VOCAB | idle |
 | 3b | reviews REL8 | idle | REL8.1 (docs and version 0.8.0) |
-| 4 | CRUDX | IMPORT (high) | idle (reviews IMPORT.3 only if a second reader is wanted) |
-| 5 | CRUD | SESSION (high, it holds the expiry sweep) | idle |
-| 6 | reviews HARDEN.3 | idle | HARDEN.3, then Rohit's HARDEN.4 and HARDEN.5 |
+| 4 | CRUDX (after the coordinator's CRUDX.0), then reviews IMPORT | IMPORT (high), then reviews CRUDX (high) | MAPX.1 (vendor exports and the frame-rate check) |
+| 5 | CRUD, then reviews SESSION (SESSION.4 at data-loss depth) | SESSION (high, it holds the expiry sweep), then reviews CRUD | idle |
+| 6 | MAPX.2 to MAPX.7 | reviews HARDEN.3, then reviews MAPX | HARDEN.3, then Rohit's HARDEN.4 and HARDEN.5 |
 | 7 | reviews REL9 | idle | REL9.1 (docs and version 0.9.0) |
 
 Rules:
@@ -521,6 +532,30 @@ README and DESIGN describe what 0.8.0 ships: the guard (strict by default), kind
 
 ---
 
+## 0.9.0 review (2026-10-25): gaps found against the code, and how the plan now handles them
+
+The 0.9.0 phases were written on 2026-10-24, before waves 1-3b were built. On 2026-10-25 each claim in waves 4-7 was checked against `main` at `2f1a104` (0.8.2). The fixes below are already written into the phases. Items marked "coordinator default" are choices made to close a gap; Rohit can overturn any of them.
+
+1. Stale line refs (CRUDX, CRUD). `ui/server.ts` grew by about 200 lines. Forget is now `ui/server.ts:1642-1700`, `post()` `:1767-1777`, `MAX_BODY_BYTES` `:106`, the route table `:1837-1888`. The Host and token checks are in the outer request handler (`:1908`, `:1914`), not in `post()`. `ui/app.ts`'s forget confirm is `:325-390`, and the Health storage rows are `ui/health.ts:184-215`. All refs are updated below.
+2. One body cap (CRUDX.1). `post()` checks one global `MAX_BODY_BYTES` (4096), but the guard allows content up to 4000 characters (`hooks/guard.ts:28`), which can be over 4096 bytes once wrapped in JSON. CRUDX.1 now gives `post()` a per-route cap argument: 24 KB for create and update, 4096 for everything else.
+3. The Review tab already exists (CRUD). `ui/review.ts` and `tests/bun/review-view.spec.ts` have been in place since 0.7.x: a Review tab with four client-side filters (never recalled, no tags, not recalled in 30 days, low importance) and a Forget button per row. The plan called it new. CRUD.2 now extends that tab rather than building a second one. Coordinator default: the Review rows get Retire (which can be restored) instead of Forget (which deletes for good). Forget stays in the memory detail sheet only.
+4. Retired, expired and lapsed rows look the same (CRUDX.3, CRUD). In the engine, retiring sets `valid_until` to now (plus `superseded_by` when a replacement is given). The sweep's expiry and a context note's normal 14-day expiry also just set `valid_until`. Telling them apart needs the audit trail: action 'retire' or 'expire' in `memory_validations` (newest 3 kept), otherwise "lapsed". CRUDX.3 now gives each row one of four states: live, retired, expired (by the sweep) or lapsed (its own expiry date passed).
+5. Retired rows show as live on the dashboard today (CRUDX, CRUD). `/api/memories` and the Memories tab ignore `valid_until` and `superseded_by` (`ui/server.ts:440`), so the 14-day context expiry from 0.8.x is already invisible. CRUDX.3 adds `state` to `/api/memories`. CRUD.2 dims non-live rows in Memories behind a "Show retired" toggle, off by default (coordinator default). The map shows non-live rows in its outer belt (MAPX).
+6. New activity actions sit outside every lane's scope (CRUDX.0, new). `ActivityAction` (`hooks/activity-log.ts:10`) has no 'restore', 'import' or 'expire', and `ActivityOrigin` has no 'import' or 'session'. CRUDX may not touch `hooks/`, and IMPORT runs beside it. New task CRUDX.0 adds them once, on `main`, before both wave 4 lanes branch. It is types plus one spec, done by the coordinator.
+7. The dashboard save must match the other save paths (CRUDX.1). Kind is required on every save since 0.8.1, context notes get a 14-day `valid_until` by default (`hooks/kinds.ts:45`, `validUntilFor`), and tags go through `cleanTags` and `tagRules`. `bin/mcp-proxy.ts:185` shows that path without `register.ts`. CRUDX.1 now names that pattern and the shared helpers to import (they are read, not changed). G3's near-duplicate call lives in `register.ts` (`:553`), which the server cannot import, so CRUDX.1 calls `mnemopi_similar` itself with `NEAR_DUPLICATE_SCORE` from `hooks/guard.ts:107`.
+8. Pinning and expiry in the dashboard (CRUDX.1, CRUD.1). IMPORT.3 adds `pinned` to `memory_update`, but the dashboard had no way to pin, and the form had no expiry. CRUDX.1's update now takes `pinned` (sent as an engine metadata merge, `{ pinned: true|false }`) and `expires_in_days`. CRUD.1's form shows both, with the 14-day context default filled in.
+9. Engine argument name (CRUDX.2). `mnemopi_invalidate` takes `replacement_id`, not `replaced_by`. The route keeps `replaced_by` in its body and maps it.
+10. Session start cannot add context (SESSION.2). In the plugin API, `session.start` returns only `{ cwd }` (`SessionStartResult`), so it cannot put a block into the conversation. The existing first-prompt recall in `prompt.submit` (`hooks/register.ts:1652`) is where context goes in today. SESSION.2 now adds the block there, on a session's first prompt.
+11. `/clear` fires no `session.start` (SESSION.1, SESSION.4). After `/clear` the process continues under a new session id, and only `session.end` fires for the old id. So "summarise the previous session at session start" misses every `/clear`. SESSION.1 now writes a small pending marker at `session.end` (session id and transcript path, no text), and the next session's first prompt finishes it in the background. The sweep keeps its 24-hour marker and also runs from the first prompt of a session.
+12. Transcript reading limits (IMPORT.0). `$.fs.read` refuses files over 4 MiB, and long session transcripts pass that. `session.start`'s input has no transcript path. IMPORT.0's spike now also records how the transcript path is found (`session.end` input, or `~/.claude/projects/<slug>/<id>.jsonl`), the real size spread, and whether reading has to move to `bin/import.ts` through `$.process.run`.
+13. SESSION task order disagreed. The wave table said SESSION.1, .2, .4; the blocks ran 1, 4, 2. The blocks are reordered to 1, 2, 4.
+14. REL9 was blocked by Rohit's manual runs (HARDEN.4, HARDEN.5). Coordinator default: REL9 now needs only HARDEN.3. The review-and-retire pass and the knowledge backfill use the shipped tools and can happen after the 0.9.0 tag.
+15. Engine log growth is still real. `~/.claude/mnemosyne/model-cache/logs` holds 481 files today (2026-10-25), so HARDEN.3 stays as written.
+
+Checked and correct as written: the engine tools `mnemopi_similar`, `mnemopi_expire_unused` (days at least 30, default kinds context, event, error and artifact, dry run by default, honours `metadata.pinned`), update's `restore` and metadata merge, and the `validator` argument; `bin/vocab.ts admit` and `alias`; `bin/memories.ts backup`; the `guardMode` option; `$.model.complete` for Haiku calls; HARDEN.1 and HARDEN.2, done in 0.8.0.
+
+---
+
 ## Wave 4: CRUDX (server) and IMPORT (plugin), side by side
 
 ### Phase CRUDX: Dashboard server: create, update, retire, restore, a review queue and the vocabulary
@@ -529,43 +564,55 @@ The dashboard can only forget today. This phase adds write routes behind the exi
 
 1. Delivers: C7 on the server.
 2. Needs first: REL8 (so META's engine args and backup and VOCAB's vocabulary helper are in, and 0.8.0 is out).
-3. Read first: `ui/server.ts:1584-1689`.
-4. May touch: `ui/server.ts`, `tests/bun/ui-server.spec.ts`, `tests/bun/crud-api.spec.ts`, `tests/bun/review-api.spec.ts`.
-5. Must not touch: `engine/`, `hooks/`, `ui/app.ts`, `tests/bun/helpers.ts`.
+3. Read first: `ui/server.ts:1642-1700` (forget, the pattern), `ui/server.ts:1767-1777` (`post()`), `ui/server.ts:1900-1920` (Host and token checks), `bin/mcp-proxy.ts:170-230` (a guarded save outside `register.ts`).
+4. May touch: `ui/server.ts`, `tests/bun/ui-server.spec.ts`, `tests/bun/crud-api.spec.ts`, `tests/bun/review-api.spec.ts`, `tests/bun/memories.spec.ts`; `hooks/activity-log.ts` and `tests/activity-log.test.ts` in CRUDX.0 only.
+5. Must not touch: `engine/`, `hooks/` (except CRUDX.0's file), `ui/app.ts`, `tests/bun/helpers.ts`. Importing `hooks/guard.ts`, `hooks/kinds.ts`, `hooks/tags.ts` and `hooks/vocab.ts` is allowed; editing them is not.
 6. Review level: data-loss. Hazard: a write route without the Origin check (guard: a 403 spec on each route).
 7. Suggested commit message: `feat(ui): create, edit, retire and review routes`
+
+#### CRUDX.0: Activity names for restore, import and expire (coordinator, before wave 4 lanes)
+
+1. Goal: the activity log can name every 0.9.0 write, so CRUDX, IMPORT and SESSION never edit the same file at once.
+2. Acceptance:
+   1. `ActivityAction` gains 'restore', 'import' and 'expire'; `ActivityOrigin` gains 'import' and 'session' (`hooks/activity-log.ts:10-11`); nothing else changes;
+   2. `tests/activity-log.test.ts` writes and reads one line of each new name.
+3. Gate: `claude plugin test . && bun run typecheck` (timeout 600 s, must exit 0).
+4. Scope: phase CRUDX. Done by the coordinator on `main`; both wave 4 lanes branch (or rebase) after it.
 
 #### CRUDX.1: POST /api/memory/create and /api/memory/update (C7) (critical)
 
 1. Goal: the two write routes.
 2. Acceptance:
-   1. both routes sit behind the existing `post()` guard (Origin, JSON, token, Host; `ui/server.ts:1679-1689`), with their own body cap of 24 KB; search and forget keep 4096;
-   2. create takes `{ owner, content, kind, tags, importance, global? }`; owner must be 'global' or an owner already in the store, else 400;
-   3. `admit()` runs first: a block is 422 with rule ids and no override; a warn is 409 with the hits unless the body has `confirm: true`;
-   4. writes go through `mnemopi_remember` / `mnemopi_update` as the owner, with source 'dashboard' and trust_tier STATED, author_type human; one activity line each, origin ui;
-   5. `tests/bun/crud-api.spec.ts` covers each status code, a foreign Origin (403) and a missing token (401).
-3. Refs: `ui/server.ts:1584-1630` (forget, the pattern); `ui/server.ts:105` (MAX_BODY_BYTES).
+   1. both routes sit behind the existing `post()` guard (Origin, JSON, size) and the outer Host and token checks; `post()` gains a per-route body cap argument, 24 KB for these two routes, and every other route keeps 4096 (`MAX_BODY_BYTES`);
+   2. create takes `{ owner, content, kind, tags?, importance?, expires_in_days?, confirm? }`; kind is required and checked with `kindProblem` (`hooks/kinds.ts`); owner must be 'global' or an owner already in the store, else 400;
+   3. update takes `{ memory_id, content?, kind?, tags?, importance?, expires_in_days?, pinned?, confirm? }`; the owner comes from the row, as forget does; `pinned` is sent as an engine metadata merge `{ pinned: true|false }`;
+   4. `admit()` runs first on any new content, with origin 'dashboard': a block is 422 with rule ids and no override; a warn is 409 with the hits unless the body has `confirm: true`; then G3 calls `mnemopi_similar` (top 3, `NEAR_DUPLICATE_SCORE`), and a match is a 409 warn of its own, unless `confirm: true`;
+   5. tags go through `cleanTags` and the vocabulary's `tagRules`; `valid_until` comes from `validUntilFor` (so a context note gets 14 days unless `expires_in_days` says otherwise), as in `bin/mcp-proxy.ts`;
+   6. writes go through `mnemopi_remember` / `mnemopi_update` as the owner, with source 'dashboard', trust_tier STATED, author_type human and veracity 'stated' (C4); update passes `validator: 'dashboard'`; one activity line each ('remember' or 'update'), origin ui, ids only;
+   7. `tests/bun/crud-api.spec.ts` covers each status code, a foreign Origin (403), a missing token (401), a 4000-character body accepted and a body over 24 KB refused (413), the context default expiry, and pin and unpin.
+3. Refs: `ui/server.ts:1642-1700` (forget); `ui/server.ts:106` (`MAX_BODY_BYTES`); `bin/mcp-proxy.ts:185` (guarded save); `hooks/guard.ts:107` (`NEAR_DUPLICATE_SCORE`).
 4. Gate: `bun run test:bun && bun run typecheck` (timeout 900 s, must exit 0).
-5. Scope: phase CRUDX.
+5. Scope: phase CRUDX. Do after CRUDX.0.
 
 #### CRUDX.2: POST /api/memory/retire and /api/memory/restore (critical)
 
 1. Goal: retire and restore routes.
 2. Acceptance:
-   1. `retire { memory_id, replaced_by? }` runs `mnemopi_invalidate` as the row's owner; `restore { memory_id }` runs `mnemopi_update` restore; neither deletes a row (spec counts rows); both pass `validator: 'dashboard'`, as does CRUDX.1's update (C10);
-   2. a missing row is 404, a row with no owner 409, one write at a time (the forgets limiter);
-   3. each logs one line, origin ui, with the ids.
+   1. `retire { memory_id, replaced_by? }` runs `mnemopi_invalidate` (its argument is `replacement_id`) as the row's owner; `restore { memory_id }` runs `mnemopi_update` with `restore: true`; neither deletes a row (spec counts rows); both pass `validator: 'dashboard'` (C10);
+   2. a missing row is 404, a row with no owner 409, one write at a time (the forgets limiter, renamed to a general write limiter that create, update, retire, restore and forget share);
+   3. each logs one line ('retire' or 'restore'), origin ui, with the ids.
 3. Gate: `bun run test:bun` (timeout 900 s, must exit 0).
 4. Scope: phase CRUDX. Do after CRUDX.1.
 
-#### CRUDX.3: GET /api/review: retirement candidates with reasons
+#### CRUDX.3: GET /api/review, and a state on every memory
 
-1. Goal: a read-only review route.
+1. Goal: a read-only review route, and the Memories list can tell live rows from retired ones.
 2. Acceptance:
-   1. read-only; per candidate `{ id, owner, preview, reasons[] }` where a reason is one of 'marked superseded' (SUPERSEDED, HISTORICAL, DEPRECATED or 'possibly stale' in the text), 'near-duplicate of \<id\> (\<score\>)' (cosine 0.88 or more from `memory_embeddings`), 'dated status note', 'guard flag', 'never recalled, older than 30 days';
-   2. retired rows are listed apart with their retire date, so they can be restored;
-   3. the route never changes `recall_count` or any row (spec);
-   4. with no vectors the near-duplicate reason is simply absent.
+   1. read-only; per candidate `{ id, owner, preview, reasons[] }` where a reason is one of 'marked superseded' (SUPERSEDED, HISTORICAL, DEPRECATED or 'possibly stale' in the text), 'near-duplicate of \<id\> (\<score\>)' (cosine 0.88 or more from `memory_embeddings`), 'dated status note', 'guard flag', 'never recalled, older than 30 days'; only live rows are candidates;
+   2. non-live rows are listed apart, each with `state` and the date it stopped being live: 'retired' (newest trail action is retire), 'expired' (newest trail action is expire, from the sweep) or 'lapsed' (its own `valid_until` passed with no such action), so each can be restored;
+   3. `/api/memories` rows gain the same `state` field ('live' for the rest); nothing else in that reply changes;
+   4. the routes never change `recall_count` or any row (spec);
+   5. with no vectors the near-duplicate reason is simply absent.
 3. Gate: `bun run test:bun` (timeout 900 s, must exit 0).
 4. Scope: phase CRUDX. Do after CRUDX.2. Pinned rows are never candidates (IMPORT.3 adds the `pinned` flag in the same wave; CRUDX.3 reads `metadata.pinned`, treats a missing flag as not pinned, and tests with a fixture row, so it never waits on IMPORT.3).
 
@@ -579,12 +626,12 @@ The dashboard can only forget today. This phase adds write routes behind the exi
 3. Gate: `bun run test:bun` (timeout 900 s, must exit 0).
 4. Scope: phase CRUDX. Do after CRUDX.3.
 
-#### CRUDX.5: Health labels the unused tables; Review shows each retired row's audit trail (C10)
+#### CRUDX.5: Health labels the unused tables; Review shows each non-live row's audit trail (C10)
 
 1. Goal: the server side of C10.5 and the history read.
 2. Acceptance:
    1. `GET /api/health-report` adds `unusedByDesign: { <table>: <reason> }` (C10.5) as a fixed map in `ui/server.ts`; `tables` is unchanged; a table in the map that does not exist in the store is left out;
-   2. `GET /api/review`'s retired rows carry `history: [{ action, validator, at }]` from `memory_validations`, newest first, read-only; empty when there is none;
+   2. `GET /api/review`'s non-live rows (retired, expired, lapsed) carry `history: [{ action, validator, at }]` from `memory_validations`, newest first, read-only; empty when there is none;
    3. `tests/bun/review-api.spec.ts` and `tests/bun/ui-server.spec.ts` cover both, including a store without `memory_validations` (history empty, no error).
 3. Gate: `bun run test:bun && bun run typecheck` (timeout 900 s, must exit 0).
 4. Scope: phase CRUDX. Do after CRUDX.4.
@@ -594,7 +641,7 @@ The dashboard can only forget today. This phase adds write routes behind the exi
 Two importers, both with a dry run and an apply after a backup: markdown or text documents split into chunks, and Claude Code session transcripts boiled down by Haiku into a few durable memories. Every candidate passes the guard and the near-duplicate check, and lands with source 'import:doc' or 'import:session'.
 
 1. Delivers: `/mnemosyne-import doc` and `/mnemosyne-import session`, and the `pinned` flag on `memory_update` (IMPORT.3).
-2. Needs first: REL8 (META and VOCAB included).
+2. Needs first: REL8 (META and VOCAB included) and CRUDX.0 (the 'import' activity names).
 3. May touch: `hooks/import.ts`, `bin/import.ts`, `hooks/register.ts`, `tests/import.test.ts`, `tests/register.test.ts`, `tests/bun/import.spec.ts`, `tests/bun/pinned.spec.ts`, `tsconfig.bun.json`.
 4. Must not touch: `engine/`, `ui/`, `tests/bun/helpers.ts`.
 5. Review level: data-loss. Hazard: a big document floods the store (guard: the dry run shows the count, plus the guard size caps and near-duplicate check). Session text leaves the machine to Haiku, as tags already do; it is named in the README.
@@ -604,7 +651,9 @@ Two importers, both with a dry run and an apply after a backup: markdown or text
 
 1. Acceptance:
    1. record the transcript path for this project and session, its line format, whether `$.fs.read` can read it, and a size cap that keeps one Haiku call under its token limit;
-   2. the result is in this task's worker_done report before IMPORT.2 starts; if transcripts cannot be read from the hooks, IMPORT.2 moves to `bin/import.ts` and the plan is updated.
+   2. record how a hook finds the path: `session.start`'s input has none, so check `session.end`'s input and `$.session`, else derive `~/.claude/projects/<slug>/<session id>.jsonl` (and how the slug is made from the folder);
+   3. record the size spread of real transcripts on this machine: `$.fs.read` refuses files over 4 MiB, so state whether reading must go through `bin/import.ts` with `$.process.run` (which streams the tail), and confirm what `/clear` and `--resume` do to the session id and file;
+   4. the result is in this task's worker_done report before IMPORT.2 starts; if transcripts cannot be read from the hooks, IMPORT.2 moves to `bin/import.ts` and the plan is updated.
 2. Manual step: the worker runs the spike in a real session and reports commands and output; the coordinator reads it before dispatching IMPORT.2.
 3. Output: a written report only; no code change is required by this task.
 
@@ -633,8 +682,10 @@ Two importers, both with a dry run and an apply after a backup: markdown or text
 
 1. Goal: pin and unpin.
 2. Acceptance:
-   1. `pinned: true` or `false` sets or clears `metadata.pinned` through the metadata merge; pinned rows are never retirement candidates (CRUDX.3 reads the flag) and never get an automatic expiry;
-   2. a spec pins, unpins and checks the session-start block.
+   1. Claude's `memory_update` tool (`hooks/register.ts:150`) takes `pinned: true` or `false` and sends it as the engine's metadata merge `{ pinned }`; pinned rows are never retirement candidates (CRUDX.3 reads the flag) and never get an automatic expiry (the engine's `mnemopi_expire_unused` already skips them);
+   2. pinning a row clears nothing else; unpinning leaves any existing `valid_until` as it is;
+   3. outside agents cannot pin: the proxy strips `metadata` from its schema (`bin/mcp-proxy.ts:305`) and gets no `pinned` property (coordinator default, 0.9.0 review); pins come from Claude and the dashboard only;
+   4. a spec pins and unpins a row on a temp store and reads `metadata.pinned` back (the session-start block is SESSION.2's spec, not this one).
 3. Gate: `claude plugin test . && bun run test:bun` (timeout 900 s, must exit 0).
 4. Scope: phase IMPORT. Do last in the phase.
 
@@ -642,41 +693,45 @@ Two importers, both with a dry run and an apply after a backup: markdown or text
 
 ## Wave 5: CRUD (UI) and SESSION (plugin), side by side
 
-### Phase CRUD: Dashboard: new and edit forms, a Review tab with retire and restore, and the vocabulary panel
+### Phase CRUD: Dashboard: new and edit forms, retire and restore in the existing Review tab, and the vocabulary panel
 
-The UI half of CRUDX. Rohit can write and edit memories with a kind and vocabulary tags, see the guard's warnings before saving, and work through the Review queue retiring one memory at a time with a confirm. Nothing happens in bulk.
+The UI half of CRUDX. Rohit can write and edit memories with a kind, vocabulary tags, an expiry and a pin, see the guard's warnings before saving, and work through the Review tab retiring one memory at a time with a confirm. The Review tab already exists (four filters and a Forget button per row, `ui/review.ts`); this phase extends it. Nothing happens in bulk.
 
 1. Delivers: the UI for C7.
 2. Needs first: CRUDX.
-3. Read first: `ui/app.ts:310-373`.
+3. Read first: `ui/app.ts:325-390` (the detail sheet and the forget confirm), `ui/app.ts:814-830` (`forgetById`), `ui/app.ts:901` (the Review host), `ui/review.ts` (the Review tab today), `ui/health.ts:184-215`.
 4. May touch: `ui/app.ts`, `ui/index.html`, `ui/style.css`, `ui/review.ts`, `ui/health.ts`, `ui/tsconfig.json`, `tests/bun/ui-views.spec.ts`, `tests/bun/review-view.spec.ts`, `tests/bun/health-view.spec.ts`.
 5. Must not touch: `ui/server.ts`, `engine/`, `hooks/`, `tests/bun/helpers.ts`.
-6. Review level: standard. Hazard: a bulk retire creeping in (guard: CRUD.2 acceptance 2 and its spec).
+6. Review level: standard. Hazard: a bulk retire creeping in (guard: CRUD.2 acceptance 3 and its spec).
 7. Manual QA steps (Rohit, in the dashboard, after the phase merges):
    1. New memory: write a note, pick a kind and two vocabulary tags, see a near-duplicate warning, Save anyway, find it in Memories.
-   2. Edit: change kind and tags of a memory; a secret pasted in is refused with the rule name.
-   3. Review: a SUPERSEDED row shows with its reason; Retire asks once more naming the memory; it moves to Retired; Restore brings it back.
-   4. Vocabulary: admit a candidate; alias one tag to another.
+   2. Edit: change kind and tags of a memory; pin it; a secret pasted in is refused with the rule name.
+   3. Review: a SUPERSEDED row shows with its reason; Retire asks once more naming the memory; it moves to the Not live list marked retired; Restore brings it back.
+   4. Memories: a retired row is hidden; "Show retired" shows it dimmed with its state.
+   5. Vocabulary: admit a candidate; alias one tag to another.
 8. Suggested commit message: `feat(ui): create, edit, review and vocabulary`
 
 #### CRUD.1: New memory and Edit forms with guard feedback
 
 1. Goal: the create and edit form.
 2. Acceptance:
-   1. a New memory button and an Edit button in the detail panel open one form: content, kind (the eight plain labels), tags (picker grouped by namespace, from `/api/vocabulary`), importance, owner (existing owners or global);
-   2. a 409 shows each warning and a Save anyway button that resends with `confirm: true`; a 422 shows the rule names and no save button;
-   3. specs in `tests/bun/ui-views.spec.ts` cover both answers.
+   1. a New memory button and an Edit button in the detail panel open one form: content, kind (the eight plain labels, required), tags (picker grouped by namespace, from `/api/vocabulary`), importance, expiry in days (filled with 14 for kind context, empty for the rest), Pinned (edit only), owner (existing owners or global; create only);
+   2. a 409 shows each warning (guard hits and near-duplicates, each near-duplicate with its id and score) and a Save anyway button that resends with `confirm: true`; a 422 shows the rule names and no save button; a 413 says the text is too long;
+   3. specs in `tests/bun/ui-views.spec.ts` cover each answer, the context expiry default, and that the form never sends `pinned` on create.
 3. Gate: `bun run test:bun && bun run typecheck` (timeout 900 s, must exit 0).
 4. Scope: phase CRUD.
 
-#### CRUD.2: Review tab: one memory at a time, retire with a confirm, restore (critical)
+#### CRUD.2: Review tab: retire candidates with a confirm, the not-live list with restore, and retired rows in Memories (critical)
 
-1. Goal: the Review tab.
+1. Goal: extend the existing Review tab, and stop retired rows reading as live.
 2. Acceptance:
-   1. the Review tab lists `/api/review` candidates with their reasons, newest reason first;
-   2. Retire is two steps, like forget (`ui/app.ts:332-356`): the confirm names the memory's first line and id and offers an optional 'replaced by'; there is no select-all;
-   3. a Retired list shows retired rows with Restore, and rows the unused-expiry sweep expired are marked 'expired as unused' with their last-used date, so Rohit can tell them from hand-retired ones;
-   4. `tests/bun/review-view.spec.ts` covers the confirm, the absence of bulk actions, restore and the 'expired as unused' mark.
+   1. the Review tab keeps its four filters and gains a fifth, "Retire candidates", which lists `/api/review` candidates with their reasons, newest reason first;
+   2. every Review row's Forget button becomes Retire (coordinator default, 0.9.0 review); Forget stays in the memory detail sheet only;
+   3. Retire is two steps, like forget (`ui/app.ts:346-390`): the confirm names the memory's first line and id and offers an optional 'replaced by'; there is no select-all;
+   4. a "Not live" list shows each non-live row with its state and date: 'retired' (by hand), 'expired as unused' (the sweep, with its last-used date) or 'lapsed' (its own expiry date passed), each with Restore;
+   5. the Memories tab hides non-live rows by default; a "Show retired" toggle shows them dimmed with their state; the toggle is a per-viewer setting only;
+   6. `sentenceOf` (`ui/app.ts:418`) gives plain sentences for the new activity names: restore, import and expire;
+   7. `tests/bun/review-view.spec.ts` and `tests/bun/ui-views.spec.ts` cover the confirm, the absence of bulk actions, the Forget-to-Retire swap, restore, the three state marks, the Memories toggle and the three new sentences.
 3. Gate: `bun run test:bun && bun run typecheck` (timeout 900 s, must exit 0).
 4. Scope: phase CRUD. Do after CRUD.1.
 
@@ -685,74 +740,86 @@ The UI half of CRUDX. Rohit can write and edit memories with a kind and vocabula
 1. Goal: the vocabulary panel.
 2. Acceptance:
    1. tags by namespace with counts; candidates with Admit and Alias to; an unused admitted tag shows a zero count but is never auto-removed;
-   2. spec covers admit and alias calls.
+   2. spec covers admit and alias calls, and a 400 for a bad tag shown as a message.
 3. Gate: `bun run test:bun` (timeout 900 s, must exit 0).
 4. Scope: phase CRUD. Do after CRUD.2.
 
-#### CRUD.4: Health shows "unused by design"; Retired rows show their last actions (C10)
+#### CRUD.4: Health shows "unused by design"; not-live rows show their last actions (C10)
 
 1. Goal: the UI side of C10.
 2. Acceptance:
-   1. in the Health tab's storage list (`ui/health.ts:188`, `:206`), a table named in `unusedByDesign` shows "unused by design" and its reason instead of "empty", and is not counted in the summary line's "N empty"; the Empty filter still lists it, marked;
-   2. each row in the Review tab's Retired list shows its `history` as one line per action ("retired by dashboard, 2026-10-25"); no line when the history is empty;
-   3. all text goes through `textContent`; `tests/bun/health-view.spec.ts` and `tests/bun/review-view.spec.ts` cover both, and an older server answer without `unusedByDesign` or `history` still renders.
+   1. in the Health tab's storage list (`storageRows` and `storageSummary`, `ui/health.ts:184-215`), a table named in `unusedByDesign` shows "unused by design" and its reason instead of "empty", and is not counted in the summary line's "N empty"; the Empty filter still lists it, marked;
+   2. each row in the Review tab's Not live list shows its `history` as one line per action ("retired by dashboard, 2026-10-25"); no line when the history is empty (a lapsed row usually has none);
+   3. all text goes through `textContent`; `tests/bun/health-view.spec.ts` and `tests/bun/review-view.spec.ts` cover both, and an older server answer without `unusedByDesign`, `history` or `state` still renders.
 3. Gate: `bun run test:bun && bun run typecheck` (timeout 900 s, must exit 0).
 4. Scope: phase CRUD. Do after CRUD.3.
 
-### Phase SESSION: What were we doing last time: session summaries and pinned memories at session start
+### Phase SESSION: What were we doing last time: session summaries and pinned memories on the first prompt
 
-At session start the plugin summarises the owner's previous session once, in the background, into one 'event' memory that expires after 30 days, using IMPORT's transcript reader. It then puts that summary and any pinned memories into context. Pinning is a flag on the memory (Python Mnemosyne's pinned, as metadata), and unpinned project-state notes fade out through their expiry.
+When a session ends (exit, `/clear` or resume), the plugin notes it in a small pending file. The next session summarises it once, in the background, into one 'event' memory that expires after 30 days, using IMPORT's transcript reader. On a session's first prompt, that summary and any pinned memories go into context through the existing first-prompt recall. The plugin API gives `session.start` no way to add context (it returns only `{ cwd }`), and `/clear` fires `session.end` but no `session.start` (0.9.0 review, items 10 and 11). Pinning is a flag on the memory (Python Mnemosyne's pinned, as metadata), and unpinned project-state notes fade out through their expiry.
 
-1. Delivers: the session-start block, summaries behind an option, pins.
-2. Needs first: IMPORT (the transcript reader).
-3. May touch: `hooks/session.ts`, `hooks/register.ts`, `bin/memories.ts`, `.claude-plugin/plugin.json`, `tests/session.test.ts`, `tests/register.test.ts`, `tests/bun/`.
+1. Delivers: the first-prompt block, summaries behind an option, the expiry sweep.
+2. Needs first: IMPORT (the transcript reader and IMPORT.0's findings).
+3. May touch: `hooks/session.ts`, `hooks/register.ts`, `bin/memories.ts`, `.claude-plugin/plugin.json`, `tests/session.test.ts`, `tests/register.test.ts`, `tests/bun/` (except `helpers.ts`).
 4. Must not touch: `engine/`, `ui/`, `tests/bun/helpers.ts`.
-5. Review level: standard. Hazard: a slow session start (guard: summaries run after the start reply with pending files, and the option defaults to off).
-6. Suggested commit message: `feat(session): last-session summary and pinned memories at start`
+5. Review level: standard, with SESSION.4 reviewed at data-loss depth (it holds the expiry sweep). Hazard: a slow first prompt (guard: the block reads only the store; summaries and the sweep run in the background after the reply, and summaries default to off).
+6. Suggested commit message: `feat(session): last-session summary, pins on the first prompt, and the unused-expiry sweep`
 
 #### SESSION.1: The previous session is summarised once, in the background
 
 1. Goal: background summary of the previous session.
 2. Acceptance:
-   1. a plugin option `sessionSummary`: 'off' (default, see Decisions) or 'on'; when on, `session.start` finds the owner's previous session and, if it has no summary yet, asks Haiku for one of at most 600 characters, after the start reply, with a pending file like knowledge extraction;
-   2. the summary goes through `admit()` and is saved as kind 'event', source 'import:session', `valid_until` 30 days, `metadata.session = <session id>`;
-   3. a lost call leaves its pending file and the next start finishes it; a session with no transcript is skipped;
-   4. `tests/session.test.ts` covers each with a stub model.
+   1. a plugin option `sessionSummary`: 'off' (default, see Decisions) or 'on';
+   2. when on, `session.end` writes a pending entry (mode 0600) holding only the ended session's id, its owner and its transcript path, found the way IMPORT.0 recorded; no text, no model call, so it is quick even on exit;
+   3. on the next session's first prompt, after the reply, in the background: each pending entry with no summary yet gets one Haiku call for a summary of at most 600 characters; the summary goes through `admit()` and is saved as kind 'event', source 'import:session', `valid_until` 30 days, `metadata.session = <session id>`; the entry is then removed; activity action 'remember', origin 'session';
+   4. a lost call leaves its pending entry and the next first prompt finishes it; a session with no transcript, or one already summarised (`metadata.session` matches), is skipped; at most 3 entries per run;
+   5. `tests/session.test.ts` covers each with a stub model, including `/clear` (an end with no start).
 3. Gate: `claude plugin test .` (timeout 600 s, must exit 0).
 4. Scope: phase SESSION. Do after IMPORT.3 (merged earlier, wave 4). Uses IMPORT's transcript reader.
 
-#### SESSION.4: The unused-expiry sweep runs at session start, and Rohit can preview it
+#### SESSION.2: The first prompt shows the last summary and pinned memories
+
+1. Goal: the first-prompt context block.
+2. Acceptance:
+   1. the existing first-prompt path in `prompt.submit` (`hooks/register.ts:1652`, the `isFirst` branch) adds one more context entry ahead of the recall: the newest live 'event' summary for this owner, then pinned memories (at most 5, 2000 characters in all), each with id and owner;
+   2. nothing is added when there is neither; a pinned memory that the recall also found is shown once;
+   3. a spec checks the block, the caps, the order, the de-duplication, and that a later prompt in the same session adds nothing.
+3. Gate: `claude plugin test .` (timeout 600 s, must exit 0).
+4. Scope: phase SESSION. Do after SESSION.1.
+
+#### SESSION.4: The unused-expiry sweep runs once a day, and Rohit can preview it
 
 1. Goal: the plugin side of auto-expire. Needs MODEL.5 and IMPORT.3 (the pinned flag).
 2. Acceptance:
    1. a plugin option `expireUnusedDays`: 90 (default), or 0 to turn the sweep off; values 1-29 are refused;
-   2. `session.start` runs the sweep at most once per 24 hours (a marker file, mode 0600), after the start reply, in the background: the C9 backup first (stop if it fails), then `mnemopi_expire_unused` with `dry_run` false and `validator: 'expire-sweep'` (C10), for the owner's own rows only; the activity log line holds counts and ids, never memory text;
+   2. the sweep runs at most once per 24 hours (a marker file, mode 0600), triggered from `session.start` and from a session's first prompt (so a long-lived process that only sees `/clear` still sweeps), after the reply, in the background: the C9 backup first (stop if it fails), then `mnemopi_expire_unused` with `dry_run` false and `validator: 'expire-sweep'` (C10), for the owner's own rows only; the activity log line (action 'expire', origin 'session') holds counts and ids, never memory text;
    3. `bun bin/memories.ts expire` is a dry run that prints the candidates (id, kind, last used, first 80 characters) and `bun bin/memories.ts expire --apply` runs it for real after a backup, so Rohit can preview the first run on his store;
    4. rows with a pinned flag, other kinds or an existing expiry are never touched (the engine enforces this; a spec checks the plugin does not pass wider kinds than the option allows);
-   5. `tests/session.test.ts` and `tests/bun/` specs cover the daily marker, the off setting, a failed backup stopping the sweep, and the dry run, all on a temp store.
+   5. `tests/session.test.ts` and `tests/bun/` specs cover the daily marker, both triggers, the off setting, a failed backup stopping the sweep, and the dry run, all on a temp store.
 3. Gate: `claude plugin test . && bun run test:bun` (timeout 900 s, must exit 0).
-4. Scope: phase SESSION. Do after IMPORT.3 (merged earlier, wave 4). May also touch `bin/memories.ts` and `.claude-plugin/plugin.json`.
+4. Scope: phase SESSION. Do after SESSION.2.
 
-#### SESSION.2: Session start shows the last summary and pinned memories
+#### SESSION.5: A local project registry: repo or plain folder (Rohit, 2026-10-25)
 
-1. Goal: the session-start context block.
+1. Goal: record what kind of project each owner is, so the map can draw repos as planets and plain folders as space stations or starships. Today the plugin asks `$.session.repo()` while working out the owner (`hooks/register.ts:344-351`) and throws the answer away.
 2. Acceptance:
-   1. `session.start` adds one context block: the newest live 'event' summary for this owner, then pinned memories (at most 5, 2000 characters in all), each with id and owner;
-   2. nothing is added when there is neither;
-   3. a spec checks the block, the caps and the order.
+   1. when the owner is worked out, the plugin writes `<root>/projects.json` (mode 0600): `{ version, projects: { <owner>: { name, kind: 'repo' | 'folder', remoteHost: <host> | null, firstSeen, lastSeen } } }`; `remoteHost` is the remote's host only (for example `github.com`), never the full URL, a user name or a token; a repo with no remote has `kind: 'repo'` and `remoteHost: null`;
+   2. a write happens at most once per owner per session start, and a failure never blocks a save;
+   3. `/mnemosyne-setup` backfills owners the file does not know: it matches each owner's name and hash against folders on disk (the same djb2 hash `owner()` uses), records the kind, and leaves unmatched owners out (the map shows those as planets marked "kind unknown");
+   4. `tests/session.test.ts` covers a repo, a local-only repo, a plain folder, the backfill on a temp folder tree, and that no remote URL or credential is written.
 3. Gate: `claude plugin test .` (timeout 600 s, must exit 0).
-4. Scope: phase SESSION. Do after SESSION.1.
+4. Scope: phase SESSION. Do after SESSION.4. On 2026-10-25 all five owners are GitHub repos, so nothing would be a station or starship yet.
 
 ---
 
-## Wave 6: HARDEN
+## Wave 6: HARDEN and MAPX, side by side
 
 ### Phase HARDEN: Open items: the bank env hole, tests out of the real home, engine log growth, platform notes, the cleanup and knowledge runs
 
 The leftovers from 0.7.0 that touch safety and housekeeping, plus the two runs Rohit does on his own store once the tools exist: the review-and-retire pass and then the knowledge backfill, in that order so Haiku calls are not spent on memories that get retired.
 
 1. Delivers: the bank pin, no test writes into the real home, log pruning, platform notes; then Rohit's review and backfill runs.
-2. Needs first: part A (HARDEN.1, HARDEN.2) needs nothing and runs in wave 1 beside MODEL and GUARD; part B (HARDEN.3 to HARDEN.5) needs CRUD and SESSION and runs in wave 6. Part A may not touch `hooks/register.ts`; only part B may.
+2. Needs first: part A (HARDEN.1, HARDEN.2) needs nothing and ran in wave 1 beside MODEL and GUARD (shipped in 0.8.0); part B (HARDEN.3 to HARDEN.5) needs CRUD and SESSION and runs in wave 6. Only HARDEN.3 gates REL9; HARDEN.4 and HARDEN.5 are Rohit's runs and may come after the 0.9.0 tag (0.9.0 review, item 14). Part A may not touch `hooks/register.ts`; only part B may.
 3. May touch: `hooks/engine.ts`, `hooks/register.ts` (part B only), `bin/install-engine.ts`, `tests/bun/helpers.ts`, `tests/bun/install-engine.spec.ts`, `tests/bun/engine-env.spec.ts`, `tests/register.test.ts`.
 4. Must not touch: `engine/`, `ui/`.
 5. Review level: standard. Hazard: HARDEN.2's gate reads the real home's log count; it only reads.
@@ -781,7 +848,7 @@ The leftovers from 0.7.0 that touch safety and housekeeping, plus the two runs R
 
 1. Goal: log pruning and platform notes.
 2. Acceptance:
-   1. session start and `/mnemosyne-setup` delete `omp.*.log` files in the model cache's logs folder older than 7 days, keeping at least the newest 20 (spec with a temp folder);
+   1. session start and `/mnemosyne-setup` delete `omp.*.log` files (481 files on 2026-10-25) in the model cache's logs folder older than 7 days, keeping at least the newest 20 (spec with a temp folder);
    2. `/mnemosyne-setup` on an Intel Mac (darwin x64) says embeddings are not supported there and leaves them off (spec with a stubbed platform);
    3. the setup reply names Linux and Windows as untested.
 3. Gate: `claude plugin test . && bun run test:bun` (timeout 900 s, must exit 0).
@@ -799,13 +866,161 @@ The leftovers from 0.7.0 that touch safety and housekeeping, plus the two runs R
 
 ---
 
+### Phase MAPX: The galaxy map becomes a solar system (Rohit, 2026-10-25)
+
+The Galaxy view of the dashboard map becomes a solar system. The memory store is a sun, and each writer is a nodule on its surface. Each project is a planet whose size is its memory count and whose orbit distance follows the Arrange by choice. Tags are land masses on the planet's surface, and the memory kinds are moons carrying their memories. Belts hold the untyped, global and no-longer-live memories. Black-hole pairs show similar memories shared between projects. Timeline and Meaning stay as they are. This replaces the parked LATER.4 ("Writer suns").
+
+The build is a port, not a rebuild (Rohit, 2026-10-25). The approved mockup is a working 3D app on three.js r186, the version the repo pins. Its code is in the repo at `docs/plans/mapx-design/`: `MapSolar.dc.html` (the board), `solar-scene.js` (its script, extracted) and `README.md` (what carries over, what changes and where each piece goes). The mockup is the contract for look and behaviour. This phase text adds what the mockup cannot show: real data, the dashboard's security policy, tests, and the few rules marked "beyond the mockup" below. Where the two disagree, Rohit decides.
+
+The mapping (Rohit's decisions, 2026-10-25):
+
+| # | Object | Stands for | Visual |
+|---|---|---|---|
+| 1 | Sun | the memory store | size = live memory count; it turns; a soft glow, dim enough that its surface (granulation, sunspots) stays visible |
+| 2 | Nodules on the sun | writers (`source`) | size = memories written; turn with the sun; flare on write |
+| 3 | Planets | projects (owners) | size = memory count |
+| 3b | Planet or craft | project kind (SESSION.5's `projects.json`) | a git repo is a planet; a local-only repo is a planet with a small "no remote" mark; a plain folder is a craft: a space station when it is a lasting workspace (5 or more memories; ring station, tags as lit panels, memories docked) or a starship when it is small or new (under 5; saucer and nacelles, tags as lit windows, it faces its direction of travel); an owner with no record is a planet marked "kind unknown" |
+| 3a | Planet style | size class | gas giant 30+ (Jupiter, Saturn), ice giant 10-29 (Neptune, Uranus), rocky under 10 (Earth, Mars, Venus, Mercury), dwarf under 3 (Pluto); neighbours in a class get different variants |
+| 4 | Orbit distance | the Arrange by choice | default: activity, busier = closer |
+| 5 | Surface land masses | the project's tags | area = times used there; on gas giants they are coloured bands and storm spots |
+| 6 | Moons | memory kinds | one per kind present; size = count |
+| 7 | Moon swarm | that kind's memories | one asteroid per memory; from Galaxy level the planet's memories show as a ring of asteroids around it |
+| 8 | Asteroid colour | writer (Colour dots by) | or recalls, or age |
+| 9 | Asteroid size | importance | bigger = more important |
+| 10 | Asteroid brightness | recalls | brighter = recalled more |
+| 11 | Halo | pinned | always visible |
+| 12 | Fading | expiry (`valid_until`) | dims in its last 7 days |
+| 13 | Planet asteroid belt | kind 'unknown' | old untyped rows |
+| 14 | Sun asteroid belt | global memories | rows with scope 'global' (6 on 2026-10-25), and any owner 'global' rows; each still counts toward its planet's size |
+| 15 | Outer galaxy belt | retired, expired, lapsed | faded; Restore pulls it back |
+| 16 | Black-hole pair | similar memories across projects | pulsing energy: older planet → its black hole → the partner's black hole → newer planet; moons stay more prominent than black holes |
+| 17 | Binary pair | near-duplicates in one project | Review lens only |
+| 18 | Satellites | a memory's knowledge items | around the selected memory |
+| 19 | Recall comet | a live recall | gold, from the planet to the caller's nodule (the agent in that project asks) |
+| 19a | Save comet | a live save | blue, from the writer's nodule to the planet |
+| 19b | Update beam | a live update | a neutral green beam from the writer's nodule to the body |
+| 19c | Forget laser | a live forget | a red laser from the writer's nodule to the body; the memory fades |
+
+Arrange by (it replaces the rail's Colour by card; planet size is always the memory count):
+
+| # | Option | Orbit distance |
+|---|---|---|
+| 1 | Activity (default) | writes + recalls in the last 30 days; busiest closest |
+| 2 | Size | memory count; biggest closest |
+| 3 | Age | median age of live memories; youngest closest |
+| 4 | Recalls | lifetime recalls; most recalled closest |
+
+Layout (Rohit, 2026-10-25): the map stays a true 3D scene like 0.6.0's (orbit by dragging, from the top or below; right-drag pans; scroll zooms; Top, Below, Side and Reset buttons; auto-rotate is offered but off by default, because a turning camera cancels out the planets' own slow orbits). Space is near-black: no grey haze from the star field or the bloom. A Find box sits at the top centre of the map (as in 0.6.0): typing lists matching planets, stations, starships, kind moons, tags and memories (memories through the existing `POST /api/search`, keyword plus meaning), dims every body that does not match, and picking a result or pressing Enter flies the camera there and opens it in the Details panel (a memory result flies straight into that memory); Escape clears it. Under the map, a fixed-height Bodies strip lists every planet, station and starship as fixed-width chips in at most two rows (more scroll sideways, never down); a chip shows or hides that body on the map without moving the camera (a hidden body also hides its label, orbit line when it is alone on it, black holes and live events), and Show all brings everything back; clicking a body on the map still flies in. The left rail keeps Arrange by, Colour dots by and Show only. The legend floats in the map's two empty top corners (Bodies on the left, Belts, links and motion on the right) and can be hidden. Under the map, a full-width row holds the Details panel (the clicked sun, planet, moon or memory) and, beside it, the Live activity log of 0.6.0, which stays. Drill-down is a camera flight, as the 0.6.0 map's camera flights are: a click speeds the camera into the body (star streaks), and the next level settles in; the path bar flies back out; reduced motion switches instantly. Wheel, +/- buttons and drag zoom and pan at every level. Every body has a hover tooltip (planet: style, counts, top tags, black holes; land or band: tag, uses, other planets with it; moon; asteroid; belt; outer-belt memory: its state, the date, its project and Restore; black hole; satellite). Levels: Galaxy (sun, planets, belts, black holes), then Planet (camera flies in; labelled land masses, kind moons, its black holes named by partner), then Moon (the swarm spreads into a readable ring), then Memory (satellites, and the detail panel). The path bar shows the level, and the URL hash holds it so a reload returns there.
+
+1. Delivers: C11 (below) and the solar-system Galaxy view, ported from the mockup.
+2. Needs first: SESSION.5 (the project registry), CRUDX (the `state` field and the write routes) and CRUD (the Edit, Pin and Retire controls MAPX.7 reuses, and the shared files `ui/index.html`, `ui/style.css`, `ui/app.ts`). MAPX.0 is done; MAPX.1 needs nothing and can run from wave 4.
+3. Read first: `docs/plans/mapx-design/README.md` and `solar-scene.js` (the mockup, method by method); `DESIGN.md` §3.5, §3.7 and §3.8 (the map today); `ui/map.ts` (how the page loads `map-lib.js` and builds the map tab); `ui/map-state.ts` (the per-frame state pattern); `ui/stream.ts` and `ui/map-live.ts` (live events); `ui/server.ts:73` (the Content Security Policy) and `galaxyLevel` (`GET /api/galaxy`); `bin/activity.ts:115` (`appendActivity`).
+4. May touch: `scripts/vendor-map.ts` and `ui/vendor/map-lib.js`, `map-lib.d.ts`, `map-lib.inputs.json` (MAPX.1's export list only), `ui/solar-layout.ts` and `ui/solar.ts` (new), `ui/map.ts`, `ui/map-state.ts`, `ui/map-live.ts`, `ui/index.html`, `ui/style.css`, `ui/app.ts` (the map tab, the hash route and the Details panel only), `ui/server.ts` (`galaxyLevel` and its helpers only), `bin/activity.ts`, `tests/bun/map-state.spec.ts`, `tests/bun/map-live.spec.ts`, `tests/bun/galaxy-api.spec.ts`, `tests/bun/activity.spec.ts`, `tests/bun/solar-*.spec.ts` (new).
+5. Must not touch: `engine/`, `hooks/`, `ui/review.ts`, `ui/health.ts`, `tests/bun/helpers.ts`, the write routes in `ui/server.ts`, and `docs/plans/mapx-design/` (the reference stays as approved).
+6. Review level: standard. The map only reads, except MAPX.3's tally file, which holds counts only. Hazards: (a) a port that drifts from the mockup (guard: `tests/bun/solar-scene.spec.ts` drives the same hovers, clicks, flights, Find and filter the mockup's smoke test did, and Rohit compares it side by side with the canvas); (b) the frame rate with up to 2000 memories (guard: MAPX.1's measurement); (c) inline styles refused by the page's policy (guard: MAPX.6 moves all styling to `ui/style.css`).
+7. Manual QA steps (Rohit, in the dashboard, after the phase merges):
+   1. Galaxy: the sun has a `claude-code` nodule; the planets match the projects; the busiest is closest; Arrange by Size, Age and Recalls each moves the planets, and each keeps its angle.
+   2. Planet: matrixkoder's surface shows its tags as land, `workflow-rules` the same colour as on the other planets; its kind moons orbit; its black holes name partner projects.
+   3. Memory: the detail panel shows text, kind, tags, writer, provenance, dates, state, pin, history and similar memories; Pin works.
+   4. Live: a recall in a Claude session sends a comet from the `claude-code` nodule; a save from the dashboard comes from the `dashboard` nodule.
+   5. Reduced motion: nothing orbits; the map is still usable by keyboard.
+8. Suggested commit message: `feat(map): the galaxy becomes a solar system`
+
+#### MAPX.0: The design, approved and exported (done, 2026-10-25)
+
+1. Done: the mockup is the "v3: solar-system map" row of the Mnemosyne Dashboard canvas, https://claude.ai/artifact/6Qn6icDrmQn6BJKjtmpiy2 (version 31; boards `MapSolar.dc.html`, interactive, and `MapSolarSpec.dc.html`, the spec sheet). Rohit approved it as the target on 2026-10-25 ("I'm happy if I get this exact design").
+2. Exported to `docs/plans/mapx-design/`: both boards verbatim, `solar-scene.js` (the script), and `README.md` (the port map).
+3. If the canvas changes later, the coordinator re-exports it here before the build starts, and notes the version.
+
+#### MAPX.1: Vendor exports and a frame-rate check (any idle lane from wave 4)
+
+1. Goal: the dashboard's bundle can run the mockup's scene, and it runs fast enough with a large store.
+2. Acceptance:
+   1. `scripts/vendor-map.ts` adds to `map-lib.js`'s export list the three.js classes and add-ons `solar-scene.js` uses (`Scene`, `PerspectiveCamera`, `WebGLRenderer`, `Group`, `Mesh`, `Points`, `Line`, `LineLoop`, `Sprite`, the geometries and materials it creates, `CanvasTexture`, `Color`, `Vector2`, `Vector3`, `Raycaster`, the blending and colour-space constants, and `OrbitControls`; the four bloom passes are already exported); the package list and licences are unchanged; `bun scripts/vendor-map.ts --check` passes;
+   2. a throwaway page runs `solar-scene.js`'s scene on the vendored bundle with 5 planets, 6 craft and 2000 memories (rings and swarms), and the frame rate on Rohit's Mac (arm64) is written in the task's report; if it is under 50 fps, the report says which part (`Points` per planet, labels or bloom) to change;
+   3. the throwaway page is never merged.
+3. Gate: `bun scripts/vendor-map.ts --check && bun run test:bun` (timeout 900 s, must exit 0).
+4. Scope: phase MAPX.
+
+#### MAPX.2: GET /api/galaxy carries what the solar system needs (C11)
+
+1. Goal: the read-only data for the new view.
+2. Acceptance:
+   0. each project gains `projectKind` ('repo', 'folder' or 'unknown') and `remoteHost` from SESSION.5's `projects.json`;
+   1. each memory gains `source`, `sourceInferred` (from `metadata.source_backfill`), `kind`, `scope`, `importance`, `pinned`, `state` (as CRUDX.3) and `validUntil`;
+   2. the reply gains `writers: [{ source, count, inferred }]`;
+   3. each project gains `activity30`, `recallsTotal`, `medianAgeDays`, `firstSaved` and `tags: [{ tag, count }]` (live rows only);
+   4. the reply gains `links: [{ a, b, pairs: [{ older, newer, score }] }]` for memories of two different owners with cosine 0.80 or more from `memory_embeddings`; a pair of projects is listed only with at least 2 pairs; at most 50 pairs per link; absent with no vectors;
+   5. read-only, within the existing 2000-memory cap; older pages that ignore the new fields still work; `tests/bun/galaxy-api.spec.ts` covers each field, a store without vectors and a store without `metadata.source_backfill`.
+3. Gate: `bun run test:bun && bun run typecheck` (timeout 900 s, must exit 0).
+4. Scope: phase MAPX.
+
+#### MAPX.3: A daily activity tally per project
+
+1. Goal: "how often in the last 30 days", which the 1 MB activity log cannot answer (it held only 2026-10-23 to 2026-10-25 on 2026-10-25).
+2. Acceptance:
+   1. `appendActivity` (`bin/activity.ts:115`) also adds each line's count to `<root>/activity-daily.json` (mode 0600): `{ version, days: { <owner>: { <YYYY-MM-DD>: { writes, recalls } } } }`; remember and update count as writes and recall as recalls; nothing else is counted; no memory text or ids;
+   2. days older than 90 are dropped on write; a tally failure never stops the log line (the log line is written first);
+   3. `activity30` (MAPX.2) sums the last 30 days from the tally; a project with under 30 days of tally history uses its lifetime numbers (memories plus recalls) instead, and the reply says which (`activitySource: 'tally' | 'lifetime'`);
+   4. `tests/bun/activity.spec.ts` covers counting, the 90-day drop, a corrupt tally file (rebuilt, the log line still written) and the fallback.
+3. Gate: `bun run test:bun` (timeout 900 s, must exit 0).
+4. Scope: phase MAPX.
+
+#### MAPX.4: Port the rules into `ui/solar-layout.ts`
+
+1. Goal: the mockup's pure functions, typed and tested, with no DOM and no three.js.
+2. Acceptance:
+   1. port from `solar-scene.js`: `targets` (orbit rings: at most 10; past 10 bodies the least significant under the current arrange share the outer rings, rank i of n going to ring 9 − ⌊(n−1−i)·10/n⌋, evenly spaced at the speed of the ring's largest body, with one orbit line and one tilt), `orbitSpeed` (0.04 rad/s × dwarf radius ÷ body radius: big bodies crawl, small ones move faster), `planetR`, `extent`, `metric`, `styleOf` and `sizeClass` (gas 30+, ice 10-29, rocky, dwarf under 3; neighbours in a class differ), the craft rule (plain folder: station at 5+ memories, else starship), `describe`, `labelName`, `tagColour`, `dotColour`, `linksOf` and `searchResults`;
+   2. they read the shape `GET /api/galaxy` returns (MAPX.2) instead of the hard-coded `PROJECTS`, `LINKS` and `WRITERS`; the same input in any order gives the same output;
+   3. `tests/bun/solar-layout.spec.ts` checks the mockup's numbers on its own data (the 11 bodies of `solar-scene.js` give 10 rings with one shared pair under each arrange option; the orbit times of about 11, 10, 5.5, 5 and 2.6 minutes; the styles Saturn, Jupiter, Mars, Mercury and Pluto), plus one project, no global memories, and 25 bodies.
+3. Gate: `bun run test:bun && bun run typecheck` (timeout 900 s, must exit 0).
+4. Scope: phase MAPX. Do after MAPX.2.
+
+#### MAPX.5: Port the scene into `ui/solar.ts`, on live data and the live stream
+
+1. Goal: the mockup's 3D scene as the dashboard's Galaxy view.
+2. Acceptance:
+   1. port from `solar-scene.js`, keeping behaviour and look: the textures (`planetTexture`, `sunTexture`, glow, dot), the scene (`initScene`, `makePlanet`, `makeCraft`, `memoryRing`, `makeHoles`), the frame loop (orbits, shared rings, the spread swarm, satellites, the black-hole line with one pulse every 30 seconds), picking (`pick`: solid bodies before dots, tags from the surface coordinates), `act`, the camera flights and views, Find's fly-to, the show/hide filter, and the bloom, sun and darkness levels as approved (bloom 0.375, threshold 0.6);
+   2. it imports three.js from `ui/vendor/map-lib.js` (MAPX.1), never a global; the Galaxy view uses the solar scene, and Timeline and Meaning keep `ForceGraph3D`; switching views disposes one renderer before creating the other (at most one WebGL context);
+   3. live events come from `ui/stream.ts` (`toMapEvent`): a recall is a gold comet from the body to the caller's nodule, a save a blue comet from the writer's nodule, an update a green beam, a forget a red laser with the memory fading; the Simulate buttons keep the demo events;
+   4. beyond the mockup: a pinned memory has a halo, a memory in its last 7 days before expiry fades, asteroid size follows importance and brightness follows recalls, a project idle 30+ days gets an ice cap, a local-only repo gets a "no remote" mark, an owner with no `projects.json` record is a planet marked "kind unknown", and near-duplicates in one project show as binary pairs under a Review lens;
+   5. reduced motion stops orbits, pulses and flights (views switch instantly);
+   6. `tests/bun/solar-scene.spec.ts` runs the scene on the vendored three.js with a stub renderer, the way the mockup's smoke test did, and checks every hover kind, planet, moon and memory clicks, a black hole flying to its partner, Find results and Enter, hiding and showing a body, all four live event kinds, and 35 seconds of frames without an error.
+3. Gate: `bun run test:bun && bun run typecheck` (timeout 900 s, must exit 0).
+4. Scope: phase MAPX. Do after MAPX.4.
+
+#### MAPX.6: Port the page around the map into the dashboard's DOM
+
+1. Goal: the mockup's page (rail, legend, Find, Bodies strip, Details, Live activity) built the dashboard's way.
+2. Acceptance:
+   1. the `<x-dc>` markup and `renderVals()` become builders in `ui/app.ts` with `createElement` and `textContent`, and the state lives in the page's state object as `ui/map-state.ts` does today; no framework;
+   2. no inline `style` attributes (the page's policy is `style-src 'self'`, `ui/server.ts:73`): every style is a class in `ui/style.css`; dynamic values (tooltip position, a chip's dimmed state) are set through `element.style` or a class; the page keeps its own fonts (no Google Fonts);
+   3. the layout matches the mockup: the rail (Arrange by, Colour dots by, Show), the map with the path bar, Find at the top centre, the two collapsible legend cards in the top corners, the view buttons, the fixed Bodies strip of two rows under the map, and the full-width row of Details and Live activity; the URL hash holds the level, and a bad hash falls back to Galaxy;
+   4. Arrange by, Colour dots by and the Show toggles are remembered per viewer in `localStorage`, as the layout is today; Tab moves through sun, planets, moons and memories in order;
+   5. `tests/bun/map-state.spec.ts` and `tests/bun/solar-page.spec.ts` cover the controls, Find's keys, the strip's show and hide, and the hash.
+3. Gate: `bun run test:bun && bun run typecheck` (timeout 900 s, must exit 0), plus Rohit's manual QA above, side by side with the canvas.
+4. Scope: phase MAPX. Do after MAPX.5.
+
+#### MAPX.7: The Details panel on real memories, with the writes
+
+1. Goal: the mockup's Details panel shows real fields and acts.
+2. Acceptance:
+   1. it shows the store summary in the Galaxy view, a body's facts, top tags and black holes (each a button that flies to the partner), a moon's kind and count, or a memory;
+   2. for a memory: the full text, kind, tags (a click lights the land mass), writer, source, trust tier and veracity, created, last recalled and recall count, expiry, state, pin, the last 3 audit actions and similar memories (a cross-project one points to its black hole), from `GET /api/galaxy` and `GET /api/memories/<id>`;
+   3. Edit, Pin and Retire reuse CRUD's form and two-step confirm; no new write route;
+   4. all text through `textContent`; `tests/bun/solar-panel.spec.ts` covers the fields and an older server reply without the new fields.
+3. Gate: `bun run test:bun && bun run typecheck` (timeout 900 s, must exit 0).
+4. Scope: phase MAPX. Do after MAPX.6.
+
+---
+
 ## Wave 7: REL9 (release 0.9.0)
 
 ### Phase REL9: Docs for the 0.9.0 half and version 0.9.0
 
 README and DESIGN describe the dashboard writes and the Review tab (with the audit trail and the "unused by design" Health labels), `/mnemosyne-import`, session summaries, pinned memories and the unused-expiry sweep; the version moves to 0.9.0.
 
-1. Needs first: HARDEN.
+1. Needs first: HARDEN.3 and MAPX (not Rohit's HARDEN.4 and HARDEN.5; 0.9.0 review, item 14).
 2. May touch: `README.md`, `DESIGN.md`, `.claude-plugin/plugin.json`.
 3. Must not touch: `ui/`, `hooks/`, `engine/`, `bin/`.
 4. Review level: light.
@@ -816,8 +1031,8 @@ README and DESIGN describe the dashboard writes and the Review tab (with the aud
 
 1. Goal: document the 0.9.0 half and set the version.
 2. Acceptance:
-   1. README has sections for dashboard writes and Review, `/mnemosyne-import`, session summaries (off by default), pinned memories and `expireUnusedDays`, and names what leaves the machine to Haiku;
-   2. `DESIGN.md` gains a v0.9.0 section with contracts C7, C8 and C10.5, the review history, and the expiry sweep's limits;
+   1. README has sections for dashboard writes and Review (Retire in the Review tab, Forget only in the detail sheet, the four row states), `/mnemosyne-import`, session summaries (off by default), pinned memories (Claude and the dashboard only), `expireUnusedDays` and the solar-system map (the mapping table and Arrange by), and names what leaves the machine to Haiku;
+   2. `DESIGN.md` gains a v0.9.0 section with contracts C7, C8, C10.5 and C11, the review history, the expiry sweep's limits, and the solar-system map (replacing §3.7's galaxy description where it changed);
    3. `.claude-plugin/plugin.json` version is 0.9.0.
 3. Gate (two commands, both must exit 0):
    1. `claude plugin validate . && claude plugin test .` (timeout 600 s);
@@ -855,10 +1070,9 @@ Nice-to-haves kept out of 0.8.0 and 0.9.0. Persona (always-on rules) and canonic
 1. Acceptance: G5 warns on phone numbers and third-party emails (the user's own email is exempt); G6 warns on 'ignore previous instructions' style text and flags the row; both warn-only.
 2. Manual step: parked; warn-only rules, added once 0.8.0's false-positive rate is known.
 
-#### LATER.4: Writer suns on the map (manual, parked; added 2026-10-25)
+#### LATER.4: Moved into MAPX (2026-10-25)
 
-1. Acceptance: the dashboard map shows each writer (the memory's `source`: `claude-code`, `user`, `mcp:<client>` such as Claude Desktop or OMP, later the importers) as a sun at the centre, and its memories orbit it with a new link kind "written by"; rows whose source was backfilled (`metadata.source_backfill = 'inferred'`, the 122 pre-0.8.0 rows relabelled to `claude-code` on 2026-10-25) are drawn differently from proven ones.
-2. Manual step: parked; Rohit's idea, UI work after 0.9.0's dashboard writes.
+1. Rohit moved the writer-sun idea into 0.9.0 as phase MAPX, reshaped as one sun with a nodule per writer. Nothing is left here; the id is kept so references stay stable.
 
 #### LATER.5: Port features from the Python engine (manual, parked; added 2026-10-25)
 
@@ -900,7 +1114,7 @@ Run from the repository root. All must exit 0.
 ### Review rule
 
 1. The review of each phase is done by a different worker than the one who built it. The builder never approves its own work.
-2. Review depth is set per phase: data-loss (MODEL, META, VOCAB, CRUDX, IMPORT) means the reviewer checks specifically for deleted, kept, relabelled or overwritten rows, secrets in logs, and that every apply backs up first; standard (GUARD, CRUD, SESSION, HARDEN, LATER); light (REL8, REL9).
+2. Review depth is set per phase: data-loss (MODEL, META, VOCAB, CRUDX, IMPORT) means the reviewer checks specifically for deleted, kept, relabelled or overwritten rows, secrets in logs, and that every apply backs up first; standard (GUARD, CRUD, SESSION except SESSION.4, HARDEN, MAPX, LATER; SESSION.4, the expiry sweep, is reviewed at data-loss depth); light (REL8, REL9).
 3. A reviewer reruns the gate commands itself and does not trust "tests pass" from the builder.
 4. A task whose review finds a defect goes back to a worker with the finding written into the task; do not widen the task's file scope to make it pass.
 
@@ -946,7 +1160,7 @@ Still open, not blocking any wave:
 
 1. In-phase task order comes from the source's "Build order" lines, not from task-level `deps` (the source only has `IMPORT.2` depending on `IMPORT.0`). META and SESSION build orders are not numeric (META.5 first; IMPORT.3, .1, .2).
 2. RESOLVED by Rohit's pick: the pinned flag task moved from SESSION (wave 5) to IMPORT.3 (wave 4), so CRUDX.3 and IMPORT.3 land in the same wave. CRUDX.3 treats a missing flag as not pinned and tests with a fixture, so the two lanes never wait on each other.
-3. REL9 depends on the whole HARDEN phase, which includes Rohit's manual HARDEN.4 and HARDEN.5, so REL9 cannot start until he finishes them. REL8 needs only HARDEN part A.
+3. Changed in the 0.9.0 review (2026-10-25): REL9 depends on HARDEN.3 only. Rohit's manual HARDEN.4 and HARDEN.5 no longer block the release. REL8 needed only HARDEN part A.
 4. Source wording "run log" (GUARD.4, HARDEN.4, HARDEN.5) and "the IMPORT brief's report" / "the orchestrator" (IMPORT.0) were MK terms; here they are "the coordinator's final report" and "the task's worker_done report". Check this is acceptable.
 5. The source's "Open questions" about `guardMode`, legacy rows, session summaries, the five SUPERSEDED rows, threshold, release split and integration branch are carried as items 7-13 of the old Open decisions list, now decided. Item 13 originally named an MK-specific branch and is reworded.
 6. The source's SUITE `covers` list does not include MODEL.3 or META.3's embedding parts (EMBED covers them), nor IMPORT.0, HARDEN.4/5, or the LATER tasks. Copied as is.
