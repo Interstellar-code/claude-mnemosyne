@@ -714,26 +714,34 @@ function mountSolarPage(host: MapHost, solar: SolarHost, shell: SolarShell, stor
   let loading = false
   // The memories the server found for the query, and whether Enter waits for them.
   let hits: { id: string; owner?: string; content?: string }[] = []
+  // The (trimmed) query those hits answer: hits for an older query never show, so Enter never opens a stale row.
+  let hitsFor = ''
   let enterWaits = false
   // Enter was pressed on a query too short to search: Find says so instead of doing nothing.
   let tooShort = false
   let lastLevel = ''
   // The /api/memories/<id> replies for the memory the page is on (dropped when it leaves memory level).
   const details = new Map<string, DetailFetch>()
+  // Bumped when a live event drops a memory's reply, so a fetch still on its way (older than the event) does not put its text back.
+  const detailTokens = new Map<string, number>()
 
   const send = <T,>(call: (scene: SolarSceneApi) => T) => {
     if (scene !== null) call(scene)
   }
   const sceneView = () => ({ ...viewOf(page), rotate: page.rotate && !reducedMotion })
-  const rows = (): FindRow[] => (page.findOpen && galaxy !== null ? findRows(bodies, page.query, hits, galaxy.memories) : [])
+  // Local bodies, moons and tags first, then the memories the server ranked for this very query, in its order.
+  const rows = (): FindRow[] => (page.findOpen && galaxy !== null ? findRows(bodies, page.query, hitsFor === page.query.trim() ? hits : [], galaxy.memories) : [])
 
   // ---- Find: the memory search ----
 
   const memorySearch = createMemorySearch({
     post: solar.post,
     mode: () => findMode(solar.embeddings(), solar.searchMode()),
-    done: (_query, found) => {
-      if (found !== null) hits = found
+    done: (query, found) => {
+      if (found !== null) {
+        hits = found
+        hitsFor = query.trim()
+      }
       renderFind()
       if (enterWaits && rows().length > 0) {
         enterWaits = false
@@ -908,6 +916,8 @@ function mountSolarPage(host: MapHost, solar: SolarHost, shell: SolarShell, stor
   function ensureDetail() {
     const level = page.level
     if (level.level !== 'memory') {
+      // A fetch still on its way for a memory the page has left must not leave its reply behind.
+      for (const id of details.keys()) detailTokens.set(id, (detailTokens.get(id) ?? 0) + 1)
       details.clear()
       return
     }
@@ -915,17 +925,36 @@ function mountSolarPage(host: MapHost, solar: SolarHost, shell: SolarShell, stor
     const have = details.get(id)
     if (have === 'loading' || (have !== undefined && have !== 'failed')) return
     details.set(id, 'loading')
+    const token = detailTokens.get(id) ?? 0
     void (async () => {
+      let reply: DetailFetch
       try {
         const response = await host.api(`/api/memories/${encodeURIComponent(id)}`)
         const body = (await response.json().catch(() => null)) as unknown
         if (!response.ok || body === null || typeof body !== 'object' || Array.isArray(body)) throw new Error(`the server answered ${response.status}`)
-        details.set(id, body as MemoryDetail)
+        reply = body as MemoryDetail
       } catch {
-        details.set(id, 'failed')
+        reply = 'failed'
       }
+      if ((detailTokens.get(id) ?? 0) !== token) return
+      details.set(id, reply)
       if (page.level.level === 'memory' && page.level.id === id) renderDetails()
     })()
+  }
+
+  /** A live save, update or forget of a memory makes its fetched record out of date: drop it, and fetch again if it is the one open. */
+  function refreshDetails(event: MapEvent) {
+    if (event.kind === 'recall') return
+    let dropped = false
+    for (const id of event.ids) {
+      if (!details.has(id)) continue
+      details.delete(id)
+      detailTokens.set(id, (detailTokens.get(id) ?? 0) + 1)
+      dropped = true
+    }
+    if (!dropped || page.level.level !== 'memory' || !event.ids.includes(page.level.id)) return
+    ensureDetail()
+    renderDetails()
   }
 
   /** The Details panel is #map-inspector, as the Timeline and Meaning layouts' selection card is; it is the solar page's only while the Galaxy layout runs. */
@@ -1105,6 +1134,7 @@ function mountSolarPage(host: MapHost, solar: SolarHost, shell: SolarShell, stor
     if (event.key === 'Escape') {
       find.value = ''
       hits = []
+      hitsFor = ''
       enterWaits = false
       tooShort = false
       memorySearch.cancel()
@@ -1128,7 +1158,9 @@ function mountSolarPage(host: MapHost, solar: SolarHost, shell: SolarShell, stor
   host.events?.(line => {
     if (!active) return
     const event = toMapEvent(line)
-    if (event !== null) send(scene => scene.event(event))
+    if (event === null) return
+    refreshDetails(event)
+    send(scene => scene.event(event))
   })
   renderRail()
   renderViews()

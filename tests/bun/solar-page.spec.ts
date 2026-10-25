@@ -310,6 +310,8 @@ type Options = {
   /** The library does not load until this settles. */
   gate?: Promise<void>
   post?: (path: string, body: { query: string; mode: string }) => Promise<Response>
+  /** The /api/memories/<id> reply (default: the galaxy fixture, as every other path gets). */
+  detail?: (id: string) => Promise<Response>
 }
 
 async function boot(options: Options = {}): Promise<Boot> {
@@ -379,7 +381,7 @@ async function boot(options: Options = {}): Promise<Boot> {
   }
   const { createMap } = (await import(join(ROOT, 'ui', 'map.ts'))) as { createMap: (host: unknown) => unknown }
   createMap({
-    api: async () => new Response(JSON.stringify(options.reply ?? FIXTURE), { status: 200 }),
+    api: async (path: string) => (options.detail !== undefined && path.startsWith('/api/memories/') ? options.detail(decodeURIComponent(path.slice('/api/memories/'.length))) : new Response(JSON.stringify(options.reply ?? FIXTURE), { status: 200 })),
     library: async () => {
       await options.gate
       if (options.libraryError !== undefined) throw new Error(options.libraryError)
@@ -665,6 +667,63 @@ describe('Find', () => {
     expect(waiting.scene().of('flyTo').at(-1)!.target).toEqual(target)
   })
 
+  test('the result order is local rows first, then the memories in the server\'s rank order, whatever order the answers arrive in', async () => {
+    const [first, second] = [FIXTURE.memories[0]!, FIXTURE.memories[2]!]
+    const ranked = [{ id: second.id, owner: second.owner, content: 'Rank one' }, { id: first.id, owner: first.owner, content: 'Rank two' }]
+    const target = { level: 'memory' as const, owner: second.owner, kind: second.kind, id: second.id }
+    const boots = (delay: number) => boot({ post: async () => { await Bun.sleep(delay); return new Response(JSON.stringify({ results: ranked }), { status: 200 }) } })
+    // The answer is in before Enter: the list shows the rank order and Enter takes row one.
+    const ahead = await boots(5)
+    type(ahead, 'qzxgate')
+    await Bun.sleep(480)
+    const labels = buttons(ahead.node('solar-find-results')).map(x => x.textContent)
+    expect(labels.map(label => label.replace(/^Memory/, '').slice(0, 8))).toEqual(['Rank one', 'Rank two'])
+    press(ahead, 'map-find', 'Enter')
+    expect(ahead.scene().of('flyTo').map(c => c.target)).toEqual([target])
+    // Enter is pressed first and the answer comes later (slowly, or at once): the same row is opened.
+    for (const delay of [5, 80]) {
+      const behind = await boots(delay)
+      type(behind, 'qzxgate')
+      press(behind, 'map-find', 'Enter')
+      await Bun.sleep(delay + 60)
+      expect(behind.scene().of('flyTo').map(c => c.target)).toEqual([target])
+    }
+  })
+
+  test('local rows stay above the memory rows, and Enter opens the first local row', async () => {
+    const memory = FIXTURE.memories[0]!
+    const b = await boot({ post: async () => new Response(JSON.stringify({ results: [{ id: memory.id, owner: memory.owner, content: 'matrix notes' }] }), { status: 200 }) })
+    type(b, 'matrix')
+    await Bun.sleep(480)
+    const labels = buttons(b.node('solar-find-results')).map(x => x.textContent)
+    expect(labels.at(-1)).toStartWith('Memory')
+    expect(labels.slice(0, -1).every(label => !label.startsWith('Memory'))).toBe(true)
+    press(b, 'map-find', 'Enter')
+    expect(b.scene().of('flyTo').at(-1)!.target).toEqual({ level: 'planet', owner: MATRIX })
+  })
+
+  test('memories found for an older query are not rows for the new one: Enter waits for the answer to what is typed', async () => {
+    const [old, fresh] = [FIXTURE.memories[0]!, FIXTURE.memories[2]!]
+    let release: (response: Response) => void = () => {}
+    const b = await boot({
+      post: async (_path, body) => {
+        if (body.query === 'qzxgate') return new Response(JSON.stringify({ results: [{ id: old.id, owner: old.owner, content: 'Old answer' }] }), { status: 200 })
+        return new Promise<Response>(resolve => { release = resolve })
+      },
+    })
+    type(b, 'qzxgate')
+    await Bun.sleep(480)
+    expect(b.node('solar-find-results').texts().join('')).toContain('Old answer')
+    type(b, 'qzxgates')
+    expect(b.node('solar-find-results').texts().join('')).not.toContain('Old answer')
+    press(b, 'map-find', 'Enter')
+    await Bun.sleep(30)
+    expect(b.scene().of('flyTo')).toEqual([])
+    release(new Response(JSON.stringify({ results: [{ id: fresh.id, owner: fresh.owner, content: 'New answer' }] }), { status: 200 }))
+    await Bun.sleep(30)
+    expect(b.scene().of('flyTo').at(-1)!.target).toEqual({ level: 'memory', owner: fresh.owner, kind: fresh.kind, id: fresh.id })
+  })
+
   test('Escape drops an answer still on its way', async () => {
     let release: (response: Response) => void = () => {}
     const memory = FIXTURE.memories[0]!
@@ -756,6 +815,64 @@ describe('the level: the URL hash, the path, Details, the announcement and the T
     // Activating a stop flies there.
     buttons(b.node('solar-tour'))[0]!.fire('click')
     expect(b.scene().of('flyTo').at(-1)!.target).toEqual({ level: 'galaxy' })
+  })
+
+  test('a live update or forget of the open memory drops its fetched record and fetches it again; a recall or another memory leaves it', async () => {
+    const memory = FIXTURE.memories[0]!
+    const fetched: string[] = []
+    let text = 'Old text'
+    const b = await boot({
+      hash: `#level=memory:${memory.id}`,
+      detail: async id => {
+        fetched.push(id)
+        return new Response(JSON.stringify({ content: text, state: 'active' }), { status: 200 })
+      },
+    })
+    await Bun.sleep(20)
+    expect(fetched).toEqual([memory.id])
+    expect(b.node('map-inspector').texts().join(' ')).toContain('Old text')
+    // A recall and an event about another memory change nothing here.
+    b.emit({ t: '2026-10-25T10:00:00.000Z', action: 'recall', owner: memory.owner, ids: [memory.id], client: 'claude-code', ok: true })
+    b.emit({ t: '2026-10-25T10:00:01.000Z', action: 'update', owner: memory.owner, ids: ['mem-999'], client: 'claude-code', ok: true })
+    await Bun.sleep(20)
+    expect(fetched).toEqual([memory.id])
+    text = 'New text'
+    b.emit({ t: '2026-10-25T10:00:02.000Z', action: 'update', owner: memory.owner, ids: [memory.id], client: 'claude-code', ok: true })
+    await Bun.sleep(20)
+    expect(fetched).toEqual([memory.id, memory.id])
+    const panel = b.node('map-inspector').texts().join(' ')
+    expect(panel).toContain('New text')
+    expect(panel).not.toContain('Old text')
+    // A forget: the record is gone, so the fetch fails and the panel stops showing the text.
+    let gone = false
+    const forgotten = await boot({
+      hash: `#level=memory:${memory.id}`,
+      detail: async () => (gone ? new Response('{}', { status: 404 }) : new Response(JSON.stringify({ content: 'Still here' }), { status: 200 })),
+    })
+    await Bun.sleep(20)
+    expect(forgotten.node('map-inspector').texts().join(' ')).toContain('Still here')
+    gone = true
+    forgotten.emit({ t: '2026-10-25T10:00:03.000Z', action: 'forget', owner: memory.owner, ids: [memory.id], client: 'claude-code', ok: true })
+    await Bun.sleep(20)
+    expect(forgotten.node('map-inspector').texts().join(' ')).not.toContain('Still here')
+  })
+
+  test('a fetch that was already on its way when the update came does not put its older text back', async () => {
+    const memory = FIXTURE.memories[0]!
+    const replies: ((response: Response) => void)[] = []
+    const b = await boot({ hash: `#level=memory:${memory.id}`, detail: () => new Promise<Response>(resolve => void replies.push(resolve)) })
+    await Bun.sleep(20)
+    expect(replies.length).toBe(1)
+    b.emit({ t: '2026-10-25T10:00:00.000Z', action: 'update', owner: memory.owner, ids: [memory.id], client: 'claude-code', ok: true })
+    await Bun.sleep(20)
+    expect(replies.length).toBe(2)
+    replies[1]!(new Response(JSON.stringify({ content: 'Fresh text' }), { status: 200 }))
+    await Bun.sleep(20)
+    replies[0]!(new Response(JSON.stringify({ content: 'Stale text' }), { status: 200 }))
+    await Bun.sleep(20)
+    const panel = b.node('map-inspector').texts().join(' ')
+    expect(panel).toContain('Fresh text')
+    expect(panel).not.toContain('Stale text')
   })
 
   test('live activity lines reach the scene as map events', async () => {
