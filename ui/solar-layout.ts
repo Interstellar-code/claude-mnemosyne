@@ -316,7 +316,10 @@ export function buildBodies(galaxy: Pick<SolarGalaxy, 'projects'>, now: number):
   })
 }
 
-/** The hash of anything that belongs to a body: its seed, then `suffix` (the mockup hashed the project id). */
+/**
+ * The hash of anything that belongs to a body: its seed, then `suffix` (the mockup hashed the project id).
+ * MAPX.5: tag lights and moon pivots must use `hashOf(body, tag)` (the mockup's hash had no '|' separator).
+ */
 export const hashOf = (body: { seed: string }, suffix = ''): number => fnv(body.seed + suffix)
 /** Where on its orbit a planet starts, in radians. */
 export const startAngle = (body: { seed: string }): number => (hashOf(body) % 6283) / 1000
@@ -542,7 +545,9 @@ export function searchResults(bodies: readonly Body[], query: string): SearchOut
   const found: SearchHit[] = []
   const moons: SearchHit[] = []
   const tags: SearchHit[] = []
-  for (const body of bodies) {
+  // Visit the bodies by label, then owner, so the result does not depend on the input order.
+  const ordered = bodies.slice().sort((a, b) => before(a.label, b.label) || before(a.owner, b.owner))
+  for (const body of ordered) {
     let hit = false
     if (body.label.toLowerCase().includes(q)) {
       hit = true

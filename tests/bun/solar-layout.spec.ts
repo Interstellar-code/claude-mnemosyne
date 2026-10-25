@@ -431,6 +431,22 @@ describe('black holes', () => {
     expect(linksOf(links, must(byLabel(bodies).cowork).owner)).toEqual([])
   })
 
+  test('every pair names one memory of each of the link\'s two owners, the older one first', () => {
+    const memory = new Map(galaxy.memories.map(m => [m.id, m]))
+    expect(galaxy.links?.length).toBeGreaterThan(0)
+    for (const link of galaxy.links ?? []) {
+      expect(link.pairs.length).toBeGreaterThanOrEqual(2)
+      for (const pair of link.pairs) {
+        const older = must(memory.get(pair.older))
+        const newer = must(memory.get(pair.newer))
+        expect([older.owner, newer.owner].sort()).toEqual([link.a, link.b].sort())
+        expect(older.state).toBe('live')
+        expect(newer.state).toBe('live')
+        expect(Date.parse(older.created ?? '')).toBeLessThan(Date.parse(newer.created ?? ''))
+      }
+    }
+  })
+
   test('no vectors means no links; a link to the owner global or an unknown owner is dropped', () => {
     const bodies = bodiesOf()
     expect(linkInfos({}, bodies)).toEqual([])
@@ -472,6 +488,27 @@ describe('Find', () => {
 })
 
 describe('any order, same answer', () => {
+  test('searchResults gives the same output when the bodies come in reverse, shuffled or rotated', () => {
+    const twins = [
+      project('project-twin-aa', { liveCount: 12, kinds: [{ kind: 'decision', count: 12 }], tags: [{ tag: 'plan-a', count: 4 }], tagsTotal: 1 }),
+      project('project-twin-bb', { liveCount: 12, kinds: [{ kind: 'decision', count: 12 }], tags: [{ tag: 'plan-a', count: 4 }], tagsTotal: 1 }),
+    ]
+    const bodies = [...bodiesOf(), ...bodiesOf(galaxyOf(twins))]
+    expect(bodies.filter(b => b.label === 'twin')).toHaveLength(2)
+    for (const query of ['plan', 'matrix', 'decision', 'twin', 'a']) {
+      const base = searchResults(bodies, query)
+      if (query !== 'a') expect(base.results.length).toBeGreaterThan(0)
+      expect(searchResults(bodies.slice().reverse(), query)).toEqual(base)
+      expect(searchResults(shuffled(bodies), query)).toEqual(base)
+      for (let turn = 1; turn < bodies.length; turn++) expect(searchResults([...bodies.slice(turn), ...bodies.slice(0, turn)], query)).toEqual(base)
+    }
+    // Two projects with one label and the same counts: the owner breaks the tie.
+    const twin = searchResults(bodies.slice().reverse(), 'twin')
+    expect(twin.results.filter(r => r.type === 'Planet').map(r => r.target)).toEqual([{ level: 'planet', owner: 'project-twin-aa' }, { level: 'planet', owner: 'project-twin-bb' }])
+    const plan = searchResults(bodies.slice().reverse(), 'plan-a').results.filter(r => r.label === 'plan-a')
+    expect(plan.map(r => r.target)).toEqual([{ level: 'planet', owner: 'project-twin-aa' }, { level: 'planet', owner: 'project-twin-bb' }])
+  })
+
   test('shuffling the projects changes no body, ring, style or search result', () => {
     const base = bodiesOf()
     const mixed = bodiesOf(galaxyOf(shuffled(galaxy.projects)))
