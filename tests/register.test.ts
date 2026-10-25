@@ -2991,6 +2991,9 @@ const PROJECTS_PATH = '/home/u/.claude/mnemosyne/projects.json'
 const REPO_OWNER = 'project-My-Repo-apu5fc'
 const perProject = { options: { scope: 'per-project' } } as const
 
+// tests/ is compiled without timer globals (tsconfig types: []); the runtime provides this one.
+declare const setTimeout: (callback: (value?: unknown) => void, ms: number) => unknown
+
 /** Lets the registry's fire-and-forget task run: session start does not wait for it. */
 const settle = () => new Promise(resolve => setTimeout(resolve, 25))
 

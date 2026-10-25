@@ -89,10 +89,14 @@ export function remoteHostOf(remote: string | null | undefined): string | null {
   const url = /^([a-z][a-z0-9+.-]*):\/\/(.*)$/is.exec(text)
   if (url !== null) {
     if (url[1]!.toLowerCase() === 'file') return LOCAL_HOST
-    // Everything up to the last '@' before the query is user info, even a password with a raw '/' in it (user:12/34@host).
     const beforeQuery = url[2]!.split(/[?#]/, 1)[0] ?? ''
-    const at = beforeQuery.lastIndexOf('@')
-    return hostOfAuthority((at < 0 ? beforeQuery : beforeQuery.slice(at + 1)).split('/', 1)[0] ?? '')
+    const authority = beforeQuery.split('/', 1)[0] ?? ''
+    // User info is read from the authority alone, so an '@' in the path (o/r@x) is never taken for it. The one exception is a
+    // password with a raw '/' in it (user:12/34@host, git-invalid but seen): the authority then ends in a 'user:...' with no '@',
+    // and the user info runs to the last '@' of the whole URL.
+    const from = authority.includes('@') || !authority.includes(':') ? authority : beforeQuery
+    const at = from.lastIndexOf('@')
+    return hostOfAuthority((at < 0 ? from : from.slice(at + 1)).split('/', 1)[0] ?? '')
   }
   // scp-like: [user@]host:path. The colon must come before any slash, or it is a path (/a/b:c, ./a:b).
   const head = text.split('/', 1)[0] ?? ''
