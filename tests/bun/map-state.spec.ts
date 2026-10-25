@@ -3620,7 +3620,6 @@ import {
   SOLAR_KEY,
   TAB_MEMORIES,
   type ChipRow,
-  type DetailsView,
   type LegendRow,
   type MemorySearchDeps,
   type SolarCrumb,
@@ -3729,10 +3728,9 @@ describe('the solar page state (MAPX.11)', () => {
     const name: SolarViewName = 'top'
     const crumb: SolarCrumb = { label: 'Galaxy', target: { level: 'galaxy' }, current: true }
     const legend: LegendRow = { colour: '#fff', name: 'Sun', means: 'the store' }
-    const details: DetailsView = { kicker: '', title: '', facts: [], hint: '' }
     const options: Pick<SolarSceneOptions, 'canvas'> = { canvas: { width: 1, height: 1 } }
     const deps: Pick<MemorySearchDeps, 'pause'> = { pause: 400 }
-    expect([chip.owner.length > 0, view.arrange, name, crumb.current, legend.name, details.hint, options.canvas.width, deps.pause]).toEqual([true, 'activity', 'top', true, 'Sun', '', 1, 400])
+    expect([chip.owner.length > 0, view.arrange, name, crumb.current, legend.name, options.canvas.width, deps.pause]).toEqual([true, 'activity', 'top', true, 'Sun', 1, 400])
   })
 
   test('findMode is keyword while embeddings are off', () => {

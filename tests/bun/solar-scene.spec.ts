@@ -243,7 +243,7 @@ describe('MAPX.5 hover', () => {
     // Outer belt: the fixture holds three memories that are not live. Hover each dot where it is drawn.
     const belt = r.all(o => o.userData?.kind === 'points' && o.userData.items.length === 3 && o.userData.items[0].tip[0].startsWith('Outer belt'))[0]
     expect(belt.userData.items.map((i: any) => i.tip[0])).toEqual(['Outer belt · a retired memory', 'Outer belt · an expired memory', 'Outer belt · a lapsed memory'])
-    expect(belt.userData.items[0].tip[3]).toBe('Restore in Review sends it back to its planet')
+    expect(belt.userData.items[0].tip[3]).toBe('Restore it in the Review tab')
     expect(belt.userData.items[1].tip[1]).toMatch(/^expired by the sweep: unused 90 days, 2026-10-16$/)
     expect(belt.userData.items[2].tip[1]).toBe('its own expiry date passed: 2026-10-23')
     expect(belt.userData.items[0].tip[2]).toMatch(/^from hermes-switchui · /)

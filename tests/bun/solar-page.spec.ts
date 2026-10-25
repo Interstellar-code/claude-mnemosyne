@@ -187,6 +187,9 @@ function loose(): any {
 }
 const fuzzy = <T extends object>(o: T): T => new Proxy(o, { get: (t, p, r) => (p in t || typeof p === 'symbol' || p === 'then' ? Reflect.get(t, p, r) : loose()) })
 
+/** The force graph's constructor throws this while it is set (a graph that cannot start); `tries` counts the starts it was asked for. */
+const graphFailure = { message: null as string | null, tries: 0 }
+
 function fakeLibrary(contexts: Contexts) {
   class Base {
     constructor() {
@@ -217,6 +220,10 @@ function fakeLibrary(contexts: Contexts) {
   class ForceGraph3D {
     renderers: any
     constructor(_element: unknown, _config?: unknown) {
+      if (graphFailure.message !== null) {
+        graphFailure.tries++
+        throw new Error(graphFailure.message)
+      }
       contexts.graphs++
       openContext(contexts)
       let lost = false
@@ -296,6 +303,8 @@ type Options = {
   real?: boolean
   /** createScene throws this. */
   sceneError?: string
+  /** The force graph cannot start, with this message. */
+  graphError?: string
   /** The library fails to load with this message. */
   libraryError?: string
   /** The library does not load until this settles. */
@@ -318,6 +327,8 @@ async function boot(options: Options = {}): Promise<Boot> {
   // three.js reads window while it runs; the page stand-in has none.
   if (!('window' in g)) g.window = globalThis
   FakeNode.webgl = options.webgl !== false
+  graphFailure.message = options.graphError ?? null
+  graphFailure.tries = 0
   const contexts = newContexts()
   const library = fakeLibrary(contexts)
   const factory = fakeSceneFactory()
@@ -413,7 +424,7 @@ describe('the solar page: markup and policy', () => {
   })
 
   test('the mockup page is in the markup: path, Find, two legend cards, view buttons, the two-row Bodies strip, Details, Live', () => {
-    for (const id of ['solar-path', 'map-find', 'solar-legend-left', 'solar-legend-right', 'solar-views', 'solar-bodies', 'solar-chips', 'solar-show-all', 'solar-details', 'map-live-strip', 'solar-card-arrange', 'solar-card-colour', 'solar-card-show', 'solar-find-results']) expect(HTML).toContain(`id="${id}"`)
+    for (const id of ['solar-path', 'map-find', 'solar-legend-left', 'solar-legend-right', 'solar-views', 'solar-bodies', 'solar-chips', 'solar-show-all', 'map-inspector', 'map-live-strip', 'solar-card-arrange', 'solar-card-colour', 'solar-card-show', 'solar-find-results']) expect(HTML).toContain(`id="${id}"`)
     expect(readFileSync(join(ROOT, 'ui', 'style.css'), 'utf8')).toContain('grid-template-rows: repeat(2, 38px)')
   })
 })
@@ -426,8 +437,8 @@ describe('the Galaxy layout as a solar page', () => {
     expect(b.scene().of('setData')[0]!.galaxy.projects.length).toBe(FIXTURE.projects.length)
     expect(lastView(b)).toEqual({ arrange: 'activity', colour: 'writer', hidden: {}, query: '', rotate: true, sample: true, legend: true })
     expect(b.node('view-map').classList.contains('solar-on')).toBe(true)
-    for (const id of ['solar-card-arrange', 'solar-card-colour', 'solar-card-show', 'solar-details', 'solar-bodies']) expect(b.node(id).hidden).toBe(false)
-    for (const id of ['map-card-colour', 'map-card-links', 'map-card-know', 'map-card-layers', 'map-card-projects', 'map-inspector', 'map-overview', 'map-legend']) expect(b.node(id).classes()).toContain('legacy-only')
+    for (const id of ['solar-card-arrange', 'solar-card-colour', 'solar-card-show', 'solar-bodies']) expect(b.node(id).hidden).toBe(false)
+    for (const id of ['map-card-colour', 'map-card-links', 'map-card-know', 'map-card-layers', 'map-card-projects', 'map-overview', 'map-legend']) expect(b.node(id).classes()).toContain('legacy-only')
     expect(buttons(b.node('solar-arrange')).map(x => x.textContent)).toEqual(['Activity', 'Size', 'Age', 'Recalls'])
     expect(buttons(b.node('solar-colour')).map(x => x.textContent)).toEqual(['Writer', 'Recalls', 'Age'])
     expect(buttons(b.node('solar-show')).map(x => x.textContent)).toEqual(['Auto-rotate: on', 'Legend: on', 'Sample outer-belt dust: on'])
@@ -440,7 +451,7 @@ describe('the Galaxy layout as a solar page', () => {
     const b = await boot({ solar: false })
     expect(b.factory.scenes.length).toBe(0)
     expect(b.node('view-map').classes()).not.toContain('solar-on')
-    for (const id of ['solar-card-arrange', 'solar-bodies', 'solar-details', 'solar-canvas']) expect(b.node(id).hidden).toBe(true)
+    for (const id of ['solar-card-arrange', 'solar-bodies', 'solar-canvas']) expect(b.node(id).hidden).toBe(true)
   })
 
   test('the Layout card is visible in all three layouts; Timeline gives the old rail back and drops the scene, Galaxy builds a new one', async () => {
@@ -672,7 +683,7 @@ describe('the level: the URL hash, the path, Details, the announcement and the T
   test('a hash level flies the scene there on load; a bad or stale one falls back to Galaxy', async () => {
     const planet = await boot({ hash: `#level=planet:${MATRIX}` })
     expect(planet.scene().of('flyTo').map(c => c.target)).toEqual([{ level: 'planet', owner: MATRIX }])
-    expect(planet.node('solar-details').texts().join(' ')).toContain('matrixkoder')
+    expect(planet.node('map-inspector').texts().join(' ')).toContain('matrixkoder')
     const moon = await boot({ hash: `#level=moon:${MATRIX}:instruction` })
     expect(moon.scene().of('flyTo').map(c => c.target)).toEqual([{ level: 'moon', owner: MATRIX, kind: 'instruction' }])
     const memory = FIXTURE.memories[0]!
@@ -690,7 +701,7 @@ describe('the level: the URL hash, the path, Details, the announcement and the T
     b.scene().level({ level: 'planet', owner: MATRIX })
     expect(b.replaced.at(-1)).toBe(`/#level=planet:${MATRIX}`)
     expect(b.node('solar-path').texts().filter(t => t !== '›')).toEqual(['Galaxy', 'matrixkoder'])
-    expect(b.node('solar-details').texts().join(' ')).toContain('matrixkoder')
+    expect(b.node('map-inspector').texts().join(' ')).toContain('matrixkoder')
     expect(b.node('solar-live').textContent).toBe('Planet: Galaxy, matrixkoder')
     b.scene().level({ level: 'moon', owner: MATRIX, kind: 'instruction' })
     expect(b.replaced.at(-1)).toBe(`/#level=moon:${MATRIX}:instruction`)
@@ -973,7 +984,7 @@ describe('the shell on the real scene (stub renderer and clock, the vendored thr
     const b = await boot({ real: true, hash: `#level=planet:${MATRIX}` })
     b.real[0]!.clock.run(3)
     expect(b.replaced.at(-1)).toBe(`/#level=planet:${MATRIX}`)
-    expect(b.node('solar-details').texts().join(' ')).toContain('matrixkoder')
+    expect(b.node('map-inspector').texts().join(' ')).toContain('matrixkoder')
     const moon = await boot({ real: true, hash: `#level=moon:${MATRIX}:instruction` })
     moon.real[0]!.clock.run(3)
     expect(moon.replaced.at(-1)).toBe(`/#level=moon:${MATRIX}:instruction`)
@@ -1017,5 +1028,91 @@ describe('the shell on the real scene (stub renderer and clock, the vendored thr
     expect(b.real[1]!.renderer().disposed).toBe(false)
     b.real[1]!.clock.run(1)
     expect(b.contexts.max).toBe(1)
+  })
+})
+
+describe('the stage message and Find, after the MAPX.6 review', () => {
+  test('a message about one renderer goes when the other renderer starts', async () => {
+    // The scene fails in Galaxy; Timeline's force graph starts, so the text no longer holds.
+    const b = await boot({ sceneError: 'context lost' })
+    expect(b.node('map-message').textContent).toBe('The 3D map could not start (context lost).')
+    b.layout('timeline')
+    await Bun.sleep(20)
+    expect(b.contexts.graphs).toBe(1)
+    expect(b.node('map-message').hidden).toBe(true)
+    expect(b.node('map-canvas').hidden).toBe(false)
+    // The force graph fails in Timeline; Galaxy's scene starts, so that text goes too.
+    const c = await boot({ graphError: 'gl lost' })
+    c.layout('timeline')
+    await Bun.sleep(20)
+    expect(c.node('map-message').textContent).toBe('The 3D map could not start (gl lost).')
+    graphFailure.message = null
+    c.layout('galaxy')
+    await Bun.sleep(20)
+    expect(c.node('map-message').hidden).toBe(true)
+    expect(c.node('solar-canvas').hidden).toBe(false)
+  })
+
+  test('a data load that works does not take a message away that still holds (a scene or a graph that failed)', async () => {
+    const scene = await boot({ sceneError: 'context lost' })
+    await Bun.sleep(20)
+    expect(scene.node('map-message').hidden).toBe(false)
+    const none = await boot({ webgl: false })
+    await Bun.sleep(20)
+    expect(none.node('map-message').textContent).toBe('This map needs WebGL, which this browser has turned off or does not offer.')
+  })
+
+  test('a store with no memories keeps its message once the scene has started', async () => {
+    const b = await boot({ reply: EMPTY_REPLY })
+    await Bun.sleep(20)
+    expect(b.node('map-message').hidden).toBe(false)
+    expect(b.node('map-message').textContent).toContain('no memories yet')
+  })
+
+  test('a force graph that could not start is tried again on a layout change, not on every state change', async () => {
+    const b = await boot({ graphError: 'gl lost' })
+    b.layout('timeline')
+    await Bun.sleep(20)
+    expect(graphFailure.tries).toBe(1)
+    // Find keystrokes are state changes: each used to retry the start.
+    type(b, 'm')
+    type(b, 'ma')
+    type(b, 'mat')
+    await Bun.sleep(20)
+    expect(graphFailure.tries).toBe(1)
+    b.layout('galaxy')
+    await Bun.sleep(20)
+    b.layout('timeline')
+    await Bun.sleep(20)
+    expect(graphFailure.tries).toBe(2)
+  })
+
+  test('Enter flies to the first result, the one at the top of the list, with many matches', async () => {
+    const b = await boot()
+    type(b, 'in')
+    const rows = buttons(b.node('solar-find-results'))
+    expect(rows.length).toBeGreaterThan(3)
+    press(b, 'map-find', 'Enter')
+    const entered = b.scene().of('flyTo').at(-1)!.target
+    const again = await boot()
+    type(again, 'in')
+    buttons(again.node('solar-find-results'))[0]!.fire('click')
+    expect(entered).toEqual(again.scene().of('flyTo').at(-1)!.target)
+  })
+
+  test('Enter on one character says why nothing flew; two characters with no match do not wait for a search that cannot run', async () => {
+    const b = await boot()
+    type(b, 'a')
+    press(b, 'map-find', 'Enter')
+    expect(b.scene().of('flyTo').length).toBe(0)
+    expect(b.node('map-found').textContent).toBe('Type at least 2 characters')
+    type(b, 'ab')
+    expect(b.node('map-found').textContent).not.toContain('Type at least')
+    const flights = b.scene().of('flyTo').length
+    type(b, 'zq')
+    press(b, 'map-find', 'Enter')
+    await Bun.sleep(20)
+    expect(b.posts.length).toBe(0)
+    expect(b.scene().of('flyTo').length).toBe(flights)
   })
 })

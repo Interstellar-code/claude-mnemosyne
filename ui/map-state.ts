@@ -2106,58 +2106,6 @@ export function solarAnnouncement(level: Target, bodies: readonly Body[]): strin
   return level.level === 'galaxy' ? 'Galaxy: the whole solar system' : `${level.level === 'planet' ? 'Planet' : level.level === 'moon' ? 'Moon' : 'Memory'}: ${crumbs.map(crumb => crumb.label).join(', ')}`
 }
 
-export type DetailsView = { kicker: string; title: string; facts: { label: string; value: string }[]; hint: string }
-
-/** The Details panel until MAPX.7 fills it: the level, its name and the numbers the data already holds. */
-export function detailsFor(level: Target, bodies: readonly Body[], galaxy: Pick<SolarGalaxy, 'projects' | 'memories' | 'writers' | 'globalLive'>): DetailsView {
-  const body = level.level === 'galaxy' ? undefined : bodies.find(candidate => candidate.owner === level.owner)
-  if (level.level === 'galaxy' || body === undefined) {
-    const live = bodies.reduce((sum, item) => sum + item.count, 0)
-    return {
-      kicker: 'Solar system',
-      title: 'Your memory store',
-      facts: [
-        { label: 'Memories', value: `${live} live` },
-        { label: 'Projects', value: String(galaxy.projects.length) },
-        { label: 'Writers', value: galaxy.writers.map(writer => `${writer.source} ${writer.count}`).join(' · ') || 'none' },
-        { label: 'Global (sun belt)', value: String(galaxy.globalLive) },
-      ],
-      hint: 'Click a planet, a moon or a memory: its details show here. Hover anything for a quick look.',
-    }
-  }
-  if (level.level === 'planet') {
-    return {
-      kicker: `${body.craft === null ? 'Planet · ' : ''}${describe(body)}`,
-      title: body.label,
-      facts: [
-        { label: 'Memories', value: String(body.count) },
-        { label: 'Tags (land)', value: String(body.tagsTotal) },
-        { label: 'Kinds (moons)', value: body.kinds.map(kind => `${kindLabel(kind.kind)} ${kind.count}`).join(', ') || 'none' },
-        { label: 'Activity', value: String(body.activity) },
-        { label: 'Lifetime recalls', value: String(body.recalls) },
-        { label: 'Median age', value: body.age === null ? 'none' : `${body.age} days` },
-      ],
-      hint: 'Hover the surface for tags; click a moon to open its memories.',
-    }
-  }
-  if (level.level === 'moon') {
-    const count = body.kinds.find(kind => kind.kind === level.kind)?.count ?? 0
-    return {
-      kicker: `Moon · ${kindOne(level.kind)} memories`,
-      title: `${kindLabel(level.kind)} of ${body.label}`,
-      facts: [{ label: 'Memories', value: String(count) }, { label: 'Share of the planet', value: body.count > 0 ? `${Math.round((count / body.count) * 100)}%` : '0%' }, { label: 'Planet', value: body.label }],
-      hint: 'The swarm spreads into a ring. Click one memory to open it here.',
-    }
-  }
-  const row = galaxy.memories.find(memory => memory.id === level.id)
-  return {
-    kicker: `Memory · ${kindOne(level.kind)} · ${body.label}`,
-    title: row?.label || level.id,
-    facts: [{ label: 'Kind', value: kindLabel(level.kind) }, { label: 'Writer', value: row?.source ?? 'unknown' }, { label: 'Created', value: row?.created ?? 'unknown' }, { label: 'Recalls', value: String(row?.recalls ?? 0) }],
-    hint: 'Its text, provenance and history arrive with the Details panel.',
-  }
-}
-
 export const TAB_MEMORIES = 30
 
 /** The Tab order: the sun, the planets, then (on a planet) its moons, then (on a moon) its memories. */
