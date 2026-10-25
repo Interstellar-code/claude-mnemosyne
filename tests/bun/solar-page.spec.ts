@@ -855,6 +855,9 @@ describe('the level: the URL hash, the path, Details, the announcement and the T
     forgotten.emit({ t: '2026-10-25T10:00:03.000Z', action: 'forget', owner: memory.owner, ids: [memory.id], client: 'claude-code', ok: true })
     await Bun.sleep(20)
     expect(forgotten.node('map-inspector').texts().join(' ')).not.toContain('Still here')
+    // The 404 reads as a forgotten memory, not as a lost reply.
+    expect(forgotten.node('map-inspector').texts().join(' ')).toContain('This memory no longer exists or was retired.')
+    expect(forgotten.node('map-inspector').texts().join(' ')).not.toContain('could not be loaded')
   })
 
   test('a fetch that was already on its way when the update came does not put its older text back', async () => {

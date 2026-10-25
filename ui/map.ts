@@ -424,6 +424,9 @@ const SOLAR_ONLY = ['solar-card-arrange', 'solar-card-colour', 'solar-card-show'
 
 const DASH = '—'
 
+/** A 404 from /api/memories/<id> inside ensureDetail: the memory was forgotten, which is not a lost reply. */
+class Gone extends Error {}
+
 /** GET /api/memories/<id>; every field optional, so a reply from an older server still renders. */
 export type MemoryDetail = {
   content?: string
@@ -442,8 +445,8 @@ export type MemoryDetail = {
   history?: { action?: string; validator?: string | null; at?: string }[]
 }
 
-/** What the panel knows of a memory's reply: the reply, still on its way, or lost. */
-export type DetailFetch = MemoryDetail | 'loading' | 'failed'
+/** What the panel knows of a memory's reply: the reply, still on its way, lost, or 'gone' (the server answered 404: the memory was forgotten). */
+export type DetailFetch = MemoryDetail | 'loading' | 'failed' | 'gone'
 
 export type PanelLink = { label: string; target: Target }
 
@@ -582,7 +585,7 @@ function memoryModel(level: Extract<Target, { level: 'memory' }>, body: Body, bo
   similar.splice(6)
 
   const historyLines = detail === null ? (fetched === 'loading' ? ['Loading…'] : [DASH]) : Array.isArray(detail.history) ? (detail.history.length === 0 ? ['none recorded'] : detail.history.slice(0, 3).map(line)) : [DASH]
-  const text = detail !== null && typeof detail.content === 'string' ? detail.content : fetched === 'loading' ? 'Loading the text…' : fetched === 'failed' ? `The full text could not be loaded.${row?.label ? ` Its first line: ${row.label}` : ''}` : null
+  const text = detail !== null && typeof detail.content === 'string' ? detail.content : fetched === 'loading' ? 'Loading the text…' : fetched === 'gone' ? `This memory no longer exists or was retired.${row?.label ? ` Its first line: ${row.label}` : ''}` : fetched === 'failed' ? `The full text could not be loaded.${row?.label ? ` Its first line: ${row.label}` : ''}` : null
 
   return {
     kicker: `Memory · ${kindOne(level.kind)} · ${body.label}`,
@@ -931,10 +934,12 @@ function mountSolarPage(host: MapHost, solar: SolarHost, shell: SolarShell, stor
       try {
         const response = await host.api(`/api/memories/${encodeURIComponent(id)}`)
         const body = (await response.json().catch(() => null)) as unknown
+        // A 404 is a forgotten memory (a live forget refetches the open one), not a lost reply.
+        if (response.status === 404) throw new Gone()
         if (!response.ok || body === null || typeof body !== 'object' || Array.isArray(body)) throw new Error(`the server answered ${response.status}`)
         reply = body as MemoryDetail
-      } catch {
-        reply = 'failed'
+      } catch (err) {
+        reply = err instanceof Gone ? 'gone' : 'failed'
       }
       if ((detailTokens.get(id) ?? 0) !== token) return
       details.set(id, reply)

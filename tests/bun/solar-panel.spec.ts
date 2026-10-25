@@ -22,7 +22,7 @@ type PanelModel = {
   hint: string
 }
 const { panelModel, renderPanel } = (await import(join(ROOT, 'ui', 'map.ts'))) as {
-  panelModel: (level: Target, bodies: readonly Body[], galaxy: SolarGalaxy, fetched?: MemoryDetail | 'loading' | 'failed' | null) => PanelModel
+  panelModel: (level: Target, bodies: readonly Body[], galaxy: SolarGalaxy, fetched?: MemoryDetail | 'loading' | 'failed' | 'gone' | null) => PanelModel
   renderPanel: (box: unknown, model: PanelModel, on: { tag: (name: string) => void; go: (target: Target) => void }, activeTag: string) => void
 }
 
@@ -319,6 +319,11 @@ describe('a memory', () => {
     expect(failed.text).toContain('The full text could not be loaded.')
     expect(failed.text).toContain(row(galaxy, 'mem-001').label)
     expect(failed.history!.lines).toEqual(['—'])
+    // A 404 (the memory was forgotten) says so plainly, not "could not be loaded".
+    const gone = panelModel(level, bodies, galaxy, 'gone')
+    expect(gone.text).toContain('This memory no longer exists or was retired.')
+    expect(gone.text).not.toContain('could not be loaded')
+    expect(gone.text).toContain(row(galaxy, 'mem-001').label)
     expect(panelModel(level, bodies, galaxy).text).toBeNull()
   })
 

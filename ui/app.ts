@@ -24,6 +24,7 @@ import { isClaudeRecall } from './recalls'
 import { startTheme } from './theme'
 import { closeSheet, openSheet, wireSheet } from './sheet'
 import { chooseMode, countNote, matchLabel, MEANING_OFF_HINT, readMode, saveMode, SHOW_FIRST, type SearchMode } from './search-mode'
+import { createWatch, type ProbeResult } from './connection'
 import { createStream, type StreamApi, type StreamHandle, type StreamListener, type StreamStatus } from './stream'
 
 const TOKEN_KEY = 'mnemosyne.token'
@@ -33,6 +34,7 @@ const VIEW_NAMES: Record<View, string> = { map: 'Map', memories: 'Memories', act
 const FEED_KEEP = 1000
 const FEED_SHOW = 300
 const CONNECTED = 'Connected to the local Mnemosyne server.'
+export const LOST = 'The Mnemosyne server has stopped (its Claude session ended). Run /mnemosyne-ui in Claude Code to start it again.'
 
 type Owner = { owner: string; count: number }
 
@@ -598,6 +600,8 @@ function byId<T extends HTMLElement = HTMLElement>(id: string) {
 }
 
 function setStatus(text: string, kind: 'ok' | 'error' | 'plain' = 'plain') {
+  // While the server is gone the banner says so; no other message (Connected, Could not load…) replaces it. A link that no longer works (a new server) is the exception.
+  if (watch.lost() && !expired && text !== LOST) return
   const status = byId('status')
   status.textContent = text
   status.className = kind === 'plain' ? 'status' : `status is-${kind}`
@@ -630,8 +634,21 @@ function expire() {
   setStatus('This link no longer works (the server was restarted). Run /mnemosyne-ui again for a fresh link.', 'error')
 }
 
-/** An /api call with the token in the Authorization header; JSON bodies as JSON. */
-async function api(path: string, init: { method?: string; body?: unknown; signal?: AbortSignal } = {}) {
+type ApiInit = { method?: string; body?: unknown; signal?: AbortSignal }
+
+/** An /api call with the token in the Authorization header; JSON bodies as JSON. A request that fails to reach the server makes the watch check on it. */
+async function api(path: string, init: ApiInit = {}) {
+  try {
+    const response = await send(path, init)
+    watch.reached()
+    return response
+  } catch (err) {
+    if (!(err instanceof Expired) && !(err instanceof DOMException && err.name === 'AbortError')) watch.suspect()
+    throw err
+  }
+}
+
+async function send(path: string, init: ApiInit) {
   const headers: Record<string, string> = { Authorization: `Bearer ${token}` }
   if (init.body !== undefined) headers['Content-Type'] = 'application/json'
   const response = await fetch(path, {
@@ -655,6 +672,53 @@ async function readJson<T>(response: Response): Promise<T> {
     return {} as T
   }
 }
+
+// ---- The server going away ----
+
+// The server stops with the Claude session that opened it. The watch asks /api/health when a request failed (and while the stream is
+// reconnecting), then every 1 s doubling to 30 s until it answers; the banner and the Server line follow it.
+const PROBE_TIMEOUT_MS = 5000
+let serverPid: number | null = null
+let serverLine: HTMLElement | null = null
+
+/** The Server line of the status panel for the current state. */
+function serverText(lost: boolean, pid: number | null) {
+  return lost ? 'stopped (its Claude session ended)' : `running, process ${pid ?? '?'}`
+}
+
+const watch = createWatch({
+  probe: async (): Promise<ProbeResult> => {
+    try {
+      // Any answer means the server is there; a 401 (api's Expired) means it came back as a new one.
+      await send('/api/health', { signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) })
+      return 'up'
+    } catch (err) {
+      return err instanceof Expired ? 'expired' : 'down'
+    }
+  },
+  onChange: lost => {
+    if (expired) return
+    if (serverLine !== null) serverLine.textContent = serverText(lost, serverPid)
+    if (lost) setStatus(LOST, 'error')
+    else {
+      // The first load never finished: the page is not wired yet, so it loads and wires now, and says Connected after.
+      if (!booted) {
+        void loadHealth().then(() => {
+          setStatus(CONNECTED, 'ok')
+          finishBoot()
+        }, () => undefined)
+        return
+      }
+      setStatus(CONNECTED, 'ok')
+      // The tabs that showed "Could not load" read again; the Activity stream reconnects on its own back-off.
+      void loadHealth().catch(() => undefined)
+      if (current === 'memories') void loadMemories()
+      if (current === 'knowledge') void loadKnowledge()
+      if (current === 'review') void loadReview()
+      if (current === 'health') void loadHealthReport()
+    }
+  },
+})
 
 const failure = (err: unknown) => (err instanceof Error ? err.message : String(err))
 
@@ -1009,7 +1073,9 @@ async function loadHealth() {
   const fact = (label: string, value: string) => facts.append(el('dt', label), el('dd', value))
   if (health.plugin) fact('Version', `Mnemosyne v${health.plugin}`)
   fact('Store', health.store)
-  fact('Server', `running, process ${health.pid}`)
+  serverPid = health.pid
+  fact('Server', serverText(watch.lost(), serverPid))
+  serverLine = (facts.lastElementChild as HTMLElement | null) ?? null
   fact('Activity log', health.activity ? 'on' : 'off')
   if (health.note) fact('Note', health.note)
   if (health.dev) fact('Mode', 'dev: reloads when ui/ changes')
@@ -1105,7 +1171,7 @@ async function openMemory(id: string, from?: HTMLElement) {
     if (response.status === 404) {
       memories.selected = ''
       closeSheet()
-      setStatus('That memory is gone.', 'error')
+      setStatus('That memory no longer exists or was retired.', 'error')
       return
     }
     const memory = await readJson<Memory & { error?: string }>(response)
@@ -1449,6 +1515,11 @@ const events = shareStream(streamApi, async () => {
   return feed.cursor
 })
 
+// A stream that is reconnecting may mean the server is gone: the watch asks it (once; it keeps its own back-off).
+events.onStatus(status => {
+  if (status === 'reconnecting') watch.suspect()
+})
+
 let eventsWired = false
 let feedDirty = false
 let drawQueued = false
@@ -1631,7 +1702,7 @@ async function runSearch() {
 
 // ---- Start ----
 
-async function main() {
+export async function main() {
   // The theme first, so the page is not drawn in the wrong colours while it loads.
   startTheme(byId('theme'), document.documentElement, (() => {
     try {
@@ -1654,6 +1725,14 @@ async function main() {
     return
   }
   setStatus(CONNECTED, 'ok')
+  finishBoot()
+}
+
+// What follows the first successful load; once only, from main() or from the watch when the server answers after a failed first load.
+let booted = false
+function finishBoot() {
+  if (booted) return
+  booted = true
   wireMemories()
   wireActivity()
   wireSearch()

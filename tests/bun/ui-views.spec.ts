@@ -798,7 +798,8 @@ describe('VIEWS R2: the Knowledge and Health glue in app.ts', () => {
     g.fetch = async (path: string, init: RequestInit = {}) => {
       calls.push({ path, method: init.method ?? 'GET', body: typeof init.body === 'string' ? init.body : '' })
       if (mode === 'fail500') return new Response(JSON.stringify({ error: 'boom' }), { status: 500 })
-      if (mode === 'throw') throw new TypeError('network down')
+      // The server itself still answers /api/health (the page's check on a failed request), so these are tab failures, not a lost server.
+      if (mode === 'throw' && path !== '/api/health') throw new TypeError('network down')
       const headers = { ...(init.headers as Record<string, string>), Authorization: `Bearer ${server.token}`, Origin: `http://127.0.0.1:${server.port}` }
       return realFetch(`http://127.0.0.1:${server.port}${path}`, { ...init, headers })
     }
