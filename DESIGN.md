@@ -202,8 +202,9 @@ of the plugin:
   `isCurrent` in `register.ts` reads the installed engine's `package.json` with
   `$.fs.read` and compares. Session start with a stale engine shows a toast
   asking for `/mnemosyne-setup`; it does not reinstall on its own (an install
-  can take minutes and needs the network). The four older tools keep working
-  on a stale engine; `memory_update` refuses, and so does the proxy (§5.8). In
+  can take minutes and needs the network). Recall, forget and stats keep working
+  on a stale engine; since v0.8.0 `memory_remember` and `memory_update` refuse,
+  and so does the proxy (§3.9, §5.8). In
   0.6.0 the dashboard command, the extraction after a save and
   `/mnemosyne-knowledge` refuse too (they need the knowledge tools), each with
   a message that says to run `/mnemosyne-setup`.
@@ -1063,13 +1064,31 @@ its true `source` and `trust_tier`.
    2026-10-24). They are not relabelled; only a retag (kind where it is
    `unknown`) or the later tools touch their labels, and a re-save keeps them
    (the first-writer rule below).
-3. Running a 0.8.0 plugin on an older engine is the one unsafe pairing: the old
-   trim deletes any row whose tier is not `IMPORTED`, and the plugin no longer
-   labels saves that way. Saves are not refused on a stale engine (only
-   `memory_update`, the dashboard and the backfills are), so the only guards are
-   the session-start notice and the README's instruction to run
-   `/mnemosyne-setup` first. Recorded as a known risk, not fixed here
-   (`hooks/` is outside this release's documentation task).
+3. Saves wait for the setup (UPGRADE.1). Running a 0.8.0 plugin on an older
+   engine was the one unsafe pairing: the old trim keeps only rows whose tier is
+   `IMPORTED` and deletes every other unconsolidated row after 24 hours (or past
+   1000 per owner), and the plugin no longer labels saves `imported`, so a save
+   made on the old engine would be deleted by the next remember. The first cut
+   of this release did not refuse saves on a stale engine and relied on a
+   session-start notice and the README; the review's finding changed that. Now
+   `memory_remember` is refused exactly like `memory_update` whenever the
+   installed engine's build (`package.json`'s `version`) is not `ENGINE_BUILD`,
+   including a build that is missing, unreadable or has no version: the plugin
+   denies the call with a message that names `/mnemosyne-setup`, before any
+   engine run (so no `mnemopi_similar` and no `replaces` retire either, and the
+   remember-phrase trigger is not used up), and `bin/mcp-proxy.ts` answers a
+   client's `memory_remember` or `memory_update` with JSON-RPC `-32000`, before
+   the guard and every engine write, logging no memory text. Recall, forget and
+   stats keep working on a stale engine, so nothing is lost and nothing is
+   hidden, and a save succeeds as soon as the setup has run. The proxy reads the
+   installed build once, when it starts, so a long-running client keeps refusing
+   after `/mnemosyne-setup` until it is restarted; the README says so. The
+   same change makes a proxy tag update whose tags clean down to only the
+   project's name a `-32602` refusal, like the plugin's, instead of erasing the
+   stored tags. Still open: a tag list made only of punctuation or blanks cleans
+   to nothing for any reason and is still read as "remove the tags", in both the
+   proxy and the plugin. The other commands that write (`/mnemosyne-tags`,
+   `/mnemosyne-knowledge`, `/mnemosyne-embed`) already stop on a stale engine.
 4. Verified by the MODEL review, not assumed: a probe over every tier (STATED,
    DERIVED, EXTERNAL_WRITE, IMPORTED) by scope (session, channel, global, NULL)
    at 48 hours old found only a non-IMPORTED `session` row trimmed, and with
@@ -1231,9 +1250,10 @@ importance, source or tier, and runs at concurrency 2, 20 rows a batch, waiting
 2, 5 and 10 s and retrying up to 3 times on a rate limit. Known limits: a
 vocabulary file with one bad entry is ignored whole and silently (alias folding
 turns off, and the dry run says there is no vocabulary); the writers take no
-lock, so two at once can lose one candidate count; an outside agent's tag update
-that cleans to nothing removes the row's tags with a success reply (the plugin's
-own update refuses it).
+lock, so two at once can lose one candidate count; a tag update made only of
+punctuation or blanks cleans to nothing and removes the row's tags with a
+success reply, in the plugin and in the proxy (an update of only the project's
+name is refused in both).
 
 C9, backups (`bin/memories.ts backup`, META.5). `VACUUM INTO
 <root>/backups/mnemopi-<UTC stamp>.db`, file mode 0600 (umask 077 and a chmod),
@@ -1342,8 +1362,8 @@ Open items carried to 0.9.0: the dashboard writes and restore, the Review
 queue, the importers, session summaries, the expiry sweep (re-check the unused
 clock if consolidation is ever turned on: a recall served only by an episodic
 copy does not reset it), the Health labels for the unused tables, a refusal for
-an empty tag update in the proxy, a lock for the vocabulary writer, and a
-message that names what is wrong with a bad vocabulary file.
+a non-empty tag list that cleans to nothing, a lock for the vocabulary writer,
+and a message that names what is wrong with a bad vocabulary file.
 
 ## 4. Why a plugin, and why mod tools rather than an MCP server
 
