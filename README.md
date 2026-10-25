@@ -93,7 +93,7 @@ Every save made through Claude (`memory_remember`, and `memory_update` when it c
 | G3 near-duplicate | a stored memory that says almost the same (cosine score 0.88 or more) | warning |
 | G4 chatter | text that reads like dated progress (a date next to `released`, `merged`, `done`, `next`, `overnight` or `round`, or the words `today`, `tonight`, `this session`) | warning |
 
-A refusal or warning names the rule and says what to do; it never repeats the matched text. A secret refusal says to remove the credential and save the fact without it. A chatter warning suggests saving the note as kind `context`, which expires. Since 0.8.2 G4 is silent for the kinds `context`, `event`, `instruction`, `preference` and `decision`: a rule or decision often quotes the date it was made ("user 2026-10-13: ..."), and that is not progress chatter.
+A refusal or warning names the rule and says what to do; it never repeats the matched text. A secret refusal says to remove the credential and save the fact without it. A chatter warning suggests saving the note as kind `context`, which expires. Since 0.8.2 G4 is silent when the save names one of the kinds `context`, `event`, `instruction`, `preference` and `decision` (a text-only `memory_update` is checked with no kind, so pass the kind there too): a rule or decision often quotes the date it was made ("user 2026-10-13: ..."), and that is not progress chatter.
 
 Settings → `guardMode` picks what a warning does:
 

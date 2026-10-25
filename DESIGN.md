@@ -1116,8 +1116,10 @@ silent. Rules:
 3. G4 chatter warns when a date and a status word (`released`, `merged`,
    `done`, `next`, `overnight`, `round`) appear together, or `today`,
    `tonight` or `this session` appears; it suggests kind `context`. Since 0.8.2
-   it is silent for `context`, `event`, `instruction`, `preference` and
-   `decision` (rules and decisions quote the date they were made).
+   it is silent when the call names one of the kinds `context`, `event`,
+   `instruction`, `preference` and `decision` (rules and decisions quote the
+   date they were made); an update that changes only the text is checked with
+   no kind, as the stored kind is not read.
 4. G3 near-duplicate is not in `admit()`: it needs the engine's embeddings, so
    the caller asks the engine (`mnemopi_similar`, top 3, cosine 0.88) and uses
    the helpers at the end of `guard.ts`. It is advisory and fails open:
@@ -1369,8 +1371,8 @@ Recorded from the phase reviews; each was a ruling or an accepted deviation.
 Open items carried to 0.9.0: the dashboard writes and restore, the Review
 queue, the importers, session summaries, the expiry sweep (re-check the unused
 clock if consolidation is ever turned on: a recall served only by an episodic
-copy does not reset it), the Health labels for the unused tables, a refusal for
-a non-empty tag list that cleans to nothing, a lock for the vocabulary writer,
+copy does not reset it), the Health labels for the unused tables, the near-duplicate
+check (G3) for outside agents' saves, a lock for the vocabulary writer,
 and a message that names what is wrong with a bad vocabulary file.
 
 ## 4. Why a plugin, and why mod tools rather than an MCP server
