@@ -749,7 +749,7 @@ records the code as it was in 0.6.0.
   chips (a memory without a picked kind keeps a tenth of its brightness); sparks
   from the Claude core on the Recall and Write layers and a live strip. Under
   reduced motion the moons stand still (speed 0; the build plan says they
-  orbit, the code and the design mockup stand still), Auto-rotate off. The page reads its settings from the state once per frame
+  orbit, the code and the design mockup stand still), Live starts paused and Auto-rotate off. The page reads its settings from the state once per frame
   and needs no framework update hook. Every label still goes through
   `textContent` or a canvas (§3.5).
 - C6, the knowledge store. Rows are written only by `mnemopi_knowledge_store`,
@@ -1557,7 +1557,7 @@ Written by MAPX.2 and MAPX.3, read only by the map. `activitySource` has one val
 
 ### Port approach (mockup → product)
 
-The 3D scene is plain JavaScript on the same three.js version, so it moves over nearly line for line. About two thirds of the code is reused: scene building (`initScene`, `makePlanet`, `makeCraft`, `memoryRing`, `makeHoles`, `circle`, `pointsObject`, `glow`, `label`), procedural textures (`planetTexture`, `sunTexture`, `glowTexture`, `dotTexture`), motion (`frame`, `spreadSwarm`, `satellites`, `recolour`), interaction (`pick`, `act`, the flights and `findGo`) and the rules (`targets`, `orbitSpeed`, `planetR`, `extent`, `styleOf`, `sizeKind`, `describe`, `labelName`, `tagColour`, `dotColour`, `searchResults`, `metric`, `linksOf`). Seeds come from the project label (FNV-1a into mulberry32), and the input is sorted first, so the same data gives the same numbers in any order. What changes: the hard-coded `PROJECTS`, `LINKS` and `WRITERS` become `GET /api/galaxy`; live events use the real activity stream (`ui/stream.ts`, `toMapEvent`); Find uses `POST /api/search`; the rules move into the pure module `ui/solar-layout.ts` with specs. Writers take WRITER_PALETTE in count order; only the nodule's spot is seeded, from the writer's name. The mockup reference stays in `docs/plans/mapx-design/` (unchanged).
+The 3D scene is plain JavaScript on the same three.js version, so it moves over nearly line for line. About two thirds of the code is reused: scene building (`makePlanet`, `makeCraft`, `memoryRing`, `makeHoles`, `circle`, `pointsObject`, `glow`, `label`), procedural textures (`planetTexture`, `sunTexture`, `glowTexture`, `dotTexture`), motion (`frame`, `spreadSwarm`, `satellites`, `recolour`), interaction (`pick`, `act` and the flights) and the rules (`targets`, `orbitSpeed`, `planetR`, `extent`, `styleOf`, `sizeKind`, `describe`, `labelName`, `tagColour`, `dotColour`, `searchResults`, `metric`, `linksOf`). Seeds come from the project label (FNV-1a into mulberry32), and the input is sorted first, so the same data gives the same numbers in any order. What changes: the hard-coded `PROJECTS`, `LINKS` and `WRITERS` become `GET /api/galaxy`; live events use the real activity stream (`ui/stream.ts`, `toMapEvent`); Find uses `POST /api/search`; the rules move into the pure module `ui/solar-layout.ts` with specs. Writers take WRITER_PALETTE in count order; only the nodule's spot is seeded, from the writer's name. The mockup reference stays in `docs/plans/mapx-design/` (unchanged).
 
 ### Policy notes
 
@@ -1569,4 +1569,4 @@ The 3D scene is plain JavaScript on the same three.js version, so it moves over 
 
 ### §3.7
 
-§3.7's galaxy (the 0.6.0 force-graph galaxy) is superseded by this solar-system view in 0.8.3. C2 (the 0.6.0 `GET /api/galaxy` shape) is extended by C11; the bloom passes (C3) and `ui/map-layout.ts` (C4) are replaced by `ui/solar-layout.ts` and the scene in `ui/solar.ts`. Timeline, Meaning and the live sparks keep their behaviour.
+§3.7's Galaxy layout (the 0.6.0 force-graph galaxy) is superseded by this solar-system view in 0.8.3. C2 (the 0.6.0 `GET /api/galaxy` shape) is extended by C11. The bloom passes (C3) and `ui/map-layout.ts` (C4) are not removed: `ui/map.ts` still uses them to draw the Timeline and Meaning layouts, while the Galaxy layout now uses `ui/solar-layout.ts` and the scene in `ui/solar.ts`. Timeline, Meaning and their live sparks keep their behaviour.
