@@ -6,7 +6,7 @@ Status: decided, ready to build (Rohit's decisions 2026-10-24, see Decisions). C
 
 Version 3 of the Mnemosyne plugin: control what goes into memory, and organise what is there. Every save, from Claude, outside agents, the dashboard or an importer, passes one guard that blocks secrets and oversize text and warns about near-duplicates and task chatter. Saves then record honest provenance and a kind instead of 'imported' and 'unknown'. Tags come from a small shared vocabulary with entity, agent and asset namespaces. The dashboard gains create, edit, retire and a review queue, and documents and session logs can be imported through the same guard. It matters because the store today holds 447 tags for 140 memories (407 used once), five rows marked SUPERSEDED that are still recalled, and no usable provenance at all.
 
-The plan has 12 phases (MODEL, GUARD, META, VOCAB, REL8, CRUDX, IMPORT, CRUD, SESSION, HARDEN, REL9, LATER) holding 45 tasks, in 9 waves. Waves 1-3 plus REL8 (wave 3b) are release 0.8.0: the guard, kinds and provenance, the audit trail and the vocabulary. Waves 4-7 are release 0.9.0: dashboard writes and review, the importers, session summaries and the expiry sweep. Wave 8 (LATER) is parked and starts only on Rohit's go.
+The plan has 12 phases (MODEL, GUARD, META, VOCAB, REL8, CRUDX, IMPORT, CRUD, SESSION, HARDEN, REL9, LATER) holding 47 tasks, in 9 waves. Waves 1-3 plus REL8 (wave 3b) are release 0.8.0: the guard, kinds and provenance, the audit trail and the vocabulary. Waves 4-7 are release 0.9.0: dashboard writes and review, the importers, session summaries and the expiry sweep. Wave 8 (LATER) is parked and starts only on Rohit's go.
 
 ## How to use this plan (for the coordinator)
 
@@ -175,11 +175,11 @@ Phase-level dependencies ("Needs first" means every task of the listed phase is 
 | 5 | SESSION | IMPORT | SESSION.1, SESSION.2, SESSION.4 |
 | 6 | HARDEN part B | CRUD, SESSION | HARDEN.3, then HARDEN.4 (Rohit), then HARDEN.5 (Rohit) |
 | 7 | REL9 (0.9.0) | HARDEN | REL9.1 |
-| 8 | LATER | REL9 (parked) | LATER.1, LATER.2, LATER.3 (all manual until Rohit says go) |
+| 8 | LATER | REL9 (parked) | LATER.1 to LATER.5 (all manual until Rohit says go) |
 
 Task-level dependencies beyond the in-phase order: IMPORT.2 depends on IMPORT.0 (the spike). SESSION.2 reads the transcript reader built in IMPORT. CRUDX.3 reads the `pinned` flag written by IMPORT.3 (both are wave 4 now; CRUDX.3 uses a fixture, so neither waits; see Notes for the reviewer, item 2).
 
-Task counts: MODEL 6, GUARD 4, META 5, VOCAB 4, REL8 1, CRUDX 5, IMPORT 4, CRUD 4, SESSION 3, HARDEN 5, REL9 1, LATER 3 = 45 tasks in 12 phases.
+Task counts: MODEL 6, GUARD 4, META 5, VOCAB 4, REL8 1, CRUDX 5, IMPORT 4, CRUD 4, SESSION 3, HARDEN 5, REL9 1, LATER 5 = 47 tasks in 12 phases.
 
 ---
 
@@ -854,6 +854,16 @@ Nice-to-haves kept out of 0.8.0 and 0.9.0. Persona (always-on rules) and canonic
 
 1. Acceptance: G5 warns on phone numbers and third-party emails (the user's own email is exempt); G6 warns on 'ignore previous instructions' style text and flags the row; both warn-only.
 2. Manual step: parked; warn-only rules, added once 0.8.0's false-positive rate is known.
+
+#### LATER.4: Writer suns on the map (manual, parked; added 2026-10-25)
+
+1. Acceptance: the dashboard map shows each writer (the memory's `source`: `claude-code`, `user`, `mcp:<client>` such as Claude Desktop or OMP, later the importers) as a sun at the centre, and its memories orbit it with a new link kind "written by"; rows whose source was backfilled (`metadata.source_backfill = 'inferred'`, the 122 pre-0.8.0 rows relabelled to `claude-code` on 2026-10-25) are drawn differently from proven ones.
+2. Manual step: parked; Rohit's idea, UI work after 0.9.0's dashboard writes.
+
+#### LATER.5: Port features from the Python engine (manual, parked; added 2026-10-25)
+
+1. Acceptance: read the Python Mnemosyne code (mnemosyne-oss/mnemosyne, MIT) for each pick before porting into `engine/` as an UPSTREAM.md change: hygiene audit and clean, trust tier from source, canonical facts, cross-session conflict resolution, audit on forget and invalidate. Research report: 16 gaps found (2026-10-25).
+2. Manual step: parked; Rohit picks which and when.
 
 ---
 
