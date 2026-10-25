@@ -30,6 +30,7 @@ import { admit } from '../hooks/guard'
 import { expiresInDaysProblem, KIND_NAMES, kindProblem, validUntilFor, withNoKindWarning } from '../hooks/kinds'
 import { engineTool, mnemosyneStats, publicTool } from '../hooks/surface'
 import { cleanTags } from '../hooks/tags'
+import { tagRules } from '../hooks/vocab'
 import { appendActivity } from './activity'
 
 const ALLOWED = new Set(['memory_remember', 'memory_recall', 'memory_update', 'memory_forget', 'memory_stats'])
@@ -58,6 +59,18 @@ const owner = process.env.MNEMOPI_SESSION_ID || 'global'
 const isGlobalOwner = owner === 'global'
 const activityLog = process.env.MNEMOSYNE_ACTIVITY_LOG ?? ''
 // The guardMode option, set by mnemosyne-mcp: strict (default, also when unset) or warn.
+// The vocabulary file its tags are cleaned with (set by mnemosyne-mcp; empty: none). Read at each call, never fatal:
+// no file or a file that cannot be read gives no aliases. The owner's project name is dropped from every tag list.
+const vocabularyFile = process.env.MNEMOSYNE_VOCABULARY ?? ''
+function tagRulesNow() {
+  let text: string | undefined
+  try {
+    text = vocabularyFile === '' ? undefined : readFileSync(vocabularyFile, 'utf8')
+  } catch {
+    text = undefined
+  }
+  return tagRules(text, owner)
+}
 const strictGuard = (process.env.MNEMOSYNE_GUARD_MODE ?? '').trim().toLowerCase() !== 'warn'
 // The client's self-declared name, from its initialize request (CTX.2); unknown until it says.
 let client = 'unknown'
@@ -224,7 +237,7 @@ void (async () => {
           refuse(message.id, action, given, { code: -32602, message: 'tags must be an array of strings' })
           continue
         }
-        const clean = cleanTags(tags)
+        const clean = cleanTags(tags, tagRulesNow())
         // remember: no tags, no metadata; update: [] removes the key.
         if (name === 'memory_update') args.metadata = { tags: clean.length > 0 ? clean : null }
         else if (clean.length > 0) args.metadata = { tags: clean }
@@ -246,7 +259,7 @@ void (async () => {
       if (action && message.id !== undefined) {
         pending.set(message.id, {
           action,
-          text: callText(action, { ...args, tags: Array.isArray(tags) ? cleanTags(tags) : undefined }),
+          text: callText(action, { ...args, tags: Array.isArray(tags) ? cleanTags(tags, tagRulesNow()) : undefined }),
           args: { ...args },
           ...(warned.length > 0 ? { warnings: warned.map(hit => `Mnemosyne guard warning: ${hit.message}`) } : {}),
           ...(noKind ? { noKind: true } : {}),

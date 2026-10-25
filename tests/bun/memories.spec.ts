@@ -10,6 +10,7 @@ import { join } from 'node:path'
 import { backupName, backupStore, BACKUP_KEEP, getRows } from '../../bin/memories'
 import { BACKFILL_TEXT_LIMIT, hasTags, judge, parseProposals, parseRows, PROPOSALS_FILE } from '../../hooks/backfill'
 import type { Proposal } from '../../hooks/backfill'
+import { writeVocabulary } from '../../bin/vocab'
 import { makeHost } from './knowledge-host'
 import type { Host } from './knowledge-host'
 import { body, engineCall, isolatedEnv, ROOT, tempDir, toolCall } from './helpers'
@@ -106,7 +107,8 @@ describe('bin/memories.ts on a real store', () => {
     // Counted against the store, never a fixed number.
     expect(rows.map(row => row.id).sort()).toEqual(expectedUntagged())
     expect(rows.length).toBeGreaterThan(5)
-    for (const row of rows) expect(Object.keys(row).sort()).toEqual(['content', 'id', 'metadata', 'owner', 'sha256', 'taggable'])
+    for (const row of rows) // VOCAB.4 added the kind and the hash of the tags (a retag fills a kind, and tells that the tags changed).
+  expect(Object.keys(row).sort()).toEqual(['content', 'id', 'kind', 'metadata', 'owner', 'sha256', 'taggable', 'tagsSha256'])
     const plain = rows.find(row => row.id === ids.plain)!
     expect(plain).toMatchObject({ owner: 'global', content: 'plain fact with no metadata at all', metadata: null })
     expect(rows.find(row => row.id === ids.emptyObject)!.metadata).toEqual({})
@@ -809,5 +811,144 @@ describe('META.4: replaces retires, never deletes', () => {
     expect(first(again).memory_id).toBe(id)
     expect(String(again.result)).toContain('nothing to retire')
     expect(rowOf(host, id)).toMatchObject({ valid_until: null, superseded_by: null })
+  })
+})
+
+// VOCAB.4: /mnemosyne-tags retag through the real hooks/register.ts, bin/memories.ts and engine (only the model is a stand-in).
+describe('VOCAB.4: retag on a real store', () => {
+  const hosts: Host[] = []
+  afterAll(() => {
+    for (const host of hosts.splice(0)) host.dispose()
+  })
+  const CLI = join(ROOT, 'engine', 'src', 'cli.ts')
+  const VOCAB = {
+    version: 1 as const,
+    tags: {
+      git: { ns: null, description: '', aliases: ['version-control'], admitted: 'init' as const, count: 9 },
+      'code-review': { ns: null, description: '', aliases: ['review'], admitted: 'init' as const, count: 5 },
+    },
+    candidates: {},
+  }
+  type Answer = { isAnswered: true; text: string } | { isAnswered: false; reason: string; status?: number | null; error?: string }
+
+  async function open(model: (request: { prompt: string }, n: number) => Answer) {
+    const host = await makeHost({ options: { extractionModel: 'haiku' }, model: model as never })
+    hosts.push(host)
+    writeVocabulary(host.root, VOCAB)
+    return host
+  }
+  /** Writes one row straight through the engine, the way an older store holds it. */
+  async function seed(host: Host, content: string, extra: Record<string, unknown>) {
+    const reply = body((await engineCall(CLI, host.store, 'global', [toolCall(1, 'mnemopi_remember', { content, scope: 'global', ...extra })])).get(1))
+    return reply!.memory_id as string
+  }
+  const db = <T>(host: Host, fn: (db: Database) => T) => {
+    const handle = new Database(join(host.store, 'mnemopi.db'), { readonly: true })
+    try {
+      return fn(handle)
+    } finally {
+      handle.close()
+    }
+  }
+  const tables = (host: Host) => db(host, d => (d.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as { name: string }[]).map(row => row.name))
+  /** Every table but working_memory, row by row: knowledge, embeddings, annotations, the audit trail, everything. */
+  const others = (host: Host) =>
+    db(host, d => Object.fromEntries(tables(host).filter(name => name !== 'working_memory' && !name.startsWith('fts_') && !/_(data|idx|content|docsize|config)$/.test(name)).map(name => [name, d.query(`SELECT * FROM ${name}`).all()])))
+  const memories = (host: Host) => db(host, d => d.query('SELECT * FROM working_memory ORDER BY id').all() as Record<string, unknown>[])
+  const reply = '{"tags":["Review","version control","made-up"],"kind":"decision"}'
+
+  test('VOCAB.4.a3: apply changes only metadata.tags and a missing kind: every other column of every memory and every other table is as it was', async () => {
+    const host = await open(() => ({ isAnswered: true, text: reply }))
+    const a = await seed(host, 'The first older memory, tagged by hand long ago.', { source: 'claude-code', trust_tier: 'DERIVED', importance: 0.7, metadata: { tags: ['Old Style', 'my repo'], pinned: true } })
+    const b = await seed(host, 'The second older memory, with a kind it keeps.', { source: 'user', trust_tier: 'STATED', veracity: 'stated', importance: 0.9, memory_type: 'preference', metadata: { tags: ['x'] } })
+    const c = await seed(host, 'The third older memory, with no metadata at all.', { source: 'imported', importance: 0.2 })
+    // A knowledge row for the first memory, so "no knowledge table changes" is not vacuous.
+    db(host, () => undefined)
+    const writable = new Database(join(host.store, 'mnemopi.db'))
+    writable.run("INSERT INTO memoria_facts (session_id, fact_type, key, value, source_memory_id) VALUES ('global', 'fact', 'k', 'a fact worth keeping', ?)", [a])
+    writable.close()
+
+    const before = memories(host)
+    const othersBefore = others(host)
+    expect(JSON.stringify(othersBefore.memoria_facts)).toContain('a fact worth keeping')
+
+    const dry = await host.command('mnemosyne-tags', 'retag')
+    expect(dry.text).toContain('Proposed tags and kinds for 3 of 3 memories')
+    // the dry run changes nothing at all
+    expect(memories(host)).toEqual(before)
+    expect(others(host)).toEqual(othersBefore)
+
+    const applied = await host.command('mnemosyne-tags', 'apply')
+    expect(applied.text).toContain('Retagged 3 memories of 3 proposed.')
+    const after = memories(host)
+    expect(after).toHaveLength(3)
+    for (const [i, row] of after.entries()) {
+      const old = before[i]!
+      expect(row.id).toBe(old.id)
+      // every column but the two a retag may change is exactly as it was
+      const { metadata_json: newMeta, memory_type: newKind, ...rest } = row
+      const { metadata_json: oldMeta, memory_type: oldKind, ...was } = old
+      expect(rest).toEqual(was)
+      expect(JSON.parse(String(newMeta)).tags).toEqual(['code-review', 'git'])
+      if (oldKind === 'unknown' || oldKind === null) expect(newKind).toBe('decision')
+      else expect(newKind).toBe(oldKind)
+      void oldMeta
+    }
+    // The hand-set kind stayed; other metadata keys stayed; the old tags were replaced.
+    expect(after.find(row => row.id === b)!.memory_type).toBe('preference')
+    expect(JSON.parse(String(after.find(row => row.id === a)!.metadata_json))).toEqual({ tags: ['code-review', 'git'], pinned: true })
+    expect(after.find(row => row.id === c)!.memory_type).toBe('decision')
+    // no other table changed: not the knowledge rows, the embeddings, the annotations or the audit trail
+    expect(others(host)).toEqual(othersBefore)
+    expect(host.activity().filter(line => line.origin === 'backfill').every(line => line.action === 'update')).toBe(true)
+  })
+
+  test('VOCAB.4.a1: apply backs the store up first: a copy of the store as it was before any change is in <root>/backups', async () => {
+    const host = await open(() => ({ isAnswered: true, text: reply }))
+    const id = await seed(host, 'An older memory whose tags a retag replaces.', { importance: 0.4, metadata: { tags: ['keep-me-in-the-backup'] } })
+    await host.command('mnemosyne-tags', 'retag')
+    await host.command('mnemosyne-tags', 'apply')
+    const folder = join(host.root, 'backups')
+    const files = readdirSync(folder).filter(name => /^mnemopi-\d{8}T\d{9}Z\.db$/.test(name))
+    expect(files).toHaveLength(1)
+    const copy = new Database(join(folder, files[0]!), { readonly: true })
+    try {
+      const row = copy.query('SELECT metadata_json, memory_type FROM working_memory WHERE id = ?').get(id) as { metadata_json: string; memory_type: string }
+      expect(JSON.parse(row.metadata_json).tags).toEqual(['keep-me-in-the-backup'])
+      expect(row.memory_type).toBe('unknown')
+    } finally {
+      copy.close()
+    }
+    // and the live row has the new tags
+    expect(JSON.parse(String(memories(host).find(row => row.id === id)!.metadata_json)).tags).toEqual(['code-review', 'git'])
+  })
+
+  test('VOCAB.4.a1: a row edited between the dry run and apply keeps the edit, and so does one whose text changed', async () => {
+    const host = await open(() => ({ isAnswered: true, text: reply }))
+    const edited = await seed(host, 'An older memory whose tags are edited meanwhile.', { metadata: { tags: ['before'] } })
+    const rewritten = await seed(host, 'An older memory whose text is rewritten meanwhile.', { metadata: { tags: ['before'] } })
+    const untouched = await seed(host, 'An older memory nobody touches meanwhile at all.', { metadata: { tags: ['before'] } })
+    await host.command('mnemosyne-tags', 'retag')
+    await engineCall(CLI, host.store, 'global', [
+      toolCall(1, 'mnemopi_update', { memory_id: edited, metadata: { tags: ['rohit-chose-this'] } }),
+      toolCall(2, 'mnemopi_update', { memory_id: rewritten, content: 'An older memory whose text was rewritten meanwhile.' }),
+    ])
+    const applied = await host.command('mnemosyne-tags', 'apply')
+    expect(applied.text).toContain('Retagged 1 memory of 3 proposed.')
+    expect(applied.text).toContain('2 changed since the dry run')
+    const tagsOf = (id: string) => JSON.parse(String(memories(host).find(row => row.id === id)!.metadata_json)).tags
+    expect(tagsOf(edited)).toEqual(['rohit-chose-this'])
+    expect(tagsOf(rewritten)).toEqual(['before'])
+    expect(tagsOf(untouched)).toEqual(['code-review', 'git'])
+  })
+
+  test('VOCAB.4.a2: a stub model that answers 429 twice is waited for and tried again; the retag still proposes', async () => {
+    let calls = 0
+    const host = await open(() => (calls++ < 2 ? { isAnswered: false, reason: 'api-error', status: 429, error: 'rate_limit' } : { isAnswered: true, text: reply }))
+    await seed(host, 'An older memory the model is slow to answer for.', { metadata: { tags: ['old'] } })
+    const dry = await host.command('mnemosyne-tags', 'retag')
+    expect(calls).toBe(3)
+    expect(dry.text).toContain('Proposed tags and kinds for 1 of 1 memory')
+    expect(dry.text).not.toContain('failed')
   })
 })
