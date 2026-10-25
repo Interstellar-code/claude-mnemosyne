@@ -1282,7 +1282,7 @@ class SolarImpl {
       const when = (memory.validUntil ?? memory.created ?? '').slice(0, 10) || 'an unknown date'
       const what = memory.state === 'retired' ? `retired: ${when}` : memory.state === 'expired' ? `expired by the sweep: unused 90 days, ${when}` : `its own expiry date passed: ${when}`
       const owner = this.bodies.find(b => b.owner === memory.owner)?.label ?? projectLabel(memory.owner)
-      items.push({ tip: [`Outer belt · ${memory.state === 'expired' ? 'an expired' : `a ${memory.state}`} memory`, what, `from ${owner} · ${this.firstLine(memory)}`, 'Restore in Review sends it back to its planet'] })
+      items.push({ tip: [`Outer belt · ${memory.state === 'expired' ? 'an expired' : `a ${memory.state}`} memory`, what, `from ${owner} · ${this.firstLine(memory)}`, 'Restore it in the Review tab'] })
     }
     // A port choice, not in the mockup: the outer belt's dots are 3 wide (the mockup's belt has no size of its own to match).
     this.outer = this.pointsObject(pos, col, 3, items, 0.45, true)

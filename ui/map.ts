@@ -19,7 +19,7 @@ import type { ForceGraph3DInstance, GraphNode } from './vendor/map-lib.js'
 import { plainLabel } from './escape'
 import type { GalaxyHub, GalaxyStar, Vec3 } from './map-layout'
 import { simulate, toMapEvent, type MapEvent } from './map-live'
-import { ARRANGE, buildBodies, COLOURS, searchResults, type Body, type SolarGalaxy, type Target } from './solar-layout'
+import { ARRANGE, buildBodies, COLOURS, SEARCH_MIN, describe, kindLabel, kindOne, linkInfos, linksOf, searchResults, tagColour, type Body, type SolarGalaxy, type SolarMemory, type Target } from './solar-layout'
 import {
   addMemory,
   announcement,
@@ -223,7 +223,6 @@ import {
   bodyChips,
   closeFind,
   createMemorySearch,
-  detailsFor,
   findMode,
   findRows,
   initialSolarPage,
@@ -239,6 +238,7 @@ import {
   setColour,
   setSolarLevel,
   setSolarQuery,
+  SEARCH_MEMORY_MIN,
   SHOW_TOGGLES,
   showAllBodies,
   shownText,
@@ -414,12 +414,286 @@ type GraphLinkData = { source: string; target: string; kind: 'spoke' | 'bridge';
 // map-state.ts. It reaches the scene only through C13 (SolarSceneApi) and never imports ui/solar.ts.
 
 const GALAXY: Target = { level: 'galaxy' }
-const SOLAR_ONLY = ['solar-card-arrange', 'solar-card-colour', 'solar-card-show', 'solar-canvas', 'solar-path', 'solar-bodies', 'solar-details', 'solar-legend-left', 'solar-legend-right', 'solar-tour', 'solar-hint', 'solar-views']
+const SOLAR_ONLY = ['solar-card-arrange', 'solar-card-colour', 'solar-card-show', 'solar-canvas', 'solar-path', 'solar-bodies', 'solar-legend-left', 'solar-legend-right', 'solar-tour', 'solar-hint', 'solar-views']
 
-type SolarMount = { sync: (layout: string) => void; active: () => boolean }
+// ---- The Details panel (MAPX.7) ----
+//
+// Read-only: the store summary, a body's facts, a moon, or one memory. A memory's text, trust tier, veracity, history
+// and state come from GET /api/memories/<id>; everything else from the galaxy reply the page already holds. Every
+// field may be missing (an older server), and a missing field shows as a dash.
+
+const DASH = '—'
+
+/** GET /api/memories/<id>; every field optional, so a reply from an older server still renders. */
+export type MemoryDetail = {
+  content?: string
+  source?: string | null
+  veracity?: string | null
+  trust_tier?: string | null
+  created_at?: string | null
+  timestamp?: string | null
+  last_recalled?: string | null
+  recall_count?: number
+  importance?: number
+  valid_until?: string | null
+  superseded_by?: string | null
+  state?: string
+  tags?: string[]
+  history?: { action?: string; validator?: string | null; at?: string }[]
+}
+
+/** What the panel knows of a memory's reply: the reply, still on its way, or lost. */
+export type DetailFetch = MemoryDetail | 'loading' | 'failed'
+
+export type PanelLink = { label: string; target: Target }
+
+export type PanelModel = {
+  kicker: string
+  title: string
+  /** A memory's full text (or the note that stands in for it); null for anything else. */
+  text: string | null
+  facts: { label: string; value: string }[]
+  tags: { label: string; names: string[] } | null
+  holes: { label: string; items: PanelLink[] } | null
+  history: { label: string; lines: string[] } | null
+  similar: { label: string; lines: PanelLink[]; empty: string } | null
+  hint: string
+}
+
+const shown = (value: unknown): string => (typeof value === 'string' && value.trim() !== '' ? value : DASH)
+const dayOf = (value: unknown): string => (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}/.test(value) ? value.slice(0, 10) : DASH)
+const numberOf = (value: unknown): string => (typeof value === 'number' && Number.isFinite(value) ? String(Math.round(value * 100) / 100) : DASH)
+const plural = (n: number, one: string) => `${n} ${one}${n === 1 ? '' : 's'}`
+
+/** Sums `{source count}` rows as "claude-code 12 · imported 2", most first; `inferred` adds "(n inferred)". */
+function writerLine(rows: readonly { source: string; count: number; inferred?: number }[]): string {
+  return rows.map(row => `${row.source} ${row.count}${typeof row.inferred === 'number' && row.inferred > 0 ? ` (${row.inferred} inferred)` : ''}`).join(' · ') || 'none'
+}
+
+function storeModel(bodies: readonly Body[], galaxy: SolarGalaxy): PanelModel {
+  const live = bodies.reduce((sum, body) => sum + body.count, 0)
+  const infos = linkInfos(galaxy, bodies)
+  const states = galaxy.memories.filter(memory => typeof memory.state === 'string')
+  const busiest = [...bodies].sort((a, b) => b.activity - a.activity || (a.label < b.label ? -1 : a.label > b.label ? 1 : 0))[0]
+  const stations = bodies.filter(body => body.craft === 'station').length
+  const ships = bodies.filter(body => body.craft === 'ship').length
+  return {
+    kicker: 'Solar system',
+    title: 'Your memory store',
+    text: null,
+    facts: [
+      { label: 'Memories', value: `${live} live` },
+      { label: 'Projects (planets)', value: String(bodies.filter(body => body.craft === null).length) },
+      { label: 'Writers (nodules)', value: writerLine(galaxy.writers ?? []) },
+      { label: 'Global (sun belt)', value: String(galaxy.globalLive ?? 0) },
+      { label: 'Black-hole pairs', value: galaxy.links === undefined ? 'needs stored vectors' : `${infos.reduce((sum, link) => sum + link.pairs, 0)} (${plural(infos.length, 'link')})` },
+      { label: 'Not live (outer belt)', value: states.length === 0 && galaxy.memories.length > 0 ? DASH : String(states.filter(memory => memory.state !== 'live').length) },
+      { label: 'Busiest planet', value: busiest === undefined ? DASH : busiest.label },
+      { label: 'Plain folders', value: stations + ships === 0 ? 'none' : `${plural(stations, 'station')} · ${plural(ships, 'starship')}` },
+    ],
+    tags: null,
+    holes: null,
+    history: null,
+    similar: null,
+    hint: 'Click a planet, a moon or a memory: its details show here. Hover anything for a quick look.',
+  }
+}
+
+function planetModel(body: Body, bodies: readonly Body[], galaxy: SolarGalaxy): PanelModel {
+  const label = new Map(bodies.map(item => [item.owner, item.label]))
+  const holes = linksOf(linkInfos(galaxy, bodies), body.owner).map(link => {
+    const out = link.older === body.owner
+    const partner = out ? link.newer : link.older
+    return { label: `${out ? 'out to' : 'in from'} ${label.get(partner) ?? partner} · ${link.pairs} similar`, target: { level: 'planet', owner: partner } as Target }
+  })
+  return {
+    kicker: `${body.craft === null ? 'Planet · ' : ''}${describe(body)}`,
+    title: body.label,
+    text: null,
+    facts: [
+      { label: 'Memories', value: String(body.count) },
+      { label: 'Tags (land)', value: String(body.tagsTotal) },
+      { label: 'Kinds (moons)', value: body.kinds.map(kind => `${kindLabel(kind.kind)} ${kind.count}`).join(', ') || 'none' },
+      { label: body.activitySource === 'tally' ? 'Activity (30 days)' : 'Activity (saved + recalls)', value: String(body.activity) },
+      { label: 'Lifetime recalls', value: String(body.recalls) },
+      { label: 'Median age', value: body.age === null ? 'none' : `${body.age} days` },
+      { label: 'Global from here', value: String(body.global) },
+      { label: 'Kind unknown', value: String(body.unknown) },
+    ],
+    tags: { label: 'Top tags (click to light the land)', names: body.tags.slice(0, 6).map(tag => tag.tag) },
+    holes: { label: 'Black holes', items: holes },
+    history: null,
+    similar: null,
+    hint: 'Hover the surface for tags; click a moon to open its memories.',
+  }
+}
+
+function moonModel(level: Extract<Target, { level: 'moon' }>, body: Body, galaxy: SolarGalaxy): PanelModel {
+  const count = body.kinds.find(kind => kind.kind === level.kind)?.count ?? 0
+  const writers = new Map<string, number>()
+  for (const memory of galaxy.memories) {
+    if (memory.owner === level.owner && memory.kind === level.kind && (memory.state === undefined || memory.state === 'live') && typeof memory.source === 'string' && memory.source !== '') writers.set(memory.source, (writers.get(memory.source) ?? 0) + 1)
+  }
+  return {
+    kicker: `Moon · ${kindOne(level.kind)} memories`,
+    title: `${kindLabel(level.kind)} of ${body.label}`,
+    text: null,
+    facts: [
+      { label: 'Kind', value: kindLabel(level.kind) },
+      { label: 'Memories', value: String(count) },
+      { label: 'Share of the planet', value: body.count > 0 ? `${Math.round((count / body.count) * 100)}%` : '0%' },
+      { label: 'Planet', value: body.label },
+      { label: 'Writers', value: writers.size === 0 ? DASH : writerLine([...writers].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)).map(([source, n]) => ({ source, count: n }))) },
+    ],
+    tags: null,
+    holes: null,
+    history: null,
+    similar: null,
+    hint: 'The swarm spreads into a ring. Click one memory to open it here.',
+  }
+}
+
+function memoryModel(level: Extract<Target, { level: 'memory' }>, body: Body, bodies: readonly Body[], galaxy: SolarGalaxy, fetched: DetailFetch | null): PanelModel {
+  const row = galaxy.memories.find(memory => memory.id === level.id) as Partial<SolarMemory> | undefined
+  const detail = fetched !== null && typeof fetched === 'object' ? fetched : null
+  const state = detail?.state ?? row?.state
+  const replaced = shown(detail?.superseded_by)
+  const recalls = typeof detail?.recall_count === 'number' ? detail.recall_count : row?.recalls
+  const lastRecalled = detail?.last_recalled !== undefined ? detail.last_recalled : row?.lastRecalled
+  const expiry = detail?.valid_until !== undefined ? detail.valid_until : row?.validUntil
+  const tags = Array.isArray(detail?.tags) ? detail.tags : Array.isArray(row?.tags) ? row.tags : null
+  const pinned = row?.pinned
+  const label = new Map(bodies.map(item => [item.owner, item.label]))
+  const line = (entry: NonNullable<MemoryDetail['history']>[number]) => `${shown(entry.action)}${shown(entry.validator) === DASH ? '' : ` by ${entry.validator}`} · ${dayOf(entry.at)}`
+
+  // Similar memories: the cross-project pairs the galaxy reply holds (the black holes' pairs); each points at the other project.
+  const similar: PanelLink[] = []
+  for (const link of galaxy.links ?? []) {
+    for (const pair of link.pairs) {
+      const other = pair.older === level.id ? pair.newer : pair.newer === level.id ? pair.older : null
+      if (other === null) continue
+      const partner = galaxy.memories.find(memory => memory.id === other) as Partial<SolarMemory> | undefined
+      const owner = partner?.owner ?? (link.a === level.owner ? link.b : link.a)
+      const where = `black hole to ${label.get(owner) ?? owner}`
+      const target: Target = partner !== undefined && typeof partner.kind === 'string' && (partner.state === undefined || partner.state === 'live') ? { level: 'memory', owner, kind: partner.kind, id: other } : { level: 'planet', owner }
+      similar.push({ label: `${shown(partner?.label)} · ${where} · ${Math.round(pair.score * 100)}%`, target })
+    }
+  }
+  similar.splice(6)
+
+  const historyLines = detail === null ? (fetched === 'loading' ? ['Loading…'] : [DASH]) : Array.isArray(detail.history) ? (detail.history.length === 0 ? ['none recorded'] : detail.history.slice(0, 3).map(line)) : [DASH]
+  const text = detail !== null && typeof detail.content === 'string' ? detail.content : fetched === 'loading' ? 'Loading the text…' : fetched === 'failed' ? `The full text could not be loaded.${row?.label ? ` Its first line: ${row.label}` : ''}` : null
+
+  return {
+    kicker: `Memory · ${kindOne(level.kind)} · ${body.label}`,
+    title: row?.label || level.id,
+    text,
+    facts: [
+      { label: 'Kind', value: kindLabel(level.kind) },
+      { label: 'Writer', value: shown(row?.source ?? detail?.source) + (row?.sourceInferred === true && shown(row?.source ?? detail?.source) !== DASH ? ' · inferred' : '') },
+      { label: 'Source · trust · veracity', value: `${shown(detail?.source ?? row?.source)} · ${shown(detail?.trust_tier)} · ${shown(detail?.veracity)}` },
+      { label: 'State · pinned', value: `${state === undefined ? DASH : replaced !== DASH ? `${state} (replaced by ${replaced})` : state} · ${typeof pinned === 'boolean' ? (pinned ? 'pinned' : 'not pinned') : DASH}` },
+      { label: 'Created', value: dayOf(detail?.created_at ?? row?.created ?? detail?.timestamp) },
+      { label: 'Last recalled · count', value: `${lastRecalled === null ? 'never' : dayOf(lastRecalled)} · ${numberOf(recalls)}` },
+      { label: 'Expiry', value: expiry === null ? 'none' : dayOf(expiry) },
+      { label: 'Importance', value: numberOf(detail?.importance ?? row?.importance) },
+    ],
+    tags: { label: 'Tags (click to light the land)', names: tags ?? [] },
+    holes: null,
+    history: { label: 'Last 3 actions', lines: historyLines },
+    similar: { label: 'Similar memories', lines: similar, empty: galaxy.links === undefined ? 'needs stored vectors' : 'none across projects' },
+    hint: state !== undefined && state !== 'live' ? 'It is in the outer belt. Restore it in the Review tab.' : 'Its knowledge satellites orbit it on the map.',
+  }
+}
+
+/** The Details panel's content for a level; `fetched` is the memory's reply when the level is a memory. */
+export function panelModel(level: Target, bodies: readonly Body[], galaxy: SolarGalaxy, fetched: DetailFetch | null = null): PanelModel {
+  const body = level.level === 'galaxy' ? undefined : bodies.find(candidate => candidate.owner === level.owner)
+  if (level.level === 'galaxy' || body === undefined) return storeModel(bodies, galaxy)
+  if (level.level === 'planet') return planetModel(body, bodies, galaxy)
+  if (level.level === 'moon') return moonModel(level, body, galaxy)
+  return memoryModel(level, body, bodies, galaxy, fetched)
+}
+
+/** Builds the panel into `box` with createElement and textContent only; clicks go out through `on`. */
+export function renderPanel(box: HTMLElement, model: PanelModel, on: { tag: (name: string) => void; go: (target: Target) => void }, activeTag: string): void {
+  const choice = (text: string, className: string) => {
+    const item = el('button', text, className)
+    item.type = 'button'
+    return item
+  }
+  const row = (label: string, ...items: Node[]) => {
+    const wrap = el('div', undefined, 'solar-row')
+    wrap.append(el('span', label, 'solar-row-label'), ...items)
+    return wrap
+  }
+  const head = el('div', undefined, 'insp-head')
+  head.append(el('span', model.kicker, 'insp-kind'), el('h2', model.title, 'insp-title'))
+  const parts: Node[] = [head]
+  if (model.text !== null) parts.push(el('p', model.text, 'insp-text'))
+  const facts = el('dl', undefined, 'solar-facts')
+  for (const fact of model.facts) {
+    const item = el('div')
+    item.append(el('dt', fact.label), el('dd', fact.value))
+    facts.append(item)
+  }
+  parts.push(facts)
+  if (model.tags !== null) {
+    parts.push(
+      row(
+        model.tags.label,
+        ...(model.tags.names.length === 0
+          ? [el('span', DASH, 'solar-none')]
+          : model.tags.names.map(name => {
+              const tag = choice(name, 'solar-tag')
+              tag.style.color = tagColour(name)
+              tag.setAttribute('aria-pressed', String(name === activeTag))
+              tag.addEventListener('click', () => on.tag(name))
+              return tag
+            })),
+      ),
+    )
+  }
+  if (model.holes !== null) {
+    parts.push(
+      row(
+        model.holes.label,
+        ...(model.holes.items.length === 0
+          ? [el('span', 'none', 'solar-none')]
+          : model.holes.items.map(item => {
+              const hole = choice(item.label, 'solar-hole')
+              hole.addEventListener('click', () => on.go(item.target))
+              return hole
+            })),
+      ),
+    )
+  }
+  if (model.history !== null && model.similar !== null) {
+    const history = el('div', undefined, 'solar-col')
+    history.append(el('span', model.history.label, 'solar-row-label'), ...model.history.lines.map(text => el('span', text, 'solar-line')))
+    const similar = el('div', undefined, 'solar-col')
+    similar.append(
+      el('span', model.similar.label, 'solar-row-label'),
+      ...(model.similar.lines.length === 0
+        ? [el('span', model.similar.empty, 'solar-none')]
+        : model.similar.lines.map(item => {
+            const near = choice(item.label, 'solar-hole')
+            near.addEventListener('click', () => on.go(item.target))
+            return near
+          })),
+    )
+    const cols = el('div', undefined, 'solar-cols')
+    cols.append(history, similar)
+    parts.push(cols)
+  }
+  parts.push(el('p', model.hint, 'insp-hint'))
+  box.replaceChildren(...parts)
+}
+
+type SolarMount = { sync: (layout: string) => void; active: () => boolean; failed: () => boolean }
 
 /** What the solar page needs from the map around it: the library (null when there is no WebGL, and the stage has said so) and the stage message. */
-type SolarShell = { library: () => Promise<MapLib | null>; loaded: () => MapLib | null; notice: (text: string) => void }
+type SolarShell = { library: () => Promise<MapLib | null>; loaded: () => MapLib | null; notice: (text: string) => void; clear: () => void }
 
 function mountSolarPage(host: MapHost, solar: SolarHost, shell: SolarShell, storage: Storage | undefined, reducedMotion: boolean): SolarMount {
   const root = byId('view-map')
@@ -441,7 +715,11 @@ function mountSolarPage(host: MapHost, solar: SolarHost, shell: SolarShell, stor
   // The memories the server found for the query, and whether Enter waits for them.
   let hits: { id: string; owner?: string; content?: string }[] = []
   let enterWaits = false
+  // Enter was pressed on a query too short to search: Find says so instead of doing nothing.
+  let tooShort = false
   let lastLevel = ''
+  // The /api/memories/<id> replies for the memory the page is on (dropped when it leaves memory level).
+  const details = new Map<string, DetailFetch>()
 
   const send = <T,>(call: (scene: SolarSceneApi) => T) => {
     if (scene !== null) call(scene)
@@ -573,7 +851,7 @@ function mountSolarPage(host: MapHost, solar: SolarHost, shell: SolarShell, stor
     const list = byId('solar-find-results')
     const found = rows()
     const query = page.query.trim()
-    byId('map-found').textContent = active && query.length >= 2 && galaxy !== null ? `${Object.keys(searchResults(bodies, query).match).length} bodies` : ''
+    byId('map-found').textContent = active && tooShort ? `Type at least ${SEARCH_MIN} characters` : active && query.length >= SEARCH_MIN && galaxy !== null ? `${Object.keys(searchResults(bodies, query).match).length} bodies` : ''
     list.hidden = !active || !page.findOpen
     if (list.hidden) {
       list.replaceChildren()
@@ -616,22 +894,51 @@ function mountSolarPage(host: MapHost, solar: SolarHost, shell: SolarShell, stor
     )
   }
 
+  /** A tag in the panel lights its land on the map the way typing it in Find does; the same tag again clears it. */
+  function lightTag(name: string) {
+    const off = page.query.trim() === name
+    find.value = off ? '' : name
+    page = { ...setSolarQuery(page, off ? '' : name), findOpen: false }
+    send(scene => scene.setView(sceneView()))
+    renderFind()
+    renderDetails()
+  }
+
+  /** The memory's full record (text, trust tier, veracity, history), fetched when the level lands on it. */
+  function ensureDetail() {
+    const level = page.level
+    if (level.level !== 'memory') {
+      details.clear()
+      return
+    }
+    const id = level.id
+    const have = details.get(id)
+    if (have === 'loading' || (have !== undefined && have !== 'failed')) return
+    details.set(id, 'loading')
+    void (async () => {
+      try {
+        const response = await host.api(`/api/memories/${encodeURIComponent(id)}`)
+        const body = (await response.json().catch(() => null)) as unknown
+        if (!response.ok || body === null || typeof body !== 'object' || Array.isArray(body)) throw new Error(`the server answered ${response.status}`)
+        details.set(id, body as MemoryDetail)
+      } catch {
+        details.set(id, 'failed')
+      }
+      if (page.level.level === 'memory' && page.level.id === id) renderDetails()
+    })()
+  }
+
+  /** The Details panel is #map-inspector, as the Timeline and Meaning layouts' selection card is; it is the solar page's only while the Galaxy layout runs. */
   function renderDetails() {
-    const box = byId('solar-details')
+    if (!active) return
+    const box = byId('map-inspector')
     if (galaxy === null) {
       box.replaceChildren()
       return
     }
-    const view = detailsFor(page.level, bodies, galaxy)
-    const head = el('div', undefined, 'insp-head')
-    head.append(el('span', view.kicker, 'insp-kind'), el('h2', view.title, 'insp-title'))
-    const facts = el('dl', undefined, 'solar-facts')
-    for (const fact of view.facts) {
-      const item = el('div')
-      item.append(el('dt', fact.label), el('dd', fact.value))
-      facts.append(item)
-    }
-    box.replaceChildren(head, facts, el('p', view.hint, 'insp-hint'))
+    const level = page.level
+    const model = panelModel(level, bodies, galaxy, level.level === 'memory' ? (details.get(level.id) ?? null) : null)
+    renderPanel(box, model, { tag: lightTag, go: target => send(scene => scene.flyTo(target)) }, page.query.trim())
   }
 
   /** The Tab order: sun, planets, moons, memories; a redraw keeps the focus on the stop that had it. */
@@ -651,6 +958,7 @@ function mountSolarPage(host: MapHost, solar: SolarHost, shell: SolarShell, stor
 
   function renderLevel() {
     renderPath()
+    ensureDetail()
     renderDetails()
     renderTour()
     const said = solarAnnouncement(page.level, bodies)
@@ -738,6 +1046,9 @@ function mountSolarPage(host: MapHost, solar: SolarHost, shell: SolarShell, stor
       return
     }
     showCanvas()
+    // The scene started: whatever the stage said before (a failed start of either renderer) no longer holds.
+    if (emptyStore()) shell.notice(EMPTY_TEXT)
+    else shell.clear()
     if (galaxy !== null) feed(scene)
   }
 
@@ -765,6 +1076,8 @@ function mountSolarPage(host: MapHost, solar: SolarHost, shell: SolarShell, stor
       renderLevel()
       renderFind()
       if (emptyStore()) shell.notice(EMPTY_TEXT)
+      // A load that worked clears a stale message only when the library is in (a library that failed keeps its text).
+      else if (!broken && shell.loaded() !== null) shell.clear()
       showCanvas()
       if (scene !== null) feed(scene)
     } catch (err) {
@@ -780,10 +1093,12 @@ function mountSolarPage(host: MapHost, solar: SolarHost, shell: SolarShell, stor
   find.addEventListener('input', () => {
     if (!active) return
     enterWaits = false
+    tooShort = false
     page = setSolarQuery(page, find.value)
     send(scene => scene.setView(sceneView()))
     memorySearch.type(find.value)
     renderFind()
+    renderDetails()
   })
   find.addEventListener('keydown', (event: KeyboardEvent) => {
     if (!active) return
@@ -791,17 +1106,23 @@ function mountSolarPage(host: MapHost, solar: SolarHost, shell: SolarShell, stor
       find.value = ''
       hits = []
       enterWaits = false
+      tooShort = false
       memorySearch.cancel()
       page = closeFind(page)
       send(scene => scene.setView(sceneView()))
       renderFind()
+      renderDetails()
     } else if (event.key === 'Enter') {
       event.preventDefault()
       page = setSolarQuery(page, find.value)
       const first = rows()[0]
+      const typed = find.value.trim().length
+      tooShort = typed > 0 && typed < SEARCH_MIN
       if (first !== undefined) go(first)
-      else enterWaits = true
+      // Wait for the memory search only when one will run (3 characters); otherwise there is nothing to wait for.
+      else if (typed >= SEARCH_MEMORY_MIN) enterWaits = true
       memorySearch.enter(find.value)
+      renderFind()
     }
   })
   host.events?.(line => {
@@ -816,6 +1137,7 @@ function mountSolarPage(host: MapHost, solar: SolarHost, shell: SolarShell, stor
 
   return {
     active: () => active,
+    failed: () => broken,
     sync(layout: string) {
       const on = layout === 'galaxy'
       if (on === active) return
@@ -823,7 +1145,10 @@ function mountSolarPage(host: MapHost, solar: SolarHost, shell: SolarShell, stor
       root.classList.toggle('solar-on', on)
       for (const id of SOLAR_ONLY) byId(id).hidden = !on
       find.placeholder = on ? 'project, tag, kind or words' : placeholder
+      // The card changes hands: the layout that is leaving does not leave its content for the other.
+      byId('map-inspector').replaceChildren()
       if (on) {
+        renderDetails()
         showCanvas()
         void makeScene()
         void load()
@@ -952,9 +1277,11 @@ export function createMap(host: MapHost): MapView {
   const rotate = byId<HTMLButtonElement>('map-rotate')
   const find$ = byId<HTMLInputElement>('map-find')
   // The solar-system Galaxy page, when the host brings a scene; it takes over the Galaxy layout's page and leaves the others alone.
-  const solarPage = host.solar ? mountSolarPage(host, host.solar, { library, loaded: () => libraryReady, notice }, storage, reducedMotion) : null
+  const solarPage = host.solar ? mountSolarPage(host, host.solar, { library, loaded: () => libraryReady, notice, clear: clearNotice }, storage, reducedMotion) : null
   // Only one renderer lives at a time (one WebGL context): the solar scene in Galaxy, the force graph in the other layouts.
   let graphTicket = 0
+  // The layout whose force graph could not start: it is tried again only when the layout changes, not on every state change (a Find keystroke).
+  let graphFailedLayout: string | null = null
   let resizer: ResizeObserver | null = null
   let libraryLoad: Promise<MapLib | null> | null = null
   let libraryReady: MapLib | null = null
@@ -963,6 +1290,13 @@ export function createMap(host: MapHost): MapView {
   function notice(text: string) {
     message.textContent = text
     message.hidden = false
+  }
+
+  /** Takes the text off the stage and gives the force graph's canvas back (say() hid it). */
+  function clearNotice() {
+    message.textContent = ''
+    message.hidden = true
+    canvasBox.hidden = false
   }
 
   /** The text over the stage when the map cannot be drawn at all: both canvases give way. */
@@ -997,10 +1331,11 @@ export function createMap(host: MapHost): MapView {
   function syncRenderer() {
     if (solarWanted()) {
       stopGraph()
+      graphFailedLayout = null
       solarPage?.sync(state.layout)
     } else {
       solarPage?.sync(state.layout)
-      void startGraph()
+      if (graphFailedLayout !== state.layout) void startGraph()
     }
   }
 
@@ -1234,6 +1569,8 @@ export function createMap(host: MapHost): MapView {
     const view = inspector(g, state)
     const overview = view.kind === 'Overview' ? view : inspector(g, { ...state, selected: null, topic: null, project: null })
     fillInspector(g, byId('map-overview'), overview, true)
+    // In the Galaxy layout #map-inspector is the solar Details panel (the solar page fills it).
+    if (solarWanted()) return
     if (view.kind === 'Overview') byId('map-inspector').replaceChildren()
     else fillInspector(g, byId('map-inspector'), view, false)
   }
@@ -2591,6 +2928,7 @@ export function createMap(host: MapHost): MapView {
       seen = null
       found = null
       if (galaxy.layout.stars.length === 0) say(EMPTY_TEXT)
+      else if (libraryReady !== null && graphFailedLayout === null && solarPage?.failed() !== true) clearNotice()
       drawGalaxy(galaxy)
       render()
       if (host.events && stopEvents === null) {
@@ -2615,6 +2953,7 @@ export function createMap(host: MapHost): MapView {
     if (graph !== null || solarWanted()) return
     const ticket = ++graphTicket
     const loaded = libraryReady ?? (await library())
+    if (loaded === null && ticket === graphTicket && !solarWanted()) graphFailedLayout = state.layout
     if (loaded === null || ticket !== graphTicket || graph !== null || solarWanted()) return
     lib = loaded
     try {
@@ -2628,9 +2967,12 @@ export function createMap(host: MapHost): MapView {
       makeMoonSprites()
     } catch (err) {
       stopGraph()
+      graphFailedLayout = state.layout
       say(`The 3D map could not start (${err instanceof Error ? err.message : String(err)}).`)
       return
     }
+    graphFailedLayout = null
+    clearNotice()
     const l = graph as unknown as Loose
     graph
       .forceEngine('d3')
