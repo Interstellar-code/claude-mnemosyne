@@ -48,7 +48,7 @@ import { ENGINE_BUILD, SETUP_TIMEOUT_MS } from './engine-build'
 import { mnemosyneStats } from './surface'
 import { admit, NEAR_DUPLICATE_SCORE, nearDuplicateFlags, nearDuplicateMessage, nearMatchesOf } from './guard'
 import type { GuardResult, NearMatch } from './guard'
-import { expiresInDaysProblem, KIND_NAMES, kindProblem, validUntilFor, withNoKindWarning } from './kinds'
+import { expiresInDaysProblem, KIND_NAMES, kindProblem, missingKindMessage, validUntilFor } from './kinds'
 import { cleanTags } from './tags'
 import type { TagRules } from './tags'
 import { AUTO_ADMIT_COUNT, parseVocabulary, tagRules, VOCAB_FILE } from './vocab'
@@ -74,7 +74,7 @@ const RULES_SECTION = {
   text: `# Long-term memory (Mnemosyne)
 mcp__mnemosyne__memory_remember / _recall / _update / _forget keep facts across sessions and repos.
 - Remember: lasting preferences, conventions, decisions, runbooks the user states. One self-contained fact per call.
-- With each fact, pass kind: fact, preference, instruction (a rule or runbook), decision, context (project state), error (a bug note), artifact (a reference) or event (a session summary).
+- With each fact, pass kind (required: a save without it is refused): fact, preference, instruction (a rule or runbook), decision, context (project state), error (a bug note), artifact (a reference) or event (a session summary).
 - With each fact, pass tags: 2 to 5 short lowercase topic words (for example ["git", "ci"]).
 - Never remember secrets, credentials, or one-off task details.
 - Recall before answering about past decisions or preferences ("what did we…", "how do I usually…").
@@ -97,7 +97,7 @@ export const guardModeOf = (options: PluginOptions): 'strict' | 'warn' => (typeo
 const KIND_PROPERTY = {
   type: 'string',
   enum: KIND_NAMES,
-  description: 'What kind of memory this is. Without it the memory is saved as unknown.',
+  description: 'What kind of memory this is. Required on memory_remember: a save without it is refused.',
 } as const
 
 const TOOLS = [
@@ -131,7 +131,7 @@ const TOOLS = [
         owner: { type: 'string', description: "With replaces: the owner of that older memory, from memory_recall; default this project's." },
         confirm: CONFIRM_PROPERTY,
       },
-      required: ['content'],
+      required: ['content', 'kind'],
     },
   },
   {
@@ -1479,15 +1479,17 @@ export const register: Register = (on, options) => {
     // Strict mode: a warned save is refused until the call says confirm: true. A block has no override.
     const needsConfirm = guard?.verdict === 'warn' && guardModeOf(options) === 'strict' && input.confirm !== true
     const refusedByGuard = guard?.verdict === 'block' || needsConfirm
+    // A remember with no kind is refused before anything runs, and like a guard refusal it leaves the remember trigger for the retry.
+    const missingKind = tool === 'memory_remember' && (input.kind === undefined || input.kind === null)
     // UPGRADE.1: a save on an installed engine older than this build is refused below. Computed here so the near-duplicate check runs no engine and a refused save leaves the remember trigger for the retry.
     const staleSave = tool === 'memory_remember' && (await isInstalled($, options).catch(() => false)) && !(await isCurrent($, options))
     // G3 (META.3): close memories of a text about to be saved. Before the trigger is consumed, so a refusal leaves it for the retry.
     const replacesId = tool === 'memory_remember' && typeof input.replaces === 'string' && REPLACES_ID.test(input.replaces) ? input.replaces : undefined
     const replacesOwner = replacesId !== undefined && typeof input.owner === 'string' && REPLACES_ID.test(input.owner) ? input.owner : undefined
     // The memory named in replaces is meant to be superseded, so it is not a near-duplicate to warn about.
-    const near = tool === 'memory_remember' && !refusedByGuard && !staleSave ? (await nearDuplicates($, options, input.content as string)).filter(match => match.id !== replacesId) : []
+    const near = tool === 'memory_remember' && !refusedByGuard && !staleSave && !missingKind ? (await nearDuplicates($, options, input.content as string)).filter(match => match.id !== replacesId) : []
     const nearRefused = near.length > 0 && guardModeOf(options) === 'strict' && input.confirm !== true
-    const refused = refusedByGuard || nearRefused
+    const refused = refusedByGuard || nearRefused || missingKind
     // KNOWX.1: only the main thread's first save after a remember phrase is the
     // human's. A subagent's event carries an agentId and never consumes the trigger.
     let provenance: { author_type: 'human'; veracity: 'stated' } | undefined
@@ -1513,6 +1515,8 @@ export const register: Register = (on, options) => {
         if (guard?.verdict === 'block') {
           return { deny: `Mnemosyne: the save guard blocked this save (${guardIds.join(', ')}). ${guard.hits.map(hit => hit.message).join(' ')}` }
         }
+        // Before the warnings, so a warned save without a kind is fixed in one retry, not two.
+        if (missingKind) return { deny: `Mnemosyne: ${missingKindMessage('memory_remember')}` }
         if (nearRefused) {
           return { deny: `Mnemosyne: the save guard warns about this save (G3). ${nearDuplicateMessage(near)} Or resend with confirm: true if a new memory is wanted.` }
         }
@@ -1559,22 +1563,20 @@ export const register: Register = (on, options) => {
         }
         // One warning line per hit, after the engine's reply; `reply` stays the engine's own text.
         const warnings = (warnIds.length > 0 ? guard!.hits.map(hit => `\nMnemosyne guard warning: ${hit.message}`).join('') : '') + (near.length > 0 ? `\nMnemosyne guard warning: ${nearDuplicateMessage(near)}` : '')
-        // A remember that named no kind is saved as 'unknown', with one warning in the reply; never a refusal.
-        const noKind = tool === 'memory_remember' && (input.kind === undefined || input.kind === null)
-        return { reply: text, result: name === 'mnemopi_recall' ? JSON.stringify(compact(text)) : name === 'mnemopi_stats' ? mnemosyneStats(text) : `${noKind ? withNoKindWarning(text) : text}${warnings}${retireLine}` }
+        return { reply: text, result: name === 'mnemopi_recall' ? JSON.stringify(compact(text)) : name === 'mnemopi_stats' ? mnemosyneStats(text) : `${text}${warnings}${retireLine}` }
       } catch (err) {
         return { deny: `Mnemosyne: ${(err as Error).message}` }
       }
     })()
     if (action !== undefined) {
-      const blocked = refused
+      const blocked = refusedByGuard || nearRefused
       // A refused call logs its rule ids only: no content text, in the line or the error.
       const outcome = blocked ? { ok: false, error: `guard:${[...guardIds, ...(near.length > 0 ? ['G3'] : [])].join(',')}` } : 'deny' in answer ? { ok: false, error: answer.deny } : callOutcome(action, input, answer.reply)
       // Tags as the engine gets them, cleaned, as the proxy logs them.
       const shown = Array.isArray(input.tags) ? { ...input, tags: cleanTags(input.tags, rules) } : input
       // A retire line follows the save's own line, with both ids and no memory text (META.4).
       const retireEntry = retired === undefined ? [] : [{ action: 'retire' as const, origin: 'tool' as const, owner: retired.owner, text: `retire ${retired.oldId} replaced by ${retired.newId ?? 'unknown'}`, ids: [retired.oldId, ...(retired.newId === undefined ? [] : [retired.newId])], count: retired.ok ? 1 : 0, ok: retired.ok, error: retired.error }]
-      await record($, options, [{ action, origin: 'tool', owner: as, text: blocked || staleSave ? '' : callText(action, shown), ...outcome, ...(provenance ?? {}) }, ...retireEntry])
+      await record($, options, [{ action, origin: 'tool', owner: as, text: blocked || staleSave || missingKind ? '' : callText(action, shown), ...outcome, ...(provenance ?? {}) }, ...retireEntry])
     }
     // A successful save (or a content update) starts extraction after the reply.
     // A tags-only or importance-only update changes no text, so it extracts nothing.
@@ -1668,7 +1670,7 @@ export const register: Register = (on, options) => {
       // The save itself is Claude's memory_remember call, logged with origin tool.
       logged.push({ action: 'remember', origin: 'trigger', text: remember, ok: true })
       context.push(
-        `The user invoked a Mnemosyne remember trigger. Call mcp__mnemosyne__memory_remember exactly once with a self-contained version of:\n${remember}\nIf it is a secret or credential, do not save it; say so.`,
+        `The user invoked a Mnemosyne remember trigger. Call mcp__mnemosyne__memory_remember exactly once, with a kind, with a self-contained version of:\n${remember}\nIf it is a secret or credential, do not save it; say so.`,
       )
     }
     // A recall term is the reason for the recall, even on a first prompt.

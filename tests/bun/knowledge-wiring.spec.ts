@@ -20,7 +20,7 @@ describe('finding 1: pending files through the real bin/memories.ts', () => {
   test('a memory_remember writes a 0600 pending file while the model call is open, removes it after the store, and logs an extract line', async () => {
     let release!: (answer: { isAnswered: true; text: string }) => void
     const host = await open({ model: () => new Promise(resolve => (release = resolve)) })
-    const saved = await host.tool('memory_remember', { content: 'We deploy on Fridays' })
+    const saved = await host.tool('memory_remember', { kind: 'fact', content: 'We deploy on Fridays' })
     expect(saved.result).toContain('memory_id')
     const id = JSON.parse(saved.result!).memory_id as string
     await until('the model call', () => host.model.length > 0)

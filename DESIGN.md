@@ -1193,9 +1193,10 @@ plain labels: `fact`, `preference`, `instruction` (rule or runbook), `decision`,
 `context` (project state), `error` (bug note), `artifact` (reference), `event`
 (session summary), plus `unknown` for old rows, which a caller cannot choose.
 A save's `kind` is forwarded as `memory_type`; the proxy drops a client's own
-`memory_type`. A save with no kind is stored `unknown` with a `warning` key in
-the (still JSON) reply, never refused; a value outside the list is refused
-(`-32602` in the proxy, a deny in the plugin). A `context` note gets
+`memory_type`. A remember with no kind is refused, and so is a value outside the list
+(`-32602` in the proxy, a deny in the plugin); the refusal holds no memory text,
+stores nothing and, in the plugin, leaves the remember phrase for the retry.
+`memory_update` needs no kind. A `context` note gets
 `valid_until` 14 days out unless `expires_in_days` (1 to 365) says otherwise.
 
 C4, provenance. The paths that exist in 0.8.0:

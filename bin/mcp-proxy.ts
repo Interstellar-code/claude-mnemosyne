@@ -12,8 +12,8 @@
 // A client never picks a bank (it would move writes to <store>/banks/<x>) and
 // never writes metadata: only `tags`, cleaned by hooks/tags.ts, reach the
 // engine, as metadata.tags. A client names a memory's kind as `kind` (hooks/kinds.ts), sent as
-// memory_type; an unknown kind is refused, none on remember is saved as 'unknown' with a
-// one-line warning. memory_update needs this plugin's engine build.
+// memory_type; an unknown kind is refused, and so is a remember with none (-32602, nothing is
+// saved). memory_update needs no kind, and this plugin's engine build.
 // Saves (remember, and update with content) pass hooks/guard.ts first: a secret or
 // size block is a -32602 error; a warned save is too in strict guard mode (the
 // default; MNEMOSYNE_GUARD_MODE, set by mnemosyne-mcp) unless the call passes
@@ -27,7 +27,7 @@ import { activityLine, callOutcome, callText, TOOL_ACTIONS } from '../hooks/acti
 import type { ActivityAction } from '../hooks/activity-log'
 import { ENGINE_BUILD } from '../hooks/engine-build'
 import { admit } from '../hooks/guard'
-import { expiresInDaysProblem, KIND_NAMES, kindProblem, validUntilFor, withNoKindWarning } from '../hooks/kinds'
+import { expiresInDaysProblem, KIND_NAMES, kindProblem, missingKindMessage, validUntilFor } from '../hooks/kinds'
 import { engineTool, mnemosyneStats, publicTool } from '../hooks/surface'
 import { cleanTags } from '../hooks/tags'
 import { tagRules } from '../hooks/vocab'
@@ -43,7 +43,7 @@ const TAGS_PROPERTY = {
 const KIND_PROPERTY = {
   type: 'string',
   enum: KIND_NAMES,
-  description: 'What kind of memory this is. On remember, without it the memory is saved as unknown.',
+  description: 'What kind of memory this is. Required on remember: a save without it is refused.',
 }
 const EXPIRES_PROPERTY = {
   type: 'integer',
@@ -98,7 +98,7 @@ const statsIds = new Set<unknown>()
 const send = (message: unknown) => process.stdout.write(`${JSON.stringify(message)}\n`)
 
 // The calls on their way to the engine, by JSON-RPC id: what to log once the reply comes back.
-type Pending = { action: ActivityAction; text: string; args: Record<string, unknown>; warnings?: string[]; noKind?: boolean }
+type Pending = { action: ActivityAction; text: string; args: Record<string, unknown>; warnings?: string[] }
 const pending = new Map<unknown, Pending>()
 
 // One activity line, written synchronously (so it is on disk before the proxy
@@ -181,8 +181,6 @@ void (async () => {
       // GUARD.2: the same admission check as the plugin's own tools, before anything reaches the engine.
       // A block is refused with the rule ids; the line holds the ids only, never the text.
       let warned: ReturnType<typeof admit>['hits'] = []
-      // A remember that names no kind: the reply gets one warning (withNoKindWarning).
-      let noKind = false
       if (name === 'memory_remember' || (name === 'memory_update' && typeof given.content === 'string')) {
         const guard = admit({ content: given.content as string, kind: typeof given.kind === 'string' ? given.kind : undefined, origin: 'proxy' })
         const ids = [...new Set(guard.hits.map(hit => hit.rule))]
@@ -212,7 +210,7 @@ void (async () => {
         }
       }
       // META.1: `kind` is the client's word for the engine's memory_type. An unknown kind is refused;
-      // a missing one on remember is saved as 'unknown' with a one-line warning. A client's own
+      // a missing one on remember is refused too (the line holds no memory text). A client's own
       // memory_type is dropped, so the kind list is the only way in.
       const { bank: _bank, metadata: _metadata, tags, confirm: _confirm, kind, memory_type: _memoryType, valid_until: _validUntil, ...args } = given
       if (TAGGED.has(name)) {
@@ -222,7 +220,10 @@ void (async () => {
           continue
         }
         if (kind !== undefined && kind !== null) args.memory_type = kind
-        else if (name === 'memory_remember') noKind = true
+        else if (name === 'memory_remember') {
+          refuse(message.id, action, {}, { code: -32602, message: missingKindMessage('memory_remember') })
+          continue
+        }
         if (name === 'memory_remember') {
           const badDays = expiresInDaysProblem(args.expires_in_days)
           if (badDays !== undefined) {
@@ -269,7 +270,6 @@ void (async () => {
           text: callText(action, { ...args, tags: Array.isArray(tags) ? cleanTags(tags, tagRulesNow()) : undefined }),
           args: { ...args },
           ...(warned.length > 0 ? { warnings: warned.map(hit => `Mnemosyne guard warning: ${hit.message}`) } : {}),
-          ...(noKind ? { noKind: true } : {}),
         })
       }
       message.params.name = engineTool(name)
@@ -306,7 +306,10 @@ function publicSchema(name: string, schema: Schema | undefined): Schema {
   return {
     ...schema,
     properties: TAGGED.has(name) ? { ...properties, kind: KIND_PROPERTY, ...(name === 'memory_remember' ? { expires_in_days: EXPIRES_PROPERTY } : {}), tags: TAGS_PROPERTY, confirm: CONFIRM_PROPERTY } : properties,
-    ...(schema?.required ? { required: schema.required.filter(key => key !== 'bank' && key !== 'metadata') } : {}),
+    // remember needs a kind, whatever the engine's own schema says.
+    ...(schema?.required || name === 'memory_remember'
+      ? { required: [...new Set([...(schema?.required ?? []).filter(key => key !== 'bank' && key !== 'metadata'), ...(name === 'memory_remember' ? ['kind'] : [])])] }
+      : {}),
   }
 }
 
@@ -337,7 +340,6 @@ for await (const line of lines(engine.stdout)) {
   const replyText = String(text?.text ?? '')
   const failure = message?.error?.message ?? (message?.result?.isError ? String(text?.text ?? 'failed') : undefined)
   // One warning line per hit, after the engine's reply.
-  if (call?.noKind && failure === undefined && typeof text?.text === 'string') text.text = withNoKindWarning(text.text)
   if (call?.warnings && failure === undefined && typeof text?.text === 'string') text.text = `${text.text}\n${call.warnings.join('\n')}`
   send(message)
   if (call) {

@@ -63,7 +63,7 @@ describe('another owner (KNOWX: extraction runs as the row owner)', () => {
     const stranger = body((await engineCall(cliOf(host), host.store, 'other-project', [toolCall(1, 'mnemopi_remember', { content: 'Other project ships on Mondays' })])).get(1)).memory_id as string
     expect(typeof stranger).toBe('string')
 
-    const idA = savedId(await host.tool('memory_remember', { content: 'We deploy on Fridays' }))
+    const idA = savedId(await host.tool('memory_remember', { kind: 'fact', content: 'We deploy on Fridays' }))
     const live = await until('the live extract line', () => host.extractLines()[0])
     const ownerA = live.owner as string
     expect(ownerA).toMatch(/^project-My-Repo-/)
@@ -101,7 +101,7 @@ describe('a memory forgotten mid-flight', () => {
   test('KNOWX gone mid-flight: forget while the model call is open -> a gone extract line, no knowledge rows, no pending file', async () => {
     const gate = held()
     const host = await open({ model: gate.model })
-    const id = savedId(await host.tool('memory_remember', { content: 'A fact that will be forgotten' }))
+    const id = savedId(await host.tool('memory_remember', { kind: 'fact', content: 'A fact that will be forgotten' }))
     await until('the model call', () => host.model.length > 0)
     expect(host.pending()).toEqual([`${id}.json`])
     const forgotten = await host.tool('memory_forget', { memory_id: id })
@@ -128,7 +128,7 @@ describe('a stale engine', () => {
     symlinkSync(join(ROOT, 'engine', 'src'), join(scope, 'pi-mnemopi', 'src'), 'dir')
 
     // An older engine's 24 h trim would delete the save, so it is refused before any engine process.
-    const refused = await host.tool('memory_remember', { content: 'Saved on an old engine' })
+    const refused = await host.tool('memory_remember', { kind: 'fact', content: 'Saved on an old engine' })
     expect(refused.deny).toContain('/mnemosyne-setup')
     expect(refused.deny).toContain('out of date')
     expect(refused.result).toBeUndefined()
@@ -145,7 +145,7 @@ describe('a stale engine', () => {
 describe('extractionModel off', () => {
   test('KNOWX off: a live save still saves, with no model call, no pending file and no extract line', async () => {
     const host = await open({ options: { extractionModel: 'off' }, model: () => ({ isAnswered: true, text: GOOD_REPLY }) })
-    const id = savedId(await host.tool('memory_remember', { content: 'Saved with extraction off' }))
+    const id = savedId(await host.tool('memory_remember', { kind: 'fact', content: 'Saved with extraction off' }))
     expect(memoryCount(host, id)).toBe(1)
     // The remember line is written before the tool replies; the extraction (if any) would follow at once.
     await Bun.sleep(400)
@@ -169,7 +169,7 @@ describe('a failed model call', () => {
   for (const [name, model, reason] of cases) {
     test(`KNOWX failed model: ${name} -> the memory stays saved, the pending file stays, one failed extract line with the reason`, async () => {
       const host = await open({ model })
-      const id = savedId(await host.tool('memory_remember', { content: 'Saved while the model is down' }))
+      const id = savedId(await host.tool('memory_remember', { kind: 'fact', content: 'Saved while the model is down' }))
       const line = await until('the extract line', () => host.extractLines()[0])
       expect(line).toMatchObject({ action: 'extract', origin: 'tool', ok: false, error: reason, ids: [id], count: 0 })
       expect(host.extractLines()).toHaveLength(1)
@@ -184,7 +184,7 @@ describe('a failed model call', () => {
 describe('a lost call finished by the backfill', () => {
   test('KNOWX backfill finishes a lost call: dry run counts the pending entry with no model call; apply stores, removes the file, logs a backfill line', async () => {
     const host = await open({ model: (_request, n) => (n === 0 ? { isAnswered: false, reason: 'timeout' } : { isAnswered: true, text: GOOD_REPLY }) })
-    const id = savedId(await host.tool('memory_remember', { content: 'We deploy on Fridays' }))
+    const id = savedId(await host.tool('memory_remember', { kind: 'fact', content: 'We deploy on Fridays' }))
     const first = await until('the first extract line', () => host.extractLines()[0])
     expect(first).toMatchObject({ origin: 'tool', ok: false, error: 'timeout', ids: [id] })
     expect(host.pending()).toEqual([`${id}.json`])
@@ -214,7 +214,7 @@ describe('non-ASCII text through the whole path', () => {
     const text = 'Café naïve 日本語 🚀 ñ — “quotes”'
     const gate = held()
     const host = await open({ model: gate.model })
-    const id = savedId(await host.tool('memory_remember', { content: text }))
+    const id = savedId(await host.tool('memory_remember', { kind: 'fact', content: text }))
     await until('the model call', () => host.model.length > 0)
     const pending = host.pendingEntry(id)
     // The prompt the model saw carries the text.

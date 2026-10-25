@@ -621,11 +621,11 @@ describe('META.2: the save paths write honest source, trust tier and veracity', 
     await host.tool('memory_remember', { content: 'the importer is half done today', kind: 'context' })
     await host.tool('memory_remember', { content: 'the importer wrap up is set for next quarter', kind: 'context', expires_in_days: 30 })
     await host.tool('memory_remember', { content: 'a fact that never expires on its own', kind: 'fact' })
-    await host.tool('memory_remember', { content: 'a note with no kind and no expiry' })
+    await host.tool('memory_remember', { content: 'a preference that never expires either', kind: 'preference' })
     inDays(rowOf(host, 'the importer is half done today').valid_until, 14)
     inDays(rowOf(host, 'the importer wrap up is set for next quarter').valid_until, 30)
     expect(rowOf(host, 'a fact that never expires on its own').valid_until).toBeNull()
-    expect(rowOf(host, 'a note with no kind and no expiry').valid_until).toBeNull()
+    expect(rowOf(host, 'a preference that never expires either').valid_until).toBeNull()
     const before = rows(host).length
     for (const expires_in_days of [0, 366, 1.5, '7', -1]) {
       const refused = await host.tool('memory_remember', { content: 'a context note with a bad expiry', kind: 'context', expires_in_days })
@@ -649,7 +649,6 @@ describe('META.2: the save paths write honest source, trust tier and veracity', 
       const first = rowOf(host, content)
       expect(first.scope).toBe(scope)
       await host.tool('memory_remember', { content, kind: 'fact', ...input })
-      await host.tool('memory_remember', { content, ...input }) // no kind: the stored kind stays too
       expect(rows(host).filter(row => row.content === content)).toHaveLength(1)
       expect(rowOf(host, content)).toMatchObject({ id: first.id, scope, trust_tier: 'DERIVED', source: 'claude-code', memory_type: 'fact' })
     }

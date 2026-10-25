@@ -80,7 +80,7 @@ describe('fix 2: the pending file is written before the queue', () => {
     const host = await open({ model: () => (open_ ? good() : new Promise<ModelAnswer>(resolve => waiting.push(resolve))) })
     const ids: string[] = []
     for (let i = 0; i < 5; i++) {
-      const saved = await host.tool('memory_remember', { content: `quick save number ${i} about topic${i}` })
+      const saved = await host.tool('memory_remember', { kind: 'fact', content: `quick save number ${i} about topic${i}` })
       ids.push(JSON.parse(saved.result!).memory_id as string)
     }
     await until('5 pending files', () => host.pending().length === 5)

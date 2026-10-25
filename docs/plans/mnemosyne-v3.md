@@ -387,7 +387,7 @@ With MODEL's engine changes in, the plugin stops writing 'imported' and writes w
 1. Goal: add the kind argument end to end.
 2. Acceptance:
    1. `hooks/kinds.ts` (import-free) lists eight kinds by engine name with a plain label: fact, preference, instruction (rule or runbook), decision, context (project state), error (bug note), artifact (reference), event (session summary);
-   2. `memory_remember` and `memory_update` take `kind`; it is forwarded as `memory_type`; a missing kind saves as 'unknown' with a one-line warning, never a refusal; an unknown value is refused;
+   2. `memory_remember` and `memory_update` take `kind`; it is forwarded as `memory_type`; a missing kind saves as 'unknown' with a one-line warning, never a refusal (superseded 2026-10-25 on branch `v3/kind-required`: a `memory_remember` without a kind is now refused, in the plugin and the proxy); an unknown value is refused;
    3. the rules section (`hooks/register.ts:59-69`) asks for a kind and says to update or replace rather than save a near-duplicate;
    4. the proxy accepts and forwards `kind` the same way.
 3. Refs: `engine/src/core/typed-memory.ts:1-16`; `hooks/register.ts:59-130`.
