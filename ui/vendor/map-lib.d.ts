@@ -116,7 +116,7 @@ export declare class UnrealBloomPass implements PassLike {
 }
 export declare class Scene { constructor(...args: any[]); [key: string]: any }
 export declare class PerspectiveCamera { constructor(fov?: number, aspect?: number, near?: number, far?: number); [key: string]: any }
-export declare class WebGLRenderer { constructor(params?: { canvas?: HTMLCanvasElement; antialias?: boolean; [key: string]: any }); [key: string]: any }
+export declare class WebGLRenderer { constructor(params?: { canvas?: HTMLCanvasElement; antialias?: boolean; [key: string]: any }); domElement: HTMLCanvasElement; setSize(width: number, height: number): void; setPixelRatio(ratio: number): void; setClearColor(color: number, alpha?: number): void; dispose(): void; [key: string]: any }
 export declare class Group { constructor(...args: any[]); [key: string]: any }
 export declare class Mesh { constructor(geometry?: any, material?: any); [key: string]: any }
 export declare class Points { constructor(geometry?: any, material?: any); [key: string]: any }
@@ -137,7 +137,7 @@ export declare class PointsMaterial { constructor(params?: any); [key: string]: 
 export declare class SpriteMaterial { constructor(params?: any); [key: string]: any }
 export declare class CanvasTexture { constructor(canvas: any); [key: string]: any }
 export declare class Color { constructor(...args: any[]); [key: string]: any; r: number; g: number; b: number }
-export declare class Vector2 { constructor(x?: number, y?: number); [key: string]: any }
+export declare class Vector2 { constructor(x?: number, y?: number); x: number; y: number; [key: string]: any }
 export declare class Vector3 { constructor(x?: number, y?: number, z?: number); clone(): Vector3; multiplyScalar(s: number): Vector3; set(x: number, y: number, z: number): Vector3; add(v: Vector3): Vector3; [key: string]: any }
 export declare class Raycaster { constructor(); [key: string]: any; setFromCamera(coords: any, camera: any): void; params: any }
 export declare class PointLight { constructor(...args: any[]); [key: string]: any }
