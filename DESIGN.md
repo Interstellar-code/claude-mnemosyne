@@ -1085,9 +1085,9 @@ its true `source` and `trust_tier`.
    after `/mnemosyne-setup` until it is restarted; the README says so. The
    same change makes a proxy tag update whose tags clean down to only the
    project's name a `-32602` refusal, like the plugin's, instead of erasing the
-   stored tags. Still open: a tag list made only of punctuation or blanks cleans
-   to nothing for any reason and is still read as "remove the tags", in both the
-   proxy and the plugin. The other commands that write (`/mnemosyne-tags`,
+   stored tags. Since 0.8.2 any non-empty tag list that cleans
+   to nothing (punctuation, blanks, the project name) is refused the same way,
+   in both the proxy and the plugin. The other commands that write (`/mnemosyne-tags`,
    `/mnemosyne-knowledge`, `/mnemosyne-embed`) already stop on a stale engine.
 4. Verified by the MODEL review, not assumed: a probe over every tier (STATED,
    DERIVED, EXTERNAL_WRITE, IMPORTED) by scope (session, channel, global, NULL)
@@ -1115,8 +1115,9 @@ silent. Rules:
    length) and warns over 1500.
 3. G4 chatter warns when a date and a status word (`released`, `merged`,
    `done`, `next`, `overnight`, `round`) appear together, or `today`,
-   `tonight` or `this session` appears; it suggests kind `context` and is
-   silent for that kind.
+   `tonight` or `this session` appears; it suggests kind `context`. Since 0.8.2
+   it is silent for `context`, `event`, `instruction`, `preference` and
+   `decision` (rules and decisions quote the date they were made).
 4. G3 near-duplicate is not in `admit()`: it needs the engine's embeddings, so
    the caller asks the engine (`mnemopi_similar`, top 3, cosine 0.88) and uses
    the helpers at the end of `guard.ts`. It is advisory and fails open:
@@ -1256,10 +1257,9 @@ importance, source or tier, and runs at concurrency 2, 20 rows a batch, waiting
 2, 5 and 10 s and retrying up to 3 times on a rate limit. Known limits: a
 vocabulary file with one bad entry is ignored whole and silently (alias folding
 turns off, and the dry run says there is no vocabulary); the writers take no
-lock, so two at once can lose one candidate count; a tag update made only of
-punctuation or blanks cleans to nothing and removes the row's tags with a
-success reply, in the plugin and in the proxy (an update of only the project's
-name is refused in both).
+lock, so two at once can lose one candidate count; a tag update that cleans to
+nothing was read as "remove the tags" until 0.8.2, which refuses it in the
+plugin and the proxy (only `tags: []` removes tags).
 
 C9, backups (`bin/memories.ts backup`, META.5). `VACUUM INTO
 <root>/backups/mnemopi-<UTC stamp>.db`, file mode 0600 (umask 077 and a chmod),

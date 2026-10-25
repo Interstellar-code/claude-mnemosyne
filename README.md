@@ -93,7 +93,7 @@ Every save made through Claude (`memory_remember`, and `memory_update` when it c
 | G3 near-duplicate | a stored memory that says almost the same (cosine score 0.88 or more) | warning |
 | G4 chatter | text that reads like dated progress (a date next to `released`, `merged`, `done`, `next`, `overnight` or `round`, or the words `today`, `tonight`, `this session`) | warning |
 
-A refusal or warning names the rule and says what to do; it never repeats the matched text. A secret refusal says to remove the credential and save the fact without it. A chatter warning suggests saving the note as kind `context`, which expires.
+A refusal or warning names the rule and says what to do; it never repeats the matched text. A secret refusal says to remove the credential and save the fact without it. A chatter warning suggests saving the note as kind `context`, which expires. Since 0.8.2 G4 is silent for the kinds `context`, `event`, `instruction`, `preference` and `decision`: a rule or decision often quotes the date it was made ("user 2026-10-13: ..."), and that is not progress chatter.
 
 Settings → `guardMode` picks what a warning does:
 
@@ -106,7 +106,7 @@ G3 needs embeddings on (it asks the engine's local `mnemopi_similar` tool, which
 
 The refusals show in the activity log as a failed call with the rule ids and no text.
 
-The rules are patterns, not understanding. An unusual secret can pass, and some prose is refused: a note such as `token: refreshAccessToken is the function that rotates it` looks like a secret assignment to G1, and a plain sentence with `today` warns under G4. Memories saved before 0.8.0 are not checked again. To see what the guard would say about your own store, run `bun bin/guard-audit.ts --store ~/.claude/mnemosyne/store` from the plugin folder: it opens the database read-only and prints counts per rule (G1, G2, G4) and per verdict, never a memory's text, id or owner.
+The rules are patterns, not understanding. An unusual secret can pass, and some prose is refused: a note such as `token: refreshAccessToken is the function that rotates it` looks like a secret assignment to G1, and a plain sentence with `today` saved as a fact warns under G4. Memories saved before 0.8.0 are not checked again. To see what the guard would say about your own store, run `bun bin/guard-audit.ts --store ~/.claude/mnemosyne/store` from the plugin folder: it opens the database read-only and prints counts per rule (G1, G2, G4) and per verdict, never a memory's text, id or owner. It reads each memory's kind, so G4 counts match what a save of that memory would get.
 
 ### Kinds
 
@@ -196,7 +196,7 @@ A `.env` file in the folder where an agent runs used to be able to point the eng
 3. No expiry sweep for unused memories; the engine tool exists but nothing runs it.
 4. Claude's own tools and the dashboard cannot restore a retired or expired memory. Only an outside agent (`memory_update` with `restore: true` through the proxy, on its own owner's row) or a direct engine call can; the dashboard's Restore button is planned for 0.9.0.
 5. The Health tab still shows the engine's unused tables (`episodic_memory`, `consolidation_log`, `gists`, `facts`, `graph_edges`, `triples`, `scratchpad` and their search indexes) as plain "empty". They stay empty on purpose, because the plugin never uses the engine tools that fill them (see [DESIGN.md](DESIGN.md)).
-6. A tag update made only of punctuation or blanks (for example `["!!!"]`) still erases the memory's tags and reports success, from Claude and from an outside agent alike; send `tags: []` to remove tags on purpose. An update whose tags are only the project's own name is refused instead, with a message that says a tag may not be the project name.
+6. A tag update whose tags all clean away (only punctuation or blanks such as `["!!!"]`, or only the project's own name) is refused since 0.8.2, from Claude and from an outside agent alike, and the stored tags stay; send `tags: []` to remove tags on purpose.
 7. Embeddings, and so G3, are tested on macOS on Apple Silicon only.
 
 ## Embeddings (meaning-based recall)

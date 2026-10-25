@@ -17,9 +17,15 @@ export function testHome(): string {
 	if (home === undefined) {
 		const dir = mkdtempSync(join(tmpdir(), "mnemosyne-engine-home-"));
 		home = dir;
-		process.on("exit", () => rmSync(dir, { recursive: true, force: true }));
+		process.on("exit", cleanupTestHome);
 	}
 	return home;
+}
+
+/** Removes the HOME testHome() made. `bun test` never fires process 'exit', so the root test preload calls this. */
+export function cleanupTestHome(): void {
+	if (home !== undefined) rmSync(home, { recursive: true, force: true });
+	home = undefined;
 }
 
 /** HOME and PI_CONFIG_DIR (a path under HOME, as the plugin sets it) for a spawned engine process. */

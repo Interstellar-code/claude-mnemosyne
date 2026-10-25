@@ -328,6 +328,14 @@ test('VOCAB.2.a3: an update whose tags are only the project name is refused, not
   expect(runs.length).toBe(0)
 })
 
+test('an update whose tags are only punctuation or blanks is refused, not turned into "remove the tags"', async ($, on) => {
+  const runs = world(on, '{"status":"updated"}')
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1', tags: ['!!!', '  ', '--'] })
+  expect(ran.deny).toContain('none of those tags can be stored')
+  expect(ran.deny).toContain('tags: []')
+  expect(runs.length).toBe(0)
+})
+
 test('VOCAB.2.a3: both mnemosyne-mcp wrappers hand the proxy the vocabulary file', { options: { externalMcp: true } }, async ($, on) => {
   expect(await wrapperText($, on)).toContain(`export MNEMOSYNE_VOCABULARY='${VOCAB_PATH}'\n`)
 })

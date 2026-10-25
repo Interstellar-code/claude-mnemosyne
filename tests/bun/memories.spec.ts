@@ -800,7 +800,7 @@ describe('META.4: replaces retires, never deletes', () => {
     const retireLines = host.activity().filter(line => line.action === 'retire')
     expect(retireLines.map(line => line.ok)).toEqual([false, true, true])
     expect(retireLines[2]!.owner).toBe('project-other-9z')
-  })
+  }, 30_000) // several engine runs; about 4.5 s, too near the 5 s default under load
 
   test('META.4: saving the same text again with replaces naming its own id retires nothing', async () => {
     const host = await open()

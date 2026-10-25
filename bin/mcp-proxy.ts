@@ -241,9 +241,9 @@ void (async () => {
           continue
         }
         const clean = cleanTags(tags, tagRulesNow())
-        // Tags that all clean away (only the project name) must not read as "remove the tags": [] is how those are removed.
-        if (name === 'memory_update' && clean.length === 0 && cleanTags(tags).length > 0) {
-          refuse(message.id, action, {}, { code: -32602, message: 'none of those tags can be stored (a tag may not be the project name). Send tags: [] to remove the tags.' })
+        // Tags that all clean away (the project name, punctuation, blanks) must not read as "remove the tags": [] is how those are removed.
+        if (name === 'memory_update' && clean.length === 0 && Array.isArray(tags) && tags.length > 0) {
+          refuse(message.id, action, {}, { code: -32602, message: 'none of those tags can be stored (a tag may not be the project name, and needs a letter or digit). Send tags: [] to remove the tags.' })
           continue
         }
         // remember: no tags, no metadata; update: [] removes the key.

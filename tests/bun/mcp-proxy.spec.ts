@@ -577,6 +577,11 @@ describe('the proxy against a real installed engine', () => {
     expect(metadataOf(id)).toEqual({ tags: ['ops', 'deploy'] })
     expect(logLines(log)[0]).toMatchObject({ action: 'update', ok: false, text: '' })
 
+    // punctuation and blanks clean away too, and are refused the same way
+    const punct = await proxy(cli, store, [toolCall(1, 'memory_update', { memory_id: id, tags: ['!!!', '  '] })], owner)
+    expect(punct.get(1).error.code).toBe(-32602)
+    expect(metadataOf(id)).toEqual({ tags: ['ops', 'deploy'] })
+
     // a mix keeps the rest; tags [] is the way to remove
     const mix = await proxy(cli, store, [toolCall(1, 'memory_update', { memory_id: id, tags: ['My Repo', 'Release'] })], owner)
     expect(text(mix.get(1)).status).toBe('updated')

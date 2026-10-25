@@ -493,8 +493,8 @@ function updateArgs(input: Record<string, unknown>, rules: TagRules = {}): Recor
   if (refused !== undefined) return refused
   if (!hasContent && !hasImportance && input.tags === undefined && !hasKind) return 'memory_update needs content, importance, tags or kind.'
   const tags = Array.isArray(input.tags) ? cleanTags(input.tags, rules) : undefined
-  // A list whose tags are all the project name, or fold away, must not read as "remove the tags": [] is how those are removed.
-  if (tags !== undefined && tags.length === 0 && Array.isArray(input.tags) && cleanTags(input.tags).length > 0) return 'none of those tags can be stored (a tag may not be the project name). Send tags: [] to remove the tags.'
+  // A list whose tags all clean away (the project name, punctuation, blanks) must not read as "remove the tags": [] is how those are removed.
+  if (tags !== undefined && tags.length === 0 && Array.isArray(input.tags) && input.tags.length > 0) return 'none of those tags can be stored (a tag may not be the project name, and needs a letter or digit). Send tags: [] to remove the tags.'
   return {
     memory_id: input.memory_id,
     ...(hasContent ? { content: input.content } : {}),

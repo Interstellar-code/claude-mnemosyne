@@ -90,4 +90,18 @@ describe('the guard audit of a temp store', () => {
       expect(out.stderr).toContain('Usage: bun bin/guard-audit.ts --store <dir>')
     }
   })
+
+  test("G4 reads each row's kind, as a save does: a dated rule is allowed, the same text as a fact or unknown warns", async () => {
+    const kinded = join(temp.dir, 'kinded')
+    mkdirSync(kinded, { recursive: true })
+    const db = new Database(join(kinded, 'mnemopi.db'))
+    db.run('CREATE TABLE working_memory (id TEXT PRIMARY KEY, content TEXT, memory_type TEXT)')
+    const rule = 'Merge small changes to main once scoped tests pass. Why: user 2026-10-13 said review rounds are done too slowly.'
+    for (const [id, kind] of [['k1', 'instruction'], ['k2', 'decision'], ['k3', 'fact'], ['k4', 'unknown']] as const) db.run('INSERT INTO working_memory VALUES (?, ?, ?)', [id, rule, kind])
+    db.close()
+    const out = await audit('--store', kinded)
+    expect(out.exitCode).toBe(0)
+    expect(out.stdout).toContain('verdict allow: 2')
+    expect(out.stdout).toContain('G4: allow 0, warn 2, block 0')
+  })
 })

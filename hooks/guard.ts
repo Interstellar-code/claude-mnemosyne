@@ -80,8 +80,12 @@ const DATE = new RegExp(`\\b\\d{4}-\\d{2}-\\d{2}\\b|\\b\\d{1,2}[/.]\\d{1,2}[/.]\
 const STATUS = /\b(?:released|merged|done|next|overnight|round)\b/i
 const NOW_WORDS = /\b(?:today|tonight|this session)\b/i
 
+// Kinds G4 leaves alone: context is already short-lived project state, event is dated by nature (a session
+// summary), and a rule, preference or decision often quotes the date it was made ("user 2026-10-13: ...").
+const DATED_OK = new Set(['context', 'event', 'instruction', 'preference', 'decision'])
+
 function chatterHits(content: string, kind: string | undefined): GuardHit[] {
-  if (kind === 'context') return [] // already saved as short-lived project state
+  if (kind !== undefined && DATED_OK.has(kind)) return []
   if (!(DATE.test(content) && STATUS.test(content)) && !NOW_WORDS.test(content)) return []
   return [{ rule: 'G4', message: "G4 task chatter: text reads like dated progress; save it as kind 'context' with an expiry (valid_until, about 14 days) instead" }]
 }

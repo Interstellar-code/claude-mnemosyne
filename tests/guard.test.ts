@@ -169,3 +169,10 @@ test('G4 stays quiet on durable facts, on a bare date or status word, and for ki
   expect(check('Hooks run next to the engine and share one store directory.').verdict).toBe('allow') // status word, no date
   expect(check('2026-10-24 released 0.7.6 with the dashboard polish', 'context').verdict).toBe('allow') // already short-lived
 })
+
+test('G4 stays quiet for a rule, preference, decision or session summary that quotes the date it was made', () => {
+  const rule = 'Merge small changes to main once scoped tests pass. Why: user 2026-10-13 said review rounds are done too slowly.'
+  for (const kind of ['instruction', 'preference', 'decision', 'event']) expect([kind, check(rule, kind).verdict]).toEqual([kind, 'allow'])
+  // a dated progress note saved as a fact, a bug note or a reference, or with no kind, still warns
+  for (const kind of ['fact', 'error', 'artifact', undefined]) expect([kind, check(rule, kind).hits.map((hit) => hit.rule)]).toEqual([kind, ['G4']])
+})

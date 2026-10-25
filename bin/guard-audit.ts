@@ -22,9 +22,13 @@ export function auditReport(store: string): string | null {
     const verdicts: Record<GuardVerdict, number> = { allow: 0, warn: 0, block: 0 }
     const hits = Object.fromEntries(RULES.map(rule => [rule, { allow: 0, warn: 0, block: 0 }])) as Record<GuardRule, Record<GuardVerdict, number>>
     let rows = 0
+    // The kind decides G4, as on a save; a store without the memory_type column (an older engine) has none.
+    const hasKind = (db.query("SELECT 1 FROM pragma_table_info('working_memory') WHERE name = 'memory_type'").get() ?? null) !== null
+    const sql = hasKind ? 'SELECT content, memory_type FROM working_memory' : 'SELECT content, NULL AS memory_type FROM working_memory'
     // One row at a time: the text lives only in this loop and is never kept or printed.
-    for (const row of db.query('SELECT content FROM working_memory').iterate() as Iterable<{ content: string | null }>) {
-      const { verdict, hits: found } = admit({ content: row.content ?? '', origin: 'audit' })
+    for (const row of db.query(sql).iterate() as Iterable<{ content: string | null; memory_type: string | null }>) {
+      const kind = row.memory_type === null || row.memory_type === 'unknown' ? undefined : row.memory_type
+      const { verdict, hits: found } = admit({ content: row.content ?? '', kind, origin: 'audit' })
       rows += 1
       verdicts[verdict] += 1
       for (const rule of new Set(found.map(hit => hit.rule))) hits[rule][verdict] += 1
