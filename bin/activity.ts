@@ -12,8 +12,12 @@
 // it checks the size again under the lock, so two writers never rotate twice. A
 // lock older than LOCK_STALE_MS is taken over. Every error is swallowed: a log
 // must never break the call it records.
-import { chmodSync, closeSync, existsSync, fchmodSync, linkSync, mkdirSync, openSync, renameSync, statSync, unlinkSync, writeSync } from 'node:fs'
-import { basename, dirname } from 'node:path'
+//
+// MAPX.3: appendActivity also maintains <root>/activity-daily.json beside the
+// log: per owner, per UTC day, writes/recalls counts. The log is written first;
+// a tally failure never stops or throws.
+import { chmodSync, closeSync, existsSync, fchmodSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeSync } from 'node:fs'
+import { basename, dirname, join } from 'node:path'
 
 export const MAX_BYTES = 1024 * 1024
 export const LOCK_STALE_MS = 10_000
@@ -23,6 +27,8 @@ export const MAX_LINE = 16 * 1024
 export const SCRIPT_TIMEOUT_MS = 5_000
 
 export type Limits = { maxBytes?: number; staleMs?: number }
+
+export const tallyPath = (path: string) => join(dirname(path), 'activity-daily.json')
 
 const isWindows = process.platform === 'win32'
 
@@ -114,8 +120,10 @@ export function rotate(path: string, limits: Limits = {}) {
 /** Appends each line as one JSON line at the end of `path`. Never throws. */
 export function appendActivity(path: string, lines: readonly unknown[], limits: Limits = {}) {
   try {
-    const text = lines.map(normalize).filter(line => line !== undefined).map(line => `${line}\n`).join('')
-    if (text === '' || typeof path !== 'string' || !basename(path).endsWith('.jsonl')) return
+    const normalized = (Array.isArray(lines) ? lines : []).map(normalize).filter((line): line is string => line !== undefined)
+    if (typeof path !== 'string' || !basename(path).endsWith('.jsonl')) return
+    const text = normalized.map(line => `${line}\n`).join('')
+    if (text === '') return
     const folder = dirname(path)
     if (!existsSync(folder)) {
       mkdirSync(folder, { recursive: true, mode: 0o700 })
@@ -131,9 +139,95 @@ export function appendActivity(path: string, lines: readonly unknown[], limits: 
     } finally {
       closeSync(fd)
     }
+    // Tally is derived from the lines that were actually written. A tally
+    // failure must never undo or stop the log write above.
+    try {
+      updateTally(path, normalized, limits)
+    } catch {
+      // swallowed: the log line is already on disk
+    }
   } catch {
     // never throws: a log write must not break a memory call
   }
+}
+
+function updateTally(logPath: string, normalizedLines: readonly string[], limits: Limits) {
+  const tally = tallyPath(logPath)
+  const folder = dirname(logPath)
+  const held = lock(tally, limits.staleMs ?? LOCK_STALE_MS)
+  if (held === undefined) return
+  try {
+    if (!existsSync(folder)) {
+      mkdirSync(folder, { recursive: true, mode: 0o700 })
+      if (!isWindows) chmodSync(folder, 0o700)
+    }
+    const data = readTally(tally)
+    const now = new Date()
+    const cutoff = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - 90))
+    const cutoffStr = cutoff.toISOString().slice(0, 10)
+    for (const line of normalizedLines) {
+      let entry: any
+      try { entry = JSON.parse(line) } catch { continue }
+      if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) continue
+      if (entry.ok !== true) continue
+      const action = entry.action
+      const isWrite = action === 'remember' || action === 'update'
+      const isRecall = action === 'recall'
+      if (!isWrite && !isRecall) continue
+      if (isRecall && entry.origin === 'ui') continue
+      const owner = (typeof entry.owner === 'string' && entry.owner !== '') ? entry.owner : 'global'
+      const day = utcDay(entry.t)
+      const count = (typeof entry.count === 'number' && Number.isInteger(entry.count) && entry.count > 0) ? entry.count : 1
+      if (!data.days[owner] || typeof data.days[owner] !== 'object' || Array.isArray(data.days[owner])) data.days[owner] = {}
+      const days = data.days[owner] as Record<string, any>
+      if (!days[day] || typeof days[day] !== 'object' || Array.isArray(days[day])) days[day] = { writes: 0, recalls: 0 }
+      if (typeof days[day].writes !== 'number') days[day].writes = 0
+      if (typeof days[day].recalls !== 'number') days[day].recalls = 0
+      if (isWrite) days[day].writes += count
+      else days[day].recalls += count
+    }
+    // drop days older than 90
+    for (const owner of Object.keys(data.days)) {
+      const days = data.days[owner]
+      if (!days || typeof days !== 'object' || Array.isArray(days)) { delete data.days[owner]; continue }
+      for (const day of Object.keys(days)) {
+        if (day < cutoffStr) delete days[day]
+      }
+      if (Object.keys(days).length === 0) delete data.days[owner]
+    }
+    const tmp = `${tally}.${process.pid}.${Date.now().toString(36)}${Math.random().toString(36).slice(2)}.tmp`
+    const tfd = openSync(tmp, 'w', 0o600)
+    try {
+      if (!isWindows) fchmodSync(tfd, 0o600)
+      writeSync(tfd, JSON.stringify(data))
+    } finally {
+      closeSync(tfd)
+    }
+    renameSync(tmp, tally)
+    if (!isWindows) chmodSync(tally, 0o600)
+  } finally {
+    try { unlinkSync(held) } catch {}
+  }
+}
+
+function readTally(path: string): { version: number; days: Record<string, any> } {
+  try {
+    const raw = readFileSync(path, 'utf8')
+    const parsed = JSON.parse(raw)
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return { version: 1, days: {} }
+    const version = (typeof parsed.version === 'number') ? parsed.version : 1
+    const days = (parsed.days !== null && typeof parsed.days === 'object' && !Array.isArray(parsed.days)) ? parsed.days : {}
+    return { version, days }
+  } catch {
+    return { version: 1, days: {} }
+  }
+}
+
+function utcDay(t: unknown): string {
+  if (typeof t !== 'string' || t.trim() === '') return new Date().toISOString().slice(0, 10)
+  const d = new Date(t)
+  if (Number.isNaN(d.getTime())) return new Date().toISOString().slice(0, 10)
+  return d.toISOString().slice(0, 10)
 }
 
 if (import.meta.main) {
