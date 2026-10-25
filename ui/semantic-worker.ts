@@ -9,8 +9,8 @@
 // One message in, one reply out. The worker is started by ui/server.ts the
 // first time /api/galaxy has enough vectors to lay out, and terminated when
 // the server stops.
-//   in   { id, radius, inputs: [{ id, json }] }
-//   out  { id, count, positions, similar }   or { id, error }
+//   in   { id, inputs: [{ id, owner, json }] }
+//   out  { id, count, positions, similar, pairs }   or { id, error }
 // The library is the vendored bundle (ui/vendor/semantic-lib.js), never a
 // node_modules import, so what runs here is the reviewed, scanned build.
 //
@@ -21,9 +21,12 @@ declare var self: Worker
 import { UMAP } from './vendor/semantic-lib.js'
 
 export type Vec3 = [number, number, number]
-export type MeaningInput = { id: string; json: string }
+// `owner` is the memory's project (MAPX.2): the pairs below cross two owners.
+export type MeaningInput = { id: string; owner?: string; json: string }
 export type MeaningRequest = { id: number; inputs: MeaningInput[] }
 export type MeaningNeighbour = { id: string; score: number }
+/** Two memories of different owners with a cosine at or above LINK_COSINE (MAPX.2, C11.3 `links`). */
+export type MeaningPair = { a: string; b: string; score: number }
 /**
  * The worker's first word on a request: it has taken the job off its queue and is about to
  * work. The server starts that run's clock here, not at post time, so a request queued
@@ -31,7 +34,7 @@ export type MeaningNeighbour = { id: string; score: number }
  */
 export type MeaningStarted = { id: number; started: true }
 export type MeaningReply =
-  | { id: number; count: number; positions: Record<string, Vec3>; similar: Record<string, MeaningNeighbour[]> }
+  | { id: number; count: number; positions: Record<string, Vec3>; similar: Record<string, MeaningNeighbour[]>; pairs: MeaningPair[] }
   | { id: number; error: string }
 
 // umap-js's own defaults, from the plan: 3 components, 15 neighbours, minDist 0.1.
@@ -42,6 +45,10 @@ export const SEED = 0x5eed1a7
 // "Similar memories": the top neighbours at or above this cosine.
 export const TOP_K = 3
 export const MIN_COSINE = 0.65
+// MAPX.2: two projects' memories this close are a black hole's pair; at most this many
+// per pair of owners leave the worker, best first (the server keeps 50 after dropping the dead).
+export const LINK_COSINE = 0.8
+export const LINK_PAIRS_PER_OWNERS = 200
 
 /** A mulberry32 stream from SEED: umap-js's `random`, so the embedding is reproducible. */
 function randomOf(seed: number): () => number {
@@ -103,17 +110,41 @@ function cosine(a: readonly number[], b: readonly number[]): number {
 }
 
 /**
- * Each vector's top TOP_K neighbours at or above MIN_COSINE, best first, ties by
- * index, as vector indices. The best few are kept in place, never a sort of the
- * whole row: at GALAXY_LIMIT points the full sort is most of the work (review
- * MEDIUM-2).
+ * The one pass over every pair of vectors. Per vector: its top TOP_K neighbours at or
+ * above MIN_COSINE, best first, ties by index, as vector indices. The best few are kept
+ * in place, never a sort of the whole row: at GALAXY_LIMIT points the full sort is most
+ * of the work (review MEDIUM-2).
+ *
+ * MAPX.2: the same cosine also feeds `pairs`, every two vectors of different `owners`
+ * (one entry per vector, by index) at or above LINK_COSINE, at most
+ * LINK_PAIRS_PER_OWNERS per pair of owners, best first, ties by the earlier index.
+ * Without `owners` there are no pairs.
  */
-export function neighboursOf(vectors: readonly number[][]): { index: number; score: number }[][] {
-  return vectors.map((vector, i) => {
+export function neighbourPass(
+  vectors: readonly number[][],
+  owners: readonly (string | undefined)[] = [],
+): { neighbours: { index: number; score: number }[][]; pairs: { i: number; j: number; score: number }[] } {
+  const buckets = new Map<string, { i: number; j: number; score: number }[]>()
+  const neighbours = vectors.map((vector, i) => {
     const best: { index: number; score: number }[] = []
+    const owner = owners[i]
     for (let j = 0; j < vectors.length; j++) {
       if (j === i) continue
       const score = cosine(vector, vectors[j] ?? [])
+      if (j > i && score >= LINK_COSINE) {
+        const other = owners[j]
+        if (owner !== undefined && other !== undefined && owner !== other) {
+          const key = owner < other ? `${owner}\u0000${other}` : `${other}\u0000${owner}`
+          const bucket = buckets.get(key) ?? []
+          buckets.set(key, bucket)
+          if (bucket.length < LINK_PAIRS_PER_OWNERS || score > (bucket[bucket.length - 1]?.score ?? 0)) {
+            let at = bucket.length
+            while (at > 0 && (bucket[at - 1]?.score ?? 0) < score) at--
+            bucket.splice(at, 0, { i, j, score })
+            if (bucket.length > LINK_PAIRS_PER_OWNERS) bucket.length = LINK_PAIRS_PER_OWNERS
+          }
+        }
+      }
       if (score < MIN_COSINE) continue
       // A row already full drops anything that does not beat its weakest entry; an equal
       // score keeps the earlier index, the order a full sort gave.
@@ -125,6 +156,12 @@ export function neighboursOf(vectors: readonly number[][]): { index: number; sco
     }
     return best
   })
+  return { neighbours, pairs: [...buckets.values()].flat() }
+}
+
+/** Each vector's top TOP_K neighbours at or above MIN_COSINE (see neighbourPass). */
+export function neighboursOf(vectors: readonly number[][]): { index: number; score: number }[][] {
+  return neighbourPass(vectors).neighbours
 }
 
 /**
@@ -146,15 +183,21 @@ export function place(embedding: readonly (readonly number[])[]): Vec3[] {
 }
 
 /** The whole answer for one request: each memory's position and its neighbours, keyed by memory id. */
-export function meaningOf(inputs: readonly MeaningInput[]): { count: number; positions: Record<string, Vec3>; similar: Record<string, MeaningNeighbour[]> } {
+export function meaningOf(inputs: readonly MeaningInput[]): {
+  count: number
+  positions: Record<string, Vec3>
+  similar: Record<string, MeaningNeighbour[]>
+  pairs: MeaningPair[]
+} {
   const { ids, vectors } = parseVectors(inputs)
+  const ownerOf = new Map(inputs.map(input => [input.id, input.owner]))
   const unitVectors = vectors.map(unit)
   // umap-js refuses fewer points than nNeighbors + 1: the clamp keeps 10 to 15 points working.
   const k = Math.max(2, Math.min(NEIGHBORS, unitVectors.length - 1))
   const umap = new UMAP({ nComponents: COMPONENTS, nNeighbors: k, minDist: 0.1, random: randomOf(SEED) })
   const embedding = umap.fit(unitVectors)
   const placed = place(embedding)
-  const neighbours = neighboursOf(unitVectors)
+  const { neighbours, pairs: found } = neighbourPass(unitVectors, ids.map(id => ownerOf.get(id)))
   const positions: Record<string, Vec3> = {}
   const similar: Record<string, MeaningNeighbour[]> = {}
   ids.forEach((id, index) => {
@@ -165,7 +208,12 @@ export function meaningOf(inputs: readonly MeaningInput[]): { count: number; pos
       return other === undefined ? [] : [{ id: other, score: neighbour.score }]
     })
   })
-  return { count: ids.length, positions, similar }
+  const pairs = found.flatMap(pair => {
+    const a = ids[pair.i]
+    const b = ids[pair.j]
+    return a === undefined || b === undefined ? [] : [{ a, b, score: pair.score }]
+  })
+  return { count: ids.length, positions, similar, pairs }
 }
 
 self.onmessage = (event: MessageEvent) => {

@@ -28,7 +28,7 @@ import {
   startServer,
 } from '../../ui/server'
 import type { ServerOptions, Started } from '../../ui/server'
-import { MIN_COSINE, TOP_K, neighboursOf, parseVectors } from '../../ui/semantic-worker'
+import { LINK_COSINE, LINK_PAIRS_PER_OWNERS, MIN_COSINE, TOP_K, meaningOf, neighbourPass, neighboursOf, parseVectors } from '../../ui/semantic-worker'
 import { ROOT, tempDir } from './helpers'
 
 const MODEL = 'bge-small-en-v1.5'
@@ -146,7 +146,8 @@ const distance = (a: readonly number[], b: readonly number[]) => Math.hypot((a[0
 const clusterOf = (id: string) => id.slice(1, id.indexOf('-'))
 
 type Star = { id: string; owner: string; tags: string[]; position?: number[]; similar?: { id: string; score: number }[] }
-type Reply = { meaning: boolean; memories: Star[]; projects: unknown[]; total: number; shown: number }
+type Link = { a: string; b: string; pairs: { older: string; newer: string; score: number }[] }
+type Reply = { meaning: boolean; memories: Star[]; projects: unknown[]; total: number; shown: number; links?: Link[] }
 
 function start(store: string, dir: string, activityLog = '', options: ServerOptions = {}) {
   return startServer({ root: join(dir, 'root'), store, cli: '', activityLog, pluginRoot: ROOT }, options)
@@ -312,6 +313,8 @@ describe('SEMX.1.a5: fewer than 10 vectors means no meaning', () => {
     const { status, body } = await getJson(below, '/api/galaxy')
     expect(status).toBe(200)
     expect(body.meaning).toBe(false)
+    // MAPX.2: the worker does not run below the floor, so there are no links either
+    expect('links' in body).toBe(false)
     expect(body.memories).toHaveLength(belowRows.length)
     for (const star of body.memories) {
       expect({ id: star.id, position: star.position }).toEqual({ id: star.id, position: undefined })
@@ -1005,5 +1008,168 @@ describe('LOW-2: the layout file goes when the store falls below the floor', () 
     expect(body.meaning).toBe(false)
     // The file named ids and scores of memories that are gone: it goes with them.
     expect(existsSync(cache)).toBe(false)
+  }, 60_000)
+})
+
+describe('MAPX.2.a5: cross-owner pairs on the worker’s own functions', () => {
+  const unit = (values: number[]) => {
+    const norm = Math.hypot(...values)
+    return values.map(value => value / norm)
+  }
+  // `n` vectors close to the x axis; a larger `tilt` is a little further from it
+  const near = (n: number, tilt: number) => Array.from({ length: n }, (_, i) => unit([1, tilt * (i + 1), 0, 0]))
+
+  test('LINK_COSINE is 0.80 and 200 pairs leave the worker per pair of owners', () => {
+    expect(LINK_COSINE).toBe(0.8)
+    expect(LINK_PAIRS_PER_OWNERS).toBe(200)
+  })
+
+  test('only vectors of two different owners at or above 0.80 pair; the same owner, a lower cosine and a missing owner do not', () => {
+    const vectors = [unit([1, 0, 0, 0]), unit([1, 0.1, 0, 0]), unit([1, 0.2, 0, 0]), unit([0, 1, 0, 0]), unit([1, 0.3, 0, 0])]
+    // 0 and 1 share an owner; 2 is another; 3 is orthogonal to the rest; 4 has no owner
+    const { pairs } = neighbourPass(vectors, ['a', 'a', 'b', 'b', undefined])
+    const found = pairs.map(pair => [pair.i, pair.j]).sort()
+    expect(found).toEqual([[0, 2], [1, 2]])
+    for (const pair of pairs) expect(pair.score).toBeGreaterThanOrEqual(LINK_COSINE)
+    // exactly the floor counts
+    const edge = neighbourPass([unit([1, 0]), unit([LINK_COSINE, Math.sqrt(1 - LINK_COSINE ** 2)])], ['a', 'b'])
+    expect(edge.pairs).toHaveLength(1)
+    const below = neighbourPass([unit([1, 0]), unit([LINK_COSINE - 0.001, Math.sqrt(1 - (LINK_COSINE - 0.001) ** 2)])], ['a', 'b'])
+    expect(below.pairs).toEqual([])
+  })
+
+  test('each unordered pair of vectors is listed once, whichever owner comes first', () => {
+    const { pairs } = neighbourPass(near(4, 0.01), ['a', 'b', 'a', 'b'])
+    const keys = pairs.map(pair => `${Math.min(pair.i, pair.j)}-${Math.max(pair.i, pair.j)}`)
+    expect(new Set(keys).size).toBe(keys.length)
+    expect(keys.sort()).toEqual(['0-1', '0-3', '1-2', '2-3'])
+  })
+
+  test('at most 200 per pair of owners, best first, and each pair of owners is capped on its own', () => {
+    // 20 of owner x, 20 of owner y, 20 of owner z: 400 cross pairs for each owner pair
+    const vectors = near(60, 0.001)
+    const owners = vectors.map((_, i) => ['x', 'y', 'z'][Math.floor(i / 20)])
+    const { pairs } = neighbourPass(vectors, owners)
+    const per = new Map<string, number[]>()
+    for (const pair of pairs) {
+      const key = [owners[pair.i], owners[pair.j]].sort().join('')
+      per.set(key, [...(per.get(key) ?? []), pair.score])
+    }
+    expect([...per.keys()].sort()).toEqual(['xy', 'xz', 'yz'])
+    for (const scores of per.values()) {
+      expect(scores).toHaveLength(LINK_PAIRS_PER_OWNERS)
+      expect(scores).toEqual([...scores].sort((a, b) => b - a))
+    }
+    // the kept 200 are the best 200 of the 400: nothing dropped beats the worst kept
+    const everything = neighbourPass(near(40, 0.001), [...Array(20).fill('x'), ...Array(20).fill('y')]).pairs
+    expect(everything).toHaveLength(LINK_PAIRS_PER_OWNERS)
+    const cosines: number[] = []
+    const base = near(40, 0.001)
+    for (let i = 0; i < 20; i++) for (let j = 20; j < 40; j++) cosines.push(base[i]!.reduce((sum, value, k) => sum + value * base[j]![k]!, 0))
+    cosines.sort((a, b) => b - a)
+    expect(everything[LINK_PAIRS_PER_OWNERS - 1]!.score).toBeCloseTo(cosines[LINK_PAIRS_PER_OWNERS - 1]!, 12)
+  })
+
+  test('the neighbours are the same with or without owners (the pass is shared)', () => {
+    const vectors = near(12, 0.05)
+    expect(neighbourPass(vectors, vectors.map((_, i) => (i % 2 === 0 ? 'a' : 'b'))).neighbours).toEqual(neighboursOf(vectors))
+  })
+
+  test('meaningOf returns the pairs as memory ids; inputs without an owner give none', () => {
+    const random = randomOf(5)
+    const vectors = Array.from({ length: 12 }, () => Array.from({ length: 16 }, () => random() - 0.5))
+    const inputs = vectors.map((vector, i) => ({ id: `w${i}`, owner: i < 6 ? 'p1' : 'p2', json: JSON.stringify(vector.map((value, k) => value + (k === 0 ? 10 : 0))) }))
+    const answer = meaningOf(inputs)
+    expect(answer.pairs.length).toBeGreaterThan(0)
+    for (const pair of answer.pairs) {
+      const a = inputs.find(input => input.id === pair.a)!
+      const b = inputs.find(input => input.id === pair.b)!
+      expect(a.owner).not.toBe(b.owner)
+      expect(pair.score).toBeGreaterThanOrEqual(LINK_COSINE)
+    }
+    expect(meaningOf(inputs.map(({ id, json }) => ({ id, json }))).pairs).toEqual([])
+  })
+})
+
+describe('MAPX.2.a5: links through the real server, and the cache under the bumped version', () => {
+  const temp = tempDir('semantic-links')
+  const store = join(temp.dir, 'store')
+  const root = join(temp.dir, 'root')
+  const cache = join(root, MEANING_CACHE)
+  const rows = fixture(12)
+  let started: Started
+
+  beforeAll(async () => {
+    makeStore(store, rows)
+    started = await start(store, temp.dir)
+  }, 60_000)
+  afterAll(() => {
+    started?.stop()
+    temp.dispose()
+  })
+
+  test('MEANING_VERSION is bumped, so a version 1 cache is a miss', () => {
+    expect(MEANING_VERSION).toBe(2)
+    expect(meaningKey(MODEL, ['a'], 'x', 1)).not.toBe(meaningKey(MODEL, ['a'], 'x'))
+  })
+
+  test('links name two projects, with at most 50 pairs, best first, older memory first, in one cluster each', async () => {
+    const { body } = await getJson(started, '/api/galaxy')
+    expect(body.meaning).toBe(true)
+    // rows alternate between the global owner and project-alpha; every cluster holds both
+    expect(body.links).toHaveLength(1)
+    const link = body.links![0]!
+    // the global rows were saved first (index 0 is 1 January): `a` is the older project
+    expect(link.a).toBe('global')
+    expect(link.b).toBe('project-alpha-1a2b')
+    expect(link.pairs).toHaveLength(50)
+    const scores = link.pairs.map(pair => pair.score)
+    expect(scores).toEqual([...scores].sort((a, b) => b - a))
+    const byId = new Map(body.memories.map(star => [star.id, star]))
+    const created = new Map(rows.map((row, index) => [row.id, `2026-01-${String((index % 28) + 1).padStart(2, '0')}`]))
+    for (const pair of link.pairs) {
+      expect(pair.score).toBeGreaterThanOrEqual(LINK_COSINE)
+      expect(clusterOf(pair.older)).toBe(clusterOf(pair.newer))
+      expect(new Set([byId.get(pair.older)!.owner, byId.get(pair.newer)!.owner]).size).toBe(2)
+      expect(created.get(pair.older)! <= created.get(pair.newer)!).toBe(true)
+    }
+  }, 60_000)
+
+  test('meaning.json holds the pairs under the version 2 key', () => {
+    const stored = JSON.parse(readFileSync(cache, 'utf8')) as { key: string; meaning: { pairs: { a: string; b: string; score: number }[] } }
+    const index = indexOf(store)
+    expect(stored.key).toBe(meaningKey(MODEL, index.ids, index.newest, 2))
+    expect(stored.key).not.toBe(meaningKey(MODEL, index.ids, index.newest, 1))
+    expect(Array.isArray(stored.meaning.pairs)).toBe(true)
+    expect(stored.meaning.pairs.length).toBeGreaterThan(50)
+    expect(stored.meaning.pairs.length).toBeLessThanOrEqual(LINK_PAIRS_PER_OWNERS)
+  })
+
+  test('a retired memory leaves its pairs at once, with no new run: the cache file is untouched', async () => {
+    const before = digest(cache)
+    const first = (await getJson(started, '/api/galaxy')).body.links![0]!
+    const victim = first.pairs[0]!.older
+    const db = new Database(join(store, 'mnemopi.db'))
+    try {
+      db.run("UPDATE working_memory SET valid_until = '2020-01-01T00:00:00.000Z' WHERE id = ?", [victim])
+    } finally {
+      db.close()
+    }
+    const after = (await getJson(started, '/api/galaxy')).body.links![0]!
+    expect(JSON.stringify(after.pairs)).not.toContain(`"${victim}"`)
+    expect(after.pairs).toHaveLength(50)
+    expect(digest(cache)).toBe(before)
+  }, 60_000)
+
+  test('an older cache (version 1 key, no pairs) is a miss: it is recomputed and the links appear', async () => {
+    const index = indexOf(store)
+    const stale = JSON.parse(readFileSync(cache, 'utf8')) as { key: string; meaning: { pairs?: unknown } }
+    delete stale.meaning.pairs
+    writeFileSync(cache, `${JSON.stringify({ key: meaningKey(MODEL, index.ids, index.newest, 1), meaning: stale.meaning })}\n`)
+    const { body } = await getJson(started, '/api/galaxy')
+    expect(body.meaning).toBe(true)
+    expect(body.links?.[0]?.pairs.length).toBeGreaterThan(0)
+    const stored = JSON.parse(readFileSync(cache, 'utf8')) as { key: string }
+    expect(stored.key).toBe(meaningKey(MODEL, index.ids, index.newest, 2))
   }, 60_000)
 })
