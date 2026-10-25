@@ -56,14 +56,14 @@ import {
 } from 'node:fs'
 import { dirname, join, sep } from 'node:path'
 import { appendActivity } from '../bin/activity'
-import { hasTagSql, untaggedSql } from '../bin/memories'
+import { hasTagSql, tagsSql, untaggedSql } from '../bin/memories'
 import { activityEntry, preview } from '../hooks/activity-log'
 import type { ActivityFields } from '../hooks/activity-log'
 import { buildRequests, engineEnv, parseReplies } from '../hooks/engine'
 import type { EngineRequest } from '../hooks/engine'
 import { CORE_SPREAD } from './map-layout'
 import { countByDay, isClaudeRecall, isOtherAppsRecall } from './recalls'
-import type { MeaningReply as MeaningWorkerReply, MeaningStarted } from './semantic-worker'
+import type { MeaningPair, MeaningReply as MeaningWorkerReply, MeaningStarted } from './semantic-worker'
 
 const UI_DIR = import.meta.dir
 const VENDOR_DIR = join(UI_DIR, 'vendor')
@@ -652,17 +652,80 @@ export function listMemories(db: Database | null, params: URLSearchParams): Answ
 /** GET /api/memories/<id>: one row in full, or 404. */
 export function getMemory(db: Database | null, id: string): Answer {
   if (db === null || !isMemoryId(id)) return { status: 404, body: { error: 'not found' } }
+  // trust_tier is a migrated column: a store that never ran the engine's migration reads it as NULL.
+  const trust = tableColumns(db, 'working_memory').has('trust_tier') ? 'trust_tier' : 'NULL AS trust_tier'
   const row = db
     .query(
       `SELECT id, content, session_id AS owner, importance, recall_count, last_recalled, timestamp, scope,
-        metadata_json, source, memory_type, veracity, created_at
+        metadata_json, source, memory_type, veracity, created_at, ${trust}, valid_until, superseded_by
        FROM working_memory WHERE id = ?`,
     )
-    .get(id) as (Omit<ListRow, 'preview' | 'length'> & { content: string; source: string | null; memory_type: string | null; veracity: string | null; created_at: string | null }) | null
+    .get(id) as
+    | (Omit<ListRow, 'preview' | 'length'> & {
+        content: string
+        source: string | null
+        memory_type: string | null
+        veracity: string | null
+        created_at: string | null
+        trust_tier: string | null
+        valid_until: string | null
+        superseded_by: string | null
+      })
+    | null
   if (row === null) return { status: 404, body: { error: 'not found' } }
   const { metadata_json, ...rest } = row
   const metadata = parseMetadata(metadata_json)
-  return { status: 200, body: { ...rest, recall_count: rest.recall_count ?? 0, metadata, tags: tagsOf(metadata) } }
+  const history = historyOf(db, id)
+  return {
+    status: 200,
+    body: { ...rest, recall_count: rest.recall_count ?? 0, metadata, tags: tagsOf(metadata), state: memoryState(row, history), history },
+  }
+}
+
+/**
+ * The audit trail's newest 3 rows for a memory, newest first: action, validator and time (as an
+ * ISO string; the table stores SQLite's zone-less UTC text), never any text.
+ */
+function historyOf(db: Database, id: string): { action: string; validator: string; at: string | null }[] {
+  try {
+    const rows = db
+      .query('SELECT action, validator, validated_at AS at FROM memory_validations WHERE memory_id = ? ORDER BY validation_id DESC LIMIT 3')
+      .all(id) as { action: string; validator: string; at: string | null }[]
+    return rows.map(row => {
+      const ms = stampMs(row.at)
+      return { action: row.action, validator: row.validator, at: ms === null ? row.at : new Date(ms).toISOString() }
+    })
+  } catch {
+    // the table is missing in a store older than the audit trail
+    return []
+  }
+}
+
+// ---- A memory's state (MAPX.2, C11.4) ----
+
+export type MemoryState = 'live' | 'retired' | 'expired' | 'lapsed'
+
+/**
+ * The state rule, in one place. A row is live when `superseded_by` is NULL and `valid_until` is
+ * NULL or still in the future (the same test the engine's recall applies, as ISO strings).
+ * Otherwise `audit` (the row's audit actions, newest first) decides: the newest 'retire' or
+ * 'expire' gives 'retired' or 'expired'; a later 'update' or 'attest' is skipped, not read as
+ * the state. With neither, a row that names a replacement is 'retired' and any other is
+ * 'lapsed' (its own expiry date passed, or a retire with no validator and no replacement:
+ * the engine writes an audit row only when a validator was passed). A restore clears both
+ * columns, so a restored row is live whatever its audit rows say.
+ */
+export function memoryState(
+  row: { valid_until: string | null; superseded_by: string | null },
+  audit: readonly { action: string }[] = [],
+  now: string = new Date().toISOString(),
+): MemoryState {
+  if (row.superseded_by == null && (row.valid_until == null || row.valid_until > now)) return 'live'
+  for (const entry of audit) {
+    if (entry.action === 'retire') return 'retired'
+    if (entry.action === 'expire') return 'expired'
+  }
+  return row.superseded_by != null ? 'retired' : 'lapsed'
 }
 
 // ---- Labels shared by the galaxy and the stats ----
@@ -727,11 +790,42 @@ export type GalaxyMemory = {
   lastRecalled: string | null
   created: string | null
   label: string
+  // MAPX.2 (C11.1)
+  source: string
+  sourceInferred: boolean
+  kind: string
+  scope: string
+  importance: number
+  pinned: boolean
+  state: MemoryState
+  validUntil: string | null
   // SEMX.1: only a memory with a vector carries these two.
   position?: [number, number, number]
   similar?: { id: string; score: number }[]
 }
-export type GalaxyProject = { owner: string; label: string; count: number; recalls: number }
+export type GalaxyProject = {
+  owner: string
+  label: string
+  count: number
+  recalls: number
+  // MAPX.2 (C11.2): all over the project's live rows, from the whole store, not the capped list.
+  liveCount: number
+  kinds: { kind: string; count: number }[]
+  unknown: number
+  global: number
+  lastActive: string | null
+  activity30: number
+  activitySource: 'tally' | 'lifetime'
+  recallsTotal: number
+  medianAgeDays: number | null
+  firstSaved: string | null
+  tags: { tag: string; count: number }[]
+  tagsTotal: number
+  projectKind: ProjectKind
+  remoteHost: string | null
+}
+export type GalaxyWriter = { source: string; count: number; inferred: number }
+export type GalaxyLink = { a: string; b: string; pairs: { older: string; newer: string; score: number }[] }
 
 // ---- Meaning (SEMX.1): UMAP positions and the similar memories beside them ----
 
@@ -741,7 +835,7 @@ export const MIN_MEANING_VECTORS = 10
 export const MEANING_CACHE = 'meaning.json'
 // Bumped when the layout's maths or constants change: an older cache file is then a miss
 // instead of a stale layout (review LOW-1).
-export const MEANING_VERSION = 1
+export const MEANING_VERSION = 2
 // A run that has not answered by now is dead: reject it, terminate the worker, start fresh.
 export const MEANING_RUN_TIMEOUT_MS = 30_000
 // How long a galaxy request waits for a cold layout before it answers the topic map instead.
@@ -756,6 +850,8 @@ export type Meaning = {
   meaning: boolean
   positions: Record<string, [number, number, number]>
   similar: Record<string, MeaningNeighbour[]>
+  // MAPX.2: every cross-owner pair at or above 0.80 the worker found, at most 200 per two owners.
+  pairs?: MeaningPair[]
 }
 export const NO_MEANING: Meaning = { meaning: false, positions: {}, similar: {} }
 
@@ -858,21 +954,25 @@ export function readVectorIndex(db: Database, limit = GALAXY_LIMIT): MeaningInde
   return { model, ids: rows.filter(row => (typeof row.model === 'string' ? row.model : '') === model).map(row => row.id), newest }
 }
 
-/** The stored JSON of `ids`' vectors, in the order given (a cache miss only). */
-export function readVectorInputs(db: Database, ids: readonly string[]): { id: string; json: string }[] {
+/** The stored JSON of `ids`' vectors and each memory's owner, in the order given (a cache miss only). */
+export function readVectorInputs(db: Database, ids: readonly string[]): { id: string; owner: string; json: string }[] {
   if (ids.length === 0) return []
   // Chunked: 2000 ids would otherwise be 2000 bound variables in one statement.
-  const byId = new Map<string, string>()
+  const byId = new Map<string, { json: string; owner: string }>()
   for (let from = 0; from < ids.length; from += VECTOR_CHUNK) {
     const chunk = ids.slice(from, from + VECTOR_CHUNK)
     const rows = db
-      .query(`SELECT memory_id AS id, embedding_json AS json FROM memory_embeddings WHERE memory_id IN (${chunk.map(() => '?').join(', ')})`)
-      .all(...chunk) as { id: string; json: string }[]
-    for (const row of rows) byId.set(row.id, row.json)
+      .query(
+        `SELECT e.memory_id AS id, e.embedding_json AS json, COALESCE(w.session_id, '') AS owner
+         FROM memory_embeddings e LEFT JOIN working_memory w ON w.id = e.memory_id
+         WHERE e.memory_id IN (${chunk.map(() => '?').join(', ')})`,
+      )
+      .all(...chunk) as { id: string; json: string; owner: string }[]
+    for (const row of rows) byId.set(row.id, { json: row.json, owner: row.owner })
   }
   return ids.flatMap(id => {
-    const json = byId.get(id)
-    return json === undefined ? [] : [{ id, json }]
+    const found = byId.get(id)
+    return found === undefined ? [] : [{ id, owner: found.owner, json: found.json }]
   })
 }
 
@@ -987,7 +1087,7 @@ export class MeaningRunner {
   }
 
   /** The worker's answer to one layout question; the worker itself runs them one at a time. */
-  run(inputs: readonly { id: string; json: string }[]): Promise<Extract<MeaningReply, { count: number }>> {
+  run(inputs: readonly { id: string; owner?: string; json: string }[]): Promise<Extract<MeaningReply, { count: number }>> {
     let worker: Worker
     try {
       worker = this.start()
@@ -1049,7 +1149,7 @@ export function scaleMeaning(meaning: Meaning, radius: number): Meaning {
   if (!meaning.meaning) return meaning
   const positions: Record<string, [number, number, number]> = {}
   for (const [id, [x, y, z]] of Object.entries(meaning.positions)) positions[id] = [x * radius, y * radius, z * radius]
-  return { meaning: true, positions, similar: meaning.similar }
+  return { meaning: true, positions, similar: meaning.similar, ...(meaning.pairs ? { pairs: meaning.pairs } : {}) }
 }
 
 /**
@@ -1093,7 +1193,7 @@ export async function meaningLevel(db: Database | null, root: string, runner: Me
     // Rows that do not parse are dropped in the worker: the floor counts usable vectors, so
     // a store of corrupt rows stays on the topic layout and is never cached (review MEDIUM-3).
     if (reply.count < MIN_MEANING_VECTORS) return NO_MEANING
-    const meaning: Meaning = { meaning: true, positions: reply.positions, similar: reply.similar }
+    const meaning: Meaning = { meaning: true, positions: reply.positions, similar: reply.similar, pairs: reply.pairs ?? [] }
     try {
       writeMeaningCache(root, key, meaning)
     } catch {
@@ -1112,6 +1212,141 @@ function tableColumns(db: Database, table: string): Set<string> {
   return new Set((db.query(`PRAGMA table_info(${table})`).all() as { name: string }[]).map(row => row.name))
 }
 
+// ---- The solar-system map's extras (MAPX.2, C11 and C12) ----
+
+export type ProjectKind = 'repo' | 'folder' | 'unknown'
+export const PROJECTS_FILE = 'projects.json'
+export const ACTIVITY_DAILY_FILE = 'activity-daily.json'
+// The most tags one planet carries, and the most pairs one link carries (C11.2, C11.3).
+export const GALAXY_PLANET_TAGS = 40
+export const GALAXY_LINK_PAIRS = 50
+// A pair of projects is a black hole only with this many pairs between them.
+export const GALAXY_LINK_MIN_PAIRS = 2
+// The tally answers "how often in the last 30 days" only once it reaches back this far.
+export const ACTIVITY_WINDOW_DAYS = 30
+const DAY_MS = 86_400_000
+// The engine's own liveness test, as SQL (one `?`: now, as an ISO string).
+const LIVE_SQL = '(superseded_by IS NULL AND (valid_until IS NULL OR valid_until > ?))'
+
+/** A stored time as milliseconds: ISO with a zone, or SQLite's `YYYY-MM-DD HH:MM:SS` (UTC); null when it is neither. */
+function stampMs(value: unknown): number | null {
+  if (typeof value !== 'string' || value === '') return null
+  const zoned = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2}(\.\d+)?)?$/.test(value) ? `${value.replace(' ', 'T')}Z` : value
+  const ms = Date.parse(zoned)
+  return Number.isFinite(ms) ? ms : null
+}
+
+/** `<root>/projects.json` (C12): each owner's kind and remote host. A missing, empty or corrupt file is an empty map. */
+function readRegistry(root: string | undefined): Map<string, { kind: ProjectKind; remoteHost: string | null }> {
+  const out = new Map<string, { kind: ProjectKind; remoteHost: string | null }>()
+  if (root === undefined) return out
+  try {
+    const projects = (JSON.parse(readFileSync(join(root, PROJECTS_FILE), 'utf8')) as { projects?: unknown }).projects
+    if (projects === null || typeof projects !== 'object' || Array.isArray(projects)) return out
+    for (const [owner, entry] of Object.entries(projects)) {
+      if (entry === null || typeof entry !== 'object') continue
+      const { kind, remoteHost } = entry as { kind?: unknown; remoteHost?: unknown }
+      out.set(owner, {
+        kind: kind === 'repo' || kind === 'folder' ? kind : 'unknown',
+        // a host only: anything else (a URL, a user, a port) is dropped rather than shown
+        remoteHost: typeof remoteHost === 'string' && /^[A-Za-z0-9.-]{1,253}$/.test(remoteHost) ? remoteHost : null,
+      })
+    }
+  } catch {
+    return new Map()
+  }
+  return out
+}
+
+/**
+ * `<root>/activity-daily.json` (C11.5). One source for the whole reply, so orbits stay
+ * comparable: 'tally' when the oldest day in the file is 30 or more days ago, else 'lifetime'
+ * (also for a missing or corrupt file). `last30` sums writes + recalls of the last 30 days
+ * (today included) per owner.
+ */
+function readTally(root: string | undefined, now: number): { source: 'tally' | 'lifetime'; last30: Map<string, number> } {
+  const last30 = new Map<string, number>()
+  if (root === undefined) return { source: 'lifetime', last30 }
+  try {
+    const days = (JSON.parse(readFileSync(join(root, ACTIVITY_DAILY_FILE), 'utf8')) as { days?: unknown }).days
+    if (days === null || typeof days !== 'object' || Array.isArray(days)) return { source: 'lifetime', last30 }
+    const today = Math.floor(now / DAY_MS)
+    let oldest = Number.POSITIVE_INFINITY
+    for (const [owner, perDay] of Object.entries(days)) {
+      if (perDay === null || typeof perDay !== 'object') continue
+      for (const [day, counts] of Object.entries(perDay)) {
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || counts === null || typeof counts !== 'object') continue
+        const ms = Date.parse(`${day}T00:00:00Z`)
+        if (!Number.isFinite(ms)) continue
+        const age = today - Math.floor(ms / DAY_MS)
+        oldest = Math.min(oldest, ms)
+        if (age >= ACTIVITY_WINDOW_DAYS) continue
+        const { writes, recalls } = counts as { writes?: unknown; recalls?: unknown }
+        const sum = (typeof writes === 'number' && Number.isFinite(writes) && writes > 0 ? writes : 0) + (typeof recalls === 'number' && Number.isFinite(recalls) && recalls > 0 ? recalls : 0)
+        last30.set(owner, (last30.get(owner) ?? 0) + sum)
+      }
+    }
+    const deep = Number.isFinite(oldest) && today - Math.floor(oldest / DAY_MS) >= ACTIVITY_WINDOW_DAYS
+    return { source: deep ? 'tally' : 'lifetime', last30: deep ? last30 : new Map() }
+  } catch {
+    return { source: 'lifetime', last30: new Map() }
+  }
+}
+
+/** The median of a list of numbers; null when it is empty. */
+function medianOf(values: number[]): number | null {
+  if (values.length === 0) return null
+  const sorted = [...values].sort((a, b) => a - b)
+  const mid = sorted.length >> 1
+  return sorted.length % 2 === 1 ? (sorted[mid] ?? null) : ((sorted[mid - 1] ?? 0) + (sorted[mid] ?? 0)) / 2
+}
+
+/**
+ * The black holes (C11.3): the worker's cross-owner pairs, kept only when both memories are
+ * live, grouped by the two projects, best first, at most GALAXY_LINK_PAIRS each, and only
+ * for two projects with at least GALAXY_LINK_MIN_PAIRS. `a` is the project saved first.
+ */
+function linksOf(db: Database, pairs: readonly MeaningPair[], firstSaved: ReadonlyMap<string, number>, now: string): GalaxyLink[] {
+  const wanted = [...new Set(pairs.flatMap(pair => [pair.a, pair.b]))]
+  const rows = new Map<string, { owner: string; timestamp: string }>()
+  for (let from = 0; from < wanted.length; from += VECTOR_CHUNK) {
+    const chunk = wanted.slice(from, from + VECTOR_CHUNK)
+    const found = db
+      .query(`SELECT id, session_id AS owner, timestamp FROM working_memory WHERE ${LIVE_SQL} AND id IN (${chunk.map(() => '?').join(', ')})`)
+      .all(now, ...chunk) as { id: string; owner: string | null; timestamp: string | null }[]
+    for (const row of found) if (typeof row.owner === 'string' && row.owner !== '') rows.set(row.id, { owner: row.owner, timestamp: row.timestamp ?? '' })
+  }
+  const groups = new Map<string, { a: string; b: string; pairs: { older: string; newer: string; score: number }[] }>()
+  for (const pair of pairs) {
+    const x = rows.get(pair.a)
+    const y = rows.get(pair.b)
+    if (x === undefined || y === undefined || x.owner === y.owner) continue
+    const xOlder = (stampMs(x.timestamp) ?? 0) < (stampMs(y.timestamp) ?? 0) || ((stampMs(x.timestamp) ?? 0) === (stampMs(y.timestamp) ?? 0) && pair.a < pair.b)
+    const [older, newer] = xOlder ? [pair.a, pair.b] : [pair.b, pair.a]
+    const owners = [x.owner, y.owner].sort()
+    const key = owners.join('\u0000')
+    const group = groups.get(key) ?? { a: owners[0] ?? '', b: owners[1] ?? '', pairs: [] }
+    groups.set(key, group)
+    group.pairs.push({ older, newer, score: Math.round(pair.score * 10_000) / 10_000 })
+  }
+  const links: GalaxyLink[] = []
+  for (const group of groups.values()) {
+    if (group.pairs.length < GALAXY_LINK_MIN_PAIRS) continue
+    group.pairs.sort((p, q) => q.score - p.score || (p.older < q.older ? -1 : p.older > q.older ? 1 : p.newer < q.newer ? -1 : p.newer > q.newer ? 1 : 0))
+    const first = (owner: string) => firstSaved.get(owner) ?? Number.POSITIVE_INFINITY
+    const swap = first(group.b) < first(group.a)
+    links.push({ a: swap ? group.b : group.a, b: swap ? group.a : group.b, pairs: group.pairs.slice(0, GALAXY_LINK_PAIRS) })
+  }
+  return links.sort((p, q) => q.pairs.length - p.pairs.length || (p.a < q.a ? -1 : p.a > q.a ? 1 : p.b < q.b ? -1 : p.b > q.b ? 1 : 0))
+}
+
+export type GalaxyOptions = {
+  // The dashboard's root: where projects.json and activity-daily.json are read (absent: neither).
+  root?: string
+  // The clock, for tests.
+  now?: Date
+}
+
 /**
  * GET /api/galaxy: every memory (newest first, at most `limit`), its project and the
  * knowledge rows mined from it, read-only. A missing store or a missing memoria table
@@ -1120,36 +1355,190 @@ function tableColumns(db: Database, table: string): Set<string> {
  * `meaning` (SEMX.1) is the layout ui/semantic-worker.ts computed: a memory with a
  * vector carries its `position` and its `similar` neighbours, and the reply says
  * `meaning: true`. Without it the reply is the topic layout's, `meaning: false`.
+ *
+ * MAPX.2 (C11): each project and memory carries what the solar-system map needs. The
+ * per-project numbers are over every live row of the store (the same rows `count` counts,
+ * minus the retired, expired and lapsed ones), never the capped list.
  */
-export function galaxyLevel(db: Database | null, limit = GALAXY_LIMIT, meaning: Meaning = NO_MEANING): Answer {
-  if (db === null) return { status: 200, body: { projects: [], memories: [], knowledge: [], meaning: false, total: 0, shown: 0 } }
+export function galaxyLevel(db: Database | null, limit = GALAXY_LIMIT, meaning: Meaning = NO_MEANING, options: GalaxyOptions = {}): Answer {
+  if (db === null) return { status: 200, body: { projects: [], memories: [], knowledge: [], writers: [], globalLive: 0, meaning: false, total: 0, shown: 0 } }
   const present = new Set(
     (db.query("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map(row => row.name),
   )
   const where = GALAXY_WHERE
+  const clock = options.now ?? new Date()
+  const now = clock.toISOString()
   const total = (db.query(`SELECT COUNT(*) AS n FROM working_memory WHERE ${where}`).get() as { n: number }).n
-  const projects: GalaxyProject[] = (
-    db
-      .query(`SELECT session_id AS owner, COUNT(*) AS count, SUM(${RECALLS}) AS recalls FROM working_memory WHERE ${where} GROUP BY session_id ORDER BY count DESC, owner`)
-      .all() as { owner: string; count: number; recalls: number | null }[]
-  ).map(row => ({ owner: row.owner, label: projectLabel(row.owner), count: row.count, recalls: row.recalls ?? 0 }))
+  const counted = db
+    .query(`SELECT session_id AS owner, COUNT(*) AS count, SUM(${RECALLS}) AS recalls FROM working_memory WHERE ${where} GROUP BY session_id ORDER BY count DESC, owner`)
+    .all() as { owner: string; count: number; recalls: number | null }[]
+
+  // Every live row's few small columns, once: the per-project and writer numbers come from this.
+  const live = db
+    .query(
+      `SELECT session_id AS owner, COALESCE(NULLIF(memory_type, ''), 'unknown') AS kind, scope, ${RECALLS} AS recalls, timestamp, last_recalled AS lastRecalled,
+              COALESCE(NULLIF(source, ''), 'unknown') AS source,
+              CASE WHEN json_valid(metadata_json) THEN json_extract(metadata_json, '$.source_backfill') END AS backfill
+       FROM working_memory WHERE ${where} AND ${LIVE_SQL}`,
+    )
+    .all(now) as { owner: string; kind: string; scope: string | null; recalls: number; timestamp: string | null; lastRecalled: string | null; source: string; backfill: unknown }[]
+  type Acc = {
+    liveCount: number
+    kinds: Map<string, number>
+    global: number
+    recalls: number
+    first: number | null
+    last: number | null
+    ages: number[]
+  }
+  const perOwner = new Map<string, Acc>()
+  const writerCounts = new Map<string, { count: number; inferred: number }>()
+  let globalLive = 0
+  for (const row of live) {
+    const acc: Acc = perOwner.get(row.owner) ?? { liveCount: 0, kinds: new Map<string, number>(), global: 0, recalls: 0, first: null, last: null, ages: [] as number[] }
+    perOwner.set(row.owner, acc)
+    acc.liveCount++
+    acc.kinds.set(row.kind, (acc.kinds.get(row.kind) ?? 0) + 1)
+    const isGlobal = row.scope === 'global'
+    if (isGlobal) acc.global++
+    if (isGlobal || row.owner === 'global') globalLive++
+    acc.recalls += row.recalls
+    const saved = stampMs(row.timestamp)
+    const recalled = stampMs(row.lastRecalled)
+    if (saved !== null) {
+      acc.first = acc.first === null ? saved : Math.min(acc.first, saved)
+      acc.ages.push(Math.max(0, (clock.getTime() - saved) / DAY_MS))
+    }
+    const active = Math.max(saved ?? Number.NEGATIVE_INFINITY, recalled ?? Number.NEGATIVE_INFINITY)
+    if (Number.isFinite(active)) acc.last = acc.last === null ? active : Math.max(acc.last, active)
+    const writer = writerCounts.get(row.source) ?? { count: 0, inferred: 0 }
+    writerCounts.set(row.source, writer)
+    writer.count++
+    if (row.backfill === 'inferred') writer.inferred++
+  }
+  const writers: GalaxyWriter[] = [...writerCounts]
+    .map(([source, entry]) => ({ source, count: entry.count, inferred: entry.inferred }))
+    .sort((a, b) => b.count - a.count || (a.source < b.source ? -1 : a.source > b.source ? 1 : 0))
+
+  // Tags, per project, over live rows: one entry per memory and tag (a repeated tag counts once).
+  const tagRows = db
+    .query(
+      `SELECT t.owner AS owner, t.tag AS tag, COUNT(*) AS n FROM (
+         SELECT DISTINCT w.id AS id, w.session_id AS owner, j.value AS tag
+         FROM working_memory w, json_each(${tagsSql('w.metadata_json')}) j
+         WHERE ${where} AND ${LIVE_SQL}
+           AND j.type = 'text' AND j.value <> ''
+       ) t GROUP BY t.owner, t.tag`,
+    )
+    .all(now) as { owner: string; tag: string; n: number }[]
+  const tagsOfOwner = new Map<string, { tag: string; count: number }[]>()
+  for (const row of tagRows) {
+    const list = tagsOfOwner.get(row.owner) ?? []
+    tagsOfOwner.set(row.owner, list)
+    list.push({ tag: row.tag, count: row.n })
+  }
+
+  const registry = readRegistry(options.root)
+  const tally = readTally(options.root, clock.getTime())
+  const iso = (ms: number | null) => (ms === null ? null : new Date(ms).toISOString())
+  const firstSaved = new Map<string, number>()
+  const projects: GalaxyProject[] = counted.map(row => {
+    const mine = perOwner.get(row.owner)
+    const tags = (tagsOfOwner.get(row.owner) ?? []).sort((a, b) => b.count - a.count || (a.tag < b.tag ? -1 : a.tag > b.tag ? 1 : 0))
+    const kinds = [...(mine?.kinds ?? [])]
+      .map(([kind, count]) => ({ kind, count }))
+      .sort((a, b) => b.count - a.count || (a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : 0))
+    const recallsTotal = mine?.recalls ?? 0
+    const liveCount = mine?.liveCount ?? 0
+    if (mine?.first != null) firstSaved.set(row.owner, mine.first)
+    const entry = registry.get(row.owner)
+    const median = medianOf(mine?.ages ?? [])
+    return {
+      owner: row.owner,
+      label: projectLabel(row.owner),
+      count: row.count,
+      recalls: row.recalls ?? 0,
+      liveCount,
+      kinds,
+      unknown: mine?.kinds.get('unknown') ?? 0,
+      global: mine?.global ?? 0,
+      lastActive: iso(mine?.last ?? null),
+      activity30: tally.source === 'tally' ? (tally.last30.get(row.owner) ?? 0) : liveCount + recallsTotal,
+      activitySource: tally.source,
+      recallsTotal,
+      medianAgeDays: median === null ? null : Math.round(median * 100) / 100,
+      firstSaved: iso(mine?.first ?? null),
+      tags: tags.slice(0, GALAXY_PLANET_TAGS),
+      tagsTotal: tags.length,
+      projectKind: entry?.kind ?? 'unknown',
+      remoteHost: entry?.remoteHost ?? null,
+    }
+  })
 
   const rows = db
     .query(
       `SELECT id, session_id AS owner, ${RECALLS} AS recalls, last_recalled AS lastRecalled,
-              timestamp AS created, substr(content, 1, 4000) AS head, metadata_json
+              timestamp AS created, substr(content, 1, 4000) AS head, metadata_json,
+              COALESCE(NULLIF(source, ''), 'unknown') AS source, COALESCE(NULLIF(memory_type, ''), 'unknown') AS kind,
+              COALESCE(scope, 'global') AS scope, COALESCE(importance, 0.5) AS importance, valid_until, superseded_by
        FROM working_memory WHERE ${where} ORDER BY ${GALAXY_ORDER} LIMIT ?`,
     )
-    .all(limit) as { id: string; owner: string; recalls: number; lastRecalled: string | null; created: string | null; head: string | null; metadata_json: string | null }[]
+    .all(limit) as {
+    id: string
+    owner: string
+    recalls: number
+    lastRecalled: string | null
+    created: string | null
+    head: string | null
+    metadata_json: string | null
+    source: string
+    kind: string
+    scope: string
+    importance: number
+    valid_until: string | null
+    superseded_by: string | null
+  }[]
+
+  // The audit rows of every row that is not live, in one query (a table older than the trail: none).
+  const audit = new Map<string, { action: string }[]>()
+  if (present.has('memory_validations')) {
+    try {
+      const trail = db
+        .query(
+          `SELECT memory_id AS id, action FROM memory_validations
+           WHERE action IN ('retire', 'expire')
+             AND memory_id IN (SELECT id FROM working_memory WHERE ${where} AND NOT ${LIVE_SQL})
+           ORDER BY validation_id DESC`,
+        )
+        .all(now) as { id: string; action: string }[]
+      for (const entry of trail) {
+        const list = audit.get(entry.id) ?? []
+        audit.set(entry.id, list)
+        list.push({ action: entry.action })
+      }
+    } catch {
+      // an unreadable trail leaves the states to the columns alone
+    }
+  }
+
   const memories: GalaxyMemory[] = rows.map(row => {
+    const metadata = parseMetadata(row.metadata_json)
     const memory: GalaxyMemory = {
       id: row.id,
       owner: row.owner,
-      tags: tagsOf(parseMetadata(row.metadata_json)),
+      tags: tagsOf(metadata),
       recalls: row.recalls,
       lastRecalled: row.lastRecalled,
       created: row.created,
       label: galaxyLabel(row.head),
+      source: row.source,
+      sourceInferred: metadata?.source_backfill === 'inferred',
+      kind: row.kind,
+      scope: row.scope,
+      importance: row.importance,
+      pinned: metadata?.pinned === true,
+      state: memoryState(row, audit.get(row.id) ?? [], now),
+      validUntil: row.valid_until,
     }
     const position = meaning.positions[row.id]
     if (position !== undefined) memory.position = position
@@ -1180,7 +1569,12 @@ export function galaxyLevel(db: Database | null, limit = GALAXY_LIMIT, meaning: 
       }
     }
   }
-  return { status: 200, body: { projects, memories, knowledge, meaning: meaning.meaning, total, shown: memories.length } }
+  // Links need vectors: absent without them, and below the floor the worker does not run.
+  const links = meaning.meaning ? linksOf(db, meaning.pairs ?? [], firstSaved, now) : undefined
+  return {
+    status: 200,
+    body: { projects, memories, knowledge, writers, globalLive, ...(links ? { links } : {}), meaning: meaning.meaning, total, shown: memories.length },
+  }
 }
 
 export type KnowledgeItem = {
@@ -1866,7 +2260,7 @@ export async function startServer(config: Config, options: ServerOptions = {}): 
         } catch {
           // a layout that fails, or a worker that died, leaves the topic map: meaning false
         }
-        return galaxyLevel(db, GALAXY_LIMIT, layout)
+        return galaxyLevel(db, GALAXY_LIMIT, layout, { root: config.root })
       })
     }
     if (path === '/api/activity') {
