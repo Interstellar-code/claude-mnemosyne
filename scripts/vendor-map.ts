@@ -280,40 +280,41 @@ export declare class UnrealBloomPass implements PassLike {
   threshold: number
   render(renderer: WebGLRendererLike, writeBuffer: RenderTargetLike, readBuffer: RenderTargetLike, deltaTime?: number, maskActive?: boolean): void
   setSize(width: number, height: number): void
-export declare const Scene: unknown
-export declare const PerspectiveCamera: unknown
-export declare const WebGLRenderer: unknown
-export declare const Group: unknown
-export declare const Mesh: unknown
-export declare const Points: unknown
-export declare const Line: unknown
-export declare const LineLoop: unknown
-export declare const Sprite: unknown
-export declare const SphereGeometry: unknown
-export declare const BoxGeometry: unknown
-export declare const CylinderGeometry: unknown
-export declare const TorusGeometry: unknown
-export declare const RingGeometry: unknown
-export declare const BufferGeometry: unknown
-export declare const BufferAttribute: unknown
-export declare const MeshBasicMaterial: unknown
-export declare const MeshStandardMaterial: unknown
-export declare const LineBasicMaterial: unknown
-export declare const PointsMaterial: unknown
-export declare const SpriteMaterial: unknown
-export declare const CanvasTexture: unknown
-export declare const Color: unknown
-export declare const Vector2: unknown
-export declare const Vector3: unknown
-export declare const Raycaster: unknown
-export declare const PointLight: unknown
-export declare const AmbientLight: unknown
-export declare const AdditiveBlending: unknown
-export declare const NormalBlending: unknown
-export declare const DoubleSide: unknown
-export declare const SRGBColorSpace: unknown
-export declare const OrbitControls: unknown
+  dispose(): void
 }
+export declare class Scene { constructor(...args: any[]); [key: string]: any }
+export declare class PerspectiveCamera { constructor(fov?: number, aspect?: number, near?: number, far?: number); [key: string]: any }
+export declare class WebGLRenderer { constructor(params?: { canvas?: HTMLCanvasElement; antialias?: boolean; [key: string]: any }); [key: string]: any }
+export declare class Group { constructor(...args: any[]); [key: string]: any }
+export declare class Mesh { constructor(geometry?: any, material?: any); [key: string]: any }
+export declare class Points { constructor(geometry?: any, material?: any); [key: string]: any }
+export declare class Line { constructor(geometry?: any, material?: any); [key: string]: any }
+export declare class LineLoop { constructor(geometry?: any, material?: any); [key: string]: any }
+export declare class Sprite { constructor(material?: any); [key: string]: any }
+export declare class SphereGeometry { constructor(radius?: number, widthSegments?: number, heightSegments?: number); [key: string]: any }
+export declare class BoxGeometry { constructor(...args: any[]); [key: string]: any }
+export declare class CylinderGeometry { constructor(...args: any[]); [key: string]: any }
+export declare class TorusGeometry { constructor(...args: any[]); [key: string]: any }
+export declare class RingGeometry { constructor(...args: any[]); [key: string]: any }
+export declare class BufferGeometry { constructor(); [key: string]: any; setFromPoints(points: any[]): any; setAttribute(name: string, attr: any): void }
+export declare class BufferAttribute { constructor(array: any, itemSize: number); [key: string]: any }
+export declare class MeshBasicMaterial { constructor(params?: any); [key: string]: any }
+export declare class MeshStandardMaterial { constructor(params?: any); [key: string]: any }
+export declare class LineBasicMaterial { constructor(params?: any); [key: string]: any }
+export declare class PointsMaterial { constructor(params?: any); [key: string]: any }
+export declare class SpriteMaterial { constructor(params?: any); [key: string]: any }
+export declare class CanvasTexture { constructor(canvas: any); [key: string]: any }
+export declare class Color { constructor(...args: any[]); [key: string]: any; r: number; g: number; b: number }
+export declare class Vector2 { constructor(x?: number, y?: number); [key: string]: any }
+export declare class Vector3 { constructor(x?: number, y?: number, z?: number); clone(): Vector3; multiplyScalar(s: number): Vector3; set(x: number, y: number, z: number): Vector3; add(v: Vector3): Vector3; [key: string]: any }
+export declare class Raycaster { constructor(); [key: string]: any; setFromCamera(coords: any, camera: any): void; params: any }
+export declare class PointLight { constructor(...args: any[]); [key: string]: any }
+export declare class AmbientLight { constructor(...args: any[]); [key: string]: any }
+export declare const AdditiveBlending: number
+export declare const NormalBlending: number
+export declare const DoubleSide: number
+export declare const SRGBColorSpace: number
+export declare class OrbitControls { constructor(camera: any, domElement: any); [key: string]: any; target: { clone(): any }; enableDamping: boolean; autoRotateSpeed: number; minDistance: number; maxDistance: number }
 export declare class OutputPass implements PassLike {
   constructor()
   enabled: boolean
