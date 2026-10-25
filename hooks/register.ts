@@ -45,6 +45,8 @@ import { admit, NEAR_DUPLICATE_SCORE, nearDuplicateFlags, nearDuplicateMessage, 
 import type { GuardResult, NearMatch } from './guard'
 import { expiresInDaysProblem, KIND_NAMES, kindProblem, validUntilFor, withNoKindWarning } from './kinds'
 import { cleanTags } from './tags'
+import type { TagRules } from './tags'
+import { tagRules, VOCAB_FILE } from './vocab'
 import { openDashboard, stopDashboard } from './ui-launch'
 
 export { ENGINE_BUILD } from './engine-build'
@@ -380,8 +382,8 @@ async function syncWrapper($: EngineInterface, options: PluginOptions) {
   // when the model is downloaded (EMB.3.a2).
   const embeddings = await embeddingsOn($, options)
   const text = windows
-    ? cmdWrapper(store, cli, proxy, activity, embeddings, guardModeOf(options))
-    : shWrapper(store, cli, proxy, activity, embeddings, guardModeOf(options))
+    ? cmdWrapper(store, cli, proxy, activity, embeddings, guardModeOf(options), `${root}/${VOCAB_FILE}`)
+    : shWrapper(store, cli, proxy, activity, embeddings, guardModeOf(options), `${root}/${VOCAB_FILE}`)
   await bunFs($, `fs.writeFileSync(a[0], a[1]); ${windows ? '' : 'fs.chmodSync(a[0], 0o700);'}`, wrapper, text)
 }
 
@@ -389,9 +391,10 @@ const WRAPPER_NOTE = `Written by the Mnemosyne plugin (externalMcp). A stdio MCP
 serving only remember / recall / update / forget / stats.
 MNEMOSYNE_OWNER picks the owner: global (default) or a project-... id.
 MNEMOSYNE_ACTIVITY_LOG is the activity log each call is recorded in; empty when activityLog is off.
-MNEMOSYNE_GUARD_MODE is the guardMode option: strict refuses a warned save unless the call passes confirm: true, warn saves it.`
+MNEMOSYNE_GUARD_MODE is the guardMode option: strict refuses a warned save unless the call passes confirm: true, warn saves it.
+MNEMOSYNE_VOCABULARY is the tag vocabulary file its tags are cleaned with (aliases folded).`
 
-const shWrapper = (store: string, cli: string, proxy: string, activity: string, embeddings: boolean, guardMode: string) => `#!/bin/sh
+const shWrapper = (store: string, cli: string, proxy: string, activity: string, embeddings: boolean, guardMode: string, vocabulary: string) => `#!/bin/sh
 ${WRAPPER_NOTE.replace(/^/gm, '# ')}
 export MNEMOPI_DATA_DIR=${shellQuote(store)}
 export MNEMOPI_SESSION_ID="\${MNEMOSYNE_OWNER:-global}"
@@ -417,11 +420,12 @@ export PI_CONFIG_DIR=${EMBEDDINGS_CACHE_DIR}
 export MNEMOSYNE_CLI=${shellQuote(cli)}
 export MNEMOSYNE_ACTIVITY_LOG=${activity ? shellQuote(activity) : ''}
 export MNEMOSYNE_GUARD_MODE=${guardMode}
+export MNEMOSYNE_VOCABULARY=${shellQuote(vocabulary)}
 exec bun ${shellQuote(proxy)}
 `
 
 // cmd has no safe quoting for " or %; paths() refuses a store holding either.
-const cmdWrapper = (store: string, cli: string, proxy: string, activity: string, embeddings: boolean, guardMode: string) => `@echo off\r
+const cmdWrapper = (store: string, cli: string, proxy: string, activity: string, embeddings: boolean, guardMode: string, vocabulary: string) => `@echo off\r
 ${WRAPPER_NOTE.replace(/^/gm, 'rem ').replace(/\n/g, '\r\n')}\r
 set "MNEMOPI_DATA_DIR=${store}"\r
 if not defined MNEMOSYNE_OWNER set "MNEMOSYNE_OWNER=global"\r
@@ -448,6 +452,7 @@ set "PI_CONFIG_DIR=${EMBEDDINGS_CACHE_DIR}"\r
 set "MNEMOSYNE_CLI=${cli}"\r
 set "MNEMOSYNE_ACTIVITY_LOG=${activity}"\r
 set "MNEMOSYNE_GUARD_MODE=${guardMode}"\r
+set "MNEMOSYNE_VOCABULARY=${vocabulary}"\r
 bun "${proxy}"\r
 `
 
@@ -472,7 +477,7 @@ async function isCurrent($: EngineInterface, options: PluginOptions) {
 }
 
 // memory_update's engine arguments, or the reason it is refused before any engine run.
-function updateArgs(input: Record<string, unknown>): Record<string, unknown> | string {
+function updateArgs(input: Record<string, unknown>, rules: TagRules = {}): Record<string, unknown> | string {
   const hasContent = typeof input.content === 'string'
   const hasImportance = typeof input.importance === 'number' && Number.isFinite(input.importance)
   if (input.tags !== undefined && !Array.isArray(input.tags)) return 'tags must be an array of strings.'
@@ -480,7 +485,9 @@ function updateArgs(input: Record<string, unknown>): Record<string, unknown> | s
   const refused = kindProblem(input.kind)
   if (refused !== undefined) return refused
   if (!hasContent && !hasImportance && input.tags === undefined && !hasKind) return 'memory_update needs content, importance, tags or kind.'
-  const tags = Array.isArray(input.tags) ? cleanTags(input.tags) : undefined
+  const tags = Array.isArray(input.tags) ? cleanTags(input.tags, rules) : undefined
+  // A list whose tags are all the project name, or fold away, must not read as "remove the tags": [] is how those are removed.
+  if (tags !== undefined && tags.length === 0 && Array.isArray(input.tags) && cleanTags(input.tags).length > 0) return 'none of those tags can be stored (a tag may not be the project name). Send tags: [] to remove the tags.'
   return {
     memory_id: input.memory_id,
     ...(hasContent ? { content: input.content } : {}),
@@ -492,6 +499,21 @@ function updateArgs(input: Record<string, unknown>): Record<string, unknown> | s
     // C10.2: a content change names Claude in the audit trail.
     ...(hasContent ? { validator: 'claude-code' } : {}),
   }
+}
+
+/**
+ * The rules cleanTags takes for a write by `ownerId` (this session's owner by default): the vocabulary's aliases,
+ * read from <root>/vocabulary.json, and the owner's project name, which is dropped. Never fails: no file, or one
+ * that cannot be read, gives no aliases.
+ */
+async function tagRulesFor($: EngineInterface, options: PluginOptions, ownerId?: string): Promise<TagRules> {
+  let text: string | undefined
+  try {
+    text = await $.fs.read(`${(await paths($, options)).root}/${VOCAB_FILE}`)
+  } catch {
+    text = undefined
+  }
+  return tagRules(text, ownerId ?? (await owner($, options).catch(() => GLOBAL_OWNER)))
 }
 
 // One engine process answering each request in turn; per request, its text or
@@ -1154,12 +1176,12 @@ export const register: Register = (on, options) => {
   // Per session, the tail of its extraction chain (one at a time).
   const extractions = new Map<string, Promise<unknown>>()
 
-  const engineArgs = (tool: string, input: Record<string, unknown>) => {
+  const engineArgs = (tool: string, input: Record<string, unknown>, rules: TagRules) => {
     switch (tool) {
       case 'memory_remember': {
         const isGlobal = !isPerProject || input.global === true
         // Tags are cleaned as the engine stores them (hooks/tags.ts); none left, no metadata.
-        const tags = Array.isArray(input.tags) ? cleanTags(input.tags) : []
+        const tags = Array.isArray(input.tags) ? cleanTags(input.tags, rules) : []
         const validUntil = validUntilFor(input.kind, input.expires_in_days)
         return [
           'mnemopi_remember',
@@ -1189,7 +1211,7 @@ export const register: Register = (on, options) => {
       case 'memory_forget':
         return ['mnemopi_forget', { memory_id: input.memory_id }] as const
       case 'memory_update': {
-        const args = updateArgs(input)
+        const args = updateArgs(input, rules)
         // tool.call refuses a bad update before any engine run; this only narrows the type.
         if (typeof args === 'string') throw new Error(args)
         return ['mnemopi_update', args] as const
@@ -1413,6 +1435,8 @@ export const register: Register = (on, options) => {
         if (took) provenance = { author_type: 'human', veracity: 'stated' }
       }
     }
+    // C6: tags are cleaned with the vocabulary's aliases and without the owner's project name (the row's owner on an update).
+    const rules = Array.isArray(input.tags) && (tool === 'memory_remember' || tool === 'memory_update') ? await tagRulesFor($, options, as) : {}
     let retired: Retired | undefined
     const answer = await (async (): Promise<{ result: string; reply: string } | { deny: string }> => {
       try {
@@ -1434,7 +1458,7 @@ export const register: Register = (on, options) => {
           if (badReplaces !== undefined) return { deny: `Mnemosyne: ${badReplaces}` }
         }
         if (tool === 'memory_update') {
-          const refused = updateArgs(input)
+          const refused = updateArgs(input, rules)
           if (typeof refused === 'string') return { deny: `Mnemosyne: ${refused}` }
         }
         if (!(await isInstalled($, options))) {
@@ -1442,7 +1466,7 @@ export const register: Register = (on, options) => {
           return { deny: NOT_INSTALLED }
         }
         if (tool === 'memory_update' && !(await isCurrent($, options))) return { deny: NOT_CURRENT }
-        const [name, args] = engineArgs(tool, input)
+        const [name, args] = engineArgs(tool, input, rules)
         // The trigger save is the person's: human, with veracity 'stated'.
         // C4: source 'user' and trust tier STATED besides the human author and veracity 'stated'.
         const withProvenance = provenance === undefined ? args : { ...args, ...provenance, source: 'user', trust_tier: 'STATED' }
@@ -1477,7 +1501,7 @@ export const register: Register = (on, options) => {
       // A refused call logs its rule ids only: no content text, in the line or the error.
       const outcome = blocked ? { ok: false, error: `guard:${[...guardIds, ...(near.length > 0 ? ['G3'] : [])].join(',')}` } : 'deny' in answer ? { ok: false, error: answer.deny } : callOutcome(action, input, answer.reply)
       // Tags as the engine gets them, cleaned, as the proxy logs them.
-      const shown = Array.isArray(input.tags) ? { ...input, tags: cleanTags(input.tags) } : input
+      const shown = Array.isArray(input.tags) ? { ...input, tags: cleanTags(input.tags, rules) } : input
       // A retire line follows the save's own line, with both ids and no memory text (META.4).
       const retireEntry = retired === undefined ? [] : [{ action: 'retire' as const, origin: 'tool' as const, owner: retired.owner, text: `retire ${retired.oldId} replaced by ${retired.newId ?? 'unknown'}`, ids: [retired.oldId, ...(retired.newId === undefined ? [] : [retired.newId])], count: retired.ok ? 1 : 0, ok: retired.ok, error: retired.error }]
       await record($, options, [{ action, origin: 'tool', owner: as, text: blocked ? '' : callText(action, shown), ...outcome, ...(provenance ?? {}) }, ...retireEntry])

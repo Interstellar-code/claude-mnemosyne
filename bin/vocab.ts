@@ -11,7 +11,7 @@
 // every tag admitted by hand. Only tags and counts are read from the store, never a memory's text.
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
-import { AGENT_SEEDS, aliasMap, emptyVocabulary, foldTag, normalizeTag, nsOf, parseVocabulary, VOCAB_FILE, vocabularyText } from '../hooks/vocab'
+import { AGENT_SEEDS, aliasMap, emptyVocabulary, foldTag, normalizeTag, nsOf, parseVocabulary, projectNameOf, VOCAB_FILE, vocabularyText } from '../hooks/vocab'
 import type { Vocabulary } from '../hooks/vocab'
 import { openReadOnly, tagsSql } from './memories'
 
@@ -41,8 +41,7 @@ export function readTagUse(store: string): { tagLists: string[][]; owners: strin
 export function projectNames(owners: readonly string[]): Set<string> {
   const names = new Set<string>()
   for (const owner of owners) {
-    const match = /^project-(.+)-[0-9a-z]+$/.exec(owner)
-    const name = match === null ? undefined : normalizeTag(match[1])
+    const name = projectNameOf(owner)
     if (name !== undefined) names.add(name)
   }
   return names

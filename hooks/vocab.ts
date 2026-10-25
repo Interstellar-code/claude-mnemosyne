@@ -1,14 +1,14 @@
 // The shared tag vocabulary (v3 plan, C5 and C6): the file's shape, the tag format and alias folding.
 // The file is <root>/vocabulary.json, mode 0600, written only by bin/vocab.ts; the tagger, the cleaner
-// and the dashboard read it. No imports, so the hooks, the proxy, the dashboard server and the Bun
-// specs can all use it.
+// and the dashboard read it. The only import is the tag format (hooks/tags.ts, itself import-free), so the
+// hooks, the proxy, the dashboard server and the Bun specs can all use it.
+import { NAMESPACES, normalizeTag } from './tags'
+import type { Namespace, TagRules } from './tags'
+export { MAX_VALUE_LENGTH, NAMESPACES, normalizeTag } from './tags'
+export type { Namespace } from './tags'
 
 export const VOCAB_VERSION = 1
 export const VOCAB_FILE = 'vocabulary.json'
-
-/** The namespaces a tag may carry: `ns:value`. A tag with none is a plain topic. */
-export const NAMESPACES = ['entity', 'agent', 'asset'] as const
-export type Namespace = (typeof NAMESPACES)[number]
 
 /** The agents the vocabulary starts with (the `agent:` seeds), each with a plain description. */
 export const AGENT_SEEDS: readonly { tag: string; description: string }[] = [
@@ -41,28 +41,6 @@ export interface Vocabulary {
   version: number
   tags: Record<string, VocabTag>
   candidates: Record<string, VocabCandidate>
-}
-
-export const MAX_VALUE_LENGTH = 31
-
-/**
- * A tag in the C6 format, or undefined when nothing is left of it. `ns:value` keeps a namespace only when it
- * is entity, agent or asset (any other `x:` is punctuation inside the value); the value is lowercase
- * kebab-case: every run of anything but letters and digits becomes one hyphen ('code review' -> 'code-review'),
- * the ends are trimmed of hyphens, and it is cut to 31 characters (code points).
- */
-export function normalizeTag(raw: unknown): string | undefined {
-  if (typeof raw !== 'string') return undefined
-  const text = raw.replace(/\p{Cc}/gu, '').normalize('NFKC').trim().toLowerCase()
-  const colon = text.indexOf(':')
-  const prefix = colon > 0 ? text.slice(0, colon).trim() : ''
-  const ns = (NAMESPACES as readonly string[]).includes(prefix) ? prefix : undefined
-  const value = Array.from((ns === undefined ? text : text.slice(colon + 1)).replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-+|-+$/g, ''))
-    .slice(0, MAX_VALUE_LENGTH)
-    .join('')
-    .replace(/-+$/g, '')
-  if (value === '') return undefined
-  return ns === undefined ? value : `${ns}:${value}`
 }
 
 /** The namespace of a normalised tag, or null. */
@@ -121,4 +99,28 @@ export function foldTag(vocab: Vocabulary | Map<string, string>, raw: unknown): 
   if (tag === undefined) return undefined
   const map = vocab instanceof Map ? vocab : aliasMap(vocab)
   return map.get(tag) ?? tag
+}
+
+/** The readable project name behind a per-project owner (`project-<Name>-<hash>`), normalised; undefined for any other owner. */
+export function projectNameOf(owner: unknown): string | undefined {
+  const match = typeof owner === 'string' ? /^project-(.+)-[0-9a-z]+$/.exec(owner) : null
+  return match === null ? undefined : normalizeTag(match[1])
+}
+
+/**
+ * The rules cleanTags takes for a write by `owner`: the vocabulary's aliases and the owner's project name
+ * to drop. `vocabText` is the vocabulary file's text, or undefined when there is none; a file that cannot
+ * be read gives no aliases (a write must never fail on the vocabulary), only the project name.
+ */
+export function tagRules(vocabText: string | undefined, owner?: unknown): TagRules {
+  let aliases: Map<string, string> | undefined
+  if (vocabText !== undefined) {
+    try {
+      aliases = aliasMap(parseVocabulary(vocabText))
+    } catch {
+      aliases = undefined
+    }
+  }
+  const name = projectNameOf(owner)
+  return { ...(aliases === undefined ? {} : { aliases }), ...(name === undefined ? {} : { drop: new Set([name]) }) }
 }

@@ -1,5 +1,6 @@
 import { expect, test } from 'claude-code/testing'
-import { AGENT_SEEDS, aliasMap, emptyVocabulary, foldTag, normalizeTag, nsOf, parseVocabulary, VOCAB_VERSION, vocabularyText } from '../hooks/vocab'
+import { cleanTags } from '../hooks/tags'
+import { AGENT_SEEDS, aliasMap, emptyVocabulary, foldTag, normalizeTag, nsOf, parseVocabulary, projectNameOf, tagRules, VOCAB_VERSION, vocabularyText } from '../hooks/vocab'
 import type { Vocabulary } from '../hooks/vocab'
 
 const sample = (): Vocabulary => ({
@@ -83,4 +84,34 @@ test('VOCAB.1: foldTag normalises, then maps an alias to its tag', () => {
   expect(foldTag(vocab, 'unknown thing')).toBe('unknown-thing')
   expect(foldTag(vocab, '!!!')).toBeUndefined()
   expect(foldTag(aliasMap(vocab), 'review')).toBe('code-review')
+})
+
+test('VOCAB.2.a2: projectNameOf reads the readable name from a per-project owner and from nothing else', () => {
+  expect(projectNameOf('project-My-Repo-1a2b')).toBe('my-repo')
+  expect(projectNameOf('project-claude-mnemosyne-9z')).toBe('claude-mnemosyne')
+  expect(projectNameOf('project-x-5')).toBe('x')
+  for (const other of ['global', '', 'project--', 'project-1a2b', 'my-repo', undefined, null, 7]) expect(projectNameOf(other)).toBeUndefined()
+})
+
+test('VOCAB.2.a2: tagRules gives the vocabulary aliases and the owner\'s project name; either may be missing, and a broken file is not fatal', () => {
+  const text = vocabularyText(sample())
+  const rules = tagRules(text, 'project-My-Repo-1a2b')
+  expect(rules.aliases?.get('review')).toBe('code-review')
+  expect([...(rules.drop ?? [])]).toEqual(['my-repo'])
+  expect(cleanTags(['Review', 'My Repo', 'git'], rules)).toEqual(['code-review', 'git'])
+  // the global owner has no project name; no file means no aliases
+  expect(tagRules(text, 'global').drop).toBeUndefined()
+  expect(tagRules(undefined, 'project-My-Repo-1a2b')).toEqual({ drop: new Set(['my-repo']) })
+  expect(tagRules(undefined)).toEqual({})
+  for (const broken of ['', 'not json', '{"version":1}', '{"version":2,"tags":{},"candidates":{}}']) {
+    const fallback = tagRules(broken, 'project-My-Repo-1a2b')
+    expect(fallback.aliases).toBeUndefined()
+    expect(cleanTags(['Review', 'My Repo'], fallback)).toEqual(['review'])
+  }
+})
+
+test('VOCAB.2.a2: hooks/vocab.ts and hooks/tags.ts still read and fold the same tag from every spelling', () => {
+  const vocab = sample()
+  for (const spelling of ['Review', 'review', ' REVIEW ', 'PR Review', 'pr_review', 'PR-review']) expect(cleanTags([spelling], { aliases: aliasMap(vocab) })).toEqual(['code-review'])
+  expect(foldTag(vocab, 'Code Review')).toBe('code-review')
 })

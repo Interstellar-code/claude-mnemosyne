@@ -7,7 +7,7 @@ import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from '
 import { join } from 'node:path'
 import { admitTag, aliasTag, countTags, listVocabulary, projectNames, readVocabulary, writeVocabulary } from '../../bin/vocab'
 import { AGENT_SEEDS, parseVocabulary } from '../../hooks/vocab'
-import { body, engineCall, ROOT, tempDir, toolCall } from './helpers'
+import { body, engineCall, engineEnv, ROOT, tempDir, toolCall } from './helpers'
 
 const CLI = join(ROOT, 'engine', 'src', 'cli.ts')
 const SCRIPT = join(ROOT, 'bin', 'vocab.ts')
@@ -272,5 +272,84 @@ describe('bin/vocab.ts', () => {
     } finally {
       local.dispose()
     }
+  })
+})
+
+// VOCAB.2 (C6): the proxy cleans tags with the vocabulary (aliases folded, the owner's project name dropped), and
+// tags already stored are read as they are. The real proxy and the real engine; no model.
+describe('VOCAB.2: tags through the real proxy and the real store', () => {
+  const temp = tempDir('vocab-proxy')
+  const root = join(temp.dir, 'data')
+  const store = join(root, 'store')
+  const file = join(root, 'vocabulary.json')
+  const PROXY = join(ROOT, 'bin', 'mcp-proxy.ts')
+  afterAll(() => temp.dispose())
+
+  /** One proxy process for `owner`: sends the calls, returns the replies by id. */
+  async function proxy(owner: string, calls: readonly [string, Record<string, unknown>][], env: Record<string, string> = {}) {
+    const child = Bun.spawn([process.execPath, PROXY], {
+      env: { ...(process.env as Record<string, string>), ...engineEnv(store, owner), MNEMOSYNE_CLI: CLI, MNEMOSYNE_ACTIVITY_LOG: '', MNEMOSYNE_VOCABULARY: file, ...env },
+      stdin: 'pipe',
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    child.stdin.write(calls.map(([name, args], i) => `${JSON.stringify(toolCall(i + 1, name, args))}\n`).join(''))
+    child.stdin.end()
+    const [stdout, stderr] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
+    const replies = new Map<unknown, any>()
+    for (const line of stdout.split('\n')) {
+      try {
+        const message = JSON.parse(line)
+        if (message?.id !== undefined) replies.set(message.id, message)
+      } catch {
+        // not JSON
+      }
+    }
+    if (replies.size === 0) throw new Error(`proxy gave no replies: ${stderr.slice(-400)}`)
+    return replies
+  }
+  const idOf = (reply: any) => JSON.parse(String(reply.result.content[0].text).split('\nMnemosyne')[0]!).memory_id as string
+  const tagsOf = (id: string) => {
+    const db = new Database(join(store, 'mnemopi.db'), { readonly: true })
+    try {
+      const row = db.query('SELECT metadata_json FROM working_memory WHERE id = ?').get(id) as { metadata_json: string | null }
+      return row.metadata_json === null ? null : (JSON.parse(row.metadata_json).tags as string[] | undefined)
+    } finally {
+      db.close()
+    }
+  }
+
+  test('VOCAB.2.a3: remember and update through the proxy fold aliases, put tags in the C6 format and drop the owner\'s project name', async () => {
+    writeVocabulary(root, {
+      version: 1,
+      tags: { 'code-review': { ns: null, description: '', aliases: ['review', 'pr-review'], admitted: 'init', count: 3 } },
+      candidates: {},
+    })
+    const owner = 'project-My-Repo-1a2b'
+    const saved = await proxy(owner, [['memory_remember', { content: 'A note saved through the proxy with tags.', kind: 'fact', tags: ['PR Review', 'My Repo', 'Build Server', 'entity: Rohit'] }]])
+    const id = idOf(saved.get(1))
+    expect(tagsOf(id)).toEqual(['code-review', 'build-server', 'entity:rohit'])
+    const updated = await proxy(owner, [['memory_update', { memory_id: id, tags: ['Review', 'my repo', 'Asset: CI Box'] }]])
+    expect(JSON.parse(updated.get(1).result.content[0].text)).toMatchObject({ status: 'updated' })
+    expect(tagsOf(id)).toEqual(['code-review', 'asset:ci-box'])
+  })
+
+  test('VOCAB.2.a3: a vocabulary the proxy cannot read, or none set, gives the format only and the call still works', async () => {
+    writeFileSync(file, 'not json')
+    const bad = await proxy('global', [['memory_remember', { content: 'A note saved while the vocabulary is broken.', kind: 'fact', tags: ['Review', 'Code Review'] }]])
+    expect(tagsOf(idOf(bad.get(1)))).toEqual(['review', 'code-review'])
+    const unset = await proxy('global', [['memory_remember', { content: 'A note saved while no vocabulary is set.', kind: 'fact', tags: ['Git Commit'] }]], { MNEMOSYNE_VOCABULARY: '' })
+    expect(tagsOf(idOf(unset.get(1)))).toEqual(['git-commit'])
+  })
+
+  test('VOCAB.2.a3: tags already stored are read and shown as they were written, not cleaned', async () => {
+    // Written the old way, straight through the engine: spaces, capitals, a project name, an emoji.
+    const reply = body((await engineCall(CLI, store, 'global', [toolCall(1, 'mnemopi_remember', { content: 'An older note with free-form tags on it.', scope: 'global', metadata: { tags: ['Old Style Tag', 'my repo', '🚀 launch', 'abcdefghijklmnopqrstuvwxyz0123456789'] } })])).get(1))
+    const id = reply!.memory_id as string
+    const ran = Bun.spawn([process.execPath, join(ROOT, 'bin', 'memories.ts'), '--store', store, 'get', id], { stdout: 'pipe', stderr: 'pipe' })
+    const out = JSON.parse(await new Response(ran.stdout).text()) as { metadata: { tags: string[] } }[]
+    await ran.exited
+    expect(out[0]!.metadata.tags).toEqual(['Old Style Tag', 'my repo', '🚀 launch', 'abcdefghijklmnopqrstuvwxyz0123456789'])
+    expect(tagsOf(id)).toEqual(['Old Style Tag', 'my repo', '🚀 launch', 'abcdefghijklmnopqrstuvwxyz0123456789'])
   })
 })

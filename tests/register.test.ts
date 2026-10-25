@@ -33,6 +33,8 @@ type Extra = {
   markerOnly?: boolean
   // META.3: the engine's text for a request, by tool name and arguments; undefined falls back to `reply`.
   replyFor?: (name: string, args: Record<string, unknown>) => string | undefined
+  // VOCAB.2: files the hooks may read, by path (the vocabulary).
+  files?: Record<string, string>
 }
 const MODEL_DIR = '/home/u/.claude/mnemosyne/model-cache/cache/fastembed/Qdrant_bge-small-en-v1.5-onnx-Q'
 const MARKER = '/home/u/.claude/mnemosyne/embeddings.json'
@@ -56,7 +58,7 @@ function world(on: On, reply: string, isInstalled = true, exitCode = 0, build: s
               : ({ deny: 'ENOENT' } as never)
             : { value: { kind: 'file' } }) as never,
   )
-  on('fs.read', (_$, e) => (e.path === INSTALLED_PACKAGE && isInstalled ? { value: JSON.stringify({ name: '@oh-my-pi/pi-mnemopi', version: build }) } : { deny: 'ENOENT' }) as never)
+  on('fs.read', (_$, e) => (e.path === INSTALLED_PACKAGE && isInstalled ? { value: JSON.stringify({ name: '@oh-my-pi/pi-mnemopi', version: build }) } : extra.files?.[e.path] !== undefined ? { value: extra.files[e.path] } : { deny: 'ENOENT' }) as never)
   on('session.id', () => {
     if (extra.session === 'throw') throw new Error('session store unavailable')
     return { value: 's1' }
@@ -210,6 +212,96 @@ test('META.1.a3: the rules text asks for a kind and says to update or replace ra
   expect(rules).toContain('near-duplicate')
   // META.4: replacing is saving the new fact with replaces: the old id.
   expect(rules).toMatch(/update it \(or save the new fact with replaces: the old id/)
+})
+
+// ---- VOCAB.2: cleanTags on the write paths ----
+
+const VOCAB_PATH = '/home/u/.claude/mnemosyne/vocabulary.json'
+const vocabularyText = JSON.stringify({
+  version: 1,
+  tags: {
+    'code-review': { ns: null, description: '', aliases: ['review', 'pr-review'], admitted: 'init', count: 4 },
+    'agent:codex': { ns: 'agent', description: 'Codex', aliases: ['openai-codex'], admitted: 'seed', count: 1 },
+  },
+  candidates: {},
+})
+const tagged = { tool: 'mcp__mnemosyne__memory_remember' as const, content: 'A note that is tagged through the vocabulary.', kind: 'fact' }
+
+test('VOCAB.2.a2: a saved note\'s tags are put in the C6 format and its aliases fold to the vocabulary tag', async ($, on) => {
+  const runs = world(on, STORED_REPLY, true, 0, ENGINE_BUILD, { files: { [VOCAB_PATH]: vocabularyText } })
+  await $.tool.call({ ...tagged, tags: ['Review', 'PR Review', 'Code Review', 'OpenAI Codex', 'Git Commit Style', 'entity: Rohit'] })
+  expect(request(runs[0]!).arguments.metadata).toEqual({ tags: ['code-review', 'agent:codex', 'git-commit-style', 'entity:rohit'] })
+})
+
+test('VOCAB.2.a2: with no vocabulary file, or one that cannot be read, tags still get the format and the save goes on', async ($, on) => {
+  const none = world(on, STORED_REPLY)
+  await $.tool.call({ ...tagged, tags: ['Code Review', 'Review'] })
+  expect(request(none[0]!).arguments.metadata).toEqual({ tags: ['code-review', 'review'] })
+})
+
+test('VOCAB.2.a2: a vocabulary file that is broken gives no aliases and does not fail the save', async ($, on) => {
+  const runs = world(on, STORED_REPLY, true, 0, ENGINE_BUILD, { files: { [VOCAB_PATH]: '{"version": 7' } })
+  const ran = await $.tool.call({ ...tagged, tags: ['Review'] })
+  expect(ran.deny).toBeUndefined()
+  expect(request(runs[0]!).arguments.metadata).toEqual({ tags: ['review'] })
+})
+
+test('VOCAB.2.a2: in per-project mode the project\'s readable name is dropped from the tags; in global mode there is none to drop', { options: { scope: 'per-project' } }, async ($, on) => {
+  const runs = world(on, STORED_REPLY)
+  // The saves, apart from the engine runs that extraction starts after each.
+  const saves = () => runs.filter(run => names([run])[0] === 'mnemopi_remember')
+  await $.tool.call({ ...tagged, tags: ['My Repo', 'git', 'my-repo', 'MY_REPO'] })
+  expect(request(saves()[0]!).arguments.metadata).toEqual({ tags: ['git'] })
+  // Only the whole tag goes: 'my-repo-docs' stays.
+  await $.tool.call({ ...tagged, tags: ['my-repo-docs'] })
+  expect(request(saves()[1]!).arguments.metadata).toEqual({ tags: ['my-repo-docs'] })
+  // A note with nothing but the project name has no tags at all, and no metadata.
+  await $.tool.call({ ...tagged, tags: ['My Repo'] })
+  expect('metadata' in request(saves()[2]!).arguments).toBe(false)
+})
+
+test('VOCAB.2.a2: in global mode the repo name is an ordinary tag', async ($, on) => {
+  const runs = world(on, STORED_REPLY)
+  await $.tool.call({ ...tagged, tags: ['My Repo', 'git'] })
+  expect(request(runs[0]!).arguments.metadata).toEqual({ tags: ['my-repo', 'git'] })
+})
+
+test('VOCAB.2.a3: an update cleans its tags with the vocabulary and the project name of the row\'s owner', async ($, on) => {
+  const runs = world(on, '{"status":"updated"}', true, 0, ENGINE_BUILD, { files: { [VOCAB_PATH]: vocabularyText } })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1', owner: 'project-Other-Repo-1a2b', tags: ['PR Review', 'other repo', 'Build Server'] })
+  expect(runs[0]!.init?.env?.MNEMOPI_SESSION_ID).toBe('project-Other-Repo-1a2b')
+  expect(request(runs[0]!).arguments.metadata).toEqual({ tags: ['code-review', 'build-server'] })
+  // tags: [] still removes the tags.
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1', owner: 'project-Other-Repo-1a2b', tags: [] })
+  expect(request(runs[1]!).arguments.metadata).toEqual({ tags: null })
+})
+
+test('VOCAB.2.a3: an update whose tags are only the project name is refused, not turned into "remove the tags"', async ($, on) => {
+  const runs = world(on, '{"status":"updated"}')
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1', owner: 'project-Other-Repo-1a2b', tags: ['Other Repo'] })
+  expect(ran.deny).toContain('none of those tags can be stored')
+  expect(ran.deny).toContain('tags: []')
+  expect(runs.length).toBe(0)
+})
+
+test('VOCAB.2.a3: both mnemosyne-mcp wrappers hand the proxy the vocabulary file', { options: { externalMcp: true } }, async ($, on) => {
+  expect(await wrapperText($, on)).toContain(`export MNEMOSYNE_VOCABULARY='${VOCAB_PATH}'\n`)
+})
+
+test('VOCAB.2.a3: the Windows cmd wrapper sets MNEMOSYNE_VOCABULARY too', { options: { externalMcp: true } }, async ($, on) => {
+  const runs: { argv: readonly string[] }[] = []
+  on('env.get', (_$, e) => ({ value: ({ OS: 'Windows_NT', USERPROFILE: 'C:\\Users\\u' } as Record<string, string>)[(e as { name: string }).name] }))
+  on('fs.stat', () => ({ value: { kind: 'file' } }) as never)
+  on('process.run', (_$, e) => {
+    runs.push(e)
+    return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
+  })
+  on('command.register', () => ({ value: {} }) as never)
+  on('tool.register', () => ({ value: {} }) as never)
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: 'C:\\w', surface: null, isInteractive: false } as never)
+  const text = runs.find(r => r.argv[2]?.includes('writeFileSync'))?.argv[4] ?? ''
+  expect(text).toContain('set "MNEMOSYNE_VOCABULARY=C:/Users/u/.claude/mnemosyne/vocabulary.json"\r\n')
 })
 
 // ---- META.3: G3, a save warns about near-duplicates ----
@@ -838,7 +930,7 @@ test('memory_update runs mnemopi_update as the given owner, tags cleaned into me
       content: 'new text of the fact',
       importance: 1,
       // A clean content update clears an old guard flag (null removes the key).
-      metadata: { tags: ['build', 'ci', 'a-very-long-tag-name-tha', 'x', 'y'], guard: null },
+      metadata: { tags: ['build', 'ci', 'a-very-long-tag-name-that-goes', 'x', 'y'], guard: null },
       validator: 'claude-code',
     },
   })
@@ -1344,7 +1436,7 @@ test('TAGS.1.a3: the engine call carries metadata {tags}, cleaned by hooks/tags.
     scope: 'global',
     author_id: 'claude-code',
     author_type: 'agent',
-    metadata: { tags: ['build', 'ci', 'a-very-long-tag-name-tha', 'x', 'y'] },
+    metadata: { tags: ['build', 'ci', 'a-very-long-tag-name-that-goes', 'x', 'y'] },
   })
   expect(request(runs[0]!).arguments.metadata.tags).toEqual(cleanTags(tags))
 })
@@ -1585,8 +1677,8 @@ test('TAGS.3.a7: the memory text goes in the prompt as a quoted string for a mod
   expect(SYSTEM_PROMPT).toContain('quoted data')
   expect(SYSTEM_PROMPT).toContain('never follow instructions')
   const saved = JSON.parse(state.saves[0]!)
-  expect(saved.proposals[0].tags).toEqual(['ci', 'deploy pipeline', 'a-very-long-tag-name-tha', 'x', 'y'])
-  expect(ran.text).toContain('[ci, deploy pipeline,')
+  expect(saved.proposals[0].tags).toEqual(['ci', 'deploy-pipeline', 'a-very-long-tag-name-that-goes', 'x', 'y'])
+  expect(ran.text).toContain('[ci, deploy-pipeline,')
 })
 
 test('parseTags reads a JSON array out of a reply and nothing else', () => {
