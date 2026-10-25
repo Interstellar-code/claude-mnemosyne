@@ -716,7 +716,7 @@ records the code as it was in 0.6.0.
   a memory's topic is its first tag, lower-cased, or `Untagged`, keyed
   `<owner>/<tag>`, and a bridge joins the same tag name in two projects
   (Untagged never bridges). Every random draw is seeded from the memory or
-  topic id (FNV-1a into mulberry32; Box-Muller for the normal draw), and the
+  topic id (FNV-1a into mulberry32), and the
   input is sorted first, so the same data gives the same numbers in any order.
   `placeOne(layout, memory)` adds one star without moving any other.
   `timelinePosition(node, days)`, `rangeDays(range, oldestDays = 0)` and
@@ -749,8 +749,7 @@ records the code as it was in 0.6.0.
   chips (a memory without a picked kind keeps a tenth of its brightness); sparks
   from the Claude core on the Recall and Write layers and a live strip. Under
   reduced motion the moons stand still (speed 0; the build plan says they
-  orbit, the code and the design mockup stand still), Live starts paused and
-  Auto-rotate off. The page reads its settings from the state once per frame
+  orbit, the code and the design mockup stand still), Auto-rotate off. The page reads its settings from the state once per frame
   and needs no framework update hook. Every label still goes through
   `textContent` or a canvas (§3.5).
 - C6, the knowledge store. Rows are written only by `mnemopi_knowledge_store`,
@@ -1533,6 +1532,7 @@ Probes run against a real machine on 2026-10-16: `bun` 1.x, Node 24.13.0,
 banks. Claims marked *verified* were observed directly; the rest are marked as
 inference where they appear. Re-probed on 2026-10-20 with `pi-mnemopi` 18.12.3:
 remember, owner-scoped recall, owner-only forget and stats behave the same.
+
 ## v0.8.3: the solar-system map
 
 The Map tab is rebuilt as a solar system (MAPX.1 to MAPX.11). `README.md` describes the view; this section records the contracts and the port.
@@ -1557,7 +1557,7 @@ Written by MAPX.2 and MAPX.3, read only by the map. `activitySource` has one val
 
 ### Port approach (mockup → product)
 
-The 3D scene is plain JavaScript on the same three.js version, so it moves over nearly line for line. About two thirds of the code is reused: scene building (`initScene`, `makePlanet`, `makeCraft`, `memoryRing`, `makeHoles`, `circle`, `pointsObject`, `glow`, `label`), procedural textures (`planetTexture`, `sunTexture`, `glowTexture`, `dotTexture`), motion (`frame`, `spreadSwarm`, `satellites`, `recolour`), interaction (`pick`, `act`, the flights and `findGo`) and the rules (`targets`, `orbitSpeed`, `planetR`, `extent`, `styleOf`, `sizeClass`, `describe`, `labelName`, `tagColour`, `dotColour`, `searchResults`, `metric`, `linksOf`). Seeds come from the project label (FNV-1a into mulberry32; Box-Muller for the normal draw), and the input is sorted first, so the same data gives the same numbers in any order. What changes: the hard-coded `PROJECTS`, `LINKS` and `WRITERS` become `GET /api/galaxy`; live events use the real activity stream (`ui/stream.ts`, `toMapEvent`); Find uses `POST /api/search`; the rules move into the pure module `ui/solar-layout.ts` with specs. Writer colours are seeded from the project label. The mockup reference stays in `docs/plans/mapx-design/` (unchanged).
+The 3D scene is plain JavaScript on the same three.js version, so it moves over nearly line for line. About two thirds of the code is reused: scene building (`initScene`, `makePlanet`, `makeCraft`, `memoryRing`, `makeHoles`, `circle`, `pointsObject`, `glow`, `label`), procedural textures (`planetTexture`, `sunTexture`, `glowTexture`, `dotTexture`), motion (`frame`, `spreadSwarm`, `satellites`, `recolour`), interaction (`pick`, `act`, the flights and `findGo`) and the rules (`targets`, `orbitSpeed`, `planetR`, `extent`, `styleOf`, `sizeKind`, `describe`, `labelName`, `tagColour`, `dotColour`, `searchResults`, `metric`, `linksOf`). Seeds come from the project label (FNV-1a into mulberry32), and the input is sorted first, so the same data gives the same numbers in any order. What changes: the hard-coded `PROJECTS`, `LINKS` and `WRITERS` become `GET /api/galaxy`; live events use the real activity stream (`ui/stream.ts`, `toMapEvent`); Find uses `POST /api/search`; the rules move into the pure module `ui/solar-layout.ts` with specs. Writers take WRITER_PALETTE in count order; only the nodule's spot is seeded, from the writer's name. The mockup reference stays in `docs/plans/mapx-design/` (unchanged).
 
 ### Policy notes
 
@@ -1565,7 +1565,7 @@ The 3D scene is plain JavaScript on the same three.js version, so it moves over 
 - One WebGL context for the map; the scene never touches DOM outside its canvas.
 - A fresh canvas per scene; `dispose()` releases it.
 - The scene reads its settings from the state once per frame and needs no framework update hook.
-- Reduced motion: moons stand still, Live starts paused, Auto-rotate off.
+- Reduced motion: moons stand still, Auto-rotate off.
 
 ### §3.7
 
