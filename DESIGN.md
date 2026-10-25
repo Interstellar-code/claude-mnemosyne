@@ -1178,10 +1178,15 @@ rows, never scope `session` or NULL, 90 days unused by default and never under
 30; a dry run unless `dry_run` is the boolean `false`, and a real run sets only
 `valid_until` and the audit row. `mnemopi_invalidate`, `mnemopi_update`,
 `mnemopi_validate` and `mnemopi_expire_unused` take an optional `validator`.
-None of these is in the proxy's allow-list, which still serves five tools. In
+None of these tools is in the proxy's allow-list, which still serves five tools. In
 0.8.0 the plugin calls `mnemopi_similar` (G3) and `mnemopi_invalidate`
-(`replaces`); nothing calls `mnemopi_expire_unused`, and nothing in the plugin or
-the proxy sends `restore`.
+(`replaces`); nothing calls `mnemopi_expire_unused`, and the plugin
+never sends `restore`. The proxy does let a client send it: it strips only
+`bank`, `metadata`, `memory_type` and `valid_until` from a call, so `memory_update`
+with `restore: true` reaches the engine and restores a retired row of the
+client's own owner (another owner's row answers `not_found`). The audit row of
+such a restore names `unknown`, because the proxy sets a `validator` only for a
+text update.
 
 C3, kinds (`hooks/kinds.ts`, META.1). The engine's `memory_type` names, with
 plain labels: `fact`, `preference`, `instruction` (rule or runbook), `decision`,
@@ -1327,8 +1332,10 @@ Recorded from the phase reviews; each was a ruling or an accepted deviation.
    new one saved. The owner string is taken from the model, so Claude can retire
    another project's private row if it knows its owner id, which is the same
    trust as `memory_forget` and `memory_update`. It is a retire started by an
-   agent; it is in the plan on purpose, restorable at the engine, and the proxy
-   does not offer it. Until 0.9.0 nothing but a direct engine call restores.
+   agent; it is in the plan on purpose, restorable (the plugin's own tools have no restore, but an outside agent
+   can restore its own owner's row through the proxy's `memory_update` with
+   `restore: true`, and a direct engine call can), and the proxy does not
+   offer `replaces`. The dashboard's Restore button arrives in 0.9.0.
 6. The bank pin (HARDEN.1). `MNEMOPI_MCP_BANK` was pinned to the empty string,
    which a `.env` in an agent's working folder could refill, moving saves to
    `<store>/banks/<x>`; this was the open item 3 of section 3.8. The engine
@@ -1490,13 +1497,14 @@ rows written elsewhere, §2.4).
    content, importance and tags, or tags that are not an array, it is denied
    before any engine run; on a stale engine it is denied with a message to run
    `/mnemosyne-setup`. The rules text now says to update a fact by id and
-   owner, to forget only to delete, and never to save a duplicate. The proxy
+   owner, to forget only to delete, and (since 0.8.0) not to save a near-duplicate
+   but to update the close memory or save with `replaces`. The proxy
    (§5.6) serves `memory_update` too, so `tools/list` holds five tools; it
    drops `bank` and `metadata` from every client call (a client `bank` would
    move writes to `<store>/banks/<x>`), maps a cleaned `tags` array to
    `metadata.tags` for remember and update, shows `tags` (never `metadata` or
-   `bank`) in the schemas, and refuses `memory_update` when the installed
-   engine's version is not `ENGINE_BUILD`. See engine/UPSTREAM.md for the
+   `bank`) in the schemas, and, since v0.8.0, refuses `memory_remember` and `memory_update` when the
+   installed engine's version is not `ENGINE_BUILD`. See engine/UPSTREAM.md for the
    engine side.
 
 ## 6. What the matrixkoder side needs (findings only)
