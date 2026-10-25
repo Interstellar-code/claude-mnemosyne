@@ -19,6 +19,7 @@ import type { ForceGraph3DInstance, GraphNode } from './vendor/map-lib.js'
 import { plainLabel } from './escape'
 import type { GalaxyHub, GalaxyStar, Vec3 } from './map-layout'
 import { simulate, toMapEvent, type MapEvent } from './map-live'
+import { ARRANGE, buildBodies, COLOURS, searchResults, type Body, type SolarGalaxy, type Target } from './solar-layout'
 import {
   addMemory,
   announcement,
@@ -218,6 +219,39 @@ import {
   type LayoutWeights,
   type MeaningPlaces,
   type SimilarPair,
+  arrangeHint,
+  bodyChips,
+  closeFind,
+  createMemorySearch,
+  detailsFor,
+  findMode,
+  findRows,
+  initialSolarPage,
+  LEGEND_LEFT,
+  LEGEND_RIGHT,
+  solarAnnouncement,
+  levelFromHash,
+  levelToHash,
+  readSolarPage,
+  resolveHash,
+  saveSolarPage,
+  setArrange,
+  setColour,
+  setSolarLevel,
+  setSolarQuery,
+  SHOW_TOGGLES,
+  showAllBodies,
+  shownText,
+  solarCrumbs,
+  tabOrder,
+  toggleBody,
+  toggleShow,
+  viewOf,
+  VIEW_BUTTONS,
+  type FindRow,
+  type SolarHost,
+  type SolarSceneApi,
+  type SolarPage,
 } from './map-state'
 
 type MapLib = typeof import('./vendor/map-lib.js')
@@ -231,6 +265,8 @@ export type MapHost = {
   events?: (listener: (line: Record<string, unknown>) => void) => () => void
   /** Tells whether that stream is connected ('live'), so the Live pill only says On when lines can arrive. */
   streamStatus?: (watcher: (status: string) => void) => () => void
+  /** The solar-system scene and what its Find needs (MAPX.6 fills it). Absent, the Galaxy layout stays the force graph. */
+  solar?: SolarHost
 }
 
 export type MapView = { visible: (shown: boolean) => void; show: (memoryId: string) => void }
@@ -367,6 +403,387 @@ type Visual = {
 type Loose = Record<string, (...args: Any[]) => Any>
 type GraphLinkData = { source: string; target: string; kind: 'spoke' | 'bridge'; owner: string; star?: string }
 
+// ---- The solar page (MAPX.11) ----
+//
+// The Galaxy layout's page around the solar scene, built like the rest of this file: createElement and
+// textContent, no inline style attributes (dynamic values go through element.style), state read from
+// map-state.ts. It reaches the scene only through C13 (SolarSceneApi) and never imports ui/solar.ts.
+
+const GALAXY: Target = { level: 'galaxy' }
+const SOLAR_ONLY = ['solar-card-arrange', 'solar-card-colour', 'solar-card-show', 'solar-canvas', 'solar-path', 'solar-bodies', 'solar-details', 'solar-legend-left', 'solar-legend-right', 'solar-tour', 'solar-hint', 'solar-views']
+
+type SolarMount = { sync: (layout: string) => void; active: () => boolean }
+
+function mountSolarPage(host: MapHost, solar: SolarHost, storage: Storage | undefined, reducedMotion: boolean): SolarMount {
+  const root = byId('view-map')
+  const canvas = byId<HTMLCanvasElement>('solar-canvas')
+  const find = byId<HTMLInputElement>('map-find')
+  const placeholder = find.placeholder
+  let page: SolarPage = readSolarPage(storage)
+  let galaxy: SolarGalaxy | null = null
+  let bodies: Body[] = []
+  let scene: SolarSceneApi | null = null
+  let active = false
+  let loading = false
+  // The memories the server found for the query, and whether Enter waits for them.
+  let hits: { id: string; owner?: string; content?: string }[] = []
+  let enterWaits = false
+  let lastLevel = ''
+
+  const send = <T,>(call: (scene: SolarSceneApi) => T) => {
+    if (scene !== null) call(scene)
+  }
+  const sceneView = () => ({ ...viewOf(page), rotate: page.rotate && !reducedMotion })
+  const rows = (): FindRow[] => (page.findOpen && galaxy !== null ? findRows(bodies, page.query, hits, galaxy.memories) : [])
+
+  // ---- Find: the memory search ----
+
+  const memorySearch = createMemorySearch({
+    post: solar.post,
+    mode: () => findMode(solar.embeddings(), solar.searchMode()),
+    done: (_query, found) => {
+      if (found !== null) hits = found
+      renderFind()
+      if (enterWaits && rows().length > 0) {
+        enterWaits = false
+        go(rows()[0]!)
+      }
+    },
+  })
+
+  function go(row: FindRow) {
+    page = { ...page, findOpen: false }
+    send(scene => scene.flyTo(row.target))
+    renderFind()
+  }
+
+  // ---- Drawing ----
+
+  const button = (text: string, className: string, pressed?: boolean) => {
+    const element = el('button', text, className)
+    element.type = 'button'
+    if (pressed !== undefined) element.setAttribute('aria-pressed', String(pressed))
+    return element
+  }
+
+  function remember() {
+    saveSolarPage(storage, page)
+  }
+
+  function changeView(next: SolarPage) {
+    if (next === page) return
+    page = next
+    remember()
+    send(scene => scene.setView(sceneView()))
+    renderRail()
+    renderChips()
+    renderLegend()
+  }
+
+  function renderRail() {
+    byId('solar-arrange').replaceChildren(
+      ...ARRANGE.map(option => {
+        const item = button(option.label, 'seg-btn', option.id === page.arrange)
+        item.addEventListener('click', () => changeView(setArrange(page, option.id)))
+        return item
+      }),
+    )
+    byId('solar-arrange-hint').textContent = `${arrangeHint(page.arrange)} Planet size is always the memory count.`
+    byId('solar-colour').replaceChildren(
+      ...COLOURS.map(option => {
+        const item = button(option.label, 'seg-btn', option.id === page.colour)
+        item.addEventListener('click', () => changeView(setColour(page, option.id)))
+        return item
+      }),
+    )
+    byId('solar-show').replaceChildren(
+      ...SHOW_TOGGLES.map(toggle => {
+        const item = button(`${toggle.label}: ${page[toggle.key] ? 'on' : 'off'}`, 'seg-btn', page[toggle.key])
+        item.addEventListener('click', () => changeView(toggleShow(page, toggle.key)))
+        return item
+      }),
+    )
+  }
+
+  function renderLegend() {
+    const card = (id: string, title: string, items: readonly { colour: string; name: string; means: string }[], key: 'legL' | 'legR') => {
+      const box = byId(id)
+      box.hidden = !active || !page.legend
+      const open = page[key]
+      const fold = button('', 'legend-fold')
+      fold.setAttribute('aria-expanded', String(open))
+      fold.append(el('span', title), el('span', open ? '▾' : '▸'))
+      fold.addEventListener('click', () => changeView(toggleShow(page, key)))
+      box.replaceChildren(fold)
+      if (!open) return
+      for (const item of items) {
+        const row = el('div', undefined, 'legend-row')
+        const swatch = dot(item.colour, 'legend-sw')
+        row.append(swatch, el('span', item.name, 'legend-name'), el('span', item.means, 'legend-means'))
+        box.append(row)
+      }
+    }
+    card('solar-legend-left', 'Bodies', LEGEND_LEFT, 'legL')
+    card('solar-legend-right', 'Belts, links and motion', LEGEND_RIGHT, 'legR')
+  }
+
+  function renderChips() {
+    byId('solar-shown').textContent = shownText(bodies, page.hidden)
+    byId('solar-chips').replaceChildren(
+      ...bodyChips(bodies, page).map(chip => {
+        const item = button('', chip.pressed ? 'body-chip' : 'body-chip is-off', chip.pressed)
+        item.dataset.owner = chip.owner
+        item.title = chip.title
+        item.append(dot(chip.colour, chip.craft ? 'chip-dot is-craft' : 'chip-dot'), el('span', chip.label, 'chip-name'), el('span', chip.value, 'chip-value'))
+        item.addEventListener('click', () => {
+          const hiding = chip.pressed
+          changeView(toggleBody(page, chip.owner))
+          if (hiding && page.level.level !== 'galaxy' && page.level.owner === chip.owner) send(scene => scene.flyTo(GALAXY))
+        })
+        return item
+      }),
+    )
+  }
+
+  function renderViews() {
+    byId('solar-views').replaceChildren(
+      ...VIEW_BUTTONS.map(spec => {
+        const item = button(spec.label, 'stage-btn')
+        item.setAttribute('aria-label', spec.aria)
+        item.addEventListener('click', () => send(scene => ('zoom' in spec.action ? scene.zoom(spec.action.zoom) : scene.showView(spec.action.view))))
+        return item
+      }),
+    )
+  }
+
+  function renderFind() {
+    const list = byId('solar-find-results')
+    const found = rows()
+    const query = page.query.trim()
+    byId('map-found').textContent = active && query.length >= 2 && galaxy !== null ? `${Object.keys(searchResults(bodies, query).match).length} bodies` : ''
+    list.hidden = !active || !page.findOpen
+    if (list.hidden) {
+      list.replaceChildren()
+      return
+    }
+    if (found.length === 0) {
+      const none = el('li', 'Nothing matches', 'find-empty')
+      none.setAttribute('role', 'presentation')
+      list.replaceChildren(none)
+      return
+    }
+    list.replaceChildren(
+      ...found.map(row => {
+        const item = el('li')
+        item.setAttribute('role', 'presentation')
+        const pick = button('', 'find-row')
+        pick.append(el('span', row.type, `find-type is-${row.type.toLowerCase()}`), el('span', row.label, 'find-label'), el('span', row.sub, 'find-sub'))
+        pick.addEventListener('click', () => go(row))
+        item.append(pick)
+        return item
+      }),
+    )
+  }
+
+  function renderPath() {
+    byId('solar-path').replaceChildren(
+      ...solarCrumbs(page.level, bodies).map((part, i) => {
+        const span = el('span', undefined, 'crumb')
+        if (i > 0) {
+          const sep = el('span', '›', 'crumb-sep')
+          sep.setAttribute('aria-hidden', 'true')
+          span.append(sep)
+        }
+        const crumb = button(part.label, part.current ? 'crumb-btn is-current' : 'crumb-btn')
+        if (part.current) crumb.setAttribute('aria-current', 'page')
+        crumb.addEventListener('click', () => send(scene => scene.flyTo(part.target)))
+        span.append(crumb)
+        return span
+      }),
+    )
+  }
+
+  function renderDetails() {
+    const box = byId('solar-details')
+    if (galaxy === null) {
+      box.replaceChildren()
+      return
+    }
+    const view = detailsFor(page.level, bodies, galaxy)
+    const head = el('div', undefined, 'insp-head')
+    head.append(el('span', view.kicker, 'insp-kind'), el('h2', view.title, 'insp-title'))
+    const facts = el('dl', undefined, 'solar-facts')
+    for (const fact of view.facts) {
+      const item = el('div')
+      item.append(el('dt', fact.label), el('dd', fact.value))
+      facts.append(item)
+    }
+    box.replaceChildren(head, facts, el('p', view.hint, 'insp-hint'))
+  }
+
+  /** The Tab order: sun, planets, moons, memories; a redraw keeps the focus on the stop that had it. */
+  function renderTour() {
+    const nav = byId('solar-tour')
+    const focused = document.activeElement instanceof HTMLElement && nav.contains(document.activeElement) ? document.activeElement.dataset.stop : undefined
+    nav.replaceChildren(
+      ...(galaxy === null ? [] : tabOrder(page.level, bodies, galaxy.memories, page.hidden)).map(stop => {
+        const item = button(stop.label, 'tour-stop')
+        item.dataset.stop = levelToHash(stop.target)
+        item.addEventListener('click', () => send(scene => scene.flyTo(stop.target)))
+        return item
+      }),
+    )
+    if (focused !== undefined) nav.querySelector<HTMLElement>(`button[data-stop="${CSS.escape(focused)}"]`)?.focus()
+  }
+
+  function renderLevel() {
+    renderPath()
+    renderDetails()
+    renderTour()
+    const said = solarAnnouncement(page.level, bodies)
+    if (said !== lastLevel) {
+      lastLevel = said
+      byId('solar-live').textContent = said
+    }
+  }
+
+  function writeHash() {
+    try {
+      if (typeof history !== 'undefined' && typeof location !== 'undefined') history.replaceState(null, '', `${location.pathname}${location.search}${levelToHash(page.level)}`)
+    } catch {
+      // the URL is a convenience only
+    }
+  }
+
+  function hover(tip: string[] | null, x: number, y: number) {
+    const box = byId('solar-tip')
+    if (tip === null || tip.length === 0) {
+      box.hidden = true
+      return
+    }
+    box.replaceChildren(el('div', tip[0], 'tip-title'), ...tip.slice(1).map(line => el('div', line, 'tip-line')))
+    const width = byId('map-stage').getBoundingClientRect().width || 900
+    box.style.left = `${Math.max(120, Math.min(width - 140, x))}px`
+    box.style.top = `${Math.max(110, y)}px`
+    box.hidden = false
+  }
+
+  // ---- The scene ----
+
+  function applyLevel(level: Target) {
+    page = setSolarLevel(page, level)
+    writeHash()
+    renderLevel()
+  }
+
+  function makeScene() {
+    if (scene !== null) return
+    canvas.hidden = false
+    scene = solar.createScene({
+      canvas,
+      onHover: hover,
+      onPick: target => send(scene => scene.flyTo(target)),
+      onLevel: applyLevel,
+    })
+    if (galaxy !== null) feed(scene)
+  }
+
+  /** Hands the scene the data, the view and the level the URL named. */
+  function feed(target: SolarSceneApi) {
+    if (galaxy === null) return
+    target.setData(galaxy)
+    target.setView(sceneView())
+    if (page.level.level !== 'galaxy') target.flyTo(page.level)
+  }
+
+  async function load() {
+    if (loading || galaxy !== null) return
+    loading = true
+    try {
+      const response = await host.api('/api/galaxy')
+      const body = (await response.json().catch(() => ({}))) as Record<string, unknown>
+      if (!response.ok) throw new Error(typeof body.error === 'string' ? body.error : `the server answered ${response.status}`)
+      if (!Array.isArray(body.projects) || !Array.isArray(body.memories)) throw new Error('the reply was not a galaxy')
+      galaxy = { ...(body as unknown as SolarGalaxy), writers: Array.isArray(body.writers) ? (body.writers as SolarGalaxy['writers']) : [], globalLive: typeof body.globalLive === 'number' ? body.globalLive : 0 }
+      bodies = buildBodies(galaxy, Date.now())
+      page = setSolarLevel(page, resolveHash(levelFromHash(typeof location === 'undefined' ? '' : location.hash), bodies, galaxy.memories))
+      writeHash()
+      renderChips()
+      renderLevel()
+      renderFind()
+      if (scene !== null) feed(scene)
+    } catch (err) {
+      host.status(`Could not load the map: ${err instanceof Error ? err.message : String(err)}`, 'error')
+    } finally {
+      loading = false
+    }
+  }
+
+  // ---- Wiring ----
+
+  byId('solar-show-all').addEventListener('click', () => changeView(showAllBodies(page)))
+  find.addEventListener('input', () => {
+    if (!active) return
+    enterWaits = false
+    page = setSolarQuery(page, find.value)
+    send(scene => scene.setView(sceneView()))
+    memorySearch.type(find.value)
+    renderFind()
+  })
+  find.addEventListener('keydown', (event: KeyboardEvent) => {
+    if (!active) return
+    if (event.key === 'Escape') {
+      find.value = ''
+      hits = []
+      enterWaits = false
+      memorySearch.cancel()
+      page = closeFind(page)
+      send(scene => scene.setView(sceneView()))
+      renderFind()
+    } else if (event.key === 'Enter') {
+      event.preventDefault()
+      page = setSolarQuery(page, find.value)
+      const first = rows()[0]
+      if (first !== undefined) go(first)
+      else enterWaits = true
+      memorySearch.enter(find.value)
+    }
+  })
+  host.events?.(line => {
+    if (!active) return
+    const event = toMapEvent(line)
+    if (event !== null) send(scene => scene.event(event))
+  })
+  renderRail()
+  renderViews()
+  renderLegend()
+  renderChips()
+
+  return {
+    active: () => active,
+    sync(layout: string) {
+      const on = layout === 'galaxy'
+      if (on === active) return
+      active = on
+      root.classList.toggle('solar-on', on)
+      for (const id of SOLAR_ONLY) byId(id).hidden = !on
+      find.placeholder = on ? 'project, tag, kind or words' : placeholder
+      if (on) {
+        makeScene()
+        void load()
+        renderLegend()
+        renderFind()
+      } else {
+        scene?.dispose()
+        scene = null
+        canvas.hidden = true
+        byId('solar-tip').hidden = true
+        byId('solar-find-results').hidden = true
+      }
+    },
+  }
+}
+
 /** Builds the Map tab once; the page calls visible() on every tab change. */
 export function createMap(host: MapHost): MapView {
   const reducedMotion = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches
@@ -471,6 +888,8 @@ export function createMap(host: MapHost): MapView {
   const live = byId('map-live')
   const rotate = byId<HTMLButtonElement>('map-rotate')
   const find$ = byId<HTMLInputElement>('map-find')
+  // The solar-system Galaxy page, when the host brings a scene; it takes over the Galaxy layout's page and leaves the others alone.
+  const solarPage = host.solar ? mountSolarPage(host, host.solar, storage, reducedMotion) : null
 
   function say(text: string) {
     message.textContent = text
@@ -484,6 +903,7 @@ export function createMap(host: MapHost): MapView {
     if (next === state) return
     if (galaxy !== null && next.query !== state.query) found = find(galaxy, next.query)
     state = next
+    solarPage?.sync(state.layout)
     render()
   }
 
@@ -2019,7 +2439,9 @@ export function createMap(host: MapHost): MapView {
       }
     })
   }
-  find$.addEventListener('input', () => search(find$.value))
+  find$.addEventListener('input', () => {
+    if (!solarPage?.active()) search(find$.value)
+  })
   canvasBox.addEventListener('pointerdown', event => {
     // A right or middle press is not a click on a star.
     if (!isPrimary(event)) return
@@ -2160,6 +2582,7 @@ export function createMap(host: MapHost): MapView {
     connected = status === 'live'
     if (galaxy !== null) renderControls(galaxy)
   })
+  solarPage?.sync(state.layout)
   void loadGalaxy()
   void start()
 

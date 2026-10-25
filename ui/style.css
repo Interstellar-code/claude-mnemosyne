@@ -1008,3 +1008,81 @@ button.toggle-name:focus-visible { outline: 2px solid var(--accent); outline-off
   background: var(--stage-lib-bg);
   pointer-events: none;
 }
+
+/* The solar-system Galaxy page (MAPX.11, design/MapSolar.dc.html). It shows only while the Galaxy layout runs the solar scene
+   (#view-map.solar-on): .legacy-only rail cards and overlays step aside; the Layout card never does. */
+.solar-on .legacy-only { display: none !important; }
+.seg-grid { display: grid; gap: 6px; }
+.seg-grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.seg-grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.solar-show { display: flex; flex-direction: column; gap: 6px; }
+.seg-grid .seg-btn, .solar-show .seg-btn { min-height: 40px; border: 1px solid var(--line-strong); border-radius: 8px; background: transparent; }
+.seg-grid .seg-btn[aria-pressed='true'], .solar-show .seg-btn[aria-pressed='true'] { border-color: var(--accent); background: var(--accent-soft); }
+.solar-on .stage-find { right: auto; left: 50%; transform: translateX(-50%); width: min(360px, 40%); background: var(--stage-panel); }
+.solar-on .stage-find .find-input { flex: 1 1 auto; width: auto; }
+.solar-canvas { display: block; width: 100%; height: 100%; cursor: grab; }
+.solar-tip { display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--stage-line); font-weight: 400; transform: translate(-50%, calc(-100% - 14px)); }
+.solar-tip .tip-title { font-weight: 600; font-size: 13px; color: var(--stage-ink); }
+.solar-tip .tip-line { color: var(--stage-ink-3); font-size: 12px; }
+.solar-path .crumb-btn { min-height: 34px; }
+.solar-hint { right: auto; left: 14px; text-align: left; max-width: 36%; }
+.solar-views { position: absolute; right: 12px; bottom: 12px; z-index: 200; max-width: 60%; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.solar-views .stage-btn { min-width: 44px; min-height: 40px; padding: 0 12px; }
+.find-results {
+  position: absolute; top: 56px; left: 50%; transform: translateX(-50%); z-index: 210; width: min(360px, 40%); max-height: 330px; overflow-y: auto;
+  margin: 0; padding: 6px; list-style: none; display: flex; flex-direction: column; gap: 2px; border-radius: 10px; border: 1px solid var(--stage-line); background: var(--stage-panel);
+}
+.find-row { width: 100%; min-height: 36px; display: flex; align-items: baseline; gap: 8px; padding: 6px 8px; border: 0; border-radius: 6px; background: transparent; color: var(--stage-ink); font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
+.find-row:hover, .find-row:focus-visible { background: var(--stage-pressed-bg); outline: 2px solid transparent; }
+.find-row:focus-visible { outline-color: var(--stage-ink); }
+.find-type { flex: 0 0 64px; font-size: 11px; font-weight: 600; color: var(--data-gold); }
+.find-type.is-memory { color: var(--data-blue); }
+.find-type.is-tag { color: var(--data-c6); }
+.find-type.is-moon { color: var(--stage-ink-4); }
+.find-label { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.find-sub { font-size: 11px; color: var(--stage-muted-3); white-space: nowrap; }
+.find-empty { padding: 8px; font-size: 12px; color: var(--stage-muted); }
+.legend-card { position: absolute; z-index: 150; padding: 12px; border-radius: 12px; border: 1px solid var(--stage-line); background: var(--stage-panel); display: flex; flex-direction: column; gap: 5px; }
+.legend-left { top: 56px; left: 12px; width: 236px; }
+.legend-right { top: 12px; right: 12px; width: 250px; }
+.legend-fold { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 32px; padding: 0; border: 0; background: transparent; color: var(--stage-muted-3); font: inherit; font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; cursor: pointer; }
+.legend-fold:focus-visible { outline: 2px solid var(--stage-ink); outline-offset: 2px; }
+.legend-row { display: flex; gap: 8px; align-items: baseline; font-size: 12px; line-height: 1.35; }
+.legend-sw { flex: 0 0 10px; width: 10px; height: 10px; border-radius: 50%; border: 1px solid var(--stage-line); }
+.legend-name { flex: 0 0 88px; color: var(--stage-ink); }
+.legend-means { flex: 1 1 auto; color: var(--stage-ink-3); }
+.solar-tour { position: absolute; left: 12px; bottom: 44px; z-index: 160; max-width: 50%; display: flex; flex-wrap: wrap; gap: 4px; }
+.solar-tour .tour-stop { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.solar-tour .tour-stop:focus { position: static; width: auto; height: auto; overflow: visible; clip-path: none; padding: 6px 10px; border-radius: 8px; border: 2px solid var(--stage-ink); background: var(--stage-panel); color: var(--stage-ink); font: inherit; font-size: 12px; }
+.bodies-strip { height: 132px; box-sizing: border-box; display: none; flex-direction: column; gap: 8px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+.bodies-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
+.bodies-head .rail-title { margin: 0; }
+.bodies-all { margin-left: auto; min-height: 28px; padding: 0 10px; background: transparent; color: var(--text); border-color: var(--line-strong); font-size: 12px; }
+.bodies-chips { display: grid; grid-auto-flow: column; grid-template-rows: repeat(2, 38px); grid-auto-columns: 172px; gap: 6px; overflow-x: auto; overflow-y: hidden; }
+.body-chip { display: flex; gap: 8px; align-items: center; height: 38px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--accent-line); background: var(--accent-soft); color: var(--text); font: inherit; font-size: 13px; cursor: pointer; }
+.body-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.body-chip.is-off { border-color: var(--line-soft); background: transparent; color: var(--muted); text-decoration: line-through; }
+.chip-dot { flex: 0 0 10px; width: 10px; height: 10px; border-radius: 50%; }
+.chip-dot.is-craft { border-radius: 2px; }
+.body-chip.is-off .chip-dot { opacity: 0.3; }
+.chip-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
+.chip-value { font-size: 11px; color: var(--muted); }
+.solar-on .map-side { flex: 1 1 100%; max-width: none; flex-direction: row; flex-wrap: wrap; align-self: stretch; }
+.solar-on .bodies-strip, .solar-on .solar-details { display: flex; }
+.solar-on .solar-details { flex: 2 1 560px; min-width: 0; }
+.solar-on .live-strip { flex: 1 1 320px; min-width: 0; }
+.solar-details { display: none; flex-direction: column; gap: 12px; padding: 16px 18px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+.solar-details .insp-title { margin: 0; font-size: 20px; }
+.solar-facts { margin: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px 16px; }
+.solar-facts dt { font-size: 12px; color: var(--muted); }
+.solar-facts dd { margin: 2px 0 0; font-weight: 600; font-size: 14px; overflow-wrap: anywhere; }
+@media (max-width: 900px) {
+  .solar-on .map-side { display: contents; }
+  .solar-on .bodies-strip { order: 2; }
+  .solar-on .solar-details { order: 3; }
+  .solar-on .legend-card { display: none; }
+  .solar-on .stage-find { top: -46px; left: 0; right: 0; transform: none; width: auto; max-width: none; }
+  .solar-on .find-results { top: -8px; width: 100%; }
+  .solar-hint { display: none; }
+}
+@media (prefers-reduced-motion: reduce) { .solar-canvas { cursor: default; } }

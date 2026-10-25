@@ -12,6 +12,7 @@
 import { plainLabel } from './escape'
 import { gauss, galaxyLayout, placeOne, randomOf, rangeDays, seedOf, ticks, timelinePosition, LANE_SPAN, TIMELINE_DAYS_X, TIMELINE_TODAY_X, UNTAGGED, type GalaxyInputMemory, type GalaxyLayout, type GalaxyStar, type Tick, type TimelineRange, type Vec3 } from './map-layout'
 import type { MapEvent, MapEventKind } from './map-live'
+import { ARRANGE, COLOURS, STYLES, SEARCH_MIN, describe, kindLabel, kindOne, labelName, metric, metricText, searchResults, type Arrange, type Body, type ColourMode, type SolarGalaxy, type SolarMemory, type Target } from './solar-layout'
 
 // ---- What the server sends ----
 
@@ -1745,3 +1746,433 @@ export function sparkAt(from: Vec3, to: Vec3, curve: number, u: number): Vec3 {
 
 /** A spark's brightness: 0 while it waits, then 1 fading a little as it lands. */
 export const sparkAlpha = (spark: Spark) => (spark.age < spark.delay ? 0 : 1 - sparkProgress(spark) * 0.3)
+
+// ---- The solar page (plan MAPX.11, contract C13) ----
+//
+// The Galaxy layout's page around the solar-system scene: Arrange by, Colour dots by,
+// Show, Find, the Bodies strip, the legend cards, Details and the level in the URL.
+// Pure: ui/map.ts builds the DOM from these rows and sends every click back here, and
+// it talks to the scene only through the C13 interface below.
+
+/** What the scene is told about the page (C13 `view`). */
+export type SolarView = {
+  arrange: Arrange
+  colour: ColourMode
+  hidden: Record<string, true>
+  query: string
+  rotate: boolean
+  sample: boolean
+  legend: boolean
+}
+
+export type SolarViewName = 'top' | 'below' | 'side' | 'reset'
+
+/** What the page gives `createSolarScene` (C13); `three`, `createRenderer` and `clock` are the page's to fill. */
+export type SolarSceneOptions = {
+  /** The page's <canvas>; typed by shape so this pure module needs no DOM lib. */
+  canvas: { width: number; height: number }
+  three?: unknown
+  createRenderer?: unknown
+  clock?: unknown
+  onHover: (tip: string[] | null, x: number, y: number) => void
+  onPick: (target: Target) => void
+  onLevel: (level: Target) => void
+}
+
+/** The scene the page drives (C13): the page never reaches into its three.js objects. */
+export type SolarSceneApi = {
+  setData: (galaxy: SolarGalaxy) => void
+  setView: (view: SolarView) => void
+  flyTo: (target: Target) => void
+  showView: (name: SolarViewName) => void
+  zoom: (factor: number) => void
+  event: (event: MapEvent) => void
+  dispose: () => void
+}
+
+/** What the page needs from its host to run the solar map; absent, the Galaxy layout stays as it is. */
+export type SolarHost = {
+  createScene: (options: SolarSceneOptions) => SolarSceneApi
+  /** POST with a JSON body; the page's own /api call. */
+  post: (path: string, body: unknown) => Promise<Response>
+  /** True when the server's embeddings are on. */
+  embeddings: () => boolean
+  /** The Search tab's mode; used only when embeddings are on. */
+  searchMode: () => string
+}
+
+export type SolarPage = SolarView & {
+  /** The two legend cards, open or folded. */
+  legL: boolean
+  legR: boolean
+  level: Target
+  findOpen: boolean
+}
+
+export const SOLAR_KEY = 'mnemosyne.map.solar'
+const GALAXY_LEVEL: Target = { level: 'galaxy' }
+
+export const initialSolarPage = (): SolarPage => ({
+  arrange: 'activity', colour: 'writer', hidden: {}, query: '', rotate: true, sample: true, legend: true, legL: true, legR: true, level: GALAXY_LEVEL, findOpen: false,
+})
+
+/** What is remembered per viewer: Arrange by, Colour dots by and the Show toggles (and the folds of the two legend cards). */
+const SOLAR_KEYS = ['arrange', 'colour', 'rotate', 'sample', 'legend', 'legL', 'legR'] as const
+
+/** The remembered settings laid over the defaults; anything stored that is not a known value is ignored. */
+export function readSolarPage(storage: Pick<Storage, 'getItem'> | undefined): SolarPage {
+  const page = initialSolarPage()
+  try {
+    const raw = JSON.parse(storage?.getItem(SOLAR_KEY) ?? 'null') as Record<string, unknown> | null
+    if (raw === null || typeof raw !== 'object') return page
+    if (ARRANGE.some(a => a.id === raw.arrange)) page.arrange = raw.arrange as Arrange
+    if (COLOURS.some(c => c.id === raw.colour)) page.colour = raw.colour as ColourMode
+    for (const key of ['rotate', 'sample', 'legend', 'legL', 'legR'] as const) if (typeof raw[key] === 'boolean') page[key] = raw[key] as boolean
+  } catch {
+    // storage is a convenience only
+  }
+  return page
+}
+
+export function saveSolarPage(storage: Pick<Storage, 'setItem'> | undefined, page: SolarPage): void {
+  try {
+    storage?.setItem(SOLAR_KEY, JSON.stringify(Object.fromEntries(SOLAR_KEYS.map(key => [key, page[key]]))))
+  } catch {
+    // storage is a convenience only
+  }
+}
+
+export const setArrange = (page: SolarPage, arrange: Arrange): SolarPage => (ARRANGE.some(a => a.id === arrange) && arrange !== page.arrange ? { ...page, arrange } : page)
+export const setColour = (page: SolarPage, colour: ColourMode): SolarPage => (COLOURS.some(c => c.id === colour) && colour !== page.colour ? { ...page, colour } : page)
+export const toggleShow = (page: SolarPage, key: 'rotate' | 'legend' | 'sample' | 'legL' | 'legR'): SolarPage => ({ ...page, [key]: !page[key] })
+
+/** The Bodies strip: hides one body, or shows it again. */
+export function toggleBody(page: SolarPage, owner: string): SolarPage {
+  const hidden = { ...page.hidden }
+  if (hidden[owner]) delete hidden[owner]
+  else hidden[owner] = true
+  return { ...page, hidden }
+}
+export const showAllBodies = (page: SolarPage): SolarPage => (Object.keys(page.hidden).length === 0 ? page : { ...page, hidden: {} })
+export const setSolarQuery = (page: SolarPage, query: string): SolarPage => ({ ...page, query, findOpen: query.trim().length >= SEARCH_MIN })
+export const closeFind = (page: SolarPage): SolarPage => ({ ...page, query: '', findOpen: false })
+export const setSolarLevel = (page: SolarPage, level: Target): SolarPage => ({ ...page, level })
+
+/** The C13 `view`: a fresh object, so the scene can keep it. */
+export const viewOf = (page: SolarPage): SolarView => ({
+  arrange: page.arrange, colour: page.colour, hidden: { ...page.hidden }, query: page.query, rotate: page.rotate, sample: page.sample, legend: page.legend,
+})
+
+export const arrangeHint = (arrange: Arrange): string => ARRANGE.find(a => a.id === arrange)?.hint ?? ''
+
+// ---- The level in the URL ----
+
+/** The fragment spelling: `planet:<owner>`, `moon:<owner>:<kind>`, `memory:<id>`, `galaxy`; parts are percent-encoded. */
+export function levelToHash(level: Target): string {
+  const part = encodeURIComponent
+  const spelled = level.level === 'galaxy' ? 'galaxy' : level.level === 'planet' ? `planet:${part(level.owner)}` : level.level === 'moon' ? `moon:${part(level.owner)}:${part(level.kind)}` : `memory:${part(level.id)}`
+  return `#level=${spelled}`
+}
+
+/** The `level=` value as it stands in the fragment, still percent-encoded (its parts are split on ':' before they are decoded). */
+const rawLevel = (hash: string): string | null => /(?:^#?|&)level=([^&]*)/.exec(hash)?.[1] ?? null
+
+/** The level a fragment names, as written (an owner or id not in the data is checked by `resolveHash`), or null. */
+export function levelFromHash(hash: string): { level: 'galaxy' } | { level: 'planet'; owner: string } | { level: 'moon'; owner: string; kind: string } | { level: 'memory'; id: string } | null {
+  const value = rawLevel(hash)
+  if (value === null) return null
+  const [name, first, second, ...rest] = value.split(':')
+  try {
+    if (rest.length > 0) return null
+    if (name === 'galaxy' && first === undefined) return { level: 'galaxy' }
+    if (name === 'planet' && first && second === undefined) return { level: 'planet', owner: decodeURIComponent(first) }
+    if (name === 'moon' && first && second) return { level: 'moon', owner: decodeURIComponent(first), kind: decodeURIComponent(second) }
+    if (name === 'memory' && first && second === undefined) return { level: 'memory', id: decodeURIComponent(first) }
+  } catch {
+    // a broken percent escape
+  }
+  return null
+}
+
+/** A hash level made into a real target from the data: a stale owner, kind or id falls back to Galaxy. */
+export function resolveHash(wanted: ReturnType<typeof levelFromHash>, bodies: readonly Body[], memories: readonly Pick<SolarMemory, 'id' | 'owner' | 'kind'>[]): Target {
+  if (wanted === null || wanted.level === 'galaxy') return GALAXY_LEVEL
+  if (wanted.level === 'memory') {
+    const row = memories.find(memory => memory.id === wanted.id)
+    return row !== undefined && bodies.some(body => body.owner === row.owner) ? { level: 'memory', owner: row.owner, kind: row.kind, id: row.id } : GALAXY_LEVEL
+  }
+  const body = bodies.find(candidate => candidate.owner === wanted.owner)
+  if (body === undefined) return GALAXY_LEVEL
+  if (wanted.level === 'planet') return { level: 'planet', owner: body.owner }
+  return body.moons.some(moon => moon.kind === wanted.kind) ? { level: 'moon', owner: body.owner, kind: wanted.kind } : GALAXY_LEVEL
+}
+
+/** The fragment left after `takeToken()`: `#token=` goes, `#level=` stays; with no token the fragment is untouched. */
+export function fragmentAfterToken(hash: string): string {
+  const params = new URLSearchParams(hash.replace(/^#/, ''))
+  if (!params.has('token')) return hash
+  const level = rawLevel(hash)
+  return level === null ? '' : `#level=${level}`
+}
+
+// ---- Find ----
+
+/** Memory search starts at this many characters, on Enter or after a pause, never per keystroke. */
+export const SEARCH_MEMORY_MIN = 3
+export const FIND_PAUSE_MS = 400
+
+export type FindRow = { type: string; label: string; sub: string; target: Target }
+
+/** The first line of a memory's text, cut to `max` characters. */
+const firstLine = (text: string, max: number): string => {
+  const line = (text.split('\n').find(part => part.trim() !== '') ?? '').trim()
+  return line.length > max ? `${line.slice(0, max - 1)}…` : line
+}
+
+/** Bodies, moons and tags matched locally (`searchResults`), then the memories the server found; a hit the map cannot place is dropped. */
+export function findRows(bodies: readonly Body[], query: string, hits: readonly { id: string; owner?: string; content?: string }[], memories: readonly Pick<SolarMemory, 'id' | 'owner' | 'kind'>[]): FindRow[] {
+  const rows: FindRow[] = searchResults(bodies, query).results.map(hit => ({ type: hit.type, label: hit.label, sub: hit.sub, target: hit.target }))
+  for (const hit of hits) {
+    const row = memories.find(memory => memory.id === hit.id)
+    const owner = row?.owner ?? hit.owner
+    const body = bodies.find(candidate => candidate.owner === owner)
+    if (body === undefined) continue
+    const target: Target = row === undefined ? { level: 'planet', owner: body.owner } : { level: 'memory', owner: row.owner, kind: row.kind, id: row.id }
+    rows.push({ type: 'Memory', label: firstLine(hit.content ?? '', 60) || hit.id, sub: `in ${body.label}`, target })
+  }
+  return rows
+}
+
+/** The mode of a memory search: keyword when the server's embeddings are off, else the Search tab's mode (so there is no 400). */
+export const findMode = (embeddings: boolean, searchMode: string): string => (embeddings ? searchMode : 'keyword')
+
+export type MemorySearchDeps = {
+  post: (path: string, body: unknown) => Promise<Response>
+  mode: () => string
+  /** Called with the query and the hits; hits are null when the search could not run (429, an error), and local results stay. */
+  done: (query: string, hits: { id: string; owner?: string; content?: string }[] | null) => void
+  pause?: number
+  setTimer?: (run: () => void, ms: number) => unknown
+  clearTimer?: (timer: unknown) => void
+}
+
+/** Find's memory search: after a pause or on Enter, with at least 3 characters, one request at a time; a 429 is quiet. */
+export function createMemorySearch(deps: MemorySearchDeps) {
+  const setTimer = deps.setTimer ?? ((run, ms) => setTimeout(run, ms))
+  const clearTimer = deps.clearTimer ?? (timer => clearTimeout(timer as ReturnType<typeof setTimeout>))
+  let timer: unknown = null
+  let running = false
+  // The newest query that wants a search while one is running.
+  let queued: string | null = null
+  let latest = ''
+  let generation = 0
+  const stop = () => {
+    if (timer !== null) clearTimer(timer)
+    timer = null
+  }
+  async function run(query: string): Promise<void> {
+    if (running) {
+      queued = query
+      return
+    }
+    running = true
+    const mine = generation
+    let hits: { id: string; owner?: string; content?: string }[] | null = null
+    try {
+      const response = await deps.post('/api/search', { query, mode: deps.mode() })
+      if (response.ok) {
+        const body = (await response.json().catch(() => ({}))) as { results?: unknown }
+        hits = Array.isArray(body.results) ? (body.results as { id?: unknown }[]).filter((hit): hit is { id: string } => typeof hit?.id === 'string') : []
+      }
+    } catch {
+      hits = null
+    }
+    running = false
+    // Typing on or Escape since: this answer is for a question nobody is asking now.
+    if (mine === generation && query === latest) deps.done(query, hits)
+    const next = queued
+    queued = null
+    if (next !== null && next !== query && next === latest && mine === generation) await run(next)
+  }
+  return {
+    /** A keystroke: starts the pause; under 3 characters it clears the memory results. */
+    type(query: string) {
+      latest = query.trim()
+      stop()
+      if (latest.length < SEARCH_MEMORY_MIN) {
+        deps.done(latest, [])
+        return
+      }
+      const wanted = latest
+      timer = setTimer(() => {
+        timer = null
+        void run(wanted)
+      }, deps.pause ?? FIND_PAUSE_MS)
+    },
+    /** Enter: searches at once. */
+    enter(query: string) {
+      latest = query.trim()
+      stop()
+      if (latest.length >= SEARCH_MEMORY_MIN) void run(latest)
+    },
+    /** Escape: drops the pending search and any answer still on its way. */
+    cancel() {
+      stop()
+      latest = ''
+      queued = null
+      generation++
+    },
+  }
+}
+
+// ---- The Bodies strip, the legend cards, the view buttons ----
+
+export type ChipRow = { owner: string; label: string; value: string; pressed: boolean; title: string; colour: string; craft: boolean }
+
+/** One chip per body, in the order of the Arrange by metric (then owner). */
+export function bodyChips(bodies: readonly Body[], page: Pick<SolarPage, 'arrange' | 'hidden'>): ChipRow[] {
+  return bodies
+    .slice()
+    .sort((a, b) => metric(b, page.arrange) - metric(a, page.arrange) || (a.owner < b.owner ? -1 : a.owner > b.owner ? 1 : 0))
+    .map(body => {
+      const off = page.hidden[body.owner] === true
+      const style = body.style === null ? null : STYLES[body.style]
+      const colour = body.craft === 'station' ? '#c3ccd8' : body.craft === 'ship' ? '#6fb8ff' : style === null ? '#a39e97' : style.kind === 'gas' ? (style.bands[1] ?? '#c48a5a') : style.a
+      return {
+        owner: body.owner,
+        label: body.label,
+        value: metricText(body, page.arrange).split(' ')[0] ?? '',
+        pressed: !off,
+        title: `${labelName(body)} (${off ? 'hidden: click to show' : 'shown: click to hide'})`,
+        colour,
+        craft: body.craft !== null,
+      }
+    })
+}
+
+export function shownText(bodies: readonly Pick<Body, 'owner'>[], hidden: Record<string, true>): string {
+  const off = bodies.filter(body => hidden[body.owner] === true).length
+  return `${bodies.length - off} of ${bodies.length} shown`
+}
+
+export type LegendRow = { colour: string; name: string; means: string }
+const legend = (rows: [string, string, string][]): LegendRow[] => rows.map(([colour, name, means]) => ({ colour, name, means }))
+
+export const LEGEND_LEFT: readonly LegendRow[] = legend([
+  ['#ffd25a', 'Sun', 'the store; it turns'], ['#56B4E9', 'Nodule', 'a writer, on the sun'], ['#c48a5a', 'Planet', 'a project; size = memories'],
+  ['#e4d09c', 'Planet style', 'gas 30+, ice 10-29, rocky, dwarf <3'], ['#c3ccd8', 'Space station', 'plain folder, 5+ memories'], ['#6fb8ff', 'Starship', 'plain folder, under 5'],
+  ['#8fb07a', 'Land, bands', 'tags; area = uses'], ['#eef2f8', 'Moon', 'a memory kind'], ['#56B4E9', 'Asteroid', 'a memory; colour = writer'],
+  ['#ffffff', 'Brightness', 'recalls'], ['#9fb0c8', 'Asteroid size', 'importance'], ['#F0E442', 'Halo · satellite', 'pinned · knowledge item'],
+])
+export const LEGEND_RIGHT: readonly LegendRow[] = legend([
+  ['#56B4E9', 'Planet ring', 'its memories, from afar'], ['#8b93a3', 'Grey asteroid', 'kind unknown (planet belt)'], ['#ffe3a3', 'Sun belt', 'global memories'],
+  ['#a99bd6', 'Outer belt', 'retired, expired, lapsed'], ['#000000', 'Black hole', 'similar across projects'], ['#E8B8FF', 'Energy line', 'older → newer; pulse /30 s'],
+  ['#F0E442', 'Recall comet', 'planet → sun'], ['#56B4E9', 'Save comet', 'sun → planet'], ['#3DDC97', 'Update beam', 'green, writer → body'],
+  ['#FF4D4D', 'Forget laser', 'red, writer → body'], ['#ecf1fa', 'Clouds · ice', 'needs review · idle 30 d'],
+])
+
+export const VIEW_BUTTONS: readonly { label: string; aria: string; action: { zoom: number } | { view: SolarViewName } }[] = [
+  { label: '+', aria: 'Zoom in', action: { zoom: 0.72 } },
+  { label: '−', aria: 'Zoom out', action: { zoom: 1.38 } },
+  { label: 'Top', aria: 'View from the top', action: { view: 'top' } },
+  { label: 'Below', aria: 'View from below', action: { view: 'below' } },
+  { label: 'Side', aria: 'View from the side', action: { view: 'side' } },
+  { label: 'Reset', aria: 'Reset the view', action: { view: 'reset' } },
+]
+
+export const SHOW_TOGGLES = [
+  { key: 'rotate', label: 'Auto-rotate' },
+  { key: 'legend', label: 'Legend' },
+  { key: 'sample', label: 'Sample outer-belt dust' },
+] as const
+
+// ---- Path, announcement, Details, Tab order ----
+
+export type SolarCrumb = { label: string; target: Target; current: boolean }
+
+export function solarCrumbs(level: Target, bodies: readonly Body[]): SolarCrumb[] {
+  const crumbs: SolarCrumb[] = [{ label: 'Galaxy', target: GALAXY_LEVEL, current: level.level === 'galaxy' }]
+  if (level.level === 'galaxy') return crumbs
+  const body = bodies.find(candidate => candidate.owner === level.owner)
+  crumbs.push({ label: body?.label ?? level.owner, target: { level: 'planet', owner: level.owner }, current: level.level === 'planet' })
+  if (level.level === 'moon' || level.level === 'memory') crumbs.push({ label: kindLabel(level.kind), target: { level: 'moon', owner: level.owner, kind: level.kind }, current: level.level === 'moon' })
+  if (level.level === 'memory') crumbs.push({ label: 'Memory', target: level, current: true })
+  return crumbs
+}
+
+/** The aria-live text for a level. */
+export function solarAnnouncement(level: Target, bodies: readonly Body[]): string {
+  const crumbs = solarCrumbs(level, bodies)
+  return level.level === 'galaxy' ? 'Galaxy: the whole solar system' : `${level.level === 'planet' ? 'Planet' : level.level === 'moon' ? 'Moon' : 'Memory'}: ${crumbs.map(crumb => crumb.label).join(', ')}`
+}
+
+export type DetailsView = { kicker: string; title: string; facts: { label: string; value: string }[]; hint: string }
+
+/** The Details panel until MAPX.7 fills it: the level, its name and the numbers the data already holds. */
+export function detailsFor(level: Target, bodies: readonly Body[], galaxy: Pick<SolarGalaxy, 'projects' | 'memories' | 'writers' | 'globalLive'>): DetailsView {
+  const body = level.level === 'galaxy' ? undefined : bodies.find(candidate => candidate.owner === level.owner)
+  if (level.level === 'galaxy' || body === undefined) {
+    const live = bodies.reduce((sum, item) => sum + item.count, 0)
+    return {
+      kicker: 'Solar system',
+      title: 'Your memory store',
+      facts: [
+        { label: 'Memories', value: `${live} live` },
+        { label: 'Projects', value: String(galaxy.projects.length) },
+        { label: 'Writers', value: galaxy.writers.map(writer => `${writer.source} ${writer.count}`).join(' · ') || 'none' },
+        { label: 'Global (sun belt)', value: String(galaxy.globalLive) },
+      ],
+      hint: 'Click a planet, a moon or a memory: its details show here. Hover anything for a quick look.',
+    }
+  }
+  if (level.level === 'planet') {
+    return {
+      kicker: `${body.craft === null ? 'Planet · ' : ''}${describe(body)}`,
+      title: body.label,
+      facts: [
+        { label: 'Memories', value: String(body.count) },
+        { label: 'Tags (land)', value: String(body.tagsTotal) },
+        { label: 'Kinds (moons)', value: body.kinds.map(kind => `${kindLabel(kind.kind)} ${kind.count}`).join(', ') || 'none' },
+        { label: 'Activity', value: String(body.activity) },
+        { label: 'Lifetime recalls', value: String(body.recalls) },
+        { label: 'Median age', value: body.age === null ? 'none' : `${body.age} days` },
+      ],
+      hint: 'Hover the surface for tags; click a moon to open its memories.',
+    }
+  }
+  if (level.level === 'moon') {
+    const count = body.kinds.find(kind => kind.kind === level.kind)?.count ?? 0
+    return {
+      kicker: `Moon · ${kindOne(level.kind)} memories`,
+      title: `${kindLabel(level.kind)} of ${body.label}`,
+      facts: [{ label: 'Memories', value: String(count) }, { label: 'Share of the planet', value: body.count > 0 ? `${Math.round((count / body.count) * 100)}%` : '0%' }, { label: 'Planet', value: body.label }],
+      hint: 'The swarm spreads into a ring. Click one memory to open it here.',
+    }
+  }
+  const row = galaxy.memories.find(memory => memory.id === level.id)
+  return {
+    kicker: `Memory · ${kindOne(level.kind)} · ${body.label}`,
+    title: row?.label || level.id,
+    facts: [{ label: 'Kind', value: kindLabel(level.kind) }, { label: 'Writer', value: row?.source ?? 'unknown' }, { label: 'Created', value: row?.created ?? 'unknown' }, { label: 'Recalls', value: String(row?.recalls ?? 0) }],
+    hint: 'Its text, provenance and history arrive with the Details panel.',
+  }
+}
+
+export const TAB_MEMORIES = 30
+
+/** The Tab order: the sun, the planets, then (on a planet) its moons, then (on a moon) its memories. */
+export function tabOrder(level: Target, bodies: readonly Body[], memories: readonly Pick<SolarMemory, 'id' | 'owner' | 'kind' | 'label' | 'state'>[], hidden: Record<string, true> = {}): { label: string; target: Target }[] {
+  const order: { label: string; target: Target }[] = [{ label: 'Sun: the whole store', target: GALAXY_LEVEL }]
+  for (const body of bodies.filter(candidate => hidden[candidate.owner] !== true)) {
+    order.push({ label: `${body.craft === null ? 'Planet' : body.craft === 'station' ? 'Station' : 'Starship'} ${body.label}`, target: { level: 'planet', owner: body.owner } })
+    if ((level.level === 'planet' || level.level === 'moon' || level.level === 'memory') && level.owner === body.owner) {
+      for (const moon of body.moons) {
+        order.push({ label: `Moon ${kindLabel(moon.kind)} of ${body.label}`, target: { level: 'moon', owner: body.owner, kind: moon.kind } })
+        if ((level.level === 'moon' || level.level === 'memory') && level.kind === moon.kind) {
+          for (const memory of memories.filter(row => row.owner === body.owner && row.kind === moon.kind && row.state === 'live').slice(0, TAB_MEMORIES)) order.push({ label: `Memory ${memory.label || memory.id}`, target: { level: 'memory', owner: body.owner, kind: moon.kind, id: memory.id } })
+        }
+      }
+    }
+  }
+  return order
+}

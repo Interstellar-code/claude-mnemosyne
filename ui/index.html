@@ -49,7 +49,7 @@
         </div>
       </details>
 
-      <details id="map-card-colour" class="rail-card" open>
+      <details id="map-card-colour" class="rail-card legacy-only" open>
         <summary class="rail-title">Colour by</summary>
         <div class="rail-body">
         <div id="map-colour" class="segmented" role="group" aria-label="Colour by">
@@ -60,7 +60,7 @@
         </div>
       </details>
 
-      <details id="map-card-links" class="rail-card">
+      <details id="map-card-links" class="rail-card legacy-only">
         <summary class="rail-title">Links</summary>
         <div class="rail-body">
         <label class="toggle"><input id="map-spokes" type="checkbox" checked><span class="toggle-text">Topic threads</span></label>
@@ -71,7 +71,7 @@
         </div>
       </details>
 
-      <details id="map-card-know" class="rail-card">
+      <details id="map-card-know" class="rail-card legacy-only">
         <summary class="rail-title">Knowledge</summary>
         <div class="rail-body">
         <div id="map-know" class="know-chips" role="group" aria-label="Show memories with this knowledge">
@@ -85,7 +85,7 @@
         </div>
       </details>
 
-      <details id="map-card-layers" class="rail-card">
+      <details id="map-card-layers" class="rail-card legacy-only">
         <summary class="rail-title">Activity layers</summary>
         <div class="rail-body">
         <label class="toggle"><input id="map-layer-recall" type="checkbox" checked><span class="toggle-text">Recall</span><span class="swatch-dot sw-recall" aria-hidden="true"></span></label>
@@ -93,14 +93,36 @@
         </div>
       </details>
 
-      <details id="map-card-projects" class="rail-card">
+      <details id="map-card-projects" class="rail-card legacy-only">
         <summary class="rail-title">Projects</summary>
         <div class="rail-body">
         <div id="map-toggles" class="toggles"></div>
         </div>
       </details>
 
-      <details id="map-topics-box" class="rail-card" hidden>
+      <details id="solar-card-arrange" class="rail-card solar-only" open hidden>
+        <summary class="rail-title">Arrange by</summary>
+        <div class="rail-body">
+        <div id="solar-arrange" class="seg-grid seg-grid-2" role="group" aria-label="Arrange by"></div>
+        <p id="solar-arrange-hint" class="rail-note"></p>
+        </div>
+      </details>
+
+      <details id="solar-card-colour" class="rail-card solar-only" open hidden>
+        <summary class="rail-title">Colour dots by</summary>
+        <div class="rail-body">
+        <div id="solar-colour" class="seg-grid seg-grid-3" role="group" aria-label="Colour dots by"></div>
+        </div>
+      </details>
+
+      <details id="solar-card-show" class="rail-card solar-only" open hidden>
+        <summary class="rail-title">Show</summary>
+        <div class="rail-body">
+        <div id="solar-show" class="solar-show" role="group" aria-label="Show"></div>
+        </div>
+      </details>
+
+      <details id="map-topics-box" class="rail-card legacy-only" hidden>
         <summary id="map-topics-title" class="rail-title"></summary>
         <div class="rail-body">
         <div id="map-topics" class="rail-list"></div>
@@ -110,17 +132,27 @@
 
     <section class="map-centre" aria-label="3D memory map">
       <div id="map-stage" class="stage">
-        <div id="map-canvas" class="stage-canvas"></div>
+        <div id="map-canvas" class="stage-canvas legacy-only"></div>
+        <canvas id="solar-canvas" class="stage-canvas solar-canvas" role="img" aria-label="3D solar system of the memory store: the sun is the store, planets are projects" hidden></canvas>
         <p id="map-message" class="stage-message" hidden></p>
-        <div id="map-tip" class="stage-tip" hidden></div>
-        <nav id="map-path" class="path" aria-label="Path"></nav>
+        <div id="solar-tip" class="stage-tip solar-tip" role="status" hidden></div>
+        <nav id="solar-path" class="path solar-path" aria-label="Map path" hidden></nav>
+        <div id="map-tip" class="stage-tip legacy-only" hidden></div>
+        <nav id="map-path" class="path legacy-only" aria-label="Path"></nav>
         <div class="stage-find">
           <svg class="find-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path></svg>
           <label for="map-find" class="sr-only">Find</label>
           <input id="map-find" class="find-input" type="search" maxlength="80" placeholder="Find tag, project or label" autocomplete="off">
           <span id="map-found" class="found muted small mono" aria-live="polite"></span>
         </div>
-        <div class="stage-controls">
+        <ul id="solar-find-results" class="find-results solar-only" role="listbox" aria-label="Find results" hidden></ul>
+        <section id="solar-legend-left" class="legend-card legend-left solar-only" aria-label="Legend: bodies" hidden></section>
+        <section id="solar-legend-right" class="legend-card legend-right solar-only" aria-label="Legend: belts, links and motion" hidden></section>
+        <nav id="solar-tour" class="solar-tour solar-only" aria-label="Walk the solar system" hidden></nav>
+        <p id="solar-hint" class="stage-hint solar-hint solar-only" hidden>Drag to orbit (see it from the top or below) · right-drag to pan · scroll to zoom · click a body to fly in</p>
+        <div id="solar-views" class="solar-views solar-only" role="group" aria-label="View" hidden></div>
+        <p id="solar-live" class="sr-only" aria-live="polite"></p>
+        <div class="stage-controls legacy-only">
           <button id="map-rotate" type="button" class="stage-btn" aria-pressed="true">Auto-rotate</button>
           <button id="map-reset" type="button" class="stage-btn">Reset view</button>
           <button id="map-demo" type="button" class="stage-btn" aria-expanded="false" aria-controls="map-demo-box">Demo ▾</button>
@@ -129,15 +161,27 @@
             <button id="map-sim-write" type="button" class="stage-btn sim-write">Simulate a write</button>
           </span>
         </div>
-        <span class="stage-hint" aria-hidden="true">Drag to orbit · scroll to zoom · click to fly in</span>
+        <span class="stage-hint legacy-only" aria-hidden="true">Drag to orbit · scroll to zoom · click to fly in</span>
         <p id="map-live" class="sr-only" aria-live="polite"></p>
       </div>
 
-      <aside id="map-inspector" class="inspector insp-card" aria-label="Selected item"></aside>
+      <section id="solar-bodies" class="bodies-strip solar-only" aria-label="Show or hide bodies" hidden>
+        <div class="bodies-head">
+          <h2 class="rail-title">Bodies</h2>
+          <span id="solar-shown" class="muted small"></span>
+          <span class="muted small">click a chip to show or hide it; click it on the map to fly in</span>
+          <button id="solar-show-all" type="button" class="stage-btn bodies-all">Show all</button>
+        </div>
+        <div id="solar-chips" class="bodies-chips"></div>
+      </section>
+
+      <aside id="map-inspector" class="inspector insp-card legacy-only" aria-label="Selected item"></aside>
     </section>
 
     <div class="map-side">
-      <aside id="map-overview" class="inspector" aria-label="Overview"></aside>
+      <section id="solar-details" class="inspector solar-details solar-only" aria-label="Details" hidden></section>
+
+      <aside id="map-overview" class="inspector legacy-only" aria-label="Overview"></aside>
 
       <section id="map-live-strip" class="live-strip" aria-label="Live activity">
         <div class="live-head" title="Recalls and saves from the activity log light up the map as they happen.">
@@ -149,7 +193,7 @@
         </ol>
       </section>
 
-      <details id="map-legend" class="rail-card">
+      <details id="map-legend" class="rail-card legacy-only">
         <summary class="rail-title">How to read the map</summary>
         <div class="rail-body">
         <dl class="legend">

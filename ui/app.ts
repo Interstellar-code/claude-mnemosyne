@@ -15,6 +15,7 @@
 // Styles live in style.css: the CSP refuses inline ones.
 
 import { createMap, type MapView } from './map'
+import { fragmentAfterToken } from './map-state'
 import { extractionState, hasStatus, itemHead, NO_FILTER, neverUsedText, ownersOf, summaryLine, kindTabs, notice as knowledgeNotice, dotClass, ownerColour, ownerColours, parseKnowledge, tableRows, total as knowledgeTotal, type KnowledgeData, type KnowledgeFilter, type KnowledgeSort, type KnowledgeHost, type KnowledgeKind } from './knowledge'
 import { chartBars, chartText, coverageRows, dayBars, kpiTiles as healthKpiTiles, parseHealth, projectRows as healthProjectRows, storageList, storageSummary, tableFilterButtons, type HealthData, type HealthHost, type TableFilter } from './health'
 import { filterButtons, parseReview, reviewCounts, reviewList, reviewRow, reviewText, type ReviewData, type ReviewFilter, type ReviewHost } from './review'
@@ -604,7 +605,8 @@ function setStatus(text: string, kind: 'ok' | 'error' | 'plain' = 'plain') {
 // Takes the token from the fragment (then drops the fragment), else from this tab's storage.
 function takeToken(): string | undefined {
   const fromLink = tokenFromHash(location.hash)
-  if (location.hash) history.replaceState(null, '', `${location.pathname}${location.search}`)
+  // A #token= link is cleared from the address bar; a #level= (the Galaxy's place) stays.
+  if (location.hash) history.replaceState(null, '', `${location.pathname}${location.search}${fragmentAfterToken(location.hash)}`)
   if (fromLink) {
     sessionStorage.setItem(TOKEN_KEY, fromLink)
     return fromLink
