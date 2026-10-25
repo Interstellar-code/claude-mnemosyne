@@ -825,12 +825,50 @@
       "pinned": false,
       "state": "lapsed",
       "validUntil": "2026-10-23T12:00:00.000Z"
+    },
+    {
+      "id": "mem-009",
+      "owner": "project-hermes-switchui-4d5e6f",
+      "tags": [
+        "debugging"
+      ],
+      "recalls": 0,
+      "lastRecalled": null,
+      "created": "2026-10-21T12:00:00.000Z",
+      "label": "[memory 9: text withheld in the fixture]",
+      "source": "claude-code",
+      "sourceInferred": false,
+      "kind": "error",
+      "scope": "project",
+      "importance": 0.5,
+      "pinned": false,
+      "state": "live",
+      "validUntil": null
+    },
+    {
+      "id": "mem-010",
+      "owner": "project-claude-mnemosyne-0d1e2f",
+      "tags": [
+        "memory-system"
+      ],
+      "recalls": 0,
+      "lastRecalled": null,
+      "created": "2026-10-23T12:00:00.000Z",
+      "label": "[memory 10: text withheld in the fixture]",
+      "source": "claude-code",
+      "sourceInferred": false,
+      "kind": "context",
+      "scope": "project",
+      "importance": 0.5,
+      "pinned": false,
+      "state": "live",
+      "validUntil": null
     }
   ],
   "knowledge": [],
   "meaning": true,
   "total": 123,
-  "shown": 8,
+  "shown": 10,
   "writers": [
     {
       "source": "claude-code",
@@ -855,13 +893,13 @@
           "score": 0.81
         },
         {
-          "older": "mem-004",
+          "older": "mem-009",
           "newer": "mem-002",
           "score": 0.8
         },
         {
-          "older": "mem-005",
-          "newer": "mem-003",
+          "older": "mem-003",
+          "newer": "mem-002",
           "score": 0.79
         }
       ]
@@ -872,17 +910,17 @@
       "pairs": [
         {
           "older": "mem-003",
-          "newer": "mem-001",
+          "newer": "mem-004",
           "score": 0.82
         },
         {
-          "older": "mem-004",
-          "newer": "mem-002",
+          "older": "mem-009",
+          "newer": "mem-010",
           "score": 0.81
         },
         {
-          "older": "mem-005",
-          "newer": "mem-003",
+          "older": "mem-003",
+          "newer": "mem-010",
           "score": 0.8
         }
       ]
@@ -892,13 +930,13 @@
       "b": "project-claude-mnemosyne-0d1e2f",
       "pairs": [
         {
-          "older": "mem-003",
-          "newer": "mem-001",
+          "older": "mem-002",
+          "newer": "mem-004",
           "score": 0.81
         },
         {
-          "older": "mem-004",
-          "newer": "mem-002",
+          "older": "mem-010",
+          "newer": "mem-001",
           "score": 0.8
         }
       ]
