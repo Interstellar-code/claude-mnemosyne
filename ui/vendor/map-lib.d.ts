@@ -112,7 +112,39 @@ export declare class UnrealBloomPass implements PassLike {
   threshold: number
   render(renderer: WebGLRendererLike, writeBuffer: RenderTargetLike, readBuffer: RenderTargetLike, deltaTime?: number, maskActive?: boolean): void
   setSize(width: number, height: number): void
-  dispose(): void
+export declare const Scene: unknown
+export declare const PerspectiveCamera: unknown
+export declare const WebGLRenderer: unknown
+export declare const Group: unknown
+export declare const Mesh: unknown
+export declare const Points: unknown
+export declare const Line: unknown
+export declare const LineLoop: unknown
+export declare const Sprite: unknown
+export declare const SphereGeometry: unknown
+export declare const BoxGeometry: unknown
+export declare const CylinderGeometry: unknown
+export declare const TorusGeometry: unknown
+export declare const RingGeometry: unknown
+export declare const BufferGeometry: unknown
+export declare const BufferAttribute: unknown
+export declare const MeshBasicMaterial: unknown
+export declare const MeshStandardMaterial: unknown
+export declare const LineBasicMaterial: unknown
+export declare const PointsMaterial: unknown
+export declare const SpriteMaterial: unknown
+export declare const CanvasTexture: unknown
+export declare const Color: unknown
+export declare const Vector2: unknown
+export declare const Vector3: unknown
+export declare const Raycaster: unknown
+export declare const PointLight: unknown
+export declare const AmbientLight: unknown
+export declare const AdditiveBlending: unknown
+export declare const NormalBlending: unknown
+export declare const DoubleSide: unknown
+export declare const SRGBColorSpace: unknown
+export declare const OrbitControls: unknown
 }
 export declare class OutputPass implements PassLike {
   constructor()
