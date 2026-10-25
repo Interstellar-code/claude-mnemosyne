@@ -1,0 +1,907 @@
+{
+  "projects": [
+    {
+      "owner": "project-matrixkoder-1a2b3c",
+      "label": "matrixkoder",
+      "count": 50,
+      "recalls": 373,
+      "liveCount": 48,
+      "kinds": [
+        {
+          "kind": "instruction",
+          "count": 33
+        },
+        {
+          "kind": "decision",
+          "count": 7
+        },
+        {
+          "kind": "preference",
+          "count": 5
+        },
+        {
+          "kind": "context",
+          "count": 2
+        },
+        {
+          "kind": "fact",
+          "count": 1
+        }
+      ],
+      "unknown": 0,
+      "global": 3,
+      "lastActive": "2026-10-23T07:12:00.000Z",
+      "activity30": 416,
+      "activitySource": "lifetime",
+      "recallsTotal": 368,
+      "medianAgeDays": 8.8,
+      "firstSaved": "2026-09-19T02:24:00.000Z",
+      "tags": [
+        {
+          "tag": "workflow-rules",
+          "count": 38
+        },
+        {
+          "tag": "planning",
+          "count": 20
+        },
+        {
+          "tag": "user-preferences",
+          "count": 19
+        },
+        {
+          "tag": "agent-lanes",
+          "count": 16
+        },
+        {
+          "tag": "orchestration",
+          "count": 9
+        },
+        {
+          "tag": "gates",
+          "count": 8
+        },
+        {
+          "tag": "model-routing",
+          "count": 7
+        },
+        {
+          "tag": "subagents",
+          "count": 6
+        },
+        {
+          "tag": "dashboard-ui",
+          "count": 6
+        },
+        {
+          "tag": "plan-template",
+          "count": 5
+        },
+        {
+          "tag": "testing",
+          "count": 4
+        },
+        {
+          "tag": "parked-work",
+          "count": 4
+        }
+      ],
+      "tagsTotal": 27,
+      "projectKind": "repo",
+      "remoteHost": "github.com"
+    },
+    {
+      "owner": "project-hermes-switchui-4d5e6f",
+      "label": "hermes-switchui",
+      "count": 62,
+      "recalls": 103,
+      "liveCount": 62,
+      "kinds": [
+        {
+          "kind": "fact",
+          "count": 23
+        },
+        {
+          "kind": "error",
+          "count": 15
+        },
+        {
+          "kind": "instruction",
+          "count": 9
+        },
+        {
+          "kind": "decision",
+          "count": 6
+        },
+        {
+          "kind": "preference",
+          "count": 5
+        },
+        {
+          "kind": "artifact",
+          "count": 3
+        },
+        {
+          "kind": "context",
+          "count": 1
+        }
+      ],
+      "unknown": 0,
+      "global": 0,
+      "lastActive": "2026-10-23T07:12:00.000Z",
+      "activity30": 165,
+      "activitySource": "lifetime",
+      "recallsTotal": 103,
+      "medianAgeDays": 8.8,
+      "firstSaved": "2026-09-19T02:24:00.000Z",
+      "tags": [
+        {
+          "tag": "hermes-platform",
+          "count": 37
+        },
+        {
+          "tag": "debugging",
+          "count": 22
+        },
+        {
+          "tag": "workflow-rules",
+          "count": 20
+        },
+        {
+          "tag": "dashboard-ui",
+          "count": 17
+        },
+        {
+          "tag": "api-gateway",
+          "count": 15
+        },
+        {
+          "tag": "skills-plugins",
+          "count": 10
+        },
+        {
+          "tag": "frontend-tooling",
+          "count": 10
+        },
+        {
+          "tag": "release-deploy",
+          "count": 8
+        },
+        {
+          "tag": "data-storage",
+          "count": 8
+        },
+        {
+          "tag": "user-preferences",
+          "count": 7
+        },
+        {
+          "tag": "chat-sessions",
+          "count": 7
+        },
+        {
+          "tag": "git",
+          "count": 6
+        }
+      ],
+      "tagsTotal": 33,
+      "projectKind": "repo",
+      "remoteHost": "github.com"
+    },
+    {
+      "owner": "project-cc-workflows-7a8b9c",
+      "label": "cc-workflows",
+      "count": 2,
+      "recalls": 93,
+      "liveCount": 2,
+      "kinds": [
+        {
+          "kind": "preference",
+          "count": 1
+        },
+        {
+          "kind": "artifact",
+          "count": 1
+        }
+      ],
+      "unknown": 0,
+      "global": 1,
+      "lastActive": "2026-10-23T19:48:00.000Z",
+      "activity30": 95,
+      "activitySource": "lifetime",
+      "recallsTotal": 93,
+      "medianAgeDays": 6.7,
+      "firstSaved": "2026-09-25T09:36:00.000Z",
+      "tags": [
+        {
+          "tag": "model-routing",
+          "count": 2
+        },
+        {
+          "tag": "daemons-scheduling",
+          "count": 1
+        },
+        {
+          "tag": "orchestration",
+          "count": 1
+        },
+        {
+          "tag": "code-review",
+          "count": 1
+        },
+        {
+          "tag": "user-preferences",
+          "count": 1
+        },
+        {
+          "tag": "workflow-rules",
+          "count": 1
+        },
+        {
+          "tag": "agent:codex",
+          "count": 1
+        }
+      ],
+      "tagsTotal": 7,
+      "projectKind": "repo",
+      "remoteHost": "github.com"
+    },
+    {
+      "owner": "project-claude-mnemosyne-0d1e2f",
+      "label": "claude-mnemosyne",
+      "count": 7,
+      "recalls": 74,
+      "liveCount": 7,
+      "kinds": [
+        {
+          "kind": "context",
+          "count": 3
+        },
+        {
+          "kind": "preference",
+          "count": 2
+        },
+        {
+          "kind": "instruction",
+          "count": 1
+        },
+        {
+          "kind": "decision",
+          "count": 1
+        }
+      ],
+      "unknown": 0,
+      "global": 1,
+      "lastActive": "2026-10-25T01:12:00.000Z",
+      "activity30": 81,
+      "activitySource": "lifetime",
+      "recallsTotal": 74,
+      "medianAgeDays": 1.8,
+      "firstSaved": "2026-10-10T02:24:00.000Z",
+      "tags": [
+        {
+          "tag": "memory-system",
+          "count": 3
+        },
+        {
+          "tag": "agent-lanes",
+          "count": 3
+        },
+        {
+          "tag": "workflow-rules",
+          "count": 3
+        },
+        {
+          "tag": "orchestration",
+          "count": 2
+        },
+        {
+          "tag": "agent:claude-code",
+          "count": 2
+        },
+        {
+          "tag": "v3",
+          "count": 2
+        },
+        {
+          "tag": "planning",
+          "count": 2
+        },
+        {
+          "tag": "orca",
+          "count": 2
+        },
+        {
+          "tag": "architecture-decisions",
+          "count": 1
+        },
+        {
+          "tag": "skills-plugins",
+          "count": 1
+        },
+        {
+          "tag": "parked-work",
+          "count": 1
+        },
+        {
+          "tag": "user-preferences",
+          "count": 1
+        }
+      ],
+      "tagsTotal": 15,
+      "projectKind": "repo",
+      "remoteHost": "github.com"
+    },
+    {
+      "owner": "project-orca-matrixkoder-3a4b5c",
+      "label": "orca-matrixkoder",
+      "count": 4,
+      "recalls": 3,
+      "liveCount": 4,
+      "kinds": [
+        {
+          "kind": "decision",
+          "count": 2
+        },
+        {
+          "kind": "unknown",
+          "count": 2
+        }
+      ],
+      "unknown": 2,
+      "global": 1,
+      "lastActive": "2026-10-25T08:24:00.000Z",
+      "activity30": 7,
+      "activitySource": "lifetime",
+      "recallsTotal": 3,
+      "medianAgeDays": 0.6,
+      "firstSaved": "2026-10-13T16:48:00.000Z",
+      "tags": [
+        {
+          "tag": "orca",
+          "count": 4
+        },
+        {
+          "tag": "matrixkoder",
+          "count": 2
+        },
+        {
+          "tag": "data-storage",
+          "count": 1
+        },
+        {
+          "tag": "architecture-decisions",
+          "count": 1
+        },
+        {
+          "tag": "orchestration",
+          "count": 1
+        },
+        {
+          "tag": "planning",
+          "count": 1
+        },
+        {
+          "tag": "workflow-rules",
+          "count": 1
+        },
+        {
+          "tag": "plan-template",
+          "count": 1
+        },
+        {
+          "tag": "agy",
+          "count": 1
+        },
+        {
+          "tag": "panes",
+          "count": 1
+        },
+        {
+          "tag": "worktrees",
+          "count": 1
+        },
+        {
+          "tag": "lanes",
+          "count": 1
+        }
+      ],
+      "tagsTotal": 12,
+      "projectKind": "repo",
+      "remoteHost": "github.com"
+    },
+    {
+      "owner": "project-cowork-6d7e8f",
+      "label": "cowork",
+      "count": 12,
+      "recalls": 40,
+      "liveCount": 12,
+      "kinds": [
+        {
+          "kind": "context",
+          "count": 5
+        },
+        {
+          "kind": "decision",
+          "count": 3
+        },
+        {
+          "kind": "preference",
+          "count": 2
+        },
+        {
+          "kind": "artifact",
+          "count": 2
+        }
+      ],
+      "unknown": 0,
+      "global": 0,
+      "lastActive": "2026-10-20T12:00:00.000Z",
+      "activity30": 52,
+      "activitySource": "lifetime",
+      "recallsTotal": 40,
+      "medianAgeDays": 20,
+      "firstSaved": "2026-08-16T12:00:00.000Z",
+      "tags": [
+        {
+          "tag": "workflow-rules",
+          "count": 5
+        },
+        {
+          "tag": "planning",
+          "count": 4
+        },
+        {
+          "tag": "documents",
+          "count": 3
+        },
+        {
+          "tag": "research",
+          "count": 2
+        },
+        {
+          "tag": "user-preferences",
+          "count": 2
+        },
+        {
+          "tag": "notes",
+          "count": 1
+        }
+      ],
+      "tagsTotal": 6,
+      "projectKind": "folder",
+      "remoteHost": null
+    },
+    {
+      "owner": "project-notes-9a0b1c",
+      "label": "notes",
+      "count": 8,
+      "recalls": 22,
+      "liveCount": 8,
+      "kinds": [
+        {
+          "kind": "fact",
+          "count": 4
+        },
+        {
+          "kind": "context",
+          "count": 2
+        },
+        {
+          "kind": "preference",
+          "count": 2
+        }
+      ],
+      "unknown": 0,
+      "global": 0,
+      "lastActive": "2026-08-26T12:00:00.000Z",
+      "activity30": 30,
+      "activitySource": "lifetime",
+      "recallsTotal": 22,
+      "medianAgeDays": 35,
+      "firstSaved": "2026-07-02T12:00:00.000Z",
+      "tags": [
+        {
+          "tag": "notes",
+          "count": 5
+        },
+        {
+          "tag": "research",
+          "count": 3
+        },
+        {
+          "tag": "planning",
+          "count": 2
+        },
+        {
+          "tag": "user-preferences",
+          "count": 1
+        }
+      ],
+      "tagsTotal": 4,
+      "projectKind": "folder",
+      "remoteHost": null
+    },
+    {
+      "owner": "project-research-2d3e4f",
+      "label": "research",
+      "count": 5,
+      "recalls": 9,
+      "liveCount": 5,
+      "kinds": [
+        {
+          "kind": "fact",
+          "count": 3
+        },
+        {
+          "kind": "artifact",
+          "count": 2
+        }
+      ],
+      "unknown": 0,
+      "global": 0,
+      "lastActive": "2026-10-20T12:00:00.000Z",
+      "activity30": 14,
+      "activitySource": "lifetime",
+      "recallsTotal": 9,
+      "medianAgeDays": 40,
+      "firstSaved": "2026-06-17T12:00:00.000Z",
+      "tags": [
+        {
+          "tag": "research",
+          "count": 4
+        },
+        {
+          "tag": "documents",
+          "count": 2
+        },
+        {
+          "tag": "data-storage",
+          "count": 1
+        }
+      ],
+      "tagsTotal": 3,
+      "projectKind": "folder",
+      "remoteHost": null
+    },
+    {
+      "owner": "project-scratch-5a6b7c",
+      "label": "scratch",
+      "count": 3,
+      "recalls": 4,
+      "liveCount": 3,
+      "kinds": [
+        {
+          "kind": "context",
+          "count": 2
+        },
+        {
+          "kind": "error",
+          "count": 1
+        }
+      ],
+      "unknown": 0,
+      "global": 0,
+      "lastActive": "2026-10-25T00:00:00.000Z",
+      "activity30": 7,
+      "activitySource": "lifetime",
+      "recallsTotal": 4,
+      "medianAgeDays": 2,
+      "firstSaved": "2026-10-09T12:00:00.000Z",
+      "tags": [
+        {
+          "tag": "debugging",
+          "count": 2
+        },
+        {
+          "tag": "testing",
+          "count": 1
+        }
+      ],
+      "tagsTotal": 2,
+      "projectKind": "folder",
+      "remoteHost": null
+    },
+    {
+      "owner": "project-sandbox-8d9e0f",
+      "label": "sandbox",
+      "count": 2,
+      "recalls": 6,
+      "liveCount": 2,
+      "kinds": [
+        {
+          "kind": "context",
+          "count": 1
+        },
+        {
+          "kind": "fact",
+          "count": 1
+        }
+      ],
+      "unknown": 0,
+      "global": 0,
+      "lastActive": "2026-10-25T06:00:00.000Z",
+      "activity30": 8,
+      "activitySource": "lifetime",
+      "recallsTotal": 6,
+      "medianAgeDays": 1,
+      "firstSaved": "2026-10-12T12:00:00.000Z",
+      "tags": [
+        {
+          "tag": "testing",
+          "count": 1
+        },
+        {
+          "tag": "orchestration",
+          "count": 1
+        }
+      ],
+      "tagsTotal": 2,
+      "projectKind": "folder",
+      "remoteHost": null
+    },
+    {
+      "owner": "project-downloads-1b2c3d",
+      "label": "downloads",
+      "count": 1,
+      "recalls": 1,
+      "liveCount": 1,
+      "kinds": [
+        {
+          "kind": "artifact",
+          "count": 1
+        }
+      ],
+      "unknown": 0,
+      "global": 0,
+      "lastActive": "2026-10-24T12:00:00.000Z",
+      "activity30": 2,
+      "activitySource": "lifetime",
+      "recallsTotal": 1,
+      "medianAgeDays": 4,
+      "firstSaved": "2026-10-03T12:00:00.000Z",
+      "tags": [
+        {
+          "tag": "documents",
+          "count": 1
+        }
+      ],
+      "tagsTotal": 1,
+      "projectKind": "folder",
+      "remoteHost": null
+    }
+  ],
+  "memories": [
+    {
+      "id": "mem-001",
+      "owner": "project-matrixkoder-1a2b3c",
+      "tags": [
+        "workflow-rules",
+        "planning"
+      ],
+      "recalls": 12,
+      "lastRecalled": "2026-10-25T00:00:00.000Z",
+      "created": "2026-10-24T12:00:00.000Z",
+      "label": "[memory 1: text withheld in the fixture]",
+      "source": "claude-code",
+      "sourceInferred": false,
+      "kind": "instruction",
+      "scope": "global",
+      "importance": 0.9,
+      "pinned": true,
+      "state": "live",
+      "validUntil": null
+    },
+    {
+      "id": "mem-002",
+      "owner": "project-matrixkoder-1a2b3c",
+      "tags": [
+        "workflow-rules"
+      ],
+      "recalls": 4,
+      "lastRecalled": "2026-10-22T12:00:00.000Z",
+      "created": "2026-10-23T12:00:00.000Z",
+      "label": "[memory 2: text withheld in the fixture]",
+      "source": "claude-code",
+      "sourceInferred": true,
+      "kind": "decision",
+      "scope": "project",
+      "importance": 0.5,
+      "pinned": false,
+      "state": "live",
+      "validUntil": null
+    },
+    {
+      "id": "mem-003",
+      "owner": "project-hermes-switchui-4d5e6f",
+      "tags": [
+        "debugging"
+      ],
+      "recalls": 7,
+      "lastRecalled": "2026-10-23T12:00:00.000Z",
+      "created": "2026-10-22T12:00:00.000Z",
+      "label": "[memory 3: text withheld in the fixture]",
+      "source": "claude-code",
+      "sourceInferred": false,
+      "kind": "error",
+      "scope": "project",
+      "importance": 0.7,
+      "pinned": false,
+      "state": "live",
+      "validUntil": null
+    },
+    {
+      "id": "mem-004",
+      "owner": "project-claude-mnemosyne-0d1e2f",
+      "tags": [
+        "memory-system",
+        "v3"
+      ],
+      "recalls": 0,
+      "lastRecalled": null,
+      "created": "2026-10-24T12:00:00.000Z",
+      "label": "[memory 4: text withheld in the fixture]",
+      "source": "claude-code",
+      "sourceInferred": false,
+      "kind": "context",
+      "scope": "project",
+      "importance": 0.5,
+      "pinned": false,
+      "state": "live",
+      "validUntil": null
+    },
+    {
+      "id": "mem-005",
+      "owner": "project-orca-matrixkoder-3a4b5c",
+      "tags": [
+        "orca"
+      ],
+      "recalls": 0,
+      "lastRecalled": null,
+      "created": "2026-10-20T12:00:00.000Z",
+      "label": "[memory 5: text withheld in the fixture]",
+      "source": "imported",
+      "sourceInferred": false,
+      "kind": "unknown",
+      "scope": "project",
+      "importance": 0.5,
+      "pinned": false,
+      "state": "live",
+      "validUntil": null
+    },
+    {
+      "id": "mem-006",
+      "owner": "project-hermes-switchui-4d5e6f",
+      "tags": [
+        "git"
+      ],
+      "recalls": 0,
+      "lastRecalled": null,
+      "created": "2026-10-19T12:00:00.000Z",
+      "label": "[memory 6: text withheld in the fixture]",
+      "source": "claude-code",
+      "sourceInferred": false,
+      "kind": "fact",
+      "scope": "project",
+      "importance": 0.5,
+      "pinned": false,
+      "state": "retired",
+      "validUntil": "2026-10-20T12:00:00.000Z"
+    },
+    {
+      "id": "mem-007",
+      "owner": "project-cc-workflows-7a8b9c",
+      "tags": [
+        "model-routing"
+      ],
+      "recalls": 1,
+      "lastRecalled": "2026-09-15T12:00:00.000Z",
+      "created": "2026-10-18T12:00:00.000Z",
+      "label": "[memory 7: text withheld in the fixture]",
+      "source": "claude-code",
+      "sourceInferred": false,
+      "kind": "preference",
+      "scope": "project",
+      "importance": 0.5,
+      "pinned": false,
+      "state": "expired",
+      "validUntil": "2026-10-16T12:00:00.000Z"
+    },
+    {
+      "id": "mem-008",
+      "owner": "project-claude-mnemosyne-0d1e2f",
+      "tags": [
+        "orca"
+      ],
+      "recalls": 0,
+      "lastRecalled": null,
+      "created": "2026-10-17T12:00:00.000Z",
+      "label": "[memory 8: text withheld in the fixture]",
+      "source": "claude-code",
+      "sourceInferred": false,
+      "kind": "decision",
+      "scope": "project",
+      "importance": 0.5,
+      "pinned": false,
+      "state": "lapsed",
+      "validUntil": "2026-10-23T12:00:00.000Z"
+    }
+  ],
+  "knowledge": [],
+  "meaning": true,
+  "total": 123,
+  "shown": 8,
+  "writers": [
+    {
+      "source": "claude-code",
+      "count": 121,
+      "inferred": 100
+    },
+    {
+      "source": "imported",
+      "count": 2,
+      "inferred": 0
+    }
+  ],
+  "globalLive": 6,
+  "links": [
+    {
+      "a": "project-hermes-switchui-4d5e6f",
+      "b": "project-matrixkoder-1a2b3c",
+      "pairs": [
+        {
+          "older": "mem-003",
+          "newer": "mem-001",
+          "score": 0.81
+        },
+        {
+          "older": "mem-004",
+          "newer": "mem-002",
+          "score": 0.8
+        },
+        {
+          "older": "mem-005",
+          "newer": "mem-003",
+          "score": 0.79
+        }
+      ]
+    },
+    {
+      "a": "project-hermes-switchui-4d5e6f",
+      "b": "project-claude-mnemosyne-0d1e2f",
+      "pairs": [
+        {
+          "older": "mem-003",
+          "newer": "mem-001",
+          "score": 0.82
+        },
+        {
+          "older": "mem-004",
+          "newer": "mem-002",
+          "score": 0.81
+        },
+        {
+          "older": "mem-005",
+          "newer": "mem-003",
+          "score": 0.8
+        }
+      ]
+    },
+    {
+      "a": "project-matrixkoder-1a2b3c",
+      "b": "project-claude-mnemosyne-0d1e2f",
+      "pairs": [
+        {
+          "older": "mem-003",
+          "newer": "mem-001",
+          "score": 0.81
+        },
+        {
+          "older": "mem-004",
+          "newer": "mem-002",
+          "score": 0.8
+        }
+      ]
+    }
+  ]
+}
