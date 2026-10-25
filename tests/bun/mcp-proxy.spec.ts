@@ -474,6 +474,80 @@ describe('the proxy against a real installed engine', () => {
     }
   })
 
+  // UPGRADE.1: an engine older than ENGINE_BUILD still has the 24 h trim that deletes every row whose trust tier is not IMPORTED,
+  // and a save of this build is EXTERNAL_WRITE, so a stale engine refuses memory_remember like memory_update.
+  test('UPGRADE.1: memory_remember on a stale engine is refused with the same error as memory_update, nothing is stored, and recall, forget and stats still work', async () => {
+    const log = join(temp.dir, 'logs-stale-remember', 'activity.jsonl')
+    const pkgPath = join(engine, 'node_modules', '@oh-my-pi', 'pi-mnemopi', 'package.json')
+    const original = readFileSync(pkgPath, 'utf8')
+    const before = rowCount()
+    writeFileSync(pkgPath, original.replace(`"version": "${ENGINE_BUILD}"`, '"version": "18.12.3"'))
+    try {
+      const replies = await proxy(
+        cli,
+        store,
+        [
+          toolCall(1, 'memory_remember', { content: 'A note with a distinctive phrase: marmalade-zeppelin.', kind: 'fact', tags: ['ops'] }),
+          toolCall(2, 'memory_update', { memory_id: 'x', tags: ['a'] }),
+          toolCall(3, 'memory_recall', { query: 'deploy notes' }),
+          toolCall(4, 'memory_forget', { memory_id: 'does-not-exist' }),
+          toolCall(5, 'memory_stats', {}),
+        ],
+        'global',
+        log,
+      )
+      expect(replies.get(1).error.code).toBe(-32000)
+      expect(replies.get(1).error.message).toContain(`memory_remember needs the Mnemosyne engine build ${ENGINE_BUILD}; installed is 18.12.3`)
+      expect(replies.get(1).error.message).toContain('/mnemosyne-setup')
+      // the same error as the update refusal, apart from the tool name
+      expect(replies.get(1).error.message.replace('memory_remember', 'memory_update')).toBe(replies.get(2).error.message)
+      expect(replies.get(1).result).toBeUndefined()
+      expect(text(replies.get(3)).status).toBe('ok')
+      expect(replies.get(4).error).toBeUndefined()
+      expect(text(replies.get(5)).status).toBe('ok')
+    } finally {
+      writeFileSync(pkgPath, original)
+    }
+    expect(rowCount()).toBe(before)
+    const [line] = logLines(log)
+    expect(line).toMatchObject({ action: 'remember', origin: 'external', ok: false, text: '' })
+    expect(line.error).toContain(`memory_remember needs the Mnemosyne engine build ${ENGINE_BUILD}`)
+    expect(readFileSync(log, 'utf8')).not.toContain('marmalade')
+  })
+
+  test('UPGRADE.1: once the engine is current again the same remember is stored', async () => {
+    const replies = await proxy(cli, store, [toolCall(1, 'memory_remember', { content: 'A note the current engine keeps without trouble.', kind: 'fact' })])
+    expect(text(replies.get(1)).status).toBe('stored')
+  })
+
+  // The review item: tags that all clean away must not read as "remove the tags".
+  test('UPGRADE.1: a proxy tag update whose tags all clean away (only the project name) is refused, and the stored tags stay; tags [] still removes them', async () => {
+    const owner = 'project-My-Repo-1a2b'
+    const saved = await proxy(cli, store, [toolCall(1, 'memory_remember', { content: 'A note whose tags a client tries to wipe by naming only the project.', kind: 'fact', tags: ['Ops', 'Deploy'] })], owner)
+    const id = text(saved.get(1)).memory_id as string
+    expect(metadataOf(id)).toEqual({ tags: ['ops', 'deploy'] })
+
+    const log = join(temp.dir, 'logs-tag-wipe', 'activity.jsonl')
+    const wipe = await proxy(cli, store, [toolCall(1, 'memory_update', { memory_id: id, tags: ['My Repo', 'my-repo'] })], owner, log)
+    expect(wipe.get(1).error.code).toBe(-32602)
+    expect(wipe.get(1).error.message).toContain('none of those tags can be stored')
+    expect(wipe.get(1).error.message).toContain('tags: []')
+    expect(wipe.get(1).result).toBeUndefined()
+    expect(metadataOf(id)).toEqual({ tags: ['ops', 'deploy'] })
+    expect(logLines(log)[0]).toMatchObject({ action: 'update', ok: false, text: '' })
+
+    // a mix keeps the rest; tags [] is the way to remove
+    const mix = await proxy(cli, store, [toolCall(1, 'memory_update', { memory_id: id, tags: ['My Repo', 'Release'] })], owner)
+    expect(text(mix.get(1)).status).toBe('updated')
+    expect(metadataOf(id)).toEqual({ tags: ['release'] })
+    const removed = await proxy(cli, store, [toolCall(1, 'memory_update', { memory_id: id, tags: [] })], owner)
+    expect(text(removed.get(1)).status).toBe('updated')
+    expect(metadataOf(id)).toEqual({})
+    // the global owner has no project name to drop, so 'my-repo' is an ordinary tag there
+    const globalSaved = await proxy(cli, store, [toolCall(1, 'memory_remember', { content: 'A global note that keeps an ordinary my-repo tag.', kind: 'fact', tags: ['My Repo'] })], 'global')
+    expect(metadataOf(text(globalSaved.get(1)).memory_id)).toEqual({ tags: ['my-repo'] })
+  })
+
   test('memory_update refused on a stale engine logs ok false', async () => {
     const log = join(temp.dir, 'logs-3', 'activity.jsonl')
     const pkgPath = join(engine, 'node_modules', '@oh-my-pi', 'pi-mnemopi', 'package.json')
@@ -526,7 +600,10 @@ describe('the proxy against a real installed engine', () => {
 describe('CTX.2: the client names itself at initialize', () => {
   const temp = tempDir('proxy-client')
   const capture = join(temp.dir, 'forwarded.txt')
-  const fakeEngine = join(temp.dir, 'fake-engine.ts')
+  // The proxy reads the installed build from <engine>/package.json beside src/ (a save is refused on any other build), so the stand-in sits where an engine does.
+  const fakeEngine = join(temp.dir, 'engine', 'src', 'fake-engine.ts')
+  mkdirSync(join(temp.dir, 'engine', 'src'), { recursive: true })
+  writeFileSync(join(temp.dir, 'engine', 'package.json'), JSON.stringify({ name: '@oh-my-pi/pi-mnemopi', version: ENGINE_BUILD }))
   // The engine edge: records each forwarded line verbatim and answers so the proxy can exit.
   writeFileSync(fakeEngine, `
 import { appendFileSync } from 'node:fs'
