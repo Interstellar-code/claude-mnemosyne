@@ -75,11 +75,14 @@ describe('the proxy against a real installed engine', () => {
       expect(tools.find(tool => tool.name === name)?.inputSchema.properties.tags).toMatchObject({ type: 'array' })
     }
     expect(tools.find(tool => tool.name === 'memory_update')?.inputSchema.required).toEqual(['memory_id'])
+    // KINDREQ.2: remember lists kind as required.
+    expect(tools.find(tool => tool.name === 'memory_remember')?.inputSchema.required).toEqual(['content', 'kind'])
   })
 
   test('remember and update map cleaned tags to metadata.tags; bank and other metadata never reach the engine', async () => {
     const saved = await proxy(cli, store, [
       toolCall(1, 'memory_remember', {
+        kind: 'fact',
         content: 'the proxy tags this fact',
         tags: [' Proxy ', 'proxy', 'Tags'],
         bank: 'evil',
@@ -116,7 +119,7 @@ describe('the proxy against a real installed engine', () => {
   })
 
   test('importance is clamped to 0..1 on update and remember; a non-number is dropped (review r1 LOW 4)', async () => {
-    const saved = await proxy(cli, store, [toolCall(1, 'memory_remember', { content: 'an important proxy fact', importance: 9 })])
+    const saved = await proxy(cli, store, [toolCall(1, 'memory_remember', { kind: 'fact', content: 'an important proxy fact', importance: 9 })])
     const id = text(saved.get(1)).memory_id
     const importance = () => {
       const db = new Database(join(store, 'mnemopi.db'), { readonly: true })
@@ -164,19 +167,57 @@ describe('the proxy against a real installed engine', () => {
     }
   })
 
-  test('META.1.a4: remember with a kind stores it as memory_type; none saves as unknown with a warning in the reply; a client memory_type is dropped', async () => {
+  test('META.1.a4: remember with a kind stores it as memory_type; a client memory_type is dropped', async () => {
     const replies = await proxy(cli, store, [
       toolCall(1, 'memory_remember', { content: 'the proxy saves a decision here', kind: 'decision', tags: ['d'] }),
-      toolCall(2, 'memory_remember', { content: 'the proxy saves a note with no kind' }),
-      toolCall(3, 'memory_remember', { content: 'the proxy ignores a memory_type of its own', memory_type: 'decision' }),
+      toolCall(2, 'memory_remember', { kind: 'fact', content: 'the proxy ignores a memory_type of its own', memory_type: 'decision' }),
     ])
     expect(rowOf(text(replies.get(1)).memory_id)?.memory_type).toBe('decision')
     expect(text(replies.get(1)).warning).toBeUndefined()
-    expect(rowOf(text(replies.get(2)).memory_id)?.memory_type).toBe('unknown')
-    const noKind = text(replies.get(2))
-    expect(noKind.warning).toContain("no kind given, saved as 'unknown'")
-    expect(noKind.warning).not.toContain('\n')
-    expect(rowOf(text(replies.get(3)).memory_id)?.memory_type).toBe('unknown')
+    expect(rowOf(text(replies.get(2)).memory_id)?.memory_type).toBe('fact')
+  })
+
+  test('KINDREQ.2: remember with no kind is a -32602 error naming the eight kinds, nothing is stored, and the log line holds no memory text', async () => {
+    const log = join(temp.dir, 'logs-kindreq', 'activity.jsonl')
+    const before = rowCount()
+    const replies = await proxy(
+      cli,
+      store,
+      [
+        toolCall(1, 'memory_remember', { content: 'the proxy refuses a note with marmalade-zeppelin and no kind' }),
+        toolCall(2, 'memory_remember', { content: 'the proxy refuses a null kind too', kind: null }),
+        toolCall(3, 'memory_remember', { content: 'the proxy refuses a replacing save with no kind', replaces: 'a1b2c3d4e5f60718' }),
+      ],
+      'global',
+      log,
+    )
+    for (const id of [1, 2, 3]) {
+      expect(replies.get(id).error.code).toBe(-32602)
+      expect(replies.get(id).error.message).toContain('no kind given')
+      expect(replies.get(id).error.message).toContain('fact, preference, instruction (rule or runbook)')
+      expect(replies.get(id).result).toBeUndefined()
+    }
+    expect(rowCount()).toBe(before)
+    const lines = logLines(log)
+    expect(lines.map(l => [l.action, l.origin, l.ok])).toEqual([
+      ['remember', 'external', false],
+      ['remember', 'external', false],
+      ['remember', 'external', false],
+    ])
+    for (const line of lines) {
+      expect(line.error).toContain('no kind given')
+      expect(line.text).toBe('')
+    }
+    expect(readFileSync(log, 'utf8')).not.toContain('marmalade-zeppelin')
+  })
+
+  test('KINDREQ.2: memory_update still needs no kind', async () => {
+    const saved = await proxy(cli, store, [toolCall(1, 'memory_remember', { content: 'the proxy updates this without a kind', kind: 'fact' })])
+    const id = text(saved.get(1)).memory_id
+    const updated = await proxy(cli, store, [toolCall(1, 'memory_update', { memory_id: id, content: 'the proxy updates this without a kind, edited' })])
+    expect(updated.get(1).error).toBeUndefined()
+    expect(text(updated.get(1))).toMatchObject({ status: 'updated' })
+    expect(rowOf(id)?.memory_type).toBe('fact')
   })
 
   test('META.1.a4: an unknown kind is a -32602 error naming the choices, and nothing is stored', async () => {
@@ -283,7 +324,7 @@ describe('the proxy against a real installed engine', () => {
   })
 
   test('remember without tags sends no metadata', async () => {
-    const saved = await proxy(cli, store, [toolCall(1, 'memory_remember', { content: 'an untagged proxy fact', metadata: { x: 1 } })])
+    const saved = await proxy(cli, store, [toolCall(1, 'memory_remember', { kind: 'fact', content: 'an untagged proxy fact', metadata: { x: 1 } })])
     expect(metadataOf(text(saved.get(1)).memory_id)).toBeNull()
   })
 
@@ -310,7 +351,7 @@ describe('the proxy against a real installed engine', () => {
   test('each allowed tool call logs one line with origin external, the owner, and ok, ids and count from the reply', async () => {
     const log = join(temp.dir, 'logs-1', 'activity.jsonl')
     const owner = 'project-proxylog-1'
-    const saved = await proxy(cli, store, [toolCall(1, 'memory_remember', { content: 'the heron nests by the proxy log', tags: ['Birds'] })], owner, log)
+    const saved = await proxy(cli, store, [toolCall(1, 'memory_remember', { kind: 'fact', content: 'the heron nests by the proxy log', tags: ['Birds'] })], owner, log)
     const id = text(saved.get(1)).memory_id as string
     const replies = await proxy(
       cli,
@@ -374,8 +415,8 @@ describe('the proxy against a real installed engine', () => {
     const log = join(temp.dir, 'logs-guard-block', 'activity.jsonl')
     const before = rowCount()
     const replies = await proxy(cli, store, [
-      toolCall(1, 'memory_remember', { content: `the bucket key is ${AWS_KEY} for the deploy` }),
-      toolCall(2, 'memory_remember', { content: 'tiny' }),
+      toolCall(1, 'memory_remember', { kind: 'fact', content: `the bucket key is ${AWS_KEY} for the deploy` }),
+      toolCall(2, 'memory_remember', { kind: 'fact', content: 'tiny' }),
       toolCall(3, 'memory_update', { memory_id: 'm1', content: `password=hunter2hunter2hunter2 for the deploy` }),
       toolCall(4, 'memory_stats', {}),
     ], 'global', log)
@@ -402,8 +443,8 @@ describe('the proxy against a real installed engine', () => {
   test('GUARD.2: in warn mode a warned remember is stored with metadata.guard beside its tags, and the reply carries one warning line per hit', async () => {
     const log = join(temp.dir, 'logs-guard-warn', 'activity.jsonl')
     const replies = await proxy(cli, store, [
-      toolCall(1, 'memory_remember', { content: 'Today the importer was rewired to use the guard module', tags: ['Ops'] }),
-      toolCall(2, 'memory_remember', { content: 'The plugin keeps its memories in one local SQLite file.' }),
+      toolCall(1, 'memory_remember', { kind: 'fact', content: 'Today the importer was rewired to use the guard module', tags: ['Ops'] }),
+      toolCall(2, 'memory_remember', { kind: 'fact', content: 'The plugin keeps its memories in one local SQLite file.' }),
     ], 'global', log, { MNEMOSYNE_GUARD_MODE: 'warn' })
     const [reply, ...warnings] = String(replies.get(1).result.content[0].text).split('\nMnemosyne guard warning: ')
     const id = JSON.parse(reply!).memory_id
@@ -423,9 +464,9 @@ describe('the proxy against a real installed engine', () => {
     const before = rowCount()
     for (const env of [{}, { MNEMOSYNE_GUARD_MODE: 'strict' }, { MNEMOSYNE_GUARD_MODE: 'bogus' }] as Record<string, string>[]) {
       const replies = await proxy(cli, store, [
-        toolCall(1, 'memory_remember', { content: WARNED }),
+        toolCall(1, 'memory_remember', { kind: 'fact', content: WARNED }),
         toolCall(2, 'memory_update', { memory_id: 'm1', content: WARNED }),
-        toolCall(3, 'memory_remember', { content: 'a long fact '.repeat(150) }),
+        toolCall(3, 'memory_remember', { kind: 'fact', content: 'a long fact '.repeat(150) }),
       ], 'global', log, env)
       for (const [id, rule] of [[1, 'G4'], [2, 'G4'], [3, 'G2']] as const) {
         expect(replies.get(id).error.code).toBe(-32602)
@@ -449,9 +490,9 @@ describe('the proxy against a real installed engine', () => {
   test('GUARD.3: confirm: true stores a warned save with metadata.guard and the warning lines; confirm never reaches the engine; a block has no override', async () => {
     const log = join(temp.dir, 'logs-guard-confirm', 'activity.jsonl')
     const replies = await proxy(cli, store, [
-      toolCall(1, 'memory_remember', { content: WARNED, confirm: true, tags: ['Ops'] }),
-      toolCall(2, 'memory_remember', { content: `the bucket key is ${AWS_KEY} for the deploy`, confirm: true }),
-      toolCall(3, 'memory_remember', { content: 'tiny', confirm: true }),
+      toolCall(1, 'memory_remember', { kind: 'fact', content: WARNED, confirm: true, tags: ['Ops'] }),
+      toolCall(2, 'memory_remember', { kind: 'fact', content: `the bucket key is ${AWS_KEY} for the deploy`, confirm: true }),
+      toolCall(3, 'memory_remember', { kind: 'fact', content: 'tiny', confirm: true }),
     ], 'global', log)
     const [reply, ...warnings] = String(replies.get(1).result.content[0].text).split('\nMnemosyne guard warning: ')
     expect(warnings.length).toBe(1)
@@ -704,7 +745,7 @@ for await (const chunk of Bun.stdin.stream()) {
   // reach the engine's own knowledge extraction, and a remember it forwards is authored by the
   // client that named itself at initialize.
   const remember = (id = 2) =>
-    JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'memory_remember', arguments: { content: 'a heron waded here' } } })
+    JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'memory_remember', arguments: { content: 'a heron waded here', kind: 'fact' } } })
   /** The params.arguments the engine actually received for the tools/call with `id`. */
   const forwardedCall = (forwarded: string, id: number) =>
     forwarded

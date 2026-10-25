@@ -128,9 +128,9 @@ describe('finding 2: one extraction per session at a time', () => {
   test('finding 2a: the second save\'s model call does not start until the first one resolves', async () => {
     const held = heldModel()
     const host = await open({ model: held.model })
-    await host.tool('memory_remember', { content: 'first quick save' })
+    await host.tool('memory_remember', { kind: 'fact', content: 'first quick save' })
     await until('the first model call', () => host.model.length === 1)
-    await host.tool('memory_remember', { content: 'second quick save' })
+    await host.tool('memory_remember', { kind: 'fact', content: 'second quick save' })
     await settle()
     // The first call is still open: the second extraction is waiting behind it.
     expect(host.model.length).toBe(1)
@@ -155,7 +155,7 @@ describe('finding 2: one extraction per session at a time', () => {
         return good()
       },
     })
-    for (let i = 0; i < 10; i++) await host.tool('memory_remember', { content: `quick save number ${i}` })
+    for (let i = 0; i < 10; i++) await host.tool('memory_remember', { kind: 'fact', content: `quick save number ${i}` })
     await until('ten extract lines', () => host.extractLines().length === 10, 60_000)
     expect(host.model.length).toBe(10)
     expect(peak).toBe(1)
@@ -198,7 +198,7 @@ describe('finding 3: the backfill and pending entries', () => {
   test('finding 3a: a pending entry of a forgotten memory is dropped by apply with no model call', async () => {
     // The first model call fails, so the save leaves its pending file behind.
     const host = await open({ model: (_request, n) => (n === 0 ? failed() : good()) })
-    const saved = await host.tool('memory_remember', { content: 'a fact about to be forgotten' })
+    const saved = await host.tool('memory_remember', { kind: 'fact', content: 'a fact about to be forgotten' })
     const id = JSON.parse(saved.result!).memory_id as string
     await until('the failed extract line', () => host.extractLines()[0])
     expect(host.extractLines()[0]).toMatchObject({ ok: false })
@@ -216,7 +216,7 @@ describe('finding 3: the backfill and pending entries', () => {
   // R2 finding 3: the dry run does not count the pending entry of a forgotten memory (apply only drops it).
   test('finding 3a (dry run): a dry run does not count the pending entry of a forgotten memory', async () => {
     const host = await open({ model: (_request, n) => (n === 0 ? failed() : good()) })
-    const saved = await host.tool('memory_remember', { content: 'a fact about to be forgotten' })
+    const saved = await host.tool('memory_remember', { kind: 'fact', content: 'a fact about to be forgotten' })
     const id = JSON.parse(saved.result!).memory_id as string
     await until('the failed extract line', () => host.extractLines()[0])
     expect(host.pending()).toEqual([`${id}.json`])
@@ -228,7 +228,7 @@ describe('finding 3: the backfill and pending entries', () => {
 
   test('finding 3b: a pending entry holding an OLD sha of changed text is finished by apply from the current text; a second apply has nothing to do', async () => {
     const host = await open({ model: (_request, n) => (n === 0 ? failed() : good()) })
-    const saved = await host.tool('memory_remember', { content: 'the original text of the fact' })
+    const saved = await host.tool('memory_remember', { kind: 'fact', content: 'the original text of the fact' })
     const id = JSON.parse(saved.result!).memory_id as string
     await until('the failed extract line', () => host.extractLines()[0])
     const oldSha = host.pendingEntry(id).sha256
@@ -285,7 +285,7 @@ describe('finding 9: extractionModel off in any spelling', () => {
   for (const spelling of ['off', 'Off', 'OFF', ' off ']) {
     test(`finding 9: extractionModel ${JSON.stringify(spelling)}: a live save makes no model call, pending file or extract line; apply and the dry run say it is off`, async () => {
       const host = await open({ options: { extractionModel: spelling }, model: good })
-      const saved = await host.tool('memory_remember', { content: 'a fact saved while extraction is off' })
+      const saved = await host.tool('memory_remember', { kind: 'fact', content: 'a fact saved while extraction is off' })
       expect(saved.result).toContain('memory_id')
       await settle()
       expect(host.model.length).toBe(0)
@@ -329,7 +329,7 @@ describe('provenance through the real engine', () => {
   test('finding 7: two parallel saves after one trigger: exactly ONE is human + stated, the other is an agent save', async () => {
     const host = await open({ options: TRIGGER, model: good })
     await host.prompt('remember that we deploy on fridays')
-    await Promise.all([host.tool('memory_remember', { content: 'first plain fact' }), host.tool('memory_remember', { content: 'second plain fact' })])
+    await Promise.all([host.tool('memory_remember', { kind: 'fact', content: 'first plain fact' }), host.tool('memory_remember', { kind: 'fact', content: 'second plain fact' })])
     await until('two extract lines', () => host.extractLines().length === 2)
     const rows = rowsOf(host)
     expect(rows).toHaveLength(2)
@@ -364,8 +364,8 @@ describe('provenance through the real engine', () => {
   test('spec 10b: the engine keeps veracity in the veracity column; trust_tier is STATED for a human-stated save and DERIVED for an agent save', async () => {
     const host = await open({ options: TRIGGER, model: good })
     await host.prompt('remember that we deploy on fridays')
-    await host.tool('memory_remember', { content: 'the human stated this' })
-    await host.tool('memory_remember', { content: 'the agent decided this' })
+    await host.tool('memory_remember', { kind: 'fact', content: 'the human stated this' })
+    await host.tool('memory_remember', { kind: 'fact', content: 'the agent decided this' })
     await until('two extract lines', () => host.extractLines().length === 2)
     const rows = rowsOf(host)
     const human = rows.find(row => row.content === 'the human stated this')!
@@ -380,7 +380,7 @@ describe('provenance through the real engine', () => {
   test('spec 11: a content memory_update keeps the row human + stated', async () => {
     const host = await open({ options: TRIGGER, model: good })
     await host.prompt('remember that we deploy on fridays')
-    const saved = await host.tool('memory_remember', { content: 'we deploy on fridays' })
+    const saved = await host.tool('memory_remember', { kind: 'fact', content: 'we deploy on fridays' })
     const id = JSON.parse(saved.result!).memory_id as string
     await until('the first extract line', () => host.extractLines().length === 1)
     const before = rowsOf(host)[0]!
@@ -394,7 +394,7 @@ describe('provenance through the real engine', () => {
 
   test('spec 12: a hostile inherited environment cannot make a plain save look human or evil', async () => {
     const host = await open({ model: good, parentEnv: { MNEMOPI_AUTHOR_ID: 'evil', MNEMOPI_AUTHOR_TYPE: 'human', MNEMOPI_POLYPHONIC_RECALL: '1' } })
-    await host.tool('memory_remember', { content: 'a plain save under a hostile shell' })
+    await host.tool('memory_remember', { kind: 'fact', content: 'a plain save under a hostile shell' })
     await until('the extract line', () => host.extractLines()[0])
     const rows = rowsOf(host)
     expect(rows).toHaveLength(1)
@@ -425,7 +425,7 @@ describe('finding 6: the real proxy never accepts veracity or a trust tier from 
       })
       const messages = [
         { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'cursor', version: '1' } } },
-        toolCall(2, 'memory_remember', args),
+        toolCall(2, 'memory_remember', { ...args, kind: 'fact' }),
       ]
       child.stdin.write(messages.map(message => `${JSON.stringify(message)}\n`).join(''))
       child.stdin.end()

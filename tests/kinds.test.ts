@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { isKind, KIND_LIST, KIND_NAMES, KINDS, kindLabel, kindProblem, NO_KIND_WARNING } from '../hooks/kinds'
+import { isKind, KIND_LIST, KIND_NAMES, KINDS, kindLabel, kindProblem, missingKindMessage } from '../hooks/kinds'
 
 test('META.1.a1: the eight kinds, by engine name, each with a plain label', () => {
   expect(KINDS.map(kind => [kind.name, kind.label])).toEqual([
@@ -25,7 +25,7 @@ test('META.1.a1: unknown is not a kind a caller can choose, and names are exact'
   for (const name of KIND_NAMES) expect(isKind(name)).toBe(true)
 })
 
-test('META.1.a2: kindProblem lets a missing kind through and names the choices for any other value', () => {
+test('META.1.a2: kindProblem lets a missing kind through (a remember refuses it on its own) and names the choices for any other value', () => {
   expect(kindProblem(undefined)).toBeUndefined()
   expect(kindProblem(null)).toBeUndefined()
   expect(kindProblem('decision')).toBeUndefined()
@@ -38,7 +38,10 @@ test('META.1.a2: kindProblem lets a missing kind through and names the choices f
   expect(kindProblem('bad\nkind')).not.toContain('\n')
 })
 
-test('META.1.a2: the missing-kind warning is one line', () => {
-  expect(NO_KIND_WARNING).not.toContain('\n')
-  expect(NO_KIND_WARNING).toContain("'unknown'")
+test('KINDREQ.1: the missing-kind refusal is one line, names the eight kinds and says to resend', () => {
+  const message = missingKindMessage('memory_remember')
+  expect(message).not.toContain('\n')
+  expect(message).toContain('nothing was saved')
+  expect(message).toContain('Resend memory_remember with kind')
+  expect(message).toContain(KIND_LIST)
 })

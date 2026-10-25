@@ -76,6 +76,8 @@ With embeddings off, recall matches words, not meaning: "deploy Fridays" finds t
 
 0.8.0 is about what goes into the memory. Every save now passes one check, every memory says what kind it is and where it came from, project-state notes expire, and tags come from a shared vocabulary. **Run `/mnemosyne-setup` before you save anything after updating**: the changes below need engine build `18.12.3-mnemosyne.10`. Until you do, saves are refused, not lost: `memory_remember` and `memory_update` answer with a message that names `/mnemosyne-setup` (the same when the engine's build is missing or unreadable), outside agents get a JSON-RPC error (`-32000`) for the same calls, and recall, forget and stats keep working. The reason is that the older engine's 24-hour trim keeps only memories labelled `imported`, and 0.8.0 stops labelling saves that way (see [How long a memory lasts](#how-long-a-memory-lasts)), so a save made on the older engine would be deleted. Memories saved before the update carry the `imported` label and are safe. After the setup, restart your other MCP clients: a proxy that started before the setup keeps refusing until its client is restarted. Session start also shows a notice asking for the setup.
 
+A save must name its kind: `memory_remember` (Claude's tool, and the MCP proxy for outside agents) refuses a call with no `kind` instead of storing it as `unknown`, and the refusal does not use up a remember phrase. See [Kinds](#kinds).
+
 Dashboard writes (create, edit, retire and restore on the page), the Review queue's actions, importers for documents and past sessions, session summaries and the sweep that expires unused memories are not in 0.8.0; they are planned for 0.9.0 (see [What 0.8.0 does not do yet](#what-080-does-not-do-yet)).
 
 ### The save guard
@@ -121,7 +123,7 @@ A save names what kind of memory it is (`kind`). The rules text Claude gets asks
 | `artifact` | reference |
 | `event` | session summary |
 
-A save with no kind goes in as `unknown`, with a warning in the reply that says to pass one; it is never refused for that. A kind that is not in the list is refused. Memories saved before 0.8.0 stay `unknown`. `memory_update` can change a kind. The kinds `fact`, `preference`, `instruction` and `decision` are protected: saving the same text again never relabels them or gives them an expiry.
+A save with no kind is refused (`memory_remember` and an outside agent's save alike; the reply names the eight kinds and nothing is stored), as is a kind that is not in the list; `memory_update` needs no kind. Memories saved before 0.8.0 stay `unknown`. `memory_update` can change a kind. The kinds `fact`, `preference`, `instruction` and `decision` are protected: saving the same text again never relabels them or gives them an expiry.
 
 ### Where a memory comes from
 
