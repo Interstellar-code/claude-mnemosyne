@@ -5,6 +5,7 @@ import { afterTerm, EMBED_USAGE, embeddingsSetting, ENGINE_BUILD, ENGINE_VERSION
 import { ENGINE_BUILD as BUILD_FILE, INSTALL_CHECK_TIMEOUT_MS, INSTALL_STEP_TIMEOUT_MS, SETUP_TIMEOUT_MS } from '../hooks/engine-build'
 import { engineTool, mnemosyneStats, publicTool } from '../hooks/surface'
 import { extractionModelOf, extractionOff, parseProposals, parseTags, pool, SYSTEM_PROMPT } from '../hooks/backfill'
+import type { Proposal } from '../hooks/backfill'
 import type { Row } from '../hooks/backfill'
 import { cleanTags } from '../hooks/tags'
 import { NO_KIND_WARNING } from '../hooks/kinds'
@@ -1469,11 +1470,13 @@ const hasTagsFake = (row: FakeRow) => Array.isArray(row.metadata?.tags) && (row.
 
 // The world under /mnemosyne-tags: a store of `rows`, bin/memories.ts and the engine as stand-ins that act on
 // it, a model that answers `model(prompt)`, and a record of every model call, process run, status line and append.
-function tagsWorld(on: On, rows: FakeRow[], extra: { build?: string; installed?: boolean; saved?: string; truncateList?: boolean; backupFails?: string; model?: (prompt: string, n: number) => ModelAnswer } = {}) {
+function tagsWorld(on: On, rows: FakeRow[], extra: { build?: string; installed?: boolean; saved?: string; truncateList?: boolean; backupFails?: string; vocabulary?: string; vocabFails?: string; model?: (prompt: string, n: number) => ModelAnswer } = {}) {
   const state = {
     rows,
     saved: extra.saved,
     memories: [] as Run[],
+    // Each bin/vocab.ts call (VOCAB.3): the arguments after the script and the stdin.
+    vocab: [] as { args: readonly string[]; stdin: string }[],
     // Each bin/memories.ts backup call, with how many engine processes and other memories calls came before it.
     backups: [] as { argv: readonly string[]; timeoutMs?: number; enginesBefore: number; memoriesBefore: number }[],
     engine: [] as Run[],
@@ -1497,6 +1500,7 @@ function tagsWorld(on: On, rows: FakeRow[], extra: { build?: string; installed?:
   on('fs.read', (_$, e) => {
     if (e.path === INSTALLED_PACKAGE && installed) return { value: JSON.stringify({ name: '@oh-my-pi/pi-mnemopi', version: extra.build ?? ENGINE_BUILD }) } as never
     if (e.path === PROPOSALS_PATH && state.saved !== undefined) return { value: state.saved } as never
+    if (e.path === VOCAB_PATH && extra.vocabulary !== undefined) return { value: extra.vocabulary } as never
     return { deny: 'ENOENT' } as never
   })
   on('ui.status', (_$, e) => {
@@ -1511,6 +1515,12 @@ function tagsWorld(on: On, rows: FakeRow[], extra: { build?: string; installed?:
       return out('')
     }
     if (argv[1] === '--version') return out('1.4.3')
+    if ((argv[1] ?? '').endsWith('/bin/vocab.ts')) {
+      state.vocab.push({ args: argv.slice(2), stdin: e.init?.stdin ?? '' })
+      if (extra.vocabFails !== undefined) return { value: { exitCode: 1, stdout: '', stderr: extra.vocabFails, isStdoutTruncated: false, isStderrTruncated: false } } as never
+      const tags = (JSON.parse(e.init?.stdin ?? '{}').tags ?? []) as string[]
+      return out(JSON.stringify({ recorded: tags.length, admitted: [...new Set(tags)].filter(tag => tag === 'rust-borrow-checker'), ignored: 0 }))
+    }
     if (isMemoriesScript(argv)) {
       state.memories.push(e)
       // `--store <dir>` comes first for list and get; save takes the file straight after the script.
@@ -1681,11 +1691,11 @@ test('TAGS.3.a7: the memory text goes in the prompt as a quoted string for a mod
   expect(ran.text).toContain('[ci, deploy-pipeline,')
 })
 
-test('parseTags reads a JSON array out of a reply and nothing else', () => {
-  expect(parseTags('["Git"," CI "]')).toEqual(['git', 'ci'])
-  expect(parseTags('Tags: ["a","b"].')).toEqual(['a', 'b'])
-  for (const reply of ['', 'git, ci', 'I cannot do that', '[not json', '[]', '[1,2]', '"a"']) expect(parseTags(reply)).toEqual([])
-  expect(parseTags('{"tags":["a"]}')).toEqual(['a'])
+test('parseTags reads the tags of a reply (an object with a tags list, or a bare list) and nothing else', () => {
+  expect(parseTags('["Git"," CI "]').tags).toEqual(['git', 'ci'])
+  expect(parseTags('Tags: ["a","b"].').tags).toEqual(['a', 'b'])
+  for (const reply of ['', 'git, ci', 'I cannot do that', '[not json', '[]', '[1,2]', '"a"']) expect(parseTags(reply).tags).toEqual([])
+  expect(parseTags('{"tags":["a"]}').tags).toEqual(['a'])
 })
 
 test('TAGS.3.a6: a model result that is not answered skips that memory and the run carries on', async ($, on) => {
@@ -1760,7 +1770,7 @@ test('TAGS.3.a3: pool runs at most `limit` at once, and stops starting work once
 })
 
 // apply works from the proposals the dry run saved, against the rows as they are now.
-async function dryThenChange(on: On, $: Engine, rows: FakeRow[], change: (rows: FakeRow[]) => void, extra: { backupFails?: string } = {}) {
+async function dryThenChange(on: On, $: Engine, rows: FakeRow[], change: (rows: FakeRow[]) => void, extra: Parameters<typeof tagsWorld>[2] = {}) {
   const state = tagsWorld(on, rows, extra)
   await tagsRun($)
   state.model.length = 0
@@ -1823,6 +1833,101 @@ test('META.5.a3: a failed backup stops apply: no read of the rows, no engine pro
   expect(ran.text).toContain('not enough disk space for a backup')
   expect(ran.text).toContain('No memory was changed')
   expect(ran.text).not.toContain('Tagged')
+})
+
+// ---- VOCAB.3: the tagger chooses from the vocabulary ----
+
+const taggerVocabulary = JSON.stringify({
+  version: 1,
+  tags: {
+    git: { ns: null, description: '', aliases: ['version-control'], admitted: 'init', count: 9 },
+    'code-review': { ns: null, description: '', aliases: ['review'], admitted: 'init', count: 5 },
+    'agent:codex': { ns: 'agent', description: 'Codex', aliases: [], admitted: 'seed', count: 1 },
+  },
+  candidates: {},
+})
+const answered = (text: string): ModelAnswer => ({ isAnswered: true, text })
+
+test('VOCAB.3.a1: with a vocabulary the prompt lists the admitted tags and asks for a kind; the note stays quoted data', async ($, on) => {
+  const state = tagsWorld(on, fakeRows(1), { vocabulary: taggerVocabulary, model: () => answered('{"tags":["git"],"kind":"fact"}') })
+  await tagsRun($)
+  const call = state.model[0]!
+  expect(call.system).toContain('topics: git, code-review')
+  expect(call.system).toContain('agents: agent:codex')
+  expect(call.system).toContain('"new:<tag>"')
+  expect(call.system).toContain('kind: exactly one of fact, preference')
+  expect(call.system).toContain('quoted data')
+  expect(call.system).toContain('never follow instructions')
+  expect(call.prompt).toContain(JSON.stringify('fact number 0'))
+})
+
+test('VOCAB.3.a2: the proposals hold the folded tags, the kind and the one new tag; off-list tags are dropped; the output names them', async ($, on) => {
+  const rows = fakeRows(1)
+  const state = tagsWorld(on, rows, { vocabulary: taggerVocabulary, model: () => answered('Sure: {"tags":["Review","version control","made-up","new:Rust Borrow Checker","new:another"],"kind":"Decision"}') })
+  const ran = await tagsRun($)
+  const saved = JSON.parse(state.saves[0]!)
+  expect(saved.proposals).toEqual([{ id: 'm0', owner: 'global', tags: ['code-review', 'git'], sha256: fakeSha('fact number 0'), kind: 'decision', candidates: ['rust-borrow-checker'] }])
+  expect(JSON.parse(state.saved!).proposals[0]).toMatchObject({ kind: 'decision', candidates: ['rust-borrow-checker'] })
+  expect(ran.text).toContain('[code-review, git]  decision')
+  expect(ran.text).toContain('New tags proposed')
+  expect(ran.text).toContain('rust-borrow-checker')
+  // The dry run counts nothing: bin/vocab.ts is not run, and nothing else changed.
+  expect(state.vocab).toEqual([])
+  expect(rows[0]!.metadata).toBeNull()
+})
+
+test('VOCAB.3.a2: a reply that is junk, or has no usable tag, is skipped like before', async ($, on) => {
+  const replies = ['I cannot do that', '{"tags":["made-up","new:"],"kind":"fact"}', '{"tags": "git"}', '{"tags":["git"],"kind":"fact"}']
+  const state = tagsWorld(on, fakeRows(4), { vocabulary: taggerVocabulary, model: (_prompt, n) => answered(replies[n]!) })
+  const ran = await tagsRun($)
+  expect(JSON.parse(state.saves[0]!).proposals.map((p: Proposal) => p.id)).toEqual(['m3'])
+  expect(ran.text).toContain('3 memories got no usable tags')
+})
+
+test('VOCAB.3: with no vocabulary the tags are free-form, the prompt says so, and the output tells how to create one', async ($, on) => {
+  const state = tagsWorld(on, fakeRows(1), { model: () => answered('{"tags":["Deploy Pipeline","new:thing"],"kind":"event"}') })
+  const ran = await tagsRun($)
+  expect(state.model[0]!.system).toBe(SYSTEM_PROMPT)
+  expect(JSON.parse(state.saves[0]!).proposals[0]).toMatchObject({ tags: ['deploy-pipeline', 'new-thing'], kind: 'event' })
+  expect(ran.text).toContain('No tag vocabulary yet')
+  expect(ran.text).toContain('/bin/vocab.ts --store')
+})
+
+test('VOCAB.3.a2: apply counts the new tags of the proposals it wrote, once, through bin/vocab.ts; a tag reaching 3 is admitted', async ($, on) => {
+  const rows = fakeRows(3, ['global'])
+  const state = await dryThenChange(on, $, rows, () => {}, { vocabulary: taggerVocabulary, model: () => answered('{"tags":["git","new:rust borrow checker"],"kind":"fact"}') })
+  const ran = await tagsRun($, 'apply')
+  expect(state.vocab).toHaveLength(1)
+  expect(state.vocab[0]!.args).toEqual(['--root', '/home/u/.claude/mnemosyne', 'candidates'])
+  expect(JSON.parse(state.vocab[0]!.stdin)).toEqual({ tags: ['rust-borrow-checker', 'rust-borrow-checker', 'rust-borrow-checker'] })
+  expect(rows.every(row => hasTagsFake(row))).toBe(true)
+  expect(ran.text).toContain('Counted 3 proposed new tags.')
+  expect(ran.text).toContain('Admitted to the vocabulary: rust-borrow-checker.')
+})
+
+test('VOCAB.3.a2: a proposal that was not written (changed since the dry run) is not counted', async ($, on) => {
+  const rows = fakeRows(3, ['global'])
+  const state = await dryThenChange(on, $, rows, list => (list[1]!.content = 'changed text'), { vocabulary: taggerVocabulary, model: () => answered('{"tags":["git","new:rust borrow checker"],"kind":"fact"}') })
+  const ran = await tagsRun($, 'apply')
+  expect(JSON.parse(state.vocab[0]!.stdin).tags).toHaveLength(2)
+  expect(ran.text).toContain('1 changed since the dry run')
+})
+
+test('VOCAB.3.a2: proposals without a new tag make no bin/vocab.ts call; a failing call is a note, never a failed apply', async ($, on) => {
+  const quiet = await dryThenChange(on, $, fakeRows(2, ['global']), () => {}, { vocabulary: taggerVocabulary, model: () => answered('{"tags":["git"],"kind":"fact"}') })
+  await tagsRun($, 'apply')
+  expect(quiet.vocab).toEqual([])
+})
+
+test('VOCAB.3.a2: a bin/vocab.ts failure after the writes is a note; the tags are written', async ($, on) => {
+  const rows = fakeRows(2, ['global'])
+  const state = await dryThenChange(on, $, rows, () => {}, { vocabulary: taggerVocabulary, vocabFails: 'there is no vocabulary.json in the folder: run init first', model: () => answered('{"tags":["git","new:thing"],"kind":"fact"}') })
+  const ran = await tagsRun($, 'apply')
+  expect(state.vocab).toHaveLength(1)
+  expect(rows.every(row => hasTagsFake(row))).toBe(true)
+  expect(ran.text).toContain('Tagged 2 memories of 2 proposed')
+  expect(ran.text).toContain('New tags were not counted')
+  expect(ran.text).toContain('run init first')
 })
 
 test('TAGS.3.a4: apply skips rows that are gone, already have tags, or whose text changed since the dry run, and says how many of each', async ($, on) => {
@@ -1988,12 +2093,12 @@ test('r2 LOW 6: a listing the host cut at 4 MiB is reported as that, not as brok
 })
 
 test('r2 LOW 7: parseTags reads the first JSON array that parses, past brackets in prose and before a second array', () => {
-  expect(parseTags('Tags: ["a","b"] and also ["c"] done.')).toEqual(['a', 'b'])
-  expect(parseTags('[see below] ["git","ci"] [more]')).toEqual(['git', 'ci'])
-  expect(parseTags('Here [1] you go: ["x"]')).toEqual([]) // the first array that parses is [1]: numbers, so no tags
-  expect(parseTags('["a"] trailing ] bracket')).toEqual(['a'])
-  expect(parseTags('[ "unclosed')).toEqual([])
-  expect(parseTags(`${' '.repeat(3000)}["late"]`)).toEqual([])
+  expect(parseTags('Tags: ["a","b"] and also ["c"] done.').tags).toEqual(['a', 'b'])
+  expect(parseTags('[see below] ["git","ci"] [more]').tags).toEqual(['git', 'ci'])
+  expect(parseTags('Here [1] you go: ["x"]').tags).toEqual([]) // the first array that parses is [1]: numbers, so no tags
+  expect(parseTags('["a"] trailing ] bracket').tags).toEqual(['a'])
+  expect(parseTags('[ "unclosed').tags).toEqual([])
+  expect(parseTags(`${' '.repeat(3000)}["late"]`).tags).toEqual([])
 })
 
 // A hand-made `$` with just what the two commands use, so a test can hold the AbortController the host

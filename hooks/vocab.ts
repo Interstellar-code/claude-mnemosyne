@@ -10,6 +10,9 @@ export type { Namespace } from './tags'
 export const VOCAB_VERSION = 1
 export const VOCAB_FILE = 'vocabulary.json'
 
+/** A proposed new tag (a candidate) that has been proposed for this many memories is admitted, as 'auto'. */
+export const AUTO_ADMIT_COUNT = 3
+
 /** The agents the vocabulary starts with (the `agent:` seeds), each with a plain description. */
 export const AGENT_SEEDS: readonly { tag: string; description: string }[] = [
   { tag: 'agent:claude-code', description: 'Claude Code' },

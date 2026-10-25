@@ -3,6 +3,7 @@
 //   bun bin/vocab.ts [--root <dir> | --store <dir>] admit <tag> [--description <text>]
 //   bun bin/vocab.ts [--root <dir> | --store <dir>] alias <from> <to>
 //   bun bin/vocab.ts [--root <dir> | --store <dir>] list
+//   bun bin/vocab.ts [--root <dir> | --store <dir>] candidates      {"tags":[...]} on stdin: one more memory for each
 //
 // <root> is the data folder (the one that holds store/, backups/ and tags-proposed.json): --root names it,
 // else it is the parent of --store. The store is only ever read, through a read-only handle. The file is
@@ -11,7 +12,7 @@
 // every tag admitted by hand. Only tags and counts are read from the store, never a memory's text.
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
-import { AGENT_SEEDS, aliasMap, emptyVocabulary, foldTag, normalizeTag, nsOf, parseVocabulary, projectNameOf, VOCAB_FILE, vocabularyText } from '../hooks/vocab'
+import { AGENT_SEEDS, AUTO_ADMIT_COUNT, aliasMap, emptyVocabulary, foldTag, normalizeTag, nsOf, parseVocabulary, projectNameOf, VOCAB_FILE, vocabularyText } from '../hooks/vocab'
 import type { Vocabulary } from '../hooks/vocab'
 import { openReadOnly, tagsSql } from './memories'
 
@@ -173,6 +174,38 @@ export function aliasTag(root: string, rawFrom: string, rawTo: string): { from: 
   return { from, to, ...(moved !== undefined && moved !== to ? { moved } : {}) }
 }
 
+export type CandidatesResult = { recorded: number; admitted: string[]; ignored: number }
+
+/**
+ * Counts one more memory for each proposed new tag (a tag the tagger offered that is not admitted yet). A candidate
+ * reaching AUTO_ADMIT_COUNT memories is admitted, as 'auto', with that count. A tag that is already admitted, an
+ * alias of one, or not a usable tag is ignored. Tags only: no memory text, no memory id.
+ */
+export function recordCandidates(root: string, raw: readonly unknown[], now: Date = new Date()): CandidatesResult {
+  const vocab = readVocabulary(root)
+  const aliases = aliasMap(vocab)
+  const result: CandidatesResult = { recorded: 0, admitted: [], ignored: 0 }
+  for (const item of raw) {
+    const tag = normalizeTag(item)
+    if (tag === undefined || vocab.tags[tag] !== undefined || aliases.has(tag)) {
+      result.ignored++
+      continue
+    }
+    const entry = vocab.candidates[tag] ?? { count: 0, firstSeen: now.toISOString() }
+    entry.count++
+    result.recorded++
+    if (entry.count >= AUTO_ADMIT_COUNT) {
+      vocab.tags[tag] = { ns: nsOf(tag), description: '', aliases: [], admitted: 'auto', count: entry.count }
+      delete vocab.candidates[tag]
+      result.admitted.push(tag)
+    } else {
+      vocab.candidates[tag] = entry
+    }
+  }
+  if (result.recorded > 0) writeVocabulary(root, vocab)
+  return result
+}
+
 /** The vocabulary as the list command prints it: admitted tags then candidates, most used first. */
 export function listVocabulary(root: string) {
   const vocab = readVocabulary(root)
@@ -184,7 +217,7 @@ export function listVocabulary(root: string) {
   }
 }
 
-const USAGE = 'usage: vocab.ts --store <dir> init [--force] | [--root <dir> | --store <dir>] admit <tag> [--description <text>] | alias <from> <to> | list'
+const USAGE = 'usage: vocab.ts --store <dir> init [--force] | [--root <dir> | --store <dir>] admit <tag> [--description <text>] | alias <from> <to> | list | candidates (tags on stdin)'
 
 async function main(argv: readonly string[]) {
   const args = [...argv]
@@ -228,6 +261,18 @@ async function main(argv: readonly string[]) {
   if (command === 'alias') {
     if (rest.length !== 2 || rest.some(arg => arg.startsWith('-'))) throw new Error(USAGE)
     return out(aliasTag(root, rest[0]!, rest[1]!))
+  }
+  if (command === 'candidates') {
+    if (rest.length > 0) throw new Error(USAGE)
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(await Bun.stdin.text())
+    } catch {
+      throw new Error('candidates needs {"tags":[...]} on stdin')
+    }
+    const list = Array.isArray(parsed) ? parsed : (parsed as { tags?: unknown } | null)?.tags
+    if (!Array.isArray(list)) throw new Error('candidates needs {"tags":[...]} on stdin')
+    return out(recordCandidates(root, list))
   }
   if (command === 'list') {
     if (rest.length > 0) throw new Error(USAGE)

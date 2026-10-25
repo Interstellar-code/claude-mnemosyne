@@ -20,7 +20,8 @@ import { createHash } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statfsSync, statSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import { BACKFILL_TEXT_LIMIT, isProposalId } from '../hooks/backfill'
-import { cleanTags } from '../hooks/tags'
+import { isKind } from '../hooks/kinds'
+import { cleanTags, normalizeTag } from '../hooks/tags'
 
 const IS_WINDOWS = process.platform === 'win32'
 export const PROPOSALS_NAME = 'tags-proposed.json'
@@ -96,8 +97,9 @@ export function getRows(db: Database | null, ids: readonly string[]): StoredRow[
 }
 
 /**
- * The proposals file's text, from stdin's JSON: only id, owner, tags (cleaned)
- * and sha256 of each proposal are kept, so a memory's text can never reach it.
+ * The proposals file's text, from stdin's JSON: only id, owner, tags (cleaned),
+ * kind, the one proposed new tag and sha256 of each proposal are kept, so a
+ * memory's text can never reach it.
  */
 export function proposalsText(input: string): string {
   const value = JSON.parse(input)
@@ -108,7 +110,10 @@ export function proposalsText(input: string): string {
     if (!isProposalId(item?.id) || typeof item.owner !== 'string' || typeof item.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(item.sha256) || tags.length === 0) {
       throw new Error(`proposal ${i} needs id, owner, sha256 and tags`)
     }
-    return { id: item.id, owner: item.owner, tags, sha256: item.sha256 }
+    // The kind (one of hooks/kinds.ts) and the one proposed new tag travel with the proposal; never any text.
+    const kind = isKind(item.kind) ? item.kind : undefined
+    const candidates = Array.isArray(item.candidates) ? [...new Set(item.candidates.map(normalizeTag).filter((tag): tag is string => tag !== undefined))].slice(0, 1) : []
+    return { id: item.id, owner: item.owner, tags, sha256: item.sha256, ...(kind === undefined ? {} : { kind }), ...(candidates.length === 0 ? {} : { candidates }) }
   })
   return `${JSON.stringify({ version: 1, created: new Date().toISOString(), proposals }, null, 2)}\n`
 }

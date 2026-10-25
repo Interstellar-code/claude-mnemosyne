@@ -5,7 +5,8 @@ import { Database } from 'bun:sqlite'
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { admitTag, aliasTag, countTags, listVocabulary, projectNames, readVocabulary, writeVocabulary } from '../../bin/vocab'
+import { admitTag, aliasTag, countTags, listVocabulary, projectNames, readVocabulary, recordCandidates, writeVocabulary } from '../../bin/vocab'
+import { proposalsText } from '../../bin/memories'
 import { AGENT_SEEDS, parseVocabulary } from '../../hooks/vocab'
 import { body, engineCall, engineEnv, ROOT, tempDir, toolCall } from './helpers'
 
@@ -351,5 +352,99 @@ describe('VOCAB.2: tags through the real proxy and the real store', () => {
     await ran.exited
     expect(out[0]!.metadata.tags).toEqual(['Old Style Tag', 'my repo', '🚀 launch', 'abcdefghijklmnopqrstuvwxyz0123456789'])
     expect(tagsOf(id)).toEqual(['Old Style Tag', 'my repo', '🚀 launch', 'abcdefghijklmnopqrstuvwxyz0123456789'])
+  })
+})
+
+// VOCAB.3: the candidates the tagger proposes are counted by bin/vocab.ts, and a candidate used on 3 memories is admitted 'auto'.
+describe('VOCAB.3: candidates', () => {
+  const temp = tempDir('vocab-candidates')
+  const root = join(temp.dir, 'data')
+  const file = join(root, 'vocabulary.json')
+  const mode = (path: string) => (statSync(path).mode & 0o777).toString(8)
+  const read = () => JSON.parse(readFileSync(file, 'utf8')) as { tags: Record<string, any>; candidates: Record<string, any> }
+  /** bin/vocab.ts candidates with `stdin` on its standard input. */
+  async function candidates(stdin: string, rootArg = root) {
+    const child = Bun.spawn([process.execPath, SCRIPT, '--root', rootArg, 'candidates'], { stdin: new Blob([stdin]), stdout: 'pipe', stderr: 'pipe' })
+    const [stdout, stderr, exitCode] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
+    return { stdout, stderr, exitCode }
+  }
+  beforeAll(() => {
+    writeVocabulary(root, {
+      version: 1,
+      tags: { git: { ns: null, description: '', aliases: ['version-control'], admitted: 'init', count: 4 } },
+      candidates: {},
+    })
+  })
+  afterAll(() => temp.dispose())
+
+  test('VOCAB.3.a2: each tag counts one memory; the third admits it as auto with that count, and it leaves the candidates', async () => {
+    const first = await candidates(JSON.stringify({ tags: ['Rust Borrow Checker'] }))
+    expect(first.exitCode).toBe(0)
+    expect(JSON.parse(first.stdout)).toEqual({ recorded: 1, admitted: [], ignored: 0 })
+    expect(read().candidates['rust-borrow-checker']).toMatchObject({ count: 1 })
+    const firstSeen = read().candidates['rust-borrow-checker'].firstSeen
+    expect(Number.isNaN(Date.parse(firstSeen))).toBe(false)
+    expect(read().tags['rust-borrow-checker']).toBeUndefined()
+
+    const second = await candidates(JSON.stringify({ tags: ['rust-borrow-checker'] }))
+    expect(JSON.parse(second.stdout).admitted).toEqual([])
+    expect(read().candidates['rust-borrow-checker']).toEqual({ count: 2, firstSeen })
+
+    const third = await candidates(JSON.stringify({ tags: ['rust-borrow-checker'] }))
+    expect(JSON.parse(third.stdout)).toEqual({ recorded: 1, admitted: ['rust-borrow-checker'], ignored: 0 })
+    expect(read().tags['rust-borrow-checker']).toEqual({ ns: null, description: '', aliases: [], admitted: 'auto', count: 3 })
+    expect(read().candidates['rust-borrow-checker']).toBeUndefined()
+    expect(mode(file)).toBe('600')
+  })
+
+  test('VOCAB.3.a2: one call may carry several memories\' tags, namespaced ones included', async () => {
+    const ran = await candidates(JSON.stringify({ tags: ['agent:gemini', 'agent:gemini', 'agent:gemini', 'asset:ci-box', 'asset:ci-box'] }))
+    expect(JSON.parse(ran.stdout)).toEqual({ recorded: 5, admitted: ['agent:gemini'], ignored: 0 })
+    expect(read().tags['agent:gemini']).toMatchObject({ ns: 'agent', admitted: 'auto', count: 3 })
+    expect(read().candidates['asset:ci-box']).toMatchObject({ count: 2 })
+  })
+
+  test('VOCAB.3.a2: an admitted tag, an alias of one and an unusable tag are ignored and write nothing', async () => {
+    const before = readFileSync(file, 'utf8')
+    const ran = await candidates(JSON.stringify({ tags: ['git', 'Version Control', '!!!', 7, null] }))
+    expect(JSON.parse(ran.stdout)).toEqual({ recorded: 0, admitted: [], ignored: 5 })
+    expect(readFileSync(file, 'utf8')).toBe(before)
+  })
+
+  test('VOCAB.3: a bare list works; bad stdin and a missing vocabulary are errors that change nothing', async () => {
+    expect(JSON.parse((await candidates(JSON.stringify(['one-more-idea']))).stdout).recorded).toBe(1)
+    const before = readFileSync(file, 'utf8')
+    for (const bad of ['', 'not json', '{"tags":"x"}', '{}', '3']) {
+      const ran = await candidates(bad)
+      expect(ran.exitCode).toBe(1)
+      expect(ran.stderr).toContain('candidates needs')
+    }
+    const absent = await candidates(JSON.stringify({ tags: ['x-y'] }), join(temp.dir, 'nowhere'))
+    expect(absent.exitCode).toBe(1)
+    expect(absent.stderr).toContain('run init first')
+    expect(readFileSync(file, 'utf8')).toBe(before)
+  })
+
+  test('VOCAB.3: recordCandidates is the code the command runs', () => {
+    const local = tempDir('vocab-candidates-fn')
+    try {
+      writeVocabulary(local.dir, { version: 1, tags: {}, candidates: { 'x-y': { count: 2, firstSeen: '2026-10-24T00:00:00.000Z' } } })
+      expect(recordCandidates(local.dir, ['X Y'], new Date('2026-10-25T00:00:00.000Z'))).toEqual({ recorded: 1, admitted: ['x-y'], ignored: 0 })
+      expect(readVocabulary(local.dir).tags['x-y']).toMatchObject({ admitted: 'auto', count: 3 })
+    } finally {
+      local.dispose()
+    }
+  })
+
+  test('VOCAB.3: the proposals file keeps a proposal\'s kind and its one new tag, and never any text', () => {
+    const sha = 'b'.repeat(64)
+    const text = proposalsText(JSON.stringify({ proposals: [
+      { id: 'm1', owner: 'global', tags: ['git'], sha256: sha, kind: 'decision', candidates: ['New Thing', 'second'], content: 'the memory text must not travel' },
+      { id: 'm2', owner: 'global', tags: ['git'], sha256: sha, kind: 'unknown', candidates: [] },
+    ] }))
+    const saved = JSON.parse(text) as { proposals: Record<string, unknown>[] }
+    expect(saved.proposals[0]).toEqual({ id: 'm1', owner: 'global', tags: ['git'], sha256: sha, kind: 'decision', candidates: ['new-thing'] })
+    expect(saved.proposals[1]).toEqual({ id: 'm2', owner: 'global', tags: ['git'], sha256: sha })
+    expect(text).not.toContain('must not travel')
   })
 })

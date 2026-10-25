@@ -31,7 +31,8 @@ import {
   parseTags,
   pool,
   PROPOSALS_FILE,
-  SYSTEM_PROMPT,
+  systemPrompt,
+  tagContext,
   tagPrompt,
 } from './backfill'
 import type { Proposal, Row } from './backfill'
@@ -46,7 +47,8 @@ import type { GuardResult, NearMatch } from './guard'
 import { expiresInDaysProblem, KIND_NAMES, kindProblem, validUntilFor, withNoKindWarning } from './kinds'
 import { cleanTags } from './tags'
 import type { TagRules } from './tags'
-import { tagRules, VOCAB_FILE } from './vocab'
+import { AUTO_ADMIT_COUNT, parseVocabulary, tagRules, VOCAB_FILE } from './vocab'
+import type { Vocabulary } from './vocab'
 import { openDashboard, stopDashboard } from './ui-launch'
 
 export { ENGINE_BUILD } from './engine-build'
@@ -751,6 +753,35 @@ function progress($: EngineInterface, text: string) {
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`
 
+/** The tag vocabulary (<root>/vocabulary.json), or undefined when there is none or it cannot be read: the tagger then goes free-form. */
+async function readVocabulary($: EngineInterface, root: string): Promise<Vocabulary | undefined> {
+  try {
+    return parseVocabulary(await $.fs.read(`${root}/${VOCAB_FILE}`))
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * VOCAB.3: counts the new tags the written proposals offered, one more memory for each, through bin/vocab.ts (the
+ * vocabulary's one writer). A tag offered for AUTO_ADMIT_COUNT memories is admitted. Returns a line for the apply
+ * reply, or nothing; never throws: the tags are written, so a failure here is only a note.
+ */
+async function recordCandidates($: EngineInterface, root: string, tags: readonly string[]): Promise<string[]> {
+  if (tags.length === 0) return []
+  try {
+    const ran = await $.process.run(['bun', `${slashes($.plugin.root)}/bin/vocab.ts`, '--root', root, 'candidates'], { stdin: JSON.stringify({ tags }), timeoutMs: MEMORIES_TIMEOUT_MS })
+    if (ran.exitCode !== 0) return [`New tags were not counted: ${`${ran.stderr}\n${ran.stdout}`.trim().slice(-200)}`]
+    const result = JSON.parse(ran.stdout) as { recorded?: number; admitted?: string[] }
+    return [
+      `Counted ${plural(result.recorded ?? 0, 'proposed new tag')}.`,
+      ...(result.admitted && result.admitted.length > 0 ? [`Admitted to the vocabulary: ${result.admitted.join(', ')}.`] : []),
+    ]
+  } catch (err) {
+    return [`New tags were not counted: ${(err as Error).message.slice(0, 200)}`]
+  }
+}
+
 // The dry run: one Haiku call per untagged memory, saved as proposals; no memory changes.
 export async function tagsDryRun($: EngineInterface, options: PluginOptions, signal: AbortSignal) {
   const { root } = await paths($, options)
@@ -766,12 +797,15 @@ export async function tagsDryRun($: EngineInterface, options: PluginOptions, sig
   let done = 0
   const model = extractionModelOf(options)
   if (extractionOff(model)) return 'Knowledge extraction is off (extractionModel in the plugin settings is "off"): no tags proposed. Set extractionModel, then try again.'
+  // VOCAB.3: the tagger chooses from the vocabulary when there is one; without it the tags are free-form.
+  const vocabulary = await readVocabulary($, root)
+  const system = systemPrompt(vocabulary)
   progress($, `tagging 0/${rows.length}`)
   await pool(rows, BACKFILL_CONCURRENCY, signal, async (row, i) => {
     try {
       // The memory's text goes in the prompt as a quoted string, to a model that is told it is data.
       const reply = await $.model.complete(
-        { model, system: SYSTEM_PROMPT, prompt: tagPrompt(row.content), maxTokens: BACKFILL_MAX_TOKENS, timeoutMs: BACKFILL_CALL_TIMEOUT_MS },
+        { model, system, prompt: tagPrompt(row.content), maxTokens: BACKFILL_MAX_TOKENS, timeoutMs: BACKFILL_CALL_TIMEOUT_MS },
         { signal },
       )
       if (!reply.isAnswered) {
@@ -781,9 +815,9 @@ export async function tagsDryRun($: EngineInterface, options: PluginOptions, sig
           firstError ||= reply.reason === 'api-error' ? `api-error ${reply.status ?? 'no response'} ${reply.error}` : reply.reason
         }
       } else {
-        const tags = parseTags(reply.text)
+        const { tags, kind, candidates } = parseTags(reply.text, vocabulary === undefined ? {} : tagContext(vocabulary, row.owner))
         if (tags.length === 0) skipped.empty++
-        else proposed[i] = { id: row.id, owner: row.owner, tags, sha256: row.sha256 }
+        else proposed[i] = { id: row.id, owner: row.owner, tags, sha256: row.sha256, ...(kind === undefined ? {} : { kind }), ...(candidates.length === 0 ? {} : { candidates }) }
       }
     } catch (err) {
       skipped.failed++
@@ -797,7 +831,7 @@ export async function tagsDryRun($: EngineInterface, options: PluginOptions, sig
   }
   const proposals = proposed.filter((p): p is Proposal => p !== undefined)
   const byId = new Map(rows.map(row => [row.id, row]))
-  const lines = proposals.map(p => `${p.id}  ${p.owner}  [${p.tags.join(', ')}]  ${Array.from(byId.get(p.id)?.content ?? '').slice(0, 60).join('').replace(/\s+/g, ' ')}`)
+  const lines = proposals.map(p => `${p.id}  ${p.owner}  [${p.tags.join(', ')}]${p.kind === undefined ? '' : `  ${p.kind}`}  ${Array.from(byId.get(p.id)?.content ?? '').slice(0, 60).join('').replace(/\s+/g, ' ')}`)
   const notes = [
     skipped.empty > 0 ? `${plural(skipped.empty, 'memory', 'memories')} got no usable tags` : '',
     skipped.failed > 0 ? `${plural(skipped.failed, 'call')} failed (${firstError})` : '',
@@ -814,6 +848,8 @@ export async function tagsDryRun($: EngineInterface, options: PluginOptions, sig
     ...lines,
     ...(notes.length > 0 ? [`Skipped: ${notes.join('; ')}.`] : []),
     ...(blockedNote ? [blockedNote] : []),
+    ...(proposals.some(p => p.candidates !== undefined) ? [`New tags proposed (counted when you apply; a tag proposed for ${AUTO_ADMIT_COUNT} memories is admitted): ${[...new Set(proposals.flatMap(p => p.candidates ?? []))].join(', ')}.`] : []),
+    ...(vocabulary === undefined ? [`No tag vocabulary yet, so these tags are free-form. Create it once with: bun ${slashes($.plugin.root)}/bin/vocab.ts --store <your store folder> init`] : []),
     `Saved to ${root}/${PROPOSALS_FILE} (ids, owners, tags and a hash of each text; never the text). Run /mnemosyne-tags apply to write them.`,
   ].join('\n')
 }
@@ -1114,6 +1150,8 @@ export async function tagsApply($: EngineInterface, options: PluginOptions, sign
   let failed = 0
   let notReached = 0
   let checked = 0
+  // The new tags offered by the proposals that were written; counted once the owners are done.
+  const offered: string[] = []
   let firstError = ''
   for (const [id, proposed] of byOwner) {
     if (signal.aborted) {
@@ -1145,6 +1183,7 @@ export async function tagsApply($: EngineInterface, options: PluginOptions, sign
       return false
     })
     written += done.length
+    offered.push(...done.flatMap(p => p.candidates ?? []))
     failed += list.length - done.length
     firstError ||= ownerError
     // One error per owner: another owner's failure does not show up on this owner's line.
@@ -1163,11 +1202,13 @@ export async function tagsApply($: EngineInterface, options: PluginOptions, sign
     ])
   }
   progress($, `${plural(written, 'memory', 'memories')} tagged`)
+  const counted = await recordCandidates($, root, offered)
   return [
     `Tagged ${plural(written, 'memory', 'memories')} of ${proposals.length} proposed.`,
     `Skipped: ${counts.gone} gone, ${counts.tagged} already tagged, ${counts.untaggable} cannot be tagged (metadata is not a JSON object), ${counts.changed} changed since the dry run.`,
     ...(failed > 0 ? [`${plural(failed, 'update')} failed (${firstError}).`] : []),
     ...(notReached > 0 ? [`Stopped early: ${plural(notReached, 'memory', 'memories')} not reached; run /mnemosyne-tags apply again to finish.`] : []),
+    ...counted,
   ].join('\n')
 }
 
