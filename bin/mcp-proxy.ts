@@ -171,9 +171,11 @@ void (async () => {
         refuse(message.id, undefined, given, { code: -32601, message: `Tool not available: ${name}` })
         continue
       }
-      if (name === 'memory_update' && build !== ENGINE_BUILD) {
-        const reason = `memory_update needs the Mnemosyne engine build ${ENGINE_BUILD}; installed is ${build}. Run /mnemosyne-setup in Claude Code.`
-        refuse(message.id, action, given, { code: -32000, message: reason })
+      if ((name === 'memory_update' || name === 'memory_remember') && build !== ENGINE_BUILD) {
+        // memory_remember too: an older engine's 24 h trim deletes every row whose trust tier is not IMPORTED, which a save of this build's is not.
+        const reason = `${name} needs the Mnemosyne engine build ${ENGINE_BUILD}; installed is ${build}. Run /mnemosyne-setup in Claude Code.`
+        // A refused save logs no memory text: the line is built from no arguments.
+        refuse(message.id, action, name === 'memory_remember' ? {} : given, { code: -32000, message: reason })
         continue
       }
       // GUARD.2: the same admission check as the plugin's own tools, before anything reaches the engine.
@@ -238,6 +240,11 @@ void (async () => {
           continue
         }
         const clean = cleanTags(tags, tagRulesNow())
+        // Tags that all clean away (only the project name) must not read as "remove the tags": [] is how those are removed.
+        if (name === 'memory_update' && clean.length === 0 && cleanTags(tags).length > 0) {
+          refuse(message.id, action, {}, { code: -32602, message: 'none of those tags can be stored (a tag may not be the project name). Send tags: [] to remove the tags.' })
+          continue
+        }
         // remember: no tags, no metadata; update: [] removes the key.
         if (name === 'memory_update') args.metadata = { tags: clean.length > 0 ? clean : null }
         else if (clean.length > 0) args.metadata = { tags: clean }

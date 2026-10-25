@@ -62,7 +62,8 @@ const ENGINE_PACKAGE = '@oh-my-pi/pi-mnemopi'
 const GLOBAL_OWNER = 'global'
 const RECALL_LIMIT = 5
 const NOT_INSTALLED = 'Mnemosyne Memory engine not installed: ask the user to run /mnemosyne-setup.'
-const NOT_CURRENT = `Mnemosyne Memory engine is out of date (memory_update needs build ${ENGINE_BUILD}): ask the user to run /mnemosyne-setup.`
+// memory_remember is refused on a stale engine too: that engine's 24 h trim deletes every row whose trust tier is not IMPORTED, and a save made with this build's honest provenance is not.
+const NOT_CURRENT = `Mnemosyne Memory engine is out of date (memory_remember and memory_update need build ${ENGINE_BUILD}; an older engine would delete this plugin's saves after 24 hours): ask the user to run /mnemosyne-setup.`
 
 // Where a person typed the prompt; another plugin's or session's text never triggers a save.
 const PERSON_ORIGINS = new Set(['composer', 'bridge', 'sdk', 'slack-ping'])
@@ -1307,7 +1308,7 @@ export const register: Register = (on, options) => {
     for (const tool of TOOLS) await $.tool.register({ ...tool, isDeferred: false })
     if (!(await isInstalled($, options))) $.ui.toast('Mnemosyne Memory engine not installed. Run /mnemosyne-setup.')
     else {
-      // A stale engine keeps the four older tools working; only memory_update refuses.
+      // A stale engine keeps recall, forget and stats working; memory_remember and memory_update refuse (an old engine's 24 h trim would delete the new saves).
       if (!(await isCurrent($, options))) $.ui.toast('Mnemosyne Memory engine is out of date. Run /mnemosyne-setup to update it.')
       await Promise.all([secure($, options), syncWrapper($, options)]).catch(() => undefined)
       activity($, options, 'memory ready', 'ready')
@@ -1478,17 +1479,19 @@ export const register: Register = (on, options) => {
     // Strict mode: a warned save is refused until the call says confirm: true. A block has no override.
     const needsConfirm = guard?.verdict === 'warn' && guardModeOf(options) === 'strict' && input.confirm !== true
     const refusedByGuard = guard?.verdict === 'block' || needsConfirm
+    // UPGRADE.1: a save on an installed engine older than this build is refused below. Computed here so the near-duplicate check runs no engine and a refused save leaves the remember trigger for the retry.
+    const staleSave = tool === 'memory_remember' && (await isInstalled($, options).catch(() => false)) && !(await isCurrent($, options))
     // G3 (META.3): close memories of a text about to be saved. Before the trigger is consumed, so a refusal leaves it for the retry.
     const replacesId = tool === 'memory_remember' && typeof input.replaces === 'string' && REPLACES_ID.test(input.replaces) ? input.replaces : undefined
     const replacesOwner = replacesId !== undefined && typeof input.owner === 'string' && REPLACES_ID.test(input.owner) ? input.owner : undefined
     // The memory named in replaces is meant to be superseded, so it is not a near-duplicate to warn about.
-    const near = tool === 'memory_remember' && !refusedByGuard ? (await nearDuplicates($, options, input.content as string)).filter(match => match.id !== replacesId) : []
+    const near = tool === 'memory_remember' && !refusedByGuard && !staleSave ? (await nearDuplicates($, options, input.content as string)).filter(match => match.id !== replacesId) : []
     const nearRefused = near.length > 0 && guardModeOf(options) === 'strict' && input.confirm !== true
     const refused = refusedByGuard || nearRefused
     // KNOWX.1: only the main thread's first save after a remember phrase is the
     // human's. A subagent's event carries an agentId and never consumes the trigger.
     let provenance: { author_type: 'human'; veracity: 'stated' } | undefined
-    if (tool === 'memory_remember' && e.agentId === undefined && !refused) {
+    if (tool === 'memory_remember' && e.agentId === undefined && !refused && !staleSave) {
       const session = await $.session.id().catch(() => undefined)
       if (session !== undefined) {
         // Consumed inside the updater, which sees the value as it is when the update lands: of two saves at once only one takes it.
@@ -1532,7 +1535,7 @@ export const register: Register = (on, options) => {
           await paths($, options) // a bad HOME or memoryDir says so rather than "not installed"
           return { deny: NOT_INSTALLED }
         }
-        if (tool === 'memory_update' && !(await isCurrent($, options))) return { deny: NOT_CURRENT }
+        if ((tool === 'memory_update' || tool === 'memory_remember') && !(await isCurrent($, options))) return { deny: NOT_CURRENT }
         const [name, args] = engineArgs(tool, input, rules)
         // The trigger save is the person's: human, with veracity 'stated'.
         // C4: source 'user' and trust tier STATED besides the human author and veracity 'stated'.
@@ -1571,7 +1574,7 @@ export const register: Register = (on, options) => {
       const shown = Array.isArray(input.tags) ? { ...input, tags: cleanTags(input.tags, rules) } : input
       // A retire line follows the save's own line, with both ids and no memory text (META.4).
       const retireEntry = retired === undefined ? [] : [{ action: 'retire' as const, origin: 'tool' as const, owner: retired.owner, text: `retire ${retired.oldId} replaced by ${retired.newId ?? 'unknown'}`, ids: [retired.oldId, ...(retired.newId === undefined ? [] : [retired.newId])], count: retired.ok ? 1 : 0, ok: retired.ok, error: retired.error }]
-      await record($, options, [{ action, origin: 'tool', owner: as, text: blocked ? '' : callText(action, shown), ...outcome, ...(provenance ?? {}) }, ...retireEntry])
+      await record($, options, [{ action, origin: 'tool', owner: as, text: blocked || staleSave ? '' : callText(action, shown), ...outcome, ...(provenance ?? {}) }, ...retireEntry])
     }
     // A successful save (or a content update) starts extraction after the reply.
     // A tags-only or importance-only update changes no text, so it extracts nothing.
