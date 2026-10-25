@@ -1533,7 +1533,40 @@ Probes run against a real machine on 2026-10-16: `bun` 1.x, Node 24.13.0,
 banks. Claims marked *verified* were observed directly; the rest are marked as
 inference where they appear. Re-probed on 2026-10-20 with `pi-mnemopi` 18.12.3:
 remember, owner-scoped recall, owner-only forget and stats behave the same.
+## v0.8.3: the solar-system map
 
-## v0.8.3 (draft)
+The Map tab is rebuilt as a solar system (MAPX.1 to MAPX.11). `README.md` describes the view; this section records the contracts and the port.
 
-Contracts C11 and C12 (activity-daily.json, projects.json), the state rule, the port approach (carries over from the mockup, seeds from the project label) and policy notes (no inline styles, one WebGL context). <!-- MAPX.10 final: check against the build -->
+### C11: the solar-system map's data (MAPX.2, MAPX.3)
+
+Written by MAPX.2 and MAPX.3, read only by the map. `activitySource` has one value for the whole reply.
+
+1. `GET /api/galaxy` adds per memory `source`, `sourceInferred`, `kind`, `scope`, `importance`, `pinned`, `state` and `validUntil`.
+2. Per project it adds `liveCount`, `kinds: [{ kind, count }]`, `unknown` (live rows of kind unknown), `global` (live rows with scope global), `lastActive` (the newest of `timestamp` and `last_recalled` over the project's live rows, the base of the ice cap), `activity30`, `activitySource`, `recallsTotal`, `medianAgeDays`, `firstSaved`, `tags: [{ tag, count }]` (at most 40, `GALAXY_PLANET_TAGS`) and `tagsTotal`, all over live rows, and `projectKind` and `remoteHost` from C12. The existing `count` and `recalls` keep their meaning (all rows).
+3. At the top level it adds `writers: [{ source, count, inferred }]`, `globalLive` (live rows with scope 'global' or owner 'global', for the sun belt) and `links: [{ a, b, pairs: [{ older, newer, score }] }]`.
+4. The state rule, written once as the exported helper `memoryState` in `ui/server.ts`: a row is live when `superseded_by` is NULL and `valid_until` is NULL or still in the future. Otherwise take the newest 'retire' or 'expire' row among the audit rows (the table keeps only the last 3 per memory, and a later 'update' row is skipped, not read as the state): 'expire' gives 'expired', 'retire' gives 'retired'; with neither, a row with `superseded_by` set is 'retired' and any other is 'lapsed' (its own expiry date passed). The engine's retire sets `valid_until` to now and `superseded_by` to the replacement or NULL (`engine/src/core/beam/store.ts`, `invalidateRows`) and writes an audit row only when a `validator` was passed, so a retire with no validator and no replacement reads 'lapsed' (a known limit; the dashboard's retire passes `validator: 'dashboard'`). Restore clears both columns (`restoreWorking`), so a restored row is live again whatever its audit rows say. CRUDX.3 (0.9.0) reuses this helper.
+5. `<root>/activity-daily.json`, mode 0600, `{ version, days: { <owner>: { <day>: { writes, recalls } } } }`, 90 days, counts only, written only by `appendActivity` (MAPX.3). `activitySource` is 'tally' when the oldest day in the file is 30 or more days ago, else 'lifetime'.
+
+### C12: the project registry (MAPX.8)
+
+`<root>/projects.json`, mode 0600, written only by `bin/projects.ts` and read by MAPX.2: `{ version, projects: { <owner>: { name, kind: 'repo' | 'folder', remoteHost: <host> | null, firstSeen, lastSeen } } }`. `remoteHost` is the remote's host only (for example `github.com`), never the full URL, a user name, a port or a token. A repo with no remote has `remoteHost: null`; a remote with no network host (a local path or a `file://` URL) records `'local'`. A project is recorded the next time a Claude session starts in it (`hooks/register.ts`).
+
+### C13: the scene interface (MAPX.5, MAPX.11)
+
+`ui/solar.ts` exports `createSolarScene(options)` with `canvas`, `three` (from `ui/vendor/map-lib.js`), optional `createRenderer` and `clock`, and callbacks `onHover(tip | null, x, y)`, `onPick(target)` and `onLevel(level)`. It returns `{ setData(galaxy), setView(view), flyTo(target), showView(name), zoom(factor), event(mapEvent), dispose() }`. `galaxy` is the C11 reply; `view` is `{ arrange, colour, hidden, query, rotate, sample, legend }`; `name` is 'top', 'below', 'side' or 'reset'; `mapEvent` is what `toMapEvent` returns (`ui/map-live.ts:47`). `target` and `level` share one shape: `{ level: 'galaxy' } | { level: 'planet', owner } | { level: 'moon', owner, kind } | { level: 'memory', owner, kind, id }`. The page never reaches into the scene's three.js objects and the scene never touches DOM outside its canvas. Find's matching (`searchResults`) lives in `ui/solar-layout.ts` and is shared. A test fake, `tests/bun/solar-scene-fake.ts`, records every call.
+
+### Port approach (mockup → product)
+
+The 3D scene is plain JavaScript on the same three.js version, so it moves over nearly line for line. About two thirds of the code is reused: scene building (`initScene`, `makePlanet`, `makeCraft`, `memoryRing`, `makeHoles`, `circle`, `pointsObject`, `glow`, `label`), procedural textures (`planetTexture`, `sunTexture`, `glowTexture`, `dotTexture`), motion (`frame`, `spreadSwarm`, `satellites`, `recolour`), interaction (`pick`, `act`, the flights and `findGo`) and the rules (`targets`, `orbitSpeed`, `planetR`, `extent`, `styleOf`, `sizeClass`, `describe`, `labelName`, `tagColour`, `dotColour`, `searchResults`, `metric`, `linksOf`). Seeds come from the project label (FNV-1a into mulberry32; Box-Muller for the normal draw), and the input is sorted first, so the same data gives the same numbers in any order. What changes: the hard-coded `PROJECTS`, `LINKS` and `WRITERS` become `GET /api/galaxy`; live events use the real activity stream (`ui/stream.ts`, `toMapEvent`); Find uses `POST /api/search`; the rules move into the pure module `ui/solar-layout.ts` with specs. Writer colours are seeded from the project label. The mockup reference stays in `docs/plans/mapx-design/` (unchanged).
+
+### Policy notes
+
+- No inline styles in the page; all styling through `ui/style.css` (§3.5).
+- One WebGL context for the map; the scene never touches DOM outside its canvas.
+- A fresh canvas per scene; `dispose()` releases it.
+- The scene reads its settings from the state once per frame and needs no framework update hook.
+- Reduced motion: moons stand still, Live starts paused, Auto-rotate off.
+
+### §3.7
+
+§3.7's galaxy (the 0.6.0 force-graph galaxy) is superseded by this solar-system view in 0.8.3. C2 (the 0.6.0 `GET /api/galaxy` shape) is extended by C11; the bloom passes (C3) and `ui/map-layout.ts` (C4) are replaced by `ui/solar-layout.ts` and the scene in `ui/solar.ts`. Timeline, Meaning and the live sparks keep their behaviour.

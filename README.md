@@ -225,8 +225,9 @@ That is a dry run: it counts the memories with no vector. Then `/mnemosyne-embed
 
 Starts a small local web page for your memories and opens it in your default browser. The reply shows the full link, with its key after `#`, and the link is on the clipboard too, so you can open it in another browser. The page has seven tabs and opens on Map:
 
-- **Map:** the solar-system Galaxy view (draft). New files: activity-daily.json, projects.json. <!-- MAPX.10 final: check against the build -->
+- **Map:** the solar-system Galaxy view: the sun and writer nodules, planets and crafts with their styles, land, moons, asteroids, belts, black holes, satellites, comets and beams, clouds and ice cap (see [The galaxy](#the-galaxy)). Arrange by, Find, the Bodies strip, the Details panel (read-only until the 0.9.0 dashboard writes), and the live events; Timeline and Meaning unchanged. Two new files in the Mnemosyne root: `activity-daily.json` (counts only) and `projects.json` (project names and the remote's host only); a project is recorded the next time a Claude session starts in it.
 - **Map (old):** every memory as a star in a glowing 3D galaxy that fills the window, with what was learned from each as moons, a Timeline layout, a Meaning layout, Similar memories links and live sparks (see [The galaxy](#the-galaxy)). The controls on the left fold away, a clicked star's details show under the graph, and the overview, the live feed and how to read the map sit on the right.
+
 - **Memories:** every memory, with a project filter, sorting (newest, most recalled, never recalled), a text and tag filter. A memory opens in a panel that slides up from the bottom, with a Forget button that asks before it deletes. Knowledge and Search open memories in the same panel.
 - **Activity:** the activity log, live, one plain sentence per call, with the app and the session that made it; click a line for its details (see [Activity log](#activity-log)).
 - **Search:** the same recall Claude uses, with scores and the top 20 results. Match by Keyword, or Keyword + meaning when embeddings are on; each result says whether it matched on words, meaning or both. Searching here does not change any memory's recall count.
@@ -244,11 +245,33 @@ The dashboard and the activity log are tested on macOS and Linux, not on Windows
 
 **Working on the dashboard.** From a checkout of this repo, `bun run dev:ui` starts a second dashboard straight from the checkout on `127.0.0.1:47175` (another port with `MNEMOSYNE_UI_PORT`) and opens it. It reads the same store as the installed one, which keeps running, and keeps its own `ui.json` under `~/.claude/mnemosyne/dev-ui`. The page reloads itself within a second when a file in `ui/` changes, and an edit to `ui/server.ts` restarts the server on the same port and token, so there is no plugin update between edits. The footer shows "Mode: dev". Ctrl-C stops it.
 
-### The galaxy (solar system, v0.8.3 draft)
+### The galaxy
 
-<!-- MAPX.10 final: check against the build -->
 
-Draft of the solar-system Galaxy view. The Map tab draws every memory as a star in a glowing galaxy (the newest 2000; past that the inspector says "showing 2000 of N"). Each project is a bright core, and a memory sits in a cluster around it for its topic: its first tag, or Untagged. A star grows with each recall, newer stars are brighter, and a hollow ring marks a memory that was never recalled. A soft bloom (a glow pass) makes it shine. The white star in the middle is Claude: recalls and saves start there.
+
+The Map tab draws the solar system of your memories: the sun is the store, writer nodules orbit it, each project is a planet or a craft, and each memory is an asteroid in a swarm around its project's kind moon. Timeline and Meaning layouts are unchanged.
+
+The mapping (how a thing on the map comes from the store):
+
+| On the map | From the store |
+|---|---|
+| Sun | the memory store (all live memories) |
+| Writer nodules | the writers (claude-code, dashboard, …), sized by count |
+| Planets (gas 30+, ice 10–29, rocky, dwarf <3) | git repos, styled by live memory count |
+| Crafts (space station 5+, starship under 5) | plain folders (no git repo) |
+| Land masses / bands | a project's tags (area = times used) |
+| Moons | memory kinds present (one per kind; size = count) |
+| Asteroids | that kind's memories (size = importance, brightness = recalls, colour = writer or recalls or age) |
+| Planet asteroid belt | memories of kind `unknown` (old untyped rows; a dwarf's memories) |
+| Sun asteroid belt | global memories (scope global) |
+| Outer galaxy belt | retired, expired, lapsed memories (faded; Restore brings them back) |
+| Black-hole pair | similar memories across two projects (2+ pairs, cosine ≥ 0.80) |
+| Satellites | the knowledge items mined from the selected memory |
+| Recall comet / save comet | a live recall (planet → sun nodule, gold) / a live save (sun nodule → planet, blue) |
+| Update beam / forget laser | a live update (green beam) / a live forget (red laser; the memory fades) |
+| Clouds / ice cap | needs review / idle 30+ days (clouds when over a quarter untidy) |
+
+Arrange by re-orders the planets' orbits: activity (busier = closer, the default), size, age, or recalls. Each keeps its angle. Find dims every body except those whose tag, project or label holds the text. The Bodies strip lists what matches. The Details panel shows a body's facts and is read-only until the dashboard's write controls (0.9.0) land. A memory's text, tags, writer, provenance, dates, state, pin, history and similar memories all show there.
 
 1. Links. Topic threads join each project core to its topics and each topic to its stars. Gold bridges join the same topic name in two different projects; Untagged never bridges. Both can be switched off in the left rail.
 2. Moving around. Drag to orbit, scroll to zoom, click a project, a topic or a star to fly in. The path bar above the map (All memories › project › topic) goes back up and Reset view returns to everything. Find dims every star except those whose tag, project or label holds the text. Colour by switches between project, recalls and age, and the project toggles hide a project. Auto-rotate turns the map on its own; it starts off when your system asks for reduced motion, and in the Timeline.
