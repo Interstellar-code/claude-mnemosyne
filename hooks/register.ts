@@ -54,6 +54,7 @@ import type { TagRules } from './tags'
 import { AUTO_ADMIT_COUNT, parseVocabulary, tagRules, VOCAB_FILE } from './vocab'
 import type { Vocabulary } from './vocab'
 import { openDashboard, stopDashboard } from './ui-launch'
+import { PROJECTS_FILE, projectName, remoteHostOf } from './projects'
 
 export { ENGINE_BUILD } from './engine-build'
 // The upstream base version; the plugin's own build of it is ENGINE_BUILD (engine/UPSTREAM.md).
@@ -707,6 +708,42 @@ async function record($: EngineInterface, options: PluginOptions, entries: reado
   }
 }
 
+// The owners already handed to `bun bin/projects.ts` in this plugin instance (at most one write per owner).
+const projectsSent = new WeakMap<object, Set<string>>()
+
+// C12: hands the project registry one record, { owner, name, kind, remoteHost }, at
+// session start, the way record() hands over activity lines: a detached $.process.spawn
+// drained in a task of its own, the script capping itself. The caller does not await
+// it (so a slow or hung $.session.repo() delays nothing), and it never throws or rejects, so a registry failure cannot change the
+// session start, a save or a recall. The owner is the one owner() gives; 'global'
+// (scope not per-project) is never recorded. The remote is cut to its host here, so
+// no URL, user name or token leaves the hook.
+async function registerProject($: EngineInterface, options: PluginOptions) {
+  try {
+    const me = await owner($, options)
+    const sent = projectsSent.get(options) ?? new Set<string>()
+    projectsSent.set(options, sent)
+    if (me === GLOBAL_OWNER || sent.has(me)) return
+    const repo = await $.session.repo()
+    const { root } = await paths($, options)
+    const input = {
+      owner: me,
+      name: projectName(slashes(repo?.root ?? (await $.session.cwd()))),
+      kind: repo ? 'repo' : 'folder',
+      remoteHost: repo ? remoteHostOf(repo.remote) : null,
+    }
+    const argv = ['bun', `${slashes($.plugin.root)}/bin/projects.ts`, 'write', `${root}/${PROJECTS_FILE}`]
+    sent.add(me)
+    void (async () => {
+      for await (const _piece of $.process.spawn({ argv, input: JSON.stringify(input) })) {
+        // drained only: the script writes nothing worth reading
+      }
+    })().catch(() => undefined)
+  } catch {
+    // a registry failure must not break a hook
+  }
+}
+
 // ---- /mnemosyne-tags: the one-time tag backfill (hooks/backfill.ts, bin/memories.ts) ----
 
 const TAGS_USAGE = 'Usage: /mnemosyne-tags (a dry run: Haiku proposes tags for the untagged memories, nothing is written), /mnemosyne-tags retag (a dry run: tags and a kind for every memory, from the vocabulary, nothing is written) or /mnemosyne-tags apply (backs the store up, then writes the saved proposals).'
@@ -1313,6 +1350,7 @@ export const register: Register = (on, options) => {
       await Promise.all([secure($, options), syncWrapper($, options)]).catch(() => undefined)
       activity($, options, 'memory ready', 'ready')
     }
+    void registerProject($, options) // fire and forget: no host call it makes (repo, cwd, env) delays the session start
 
     return next(e)
   })
