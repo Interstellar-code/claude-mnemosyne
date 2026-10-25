@@ -1,21 +1,21 @@
 # mnemosyne-v3: Guardrails on what enters memory, honest kinds and provenance, a shared tag vocabulary, dashboard writes and review, and importers
 
-Status: decided, ready to build (Rohit's decisions 2026-10-24, see Decisions). Created 2026-10-24. Baseline: `main` at `247ea75` (0.7.6). Delivery: each phase on a short branch off `main`, merged straight into `main` after its review; nothing is pushed. Two releases: 0.8.0 after wave 3 (REL8), 0.9.0 at the end (REL9).
+Status: decided, ready to build (Rohit's decisions 2026-10-24, see Decisions). Created 2026-10-24. Baseline: `main` at `247ea75` (0.7.6); the map plan (`docs/plans/mapx-solar-map.md`) ships first, so `main` moves on before wave 4. Delivery: each phase on a short branch off `main`, merged straight into `main` after its review; nothing is pushed. Two releases: 0.8.0 after wave 3 (REL8), 0.9.0 at the end (REL9).
 
-Status 2026-10-25: waves 1-3b are shipped (0.8.0, then fixes 0.8.1 and 0.8.2; `main` at `2f1a104`). The 0.9.0 half (waves 4-7) was reviewed against the code on 2026-10-25 and corrected in place; see "0.9.0 review (2026-10-25)" before Wave 4. Not yet started; Rohit is still adding points before execution is planned.
+Status 2026-10-25: waves 1-3b are shipped (0.8.0, then fixes 0.8.1 and 0.8.2; `main` at `2f1a104`). The 0.9.0 half (waves 4-7) was reviewed against the code on 2026-10-25 and corrected in place; see "0.9.0 review (2026-10-25)" before Wave 4. Not yet started; Rohit is still adding points before execution is planned. The solar-system map (the old phase MAPX) and the project registry (the old SESSION.5) moved to `docs/plans/mapx-solar-map.md` on 2026-10-25; the map plan ships first and `main` moves on, so lanes branch from the new `main`.
 
 ## Summary
 
 Version 3 of the Mnemosyne plugin: control what goes into memory, and organise what is there. Every save, from Claude, outside agents, the dashboard or an importer, passes one guard that blocks secrets and oversize text and warns about near-duplicates and task chatter. Saves then record honest provenance and a kind instead of 'imported' and 'unknown'. Tags come from a small shared vocabulary with entity, agent and asset namespaces. The dashboard gains create, edit, retire and a review queue, and documents and session logs can be imported through the same guard. It matters because the store today holds 447 tags for 140 memories (407 used once), five rows marked SUPERSEDED that are still recalled, and no usable provenance at all.
 
-The plan has 13 phases (MODEL, GUARD, META, VOCAB, REL8, CRUDX, IMPORT, CRUD, SESSION, HARDEN, MAPX, REL9, LATER) holding 56 tasks, in 9 waves. Waves 1-3 plus REL8 (wave 3b) are release 0.8.0: the guard, kinds and provenance, the audit trail and the vocabulary. Waves 4-7 are release 0.9.0: dashboard writes and review, the importers, session summaries, the expiry sweep and the solar-system map (MAPX, added 2026-10-25). Wave 8 (LATER) is parked and starts only on Rohit's go.
+The plan has 12 phases (MODEL, GUARD, META, VOCAB, REL8, CRUDX, IMPORT, CRUD, SESSION, HARDEN, REL9, LATER) holding 47 tasks, in 9 waves. Waves 1-3 plus REL8 (wave 3b) are release 0.8.0: the guard, kinds and provenance, the audit trail and the vocabulary. Waves 4-7 are release 0.9.0: dashboard writes and review, the importers, session summaries, and the expiry sweep. The solar-system map, first added here on 2026-10-25, is now its own plan (`docs/plans/mapx-solar-map.md`) and ships before wave 4. Wave 8 (LATER) is parked and starts only on Rohit's go.
 
 ## How to use this plan (for the coordinator)
 
 1. Each task below is written to be pasted as a worker prompt. A worker prompt is: the "Standing constraints for every worker" section, the phase block (its file scope, hazards and review level), and the task block (goal, acceptance, refs, gate).
 2. Task ids are stable. Build the Orca task DAG from the wave table: a task depends on every task of the phases listed in its phase's "Needs first", plus the in-phase order given in the table.
 3. Tasks inside one phase touch the same files, so run them in the listed order, not in parallel. Phases in the same wave have disjoint file scopes and can run side by side (MODEL, GUARD and HARDEN part A in wave 1, CRUDX and IMPORT in wave 4, CRUD and SESSION in wave 5).
-4. `hooks/register.ts` changes hands only at wave boundaries. `tests/bun/helpers.ts` is forbidden everywhere except HARDEN.
+4. `hooks/register.ts` changes hands only at wave boundaries. The map plan's MAPX.8 touches one small hunk of it first, on `main`, before the wave 4 lanes branch (map plan, D6). `tests/bun/helpers.ts` is forbidden everywhere except HARDEN.
 5. Tasks marked "Rohit" are manual: do not dispatch them to a worker. Wait for Rohit to report.
 6. Research reference: `research/v3-research.md` (next to this plan).
 
@@ -90,7 +90,8 @@ File map:
 10. `hooks/import.ts`, `bin/import.ts` (new) are changed by IMPORT.
 11. `hooks/session.ts` (new) is changed by SESSION.
 12. `hooks/engine.ts`, `tests/bun/helpers.ts`, `bin/install-engine.ts` are changed by HARDEN.
-13. `ui/map-layout.ts`, `ui/map-state.ts`, `ui/map.ts`, `ui/map-live.ts`, `bin/activity.ts` and `ui/server.ts`'s `galaxyLevel` are changed by MAPX (wave 6, after CRUDX and CRUD).
+
+The map plan (`docs/plans/mapx-solar-map.md`) also edits `ui/server.ts` (`galaxyLevel`, `getMemory`), `ui/app.ts`, `ui/index.html`, `ui/style.css` and a small hunk of `hooks/register.ts`; whichever branch lands second rebases onto `main` (map plan, D4, D6, D7).
 
 ### Contracts
 
@@ -139,11 +140,7 @@ File map:
    4. forget deletes the memory's trail rows in the same transaction as the row (`purgeWorkingMemoryArtifacts`);
    5. `GET /api/health-report` gains `unusedByDesign: { <table>: <reason> }` for `episodic_memory`, `consolidation_log`, `gists`, `facts`, `graph_edges`, `triples`, `scratchpad` and the `fts_episodes*` and `fts_facts*` tables; the Health tab shows each as "unused by design" with its reason instead of "empty".
    MODEL writes 1-4; CRUDX writes 5 and the review history; CRUD shows both; SESSION passes 'expire-sweep'.
-11. C11: the solar-system map's data (MAPX, 2026-10-25):
-   1. `GET /api/galaxy` adds per memory `source`, `sourceInferred`, `kind`, `scope`, `importance`, `pinned`, `state`, `validUntil`; per project `activity30`, `activitySource`, `recallsTotal`, `medianAgeDays`, `firstSaved`, `tags`; and top-level `writers` and `links` (MAPX.2);
-   1a. `<root>/projects.json` (SESSION.5): owner → name, kind ('repo' or 'folder'), remote host only, first and last seen;
-   2. `<root>/activity-daily.json`, mode 0600, `{ version, days: { <owner>: { <day>: { writes, recalls } } } }`, 90 days, counts only, written only by `appendActivity` (MAPX.3).
-   MAPX writes both; only the map reads them.
+11. C11 and C12 (the solar-system map's data and the project registry `projects.json`) moved to `docs/plans/mapx-solar-map.md` on 2026-10-25 and are not part of this plan. C11.4 there defines the exported `memoryState` helper that CRUDX.3 reuses.
 
 ### Out of scope
 
@@ -182,15 +179,14 @@ Phase-level dependencies ("Needs first" means every task of the listed phase is 
 | 4 | CRUDX | REL8 | CRUDX.0 (coordinator, on `main`, before both wave 4 lanes start), CRUDX.1, CRUDX.2, CRUDX.3, CRUDX.4, CRUDX.5 |
 | 4 | IMPORT | REL8, CRUDX.0 | IMPORT.0, IMPORT.1, IMPORT.2, IMPORT.3 |
 | 5 | CRUD | CRUDX | CRUD.1, CRUD.2, CRUD.3, CRUD.4 |
-| 5 | SESSION | IMPORT | SESSION.1, SESSION.2, SESSION.4, SESSION.5 |
+| 5 | SESSION | IMPORT | SESSION.1, SESSION.2, SESSION.4 |
 | 6 | HARDEN part B | CRUD, SESSION | HARDEN.3, then HARDEN.4 (Rohit), then HARDEN.5 (Rohit) |
-| 6 | MAPX | SESSION.5, CRUDX, CRUD (MAPX.0 is done; MAPX.1 needs nothing and runs from wave 4) | MAPX.0 (done), MAPX.1, MAPX.2, MAPX.3, MAPX.4, MAPX.5, MAPX.6, MAPX.7 |
-| 7 | REL9 (0.9.0) | HARDEN.3 and MAPX (HARDEN.4 and HARDEN.5 are Rohit's runs and no longer gate the release; 0.9.0 review) | REL9.1 |
-| 8 | LATER | REL9 (parked) | LATER.1, LATER.2, LATER.3, LATER.5 (all manual until Rohit says go; LATER.4 became MAPX) |
+| 7 | REL9 (0.9.0) | HARDEN.3 (HARDEN.4 and HARDEN.5 are Rohit's runs and no longer gate the release; 0.9.0 review) | REL9.1 |
+| 8 | LATER | REL9 (parked) | LATER.1, LATER.2, LATER.3, LATER.5 (all manual until Rohit says go; LATER.4 moved to the map plan) |
 
 Task-level dependencies beyond the in-phase order: IMPORT.2 depends on IMPORT.0 (the spike). SESSION.2 reads the transcript reader built in IMPORT. CRUDX.3 reads the `pinned` flag written by IMPORT.3 (both are wave 4 now; CRUDX.3 uses a fixture, so neither waits; see Notes for the reviewer, item 2).
 
-Task counts: MODEL 6, GUARD 4, META 5, VOCAB 4, REL8 1, CRUDX 6, IMPORT 4, CRUD 4, SESSION 4, HARDEN 5, MAPX 8, REL9 1, LATER 4 = 56 tasks in 13 phases.
+Task counts: MODEL 6, GUARD 4, META 5, VOCAB 4, REL8 1, CRUDX 6, IMPORT 4, CRUD 4, SESSION 3, HARDEN 5, REL9 1, LATER 4 = 47 tasks in 12 phases (LATER.4 is a pointer, not counted; the old MAPX phase and SESSION.5 moved to `docs/plans/mapx-solar-map.md`).
 
 ---
 
@@ -212,9 +208,9 @@ Who builds what (a proposal; the coordinator may swap lanes A and B between phas
 | 2 | META | reviews META | idle |
 | 3 | VOCAB | reviews VOCAB | idle |
 | 3b | reviews REL8 | idle | REL8.1 (docs and version 0.8.0) |
-| 4 | CRUDX (after the coordinator's CRUDX.0), then reviews IMPORT | IMPORT (high), then reviews CRUDX (high) | MAPX.1 (vendor exports and the frame-rate check) |
+| 4 | CRUDX (after the coordinator's CRUDX.0), then reviews IMPORT | IMPORT (high), then reviews CRUDX (high) | idle |
 | 5 | CRUD, then reviews SESSION (SESSION.4 at data-loss depth) | SESSION (high, it holds the expiry sweep), then reviews CRUD | idle |
-| 6 | MAPX.2 to MAPX.7 | reviews HARDEN.3, then reviews MAPX | HARDEN.3, then Rohit's HARDEN.4 and HARDEN.5 |
+| 6 | idle | reviews HARDEN.3 | HARDEN.3, then Rohit's HARDEN.4 and HARDEN.5 |
 | 7 | reviews REL9 | idle | REL9.1 (docs and version 0.9.0) |
 
 Rules:
@@ -540,7 +536,7 @@ The 0.9.0 phases were written on 2026-10-24, before waves 1-3b were built. On 20
 2. One body cap (CRUDX.1). `post()` checks one global `MAX_BODY_BYTES` (4096), but the guard allows content up to 4000 characters (`hooks/guard.ts:28`), which can be over 4096 bytes once wrapped in JSON. CRUDX.1 now gives `post()` a per-route cap argument: 24 KB for create and update, 4096 for everything else.
 3. The Review tab already exists (CRUD). `ui/review.ts` and `tests/bun/review-view.spec.ts` have been in place since 0.7.x: a Review tab with four client-side filters (never recalled, no tags, not recalled in 30 days, low importance) and a Forget button per row. The plan called it new. CRUD.2 now extends that tab rather than building a second one. Coordinator default: the Review rows get Retire (which can be restored) instead of Forget (which deletes for good). Forget stays in the memory detail sheet only.
 4. Retired, expired and lapsed rows look the same (CRUDX.3, CRUD). In the engine, retiring sets `valid_until` to now (plus `superseded_by` when a replacement is given). The sweep's expiry and a context note's normal 14-day expiry also just set `valid_until`. Telling them apart needs the audit trail: action 'retire' or 'expire' in `memory_validations` (newest 3 kept), otherwise "lapsed". CRUDX.3 now gives each row one of four states: live, retired, expired (by the sweep) or lapsed (its own expiry date passed).
-5. Retired rows show as live on the dashboard today (CRUDX, CRUD). `/api/memories` and the Memories tab ignore `valid_until` and `superseded_by` (`ui/server.ts:440`), so the 14-day context expiry from 0.8.x is already invisible. CRUDX.3 adds `state` to `/api/memories`. CRUD.2 dims non-live rows in Memories behind a "Show retired" toggle, off by default (coordinator default). The map shows non-live rows in its outer belt (MAPX).
+5. Retired rows show as live on the dashboard today (CRUDX, CRUD). `/api/memories` and the Memories tab ignore `valid_until` and `superseded_by` (`ui/server.ts:440`), so the 14-day context expiry from 0.8.x is already invisible. CRUDX.3 adds `state` to `/api/memories`. CRUD.2 dims non-live rows in Memories behind a "Show retired" toggle, off by default (coordinator default). The map shows non-live rows in its outer belt; that is in `docs/plans/mapx-solar-map.md`, which ships first and computes the same four states itself (its C11.4).
 6. New activity actions sit outside every lane's scope (CRUDX.0, new). `ActivityAction` (`hooks/activity-log.ts:10`) has no 'restore', 'import' or 'expire', and `ActivityOrigin` has no 'import' or 'session'. CRUDX may not touch `hooks/`, and IMPORT runs beside it. New task CRUDX.0 adds them once, on `main`, before both wave 4 lanes branch. It is types plus one spec, done by the coordinator.
 7. The dashboard save must match the other save paths (CRUDX.1). Kind is required on every save since 0.8.1, context notes get a 14-day `valid_until` by default (`hooks/kinds.ts:45`, `validUntilFor`), and tags go through `cleanTags` and `tagRules`. `bin/mcp-proxy.ts:185` shows that path without `register.ts`. CRUDX.1 now names that pattern and the shared helpers to import (they are read, not changed). G3's near-duplicate call lives in `register.ts` (`:553`), which the server cannot import, so CRUDX.1 calls `mnemopi_similar` itself with `NEAR_DUPLICATE_SCORE` from `hooks/guard.ts:107`.
 8. Pinning and expiry in the dashboard (CRUDX.1, CRUD.1). IMPORT.3 adds `pinned` to `memory_update`, but the dashboard had no way to pin, and the form had no expiry. CRUDX.1's update now takes `pinned` (sent as an engine metadata merge, `{ pinned: true|false }`) and `expires_in_days`. CRUD.1's form shows both, with the 14-day context default filled in.
@@ -569,6 +565,7 @@ The dashboard can only forget today. This phase adds write routes behind the exi
 5. Must not touch: `engine/`, `hooks/` (except CRUDX.0's file), `ui/app.ts`, `tests/bun/helpers.ts`. Importing `hooks/guard.ts`, `hooks/kinds.ts`, `hooks/tags.ts` and `hooks/vocab.ts` is allowed; editing them is not.
 6. Review level: data-loss. Hazard: a write route without the Origin check (guard: a 403 spec on each route).
 7. Suggested commit message: `feat(ui): create, edit, retire and review routes`
+8. Map plan (`docs/plans/mapx-solar-map.md`): its MAPX.2 also edits `ui/server.ts` (`galaxyLevel`, `getMemory`), in different regions from this phase, so whichever lands second rebases (D7). Its MAPX.9 (Edit, Pin and Retire in the Details panel) waits for CRUDX.1 and CRUDX.2 and CRUD.1 and CRUD.2.
 
 #### CRUDX.0: Activity names for restore, import and expire (coordinator, before wave 4 lanes)
 
@@ -577,7 +574,7 @@ The dashboard can only forget today. This phase adds write routes behind the exi
    1. `ActivityAction` gains 'restore', 'import' and 'expire'; `ActivityOrigin` gains 'import' and 'session' (`hooks/activity-log.ts:10-11`); nothing else changes;
    2. `tests/activity-log.test.ts` writes and reads one line of each new name.
 3. Gate: `claude plugin test . && bun run typecheck` (timeout 600 s, must exit 0).
-4. Scope: phase CRUDX. Done by the coordinator on `main`; both wave 4 lanes branch (or rebase) after it.
+4. Scope: phase CRUDX. Done by the coordinator on `main`; both wave 4 lanes branch (or rebase) after it. The map plan counts only recall, remember and update and ignores the new names (D8), so neither plan waits on the other here.
 
 #### CRUDX.1: POST /api/memory/create and /api/memory/update (C7) (critical)
 
@@ -614,7 +611,7 @@ The dashboard can only forget today. This phase adds write routes behind the exi
    4. the routes never change `recall_count` or any row (spec);
    5. with no vectors the near-duplicate reason is simply absent.
 3. Gate: `bun run test:bun` (timeout 900 s, must exit 0).
-4. Scope: phase CRUDX. Do after CRUDX.2. Pinned rows are never candidates (IMPORT.3 adds the `pinned` flag in the same wave; CRUDX.3 reads `metadata.pinned`, treats a missing flag as not pinned, and tests with a fixture row, so it never waits on IMPORT.3).
+4. Scope: phase CRUDX. Do after CRUDX.2. Pinned rows are never candidates (IMPORT.3 adds the `pinned` flag in the same wave; CRUDX.3 reads `metadata.pinned`, treats a missing flag as not pinned, and tests with a fixture row, so it never waits on IMPORT.3). Map plan (D1): if `docs/plans/mapx-solar-map.md` has merged, import its exported `memoryState` helper from `ui/server.ts` (its C11.4) for `state` instead of writing a second rule, with the same four values; if it has not, write the rule from C11.4's text and let the map plan's MAPX.2 import yours; the coordinator decides at build time.
 
 #### CRUDX.4: GET /api/vocabulary and POST /api/vocabulary/admit and /alias
 
@@ -634,7 +631,7 @@ The dashboard can only forget today. This phase adds write routes behind the exi
    2. `GET /api/review`'s non-live rows (retired, expired, lapsed) carry `history: [{ action, validator, at }]` from `memory_validations`, newest first, read-only; empty when there is none;
    3. `tests/bun/review-api.spec.ts` and `tests/bun/ui-server.spec.ts` cover both, including a store without `memory_validations` (history empty, no error).
 3. Gate: `bun run test:bun && bun run typecheck` (timeout 900 s, must exit 0).
-4. Scope: phase CRUDX. Do after CRUDX.4.
+4. Scope: phase CRUDX. Do after CRUDX.4. The map plan reads the last 3 audit rows itself through its own route and does not wait for this task (D10).
 
 ### Phase IMPORT: Importing documents and session logs through the guard
 
@@ -646,6 +643,7 @@ Two importers, both with a dry run and an apply after a backup: markdown or text
 4. Must not touch: `engine/`, `ui/`, `tests/bun/helpers.ts`.
 5. Review level: data-loss. Hazard: a big document floods the store (guard: the dry run shows the count, plus the guard size caps and near-duplicate check). Session text leaves the machine to Haiku, as tags already do; it is named in the README.
 6. Suggested commit message: `feat(import): documents and session logs, through the guard`
+7. Map plan (D6): `hooks/register.ts` is first touched by the map plan's MAPX.8 (one small hunk near `owner()` and the `session.start` handler), merged on `main` before this phase's lane branches; rebase onto `main` if it is not in your branch yet.
 
 #### IMPORT.0: Spike: where session transcripts live and what the hooks may read (manual spike)
 
@@ -687,7 +685,7 @@ Two importers, both with a dry run and an apply after a backup: markdown or text
    3. outside agents cannot pin: the proxy strips `metadata` from its schema (`bin/mcp-proxy.ts:305`) and gets no `pinned` property (coordinator default, 0.9.0 review); pins come from Claude and the dashboard only;
    4. a spec pins and unpins a row on a temp store and reads `metadata.pinned` back (the session-start block is SESSION.2's spec, not this one).
 3. Gate: `claude plugin test . && bun run test:bun` (timeout 900 s, must exit 0).
-4. Scope: phase IMPORT. Do last in the phase.
+4. Scope: phase IMPORT. Do last in the phase. The map plan reads `metadata.pinned` and treats a missing flag as not pinned, so it does not wait for this task (D3).
 
 ---
 
@@ -710,6 +708,7 @@ The UI half of CRUDX. Rohit can write and edit memories with a kind, vocabulary 
    4. Memories: a retired row is hidden; "Show retired" shows it dimmed with its state.
    5. Vocabulary: admit a candidate; alias one tag to another.
 8. Suggested commit message: `feat(ui): create, edit, review and vocabulary`
+9. Map plan (`docs/plans/mapx-solar-map.md`): its MAPX.6 and MAPX.7 also edit `ui/app.ts`, `ui/index.html` and `ui/style.css`; whichever branch lands second rebases onto `main` (D4). Its MAPX.9 reuses CRUD.1's form and CRUD.2's two-step confirm and Restore as they are (they are unchanged by the map plan), and waits until CRUD.1 and CRUD.2 are merged.
 
 #### CRUD.1: New memory and Edit forms with guard feedback
 
@@ -764,6 +763,7 @@ When a session ends (exit, `/clear` or resume), the plugin notes it in a small p
 4. Must not touch: `engine/`, `ui/`, `tests/bun/helpers.ts`.
 5. Review level: standard, with SESSION.4 reviewed at data-loss depth (it holds the expiry sweep). Hazard: a slow first prompt (guard: the block reads only the store; summaries and the sweep run in the background after the reply, and summaries default to off).
 6. Suggested commit message: `feat(session): last-session summary, pins on the first prompt, and the unused-expiry sweep`
+7. Map plan (D6): this phase's `hooks/register.ts` edits come after the map plan's MAPX.8 hunk (registry write near `owner()`); the registry itself is no longer part of this phase (see the SESSION.5 note below SESSION.4).
 
 #### SESSION.1: The previous session is summarised once, in the background
 
@@ -799,20 +799,11 @@ When a session ends (exit, `/clear` or resume), the plugin notes it in a small p
 3. Gate: `claude plugin test . && bun run test:bun` (timeout 900 s, must exit 0).
 4. Scope: phase SESSION. Do after SESSION.2.
 
-#### SESSION.5: A local project registry: repo or plain folder (Rohit, 2026-10-25)
-
-1. Goal: record what kind of project each owner is, so the map can draw repos as planets and plain folders as space stations or starships. Today the plugin asks `$.session.repo()` while working out the owner (`hooks/register.ts:344-351`) and throws the answer away.
-2. Acceptance:
-   1. when the owner is worked out, the plugin writes `<root>/projects.json` (mode 0600): `{ version, projects: { <owner>: { name, kind: 'repo' | 'folder', remoteHost: <host> | null, firstSeen, lastSeen } } }`; `remoteHost` is the remote's host only (for example `github.com`), never the full URL, a user name or a token; a repo with no remote has `kind: 'repo'` and `remoteHost: null`;
-   2. a write happens at most once per owner per session start, and a failure never blocks a save;
-   3. `/mnemosyne-setup` backfills owners the file does not know: it matches each owner's name and hash against folders on disk (the same djb2 hash `owner()` uses), records the kind, and leaves unmatched owners out (the map shows those as planets marked "kind unknown");
-   4. `tests/session.test.ts` covers a repo, a local-only repo, a plain folder, the backfill on a temp folder tree, and that no remote URL or credential is written.
-3. Gate: `claude plugin test .` (timeout 600 s, must exit 0).
-4. Scope: phase SESSION. Do after SESSION.4. On 2026-10-25 all five owners are GitHub repos, so nothing would be a station or starship yet.
+SESSION.5 (the local project registry, `projects.json`) moved to the map plan as MAPX.8 on 2026-10-25 (Rohit: the map is built first, as its own plan; see `docs/plans/mapx-solar-map.md`, contract C12). SESSION is therefore three tasks: SESSION.1, SESSION.2, SESSION.4.
 
 ---
 
-## Wave 6: HARDEN and MAPX, side by side
+## Wave 6: HARDEN (part B)
 
 ### Phase HARDEN: Open items: the bank env hole, tests out of the real home, engine log growth, platform notes, the cleanup and knowledge runs
 
@@ -864,153 +855,7 @@ The leftovers from 0.7.0 that touch safety and housekeeping, plus the two runs R
 1. Acceptance: after HARDEN.4: `/mnemosyne-tags retag` dry run on a copy of the store, then apply; then `/mnemosyne-knowledge` dry run and apply (about 134 Haiku calls today, fewer after retirements); counts recorded.
 2. Manual step: Rohit runs both; each apply backs up first (C9). Do not dispatch this to a worker.
 
----
-
-### Phase MAPX: The galaxy map becomes a solar system (Rohit, 2026-10-25)
-
-The Galaxy view of the dashboard map becomes a solar system. The memory store is a sun, and each writer is a nodule on its surface. Each project is a planet whose size is its memory count and whose orbit distance follows the Arrange by choice. Tags are land masses on the planet's surface, and the memory kinds are moons carrying their memories. Belts hold the untyped, global and no-longer-live memories. Black-hole pairs show similar memories shared between projects. Timeline and Meaning stay as they are. This replaces the parked LATER.4 ("Writer suns").
-
-The build is a port, not a rebuild (Rohit, 2026-10-25). The approved mockup is a working 3D app on three.js r186, the version the repo pins. Its code is in the repo at `docs/plans/mapx-design/`: `MapSolar.dc.html` (the board), `solar-scene.js` (its script, extracted) and `README.md` (what carries over, what changes and where each piece goes). The mockup is the contract for look and behaviour. This phase text adds what the mockup cannot show: real data, the dashboard's security policy, tests, and the few rules marked "beyond the mockup" below. Where the two disagree, Rohit decides.
-
-The mapping (Rohit's decisions, 2026-10-25):
-
-| # | Object | Stands for | Visual |
-|---|---|---|---|
-| 1 | Sun | the memory store | size = live memory count; it turns; a soft glow, dim enough that its surface (granulation, sunspots) stays visible |
-| 2 | Nodules on the sun | writers (`source`) | size = memories written; turn with the sun; flare on write |
-| 3 | Planets | projects (owners) | size = memory count |
-| 3b | Planet or craft | project kind (SESSION.5's `projects.json`) | a git repo is a planet; a local-only repo is a planet with a small "no remote" mark; a plain folder is a craft: a space station when it is a lasting workspace (5 or more memories; ring station, tags as lit panels, memories docked) or a starship when it is small or new (under 5; saucer and nacelles, tags as lit windows, it faces its direction of travel); an owner with no record is a planet marked "kind unknown" |
-| 3a | Planet style | size class | gas giant 30+ (Jupiter, Saturn), ice giant 10-29 (Neptune, Uranus), rocky under 10 (Earth, Mars, Venus, Mercury), dwarf under 3 (Pluto); neighbours in a class get different variants |
-| 4 | Orbit distance | the Arrange by choice | default: activity, busier = closer |
-| 5 | Surface land masses | the project's tags | area = times used there; on gas giants they are coloured bands and storm spots |
-| 6 | Moons | memory kinds | one per kind present; size = count |
-| 7 | Moon swarm | that kind's memories | one asteroid per memory; from Galaxy level the planet's memories show as a ring of asteroids around it |
-| 8 | Asteroid colour | writer (Colour dots by) | or recalls, or age |
-| 9 | Asteroid size | importance | bigger = more important |
-| 10 | Asteroid brightness | recalls | brighter = recalled more |
-| 11 | Halo | pinned | always visible |
-| 12 | Fading | expiry (`valid_until`) | dims in its last 7 days |
-| 13 | Planet asteroid belt | kind 'unknown' | old untyped rows |
-| 14 | Sun asteroid belt | global memories | rows with scope 'global' (6 on 2026-10-25), and any owner 'global' rows; each still counts toward its planet's size |
-| 15 | Outer galaxy belt | retired, expired, lapsed | faded; Restore pulls it back |
-| 16 | Black-hole pair | similar memories across projects | pulsing energy: older planet → its black hole → the partner's black hole → newer planet; moons stay more prominent than black holes |
-| 17 | Binary pair | near-duplicates in one project | Review lens only |
-| 18 | Satellites | a memory's knowledge items | around the selected memory |
-| 19 | Recall comet | a live recall | gold, from the planet to the caller's nodule (the agent in that project asks) |
-| 19a | Save comet | a live save | blue, from the writer's nodule to the planet |
-| 19b | Update beam | a live update | a neutral green beam from the writer's nodule to the body |
-| 19c | Forget laser | a live forget | a red laser from the writer's nodule to the body; the memory fades |
-
-Arrange by (it replaces the rail's Colour by card; planet size is always the memory count):
-
-| # | Option | Orbit distance |
-|---|---|---|
-| 1 | Activity (default) | writes + recalls in the last 30 days; busiest closest |
-| 2 | Size | memory count; biggest closest |
-| 3 | Age | median age of live memories; youngest closest |
-| 4 | Recalls | lifetime recalls; most recalled closest |
-
-Layout (Rohit, 2026-10-25): the map stays a true 3D scene like 0.6.0's (orbit by dragging, from the top or below; right-drag pans; scroll zooms; Top, Below, Side and Reset buttons; auto-rotate is offered but off by default, because a turning camera cancels out the planets' own slow orbits). Space is near-black: no grey haze from the star field or the bloom. A Find box sits at the top centre of the map (as in 0.6.0): typing lists matching planets, stations, starships, kind moons, tags and memories (memories through the existing `POST /api/search`, keyword plus meaning), dims every body that does not match, and picking a result or pressing Enter flies the camera there and opens it in the Details panel (a memory result flies straight into that memory); Escape clears it. Under the map, a fixed-height Bodies strip lists every planet, station and starship as fixed-width chips in at most two rows (more scroll sideways, never down); a chip shows or hides that body on the map without moving the camera (a hidden body also hides its label, orbit line when it is alone on it, black holes and live events), and Show all brings everything back; clicking a body on the map still flies in. The left rail keeps Arrange by, Colour dots by and Show only. The legend floats in the map's two empty top corners (Bodies on the left, Belts, links and motion on the right) and can be hidden. Under the map, a full-width row holds the Details panel (the clicked sun, planet, moon or memory) and, beside it, the Live activity log of 0.6.0, which stays. Drill-down is a camera flight, as the 0.6.0 map's camera flights are: a click speeds the camera into the body (star streaks), and the next level settles in; the path bar flies back out; reduced motion switches instantly. Wheel, +/- buttons and drag zoom and pan at every level. Every body has a hover tooltip (planet: style, counts, top tags, black holes; land or band: tag, uses, other planets with it; moon; asteroid; belt; outer-belt memory: its state, the date, its project and Restore; black hole; satellite). Levels: Galaxy (sun, planets, belts, black holes), then Planet (camera flies in; labelled land masses, kind moons, its black holes named by partner), then Moon (the swarm spreads into a readable ring), then Memory (satellites, and the detail panel). The path bar shows the level, and the URL hash holds it so a reload returns there.
-
-1. Delivers: C11 (below) and the solar-system Galaxy view, ported from the mockup.
-2. Needs first: SESSION.5 (the project registry), CRUDX (the `state` field and the write routes) and CRUD (the Edit, Pin and Retire controls MAPX.7 reuses, and the shared files `ui/index.html`, `ui/style.css`, `ui/app.ts`). MAPX.0 is done; MAPX.1 needs nothing and can run from wave 4.
-3. Read first: `docs/plans/mapx-design/README.md` and `solar-scene.js` (the mockup, method by method); `DESIGN.md` §3.5, §3.7 and §3.8 (the map today); `ui/map.ts` (how the page loads `map-lib.js` and builds the map tab); `ui/map-state.ts` (the per-frame state pattern); `ui/stream.ts` and `ui/map-live.ts` (live events); `ui/server.ts:73` (the Content Security Policy) and `galaxyLevel` (`GET /api/galaxy`); `bin/activity.ts:115` (`appendActivity`).
-4. May touch: `scripts/vendor-map.ts` and `ui/vendor/map-lib.js`, `map-lib.d.ts`, `map-lib.inputs.json` (MAPX.1's export list only), `ui/solar-layout.ts` and `ui/solar.ts` (new), `ui/map.ts`, `ui/map-state.ts`, `ui/map-live.ts`, `ui/index.html`, `ui/style.css`, `ui/app.ts` (the map tab, the hash route and the Details panel only), `ui/server.ts` (`galaxyLevel` and its helpers only), `bin/activity.ts`, `tests/bun/map-state.spec.ts`, `tests/bun/map-live.spec.ts`, `tests/bun/galaxy-api.spec.ts`, `tests/bun/activity.spec.ts`, `tests/bun/solar-*.spec.ts` (new).
-5. Must not touch: `engine/`, `hooks/`, `ui/review.ts`, `ui/health.ts`, `tests/bun/helpers.ts`, the write routes in `ui/server.ts`, and `docs/plans/mapx-design/` (the reference stays as approved).
-6. Review level: standard. The map only reads, except MAPX.3's tally file, which holds counts only. Hazards: (a) a port that drifts from the mockup (guard: `tests/bun/solar-scene.spec.ts` drives the same hovers, clicks, flights, Find and filter the mockup's smoke test did, and Rohit compares it side by side with the canvas); (b) the frame rate with up to 2000 memories (guard: MAPX.1's measurement); (c) inline styles refused by the page's policy (guard: MAPX.6 moves all styling to `ui/style.css`).
-7. Manual QA steps (Rohit, in the dashboard, after the phase merges):
-   1. Galaxy: the sun has a `claude-code` nodule; the planets match the projects; the busiest is closest; Arrange by Size, Age and Recalls each moves the planets, and each keeps its angle.
-   2. Planet: matrixkoder's surface shows its tags as land, `workflow-rules` the same colour as on the other planets; its kind moons orbit; its black holes name partner projects.
-   3. Memory: the detail panel shows text, kind, tags, writer, provenance, dates, state, pin, history and similar memories; Pin works.
-   4. Live: a recall in a Claude session sends a comet from the `claude-code` nodule; a save from the dashboard comes from the `dashboard` nodule.
-   5. Reduced motion: nothing orbits; the map is still usable by keyboard.
-8. Suggested commit message: `feat(map): the galaxy becomes a solar system`
-
-#### MAPX.0: The design, approved and exported (done, 2026-10-25)
-
-1. Done: the mockup is the "v3: solar-system map" row of the Mnemosyne Dashboard canvas, https://claude.ai/artifact/6Qn6icDrmQn6BJKjtmpiy2 (version 31; boards `MapSolar.dc.html`, interactive, and `MapSolarSpec.dc.html`, the spec sheet). Rohit approved it as the target on 2026-10-25 ("I'm happy if I get this exact design").
-2. Exported to `docs/plans/mapx-design/`: both boards verbatim, `solar-scene.js` (the script), and `README.md` (the port map).
-3. If the canvas changes later, the coordinator re-exports it here before the build starts, and notes the version.
-
-#### MAPX.1: Vendor exports and a frame-rate check (any idle lane from wave 4)
-
-1. Goal: the dashboard's bundle can run the mockup's scene, and it runs fast enough with a large store.
-2. Acceptance:
-   1. `scripts/vendor-map.ts` adds to `map-lib.js`'s export list the three.js classes and add-ons `solar-scene.js` uses (`Scene`, `PerspectiveCamera`, `WebGLRenderer`, `Group`, `Mesh`, `Points`, `Line`, `LineLoop`, `Sprite`, the geometries and materials it creates, `CanvasTexture`, `Color`, `Vector2`, `Vector3`, `Raycaster`, the blending and colour-space constants, and `OrbitControls`; the four bloom passes are already exported); the package list and licences are unchanged; `bun scripts/vendor-map.ts --check` passes;
-   2. a throwaway page runs `solar-scene.js`'s scene on the vendored bundle with 5 planets, 6 craft and 2000 memories (rings and swarms), and the frame rate on Rohit's Mac (arm64) is written in the task's report; if it is under 50 fps, the report says which part (`Points` per planet, labels or bloom) to change;
-   3. the throwaway page is never merged.
-3. Gate: `bun scripts/vendor-map.ts --check && bun run test:bun` (timeout 900 s, must exit 0).
-4. Scope: phase MAPX.
-
-#### MAPX.2: GET /api/galaxy carries what the solar system needs (C11)
-
-1. Goal: the read-only data for the new view.
-2. Acceptance:
-   0. each project gains `projectKind` ('repo', 'folder' or 'unknown') and `remoteHost` from SESSION.5's `projects.json`;
-   1. each memory gains `source`, `sourceInferred` (from `metadata.source_backfill`), `kind`, `scope`, `importance`, `pinned`, `state` (as CRUDX.3) and `validUntil`;
-   2. the reply gains `writers: [{ source, count, inferred }]`;
-   3. each project gains `activity30`, `recallsTotal`, `medianAgeDays`, `firstSaved` and `tags: [{ tag, count }]` (live rows only);
-   4. the reply gains `links: [{ a, b, pairs: [{ older, newer, score }] }]` for memories of two different owners with cosine 0.80 or more from `memory_embeddings`; a pair of projects is listed only with at least 2 pairs; at most 50 pairs per link; absent with no vectors;
-   5. read-only, within the existing 2000-memory cap; older pages that ignore the new fields still work; `tests/bun/galaxy-api.spec.ts` covers each field, a store without vectors and a store without `metadata.source_backfill`.
-3. Gate: `bun run test:bun && bun run typecheck` (timeout 900 s, must exit 0).
-4. Scope: phase MAPX.
-
-#### MAPX.3: A daily activity tally per project
-
-1. Goal: "how often in the last 30 days", which the 1 MB activity log cannot answer (it held only 2026-10-23 to 2026-10-25 on 2026-10-25).
-2. Acceptance:
-   1. `appendActivity` (`bin/activity.ts:115`) also adds each line's count to `<root>/activity-daily.json` (mode 0600): `{ version, days: { <owner>: { <YYYY-MM-DD>: { writes, recalls } } } }`; remember and update count as writes and recall as recalls; nothing else is counted; no memory text or ids;
-   2. days older than 90 are dropped on write; a tally failure never stops the log line (the log line is written first);
-   3. `activity30` (MAPX.2) sums the last 30 days from the tally; a project with under 30 days of tally history uses its lifetime numbers (memories plus recalls) instead, and the reply says which (`activitySource: 'tally' | 'lifetime'`);
-   4. `tests/bun/activity.spec.ts` covers counting, the 90-day drop, a corrupt tally file (rebuilt, the log line still written) and the fallback.
-3. Gate: `bun run test:bun` (timeout 900 s, must exit 0).
-4. Scope: phase MAPX.
-
-#### MAPX.4: Port the rules into `ui/solar-layout.ts`
-
-1. Goal: the mockup's pure functions, typed and tested, with no DOM and no three.js.
-2. Acceptance:
-   1. port from `solar-scene.js`: `targets` (orbit rings: at most 10; past 10 bodies the least significant under the current arrange share the outer rings, rank i of n going to ring 9 − ⌊(n−1−i)·10/n⌋, evenly spaced at the speed of the ring's largest body, with one orbit line and one tilt), `orbitSpeed` (0.04 rad/s × dwarf radius ÷ body radius: big bodies crawl, small ones move faster), `planetR`, `extent`, `metric`, `styleOf` and `sizeClass` (gas 30+, ice 10-29, rocky, dwarf under 3; neighbours in a class differ), the craft rule (plain folder: station at 5+ memories, else starship), `describe`, `labelName`, `tagColour`, `dotColour`, `linksOf` and `searchResults`;
-   2. they read the shape `GET /api/galaxy` returns (MAPX.2) instead of the hard-coded `PROJECTS`, `LINKS` and `WRITERS`; the same input in any order gives the same output;
-   3. `tests/bun/solar-layout.spec.ts` checks the mockup's numbers on its own data (the 11 bodies of `solar-scene.js` give 10 rings with one shared pair under each arrange option; the orbit times of about 11, 10, 5.5, 5 and 2.6 minutes; the styles Saturn, Jupiter, Mars, Mercury and Pluto), plus one project, no global memories, and 25 bodies.
-3. Gate: `bun run test:bun && bun run typecheck` (timeout 900 s, must exit 0).
-4. Scope: phase MAPX. Do after MAPX.2.
-
-#### MAPX.5: Port the scene into `ui/solar.ts`, on live data and the live stream
-
-1. Goal: the mockup's 3D scene as the dashboard's Galaxy view.
-2. Acceptance:
-   1. port from `solar-scene.js`, keeping behaviour and look: the textures (`planetTexture`, `sunTexture`, glow, dot), the scene (`initScene`, `makePlanet`, `makeCraft`, `memoryRing`, `makeHoles`), the frame loop (orbits, shared rings, the spread swarm, satellites, the black-hole line with one pulse every 30 seconds), picking (`pick`: solid bodies before dots, tags from the surface coordinates), `act`, the camera flights and views, Find's fly-to, the show/hide filter, and the bloom, sun and darkness levels as approved (bloom 0.375, threshold 0.6);
-   2. it imports three.js from `ui/vendor/map-lib.js` (MAPX.1), never a global; the Galaxy view uses the solar scene, and Timeline and Meaning keep `ForceGraph3D`; switching views disposes one renderer before creating the other (at most one WebGL context);
-   3. live events come from `ui/stream.ts` (`toMapEvent`): a recall is a gold comet from the body to the caller's nodule, a save a blue comet from the writer's nodule, an update a green beam, a forget a red laser with the memory fading; the Simulate buttons keep the demo events;
-   4. beyond the mockup: a pinned memory has a halo, a memory in its last 7 days before expiry fades, asteroid size follows importance and brightness follows recalls, a project idle 30+ days gets an ice cap, a local-only repo gets a "no remote" mark, an owner with no `projects.json` record is a planet marked "kind unknown", and near-duplicates in one project show as binary pairs under a Review lens;
-   5. reduced motion stops orbits, pulses and flights (views switch instantly);
-   6. `tests/bun/solar-scene.spec.ts` runs the scene on the vendored three.js with a stub renderer, the way the mockup's smoke test did, and checks every hover kind, planet, moon and memory clicks, a black hole flying to its partner, Find results and Enter, hiding and showing a body, all four live event kinds, and 35 seconds of frames without an error.
-3. Gate: `bun run test:bun && bun run typecheck` (timeout 900 s, must exit 0).
-4. Scope: phase MAPX. Do after MAPX.4.
-
-#### MAPX.6: Port the page around the map into the dashboard's DOM
-
-1. Goal: the mockup's page (rail, legend, Find, Bodies strip, Details, Live activity) built the dashboard's way.
-2. Acceptance:
-   1. the `<x-dc>` markup and `renderVals()` become builders in `ui/app.ts` with `createElement` and `textContent`, and the state lives in the page's state object as `ui/map-state.ts` does today; no framework;
-   2. no inline `style` attributes (the page's policy is `style-src 'self'`, `ui/server.ts:73`): every style is a class in `ui/style.css`; dynamic values (tooltip position, a chip's dimmed state) are set through `element.style` or a class; the page keeps its own fonts (no Google Fonts);
-   3. the layout matches the mockup: the rail (Arrange by, Colour dots by, Show), the map with the path bar, Find at the top centre, the two collapsible legend cards in the top corners, the view buttons, the fixed Bodies strip of two rows under the map, and the full-width row of Details and Live activity; the URL hash holds the level, and a bad hash falls back to Galaxy;
-   4. Arrange by, Colour dots by and the Show toggles are remembered per viewer in `localStorage`, as the layout is today; Tab moves through sun, planets, moons and memories in order;
-   5. `tests/bun/map-state.spec.ts` and `tests/bun/solar-page.spec.ts` cover the controls, Find's keys, the strip's show and hide, and the hash.
-3. Gate: `bun run test:bun && bun run typecheck` (timeout 900 s, must exit 0), plus Rohit's manual QA above, side by side with the canvas.
-4. Scope: phase MAPX. Do after MAPX.5.
-
-#### MAPX.7: The Details panel on real memories, with the writes
-
-1. Goal: the mockup's Details panel shows real fields and acts.
-2. Acceptance:
-   1. it shows the store summary in the Galaxy view, a body's facts, top tags and black holes (each a button that flies to the partner), a moon's kind and count, or a memory;
-   2. for a memory: the full text, kind, tags (a click lights the land mass), writer, source, trust tier and veracity, created, last recalled and recall count, expiry, state, pin, the last 3 audit actions and similar memories (a cross-project one points to its black hole), from `GET /api/galaxy` and `GET /api/memories/<id>`;
-   3. Edit, Pin and Retire reuse CRUD's form and two-step confirm; no new write route;
-   4. all text through `textContent`; `tests/bun/solar-panel.spec.ts` covers the fields and an older server reply without the new fields.
-3. Gate: `bun run test:bun && bun run typecheck` (timeout 900 s, must exit 0).
-4. Scope: phase MAPX. Do after MAPX.6.
+The solar-system map (the old phase MAPX, MAPX.0 to MAPX.7) moved out of this plan on 2026-10-25. Rohit wants the map built first, ahead of the rest of 0.9.0, as its own plan: `docs/plans/mapx-solar-map.md`, which also carries the map's contract (C11) and the project registry (C12). Nothing in this plan builds the map; where the two plans meet, the affected task has a one-line note. The approved mockup stays in `docs/plans/mapx-design/`.
 
 ---
 
@@ -1020,7 +865,7 @@ Layout (Rohit, 2026-10-25): the map stays a true 3D scene like 0.6.0's (orbit by
 
 README and DESIGN describe the dashboard writes and the Review tab (with the audit trail and the "unused by design" Health labels), `/mnemosyne-import`, session summaries, pinned memories and the unused-expiry sweep; the version moves to 0.9.0.
 
-1. Needs first: HARDEN.3 and MAPX (not Rohit's HARDEN.4 and HARDEN.5; 0.9.0 review, item 14).
+1. Needs first: HARDEN.3 (not Rohit's HARDEN.4 and HARDEN.5; 0.9.0 review, item 14).
 2. May touch: `README.md`, `DESIGN.md`, `.claude-plugin/plugin.json`.
 3. Must not touch: `ui/`, `hooks/`, `engine/`, `bin/`.
 4. Review level: light.
@@ -1031,13 +876,13 @@ README and DESIGN describe the dashboard writes and the Review tab (with the aud
 
 1. Goal: document the 0.9.0 half and set the version.
 2. Acceptance:
-   1. README has sections for dashboard writes and Review (Retire in the Review tab, Forget only in the detail sheet, the four row states), `/mnemosyne-import`, session summaries (off by default), pinned memories (Claude and the dashboard only), `expireUnusedDays` and the solar-system map (the mapping table and Arrange by), and names what leaves the machine to Haiku;
-   2. `DESIGN.md` gains a v0.9.0 section with contracts C7, C8, C10.5 and C11, the review history, the expiry sweep's limits, and the solar-system map (replacing §3.7's galaxy description where it changed);
+   1. README has sections for dashboard writes and Review (Retire in the Review tab, Forget only in the detail sheet, the four row states), `/mnemosyne-import`, session summaries (off by default), pinned memories (Claude and the dashboard only), and `expireUnusedDays`, and names what leaves the machine to Haiku (the solar-system map's README text is the map plan's MAPX.10, not this task);
+   2. `DESIGN.md` gains a v0.9.0 section with contracts C7, C8 and C10.5, the review history and the expiry sweep's limits (the map's contracts C11 and C12 and the changed §3.7 galaxy description belong to the map plan's MAPX.10);
    3. `.claude-plugin/plugin.json` version is 0.9.0.
 3. Gate (two commands, both must exit 0):
    1. `claude plugin validate . && claude plugin test .` (timeout 600 s);
    2. `grep -q 'expireUnusedDays' README.md && grep -q 'v0.9.0' DESIGN.md && grep -q '"version": "0.9.0"' .claude-plugin/plugin.json` (timeout 60 s).
-4. Scope: phase REL9.
+4. Scope: phase REL9. The map plan's MAPX.10 edits the same three files (D9): if it has merged, rebase onto its README and DESIGN.md changes and keep them; the map ships first as 0.8.3 (Rohit, 2026-10-25), so 0.9.0 keeps its number.
 
 ---
 
@@ -1070,9 +915,9 @@ Nice-to-haves kept out of 0.8.0 and 0.9.0. Persona (always-on rules) and canonic
 1. Acceptance: G5 warns on phone numbers and third-party emails (the user's own email is exempt); G6 warns on 'ignore previous instructions' style text and flags the row; both warn-only.
 2. Manual step: parked; warn-only rules, added once 0.8.0's false-positive rate is known.
 
-#### LATER.4: Moved into MAPX (2026-10-25)
+#### LATER.4: Moved to the map plan (2026-10-25)
 
-1. Rohit moved the writer-sun idea into 0.9.0 as phase MAPX, reshaped as one sun with a nodule per writer. Nothing is left here; the id is kept so references stay stable.
+1. Rohit moved the writer-sun idea into the solar-system map, reshaped as one sun with a nodule per writer. It now lives in `docs/plans/mapx-solar-map.md`. Nothing is left here; the id is kept so references stay stable.
 
 #### LATER.5: Port features from the Python engine (manual, parked; added 2026-10-25)
 
@@ -1114,7 +959,7 @@ Run from the repository root. All must exit 0.
 ### Review rule
 
 1. The review of each phase is done by a different worker than the one who built it. The builder never approves its own work.
-2. Review depth is set per phase: data-loss (MODEL, META, VOCAB, CRUDX, IMPORT) means the reviewer checks specifically for deleted, kept, relabelled or overwritten rows, secrets in logs, and that every apply backs up first; standard (GUARD, CRUD, SESSION except SESSION.4, HARDEN, MAPX, LATER; SESSION.4, the expiry sweep, is reviewed at data-loss depth); light (REL8, REL9).
+2. Review depth is set per phase: data-loss (MODEL, META, VOCAB, CRUDX, IMPORT) means the reviewer checks specifically for deleted, kept, relabelled or overwritten rows, secrets in logs, and that every apply backs up first; standard (GUARD, CRUD, SESSION except SESSION.4, HARDEN, LATER; SESSION.4, the expiry sweep, is reviewed at data-loss depth); light (REL8, REL9).
 3. A reviewer reruns the gate commands itself and does not trust "tests pass" from the builder.
 4. A task whose review finds a defect goes back to a worker with the finding written into the task; do not widen the task's file scope to make it pass.
 
@@ -1148,6 +993,8 @@ Decided:
 7. Upstream: the engine stays on 18.12.3 and is not compared against 18.12.4-18.12.6 before MODEL. Upstream fixes or features are imported selectively later, each as its own UPSTREAM.md change.
 8. Taken as the coordinator's defaults: (d) VOCAB.4 lowers the backfill batch to 20 and concurrency to 2; (f) `triple_end` stays cut; item 11 keeps the 0.88 near-duplicate threshold; item 10, the five SUPERSEDED or HISTORICAL rows (`da54d924…`, `ce61a767…`, `72d4c387…`, `412c7317…`, `f485b1bd…`), are handled by Rohit's own clicks in HARDEN.4.
 
+8a. The solar-system map (the old phase MAPX) and the project registry (the old SESSION.5) moved out of this plan on 2026-10-25 (Rohit: the map is built first, as its own plan): `docs/plans/mapx-solar-map.md`. This plan keeps only the coordination notes in the affected tasks.
+
 Still open, not blocking any wave:
 
 9. (b) Pinning `MNEMOPI_HOST_LLM_ENABLED`.
@@ -1167,3 +1014,4 @@ Still open, not blocking any wave:
 7. Source task fields `critical` and `risk` (numeric) are shown only as "(critical)" in task titles; the numeric values are dropped. Phase fields route, size, lane_group and subagents are dropped as MK-only.
 8. The README "3 GB peak note" in Decisions item 8 is from the request, not the source; the source does not mention it.
 9. Wave 4 and 5 phases touch `hooks/register.ts` only in IMPORT and SESSION respectively, so the side-by-side pairs have disjoint scopes; `tsconfig.bun.json` appears in GUARD, VOCAB and IMPORT (different waves, no overlap).
+10. The solar-system map moved out on 2026-10-25. The old phase MAPX (8 tasks, counted in the earlier "56 tasks in 13 phases"), SESSION.5, contract C11 and the file map's item 13 (`ui/map-*.ts`, `bin/activity.ts`) are in `docs/plans/mapx-solar-map.md` (with C11 and C12 there). The counts here are now 47 tasks in 12 phases. The dependency table in that plan (D1 to D10) is the list of every place the two plans meet.
