@@ -265,8 +265,10 @@ export type MapHost = {
   events?: (listener: (line: Record<string, unknown>) => void) => () => void
   /** Tells whether that stream is connected ('live'), so the Live pill only says On when lines can arrive. */
   streamStatus?: (watcher: (status: string) => void) => () => void
-  /** The solar-system scene and what its Find needs (MAPX.6 fills it). Absent, the Galaxy layout stays the force graph. */
+  /** The solar-system scene and what its Find needs (ui/app.ts fills it). Absent, the Galaxy layout stays the force graph. */
   solar?: SolarHost
+  /** Loads the vendored three.js bundle; absent, the page imports /vendor/map-lib.js. A spec passes a stand-in. */
+  library?: () => Promise<MapLib>
 }
 
 export type MapView = { visible: (shown: boolean) => void; show: (memoryId: string) => void }
@@ -277,6 +279,8 @@ const ROTATE_SPEED = 0.35
 const HOME: Vec3 = [0, 160, 700]
 const ADDITIVE = 2
 const NORMAL = 1
+const EMPTY_TEXT = 'This store has no memories yet. Save one from a Claude session, then reload this page.'
+const NO_WEBGL_TEXT = 'This map needs WebGL, which this browser has turned off or does not offer.'
 
 // ---- DOM helpers ----
 
@@ -414,9 +418,18 @@ const SOLAR_ONLY = ['solar-card-arrange', 'solar-card-colour', 'solar-card-show'
 
 type SolarMount = { sync: (layout: string) => void; active: () => boolean }
 
-function mountSolarPage(host: MapHost, solar: SolarHost, storage: Storage | undefined, reducedMotion: boolean): SolarMount {
+/** What the solar page needs from the map around it: the library (null when there is no WebGL, and the stage has said so) and the stage message. */
+type SolarShell = { library: () => Promise<MapLib | null>; loaded: () => MapLib | null; notice: (text: string) => void }
+
+function mountSolarPage(host: MapHost, solar: SolarHost, shell: SolarShell, storage: Storage | undefined, reducedMotion: boolean): SolarMount {
   const root = byId('view-map')
-  const canvas = byId<HTMLCanvasElement>('solar-canvas')
+  // Each scene gets its own canvas: dispose() ends the canvas's WebGL context, and a canvas cannot take a new one.
+  let canvas = byId<HTMLCanvasElement>('solar-canvas')
+  let canvasUsed = false
+  // Bumped whenever a scene is wanted or no longer wanted, so a scene still waiting for the library gives up.
+  let wanted = 0
+  // The scene could not start (no WebGL, the renderer failed): the stage says why and the canvas stays hidden.
+  let broken = false
   const find = byId<HTMLInputElement>('map-find')
   const placeholder = find.placeholder
   let page: SolarPage = readSolarPage(storage)
@@ -670,21 +683,61 @@ function mountSolarPage(host: MapHost, solar: SolarHost, storage: Storage | unde
 
   // ---- The scene ----
 
+  /**
+   * The scene lands on a level. When it names an owner that was hidden, the scene has shown it (a flight to a
+   * hidden planet shows it first): the Bodies strip and the hidden set sent in setView follow, so both agree.
+   */
   function applyLevel(level: Target) {
     page = setSolarLevel(page, level)
+    if (level.level !== 'galaxy' && page.hidden[level.owner] === true) {
+      page = toggleBody(page, level.owner)
+      remember()
+      send(scene => scene.setView(sceneView()))
+      renderChips()
+      renderLegend()
+    }
     writeHash()
     renderLevel()
   }
 
-  function makeScene() {
+  const emptyStore = () => galaxy !== null && galaxy.memories.length === 0
+  const showCanvas = () => {
+    canvas.hidden = !active || broken || emptyStore()
+  }
+
+  async function makeScene() {
     if (scene !== null) return
-    canvas.hidden = false
-    scene = solar.createScene({
-      canvas,
-      onHover: hover,
-      onPick: target => send(scene => scene.flyTo(target)),
-      onLevel: applyLevel,
-    })
+    const ticket = ++wanted
+    broken = false
+    // Once the library is loaded a scene is made at once; the first one waits for it.
+    const three = shell.loaded() ?? (await shell.library())
+    if (ticket !== wanted || !active) return
+    if (three === null) {
+      broken = true
+      showCanvas()
+      return
+    }
+    if (canvasUsed) {
+      const next = canvas.cloneNode(false) as HTMLCanvasElement
+      canvas.replaceWith(next)
+      canvas = next
+    }
+    canvasUsed = true
+    try {
+      scene = solar.createScene({
+        canvas,
+        three,
+        onHover: hover,
+        onPick: target => send(scene => scene.flyTo(target)),
+        onLevel: applyLevel,
+      })
+    } catch (err) {
+      broken = true
+      shell.notice(`The 3D map could not start (${err instanceof Error ? err.message : String(err)}).`)
+      showCanvas()
+      return
+    }
+    showCanvas()
     if (galaxy !== null) feed(scene)
   }
 
@@ -711,6 +764,8 @@ function mountSolarPage(host: MapHost, solar: SolarHost, storage: Storage | unde
       renderChips()
       renderLevel()
       renderFind()
+      if (emptyStore()) shell.notice(EMPTY_TEXT)
+      showCanvas()
       if (scene !== null) feed(scene)
     } catch (err) {
       host.status(`Could not load the map: ${err instanceof Error ? err.message : String(err)}`, 'error')
@@ -769,14 +824,22 @@ function mountSolarPage(host: MapHost, solar: SolarHost, storage: Storage | unde
       for (const id of SOLAR_ONLY) byId(id).hidden = !on
       find.placeholder = on ? 'project, tag, kind or words' : placeholder
       if (on) {
-        makeScene()
+        showCanvas()
+        void makeScene()
         void load()
         renderLegend()
         renderFind()
       } else {
-        scene?.dispose()
+        // Leaving Galaxy: the scene lets its WebGL context go before the force graph makes its own.
+        wanted++
+        const leaving = scene
         scene = null
-        canvas.hidden = true
+        try {
+          leaving?.dispose()
+        } catch (err) {
+          host.status(`The solar scene did not close cleanly (${err instanceof Error ? err.message : String(err)}).`, 'error')
+        }
+        showCanvas()
         byId('solar-tip').hidden = true
         byId('solar-find-results').hidden = true
       }
@@ -889,12 +952,56 @@ export function createMap(host: MapHost): MapView {
   const rotate = byId<HTMLButtonElement>('map-rotate')
   const find$ = byId<HTMLInputElement>('map-find')
   // The solar-system Galaxy page, when the host brings a scene; it takes over the Galaxy layout's page and leaves the others alone.
-  const solarPage = host.solar ? mountSolarPage(host, host.solar, storage, reducedMotion) : null
+  const solarPage = host.solar ? mountSolarPage(host, host.solar, { library, loaded: () => libraryReady, notice }, storage, reducedMotion) : null
+  // Only one renderer lives at a time (one WebGL context): the solar scene in Galaxy, the force graph in the other layouts.
+  let graphTicket = 0
+  let resizer: ResizeObserver | null = null
+  let libraryLoad: Promise<MapLib | null> | null = null
+  let libraryReady: MapLib | null = null
 
-  function say(text: string) {
+  /** The text over the stage; the canvases are left as they are. */
+  function notice(text: string) {
     message.textContent = text
     message.hidden = false
+  }
+
+  /** The text over the stage when the map cannot be drawn at all: both canvases give way. */
+  function say(text: string) {
+    notice(text)
     canvasBox.hidden = true
+    byId('solar-canvas').hidden = true
+  }
+
+  /** The vendored three.js bundle, loaded once; null (after the stage says why) when there is no WebGL or the bundle will not load. */
+  function library(): Promise<MapLib | null> {
+    libraryLoad ??= (async () => {
+      if (!hasWebGL(() => document.createElement('canvas'))) {
+        say(NO_WEBGL_TEXT)
+        return null
+      }
+      try {
+        libraryReady = host.library ? await host.library() : ((await import(LIB_URL)) as MapLib)
+        return libraryReady
+      } catch (err) {
+        say(`The map library could not load (${err instanceof Error ? err.message : String(err)}).`)
+        return null
+      }
+    })()
+    return libraryLoad
+  }
+
+  /** The solar scene draws the Galaxy layout when the host brought one. */
+  const solarWanted = () => solarPage !== null && state.layout === 'galaxy'
+
+  /** Makes the layout's renderer and lets the other one go first: the force graph before the solar scene, the solar scene before the force graph. */
+  function syncRenderer() {
+    if (solarWanted()) {
+      stopGraph()
+      solarPage?.sync(state.layout)
+    } else {
+      solarPage?.sync(state.layout)
+      void startGraph()
+    }
   }
 
   // ---- State changes ----
@@ -903,7 +1010,7 @@ export function createMap(host: MapHost): MapView {
     if (next === state) return
     if (galaxy !== null && next.query !== state.query) found = find(galaxy, next.query)
     state = next
-    solarPage?.sync(state.layout)
+    syncRenderer()
     render()
   }
 
@@ -2477,9 +2584,13 @@ export function createMap(host: MapHost): MapView {
       if (reply === null) throw new Error('the reply was not a galaxy')
       galaxy = buildGalaxy(reply)
       failed = false
-      if (state.layout === 'meaning' && !galaxy.meaning) state = setLayout(state, 'galaxy', true)
+      if (state.layout === 'meaning' && !galaxy.meaning) {
+        state = setLayout(state, 'galaxy', true)
+        syncRenderer()
+      }
       seen = null
       found = null
+      if (galaxy.layout.stars.length === 0) say(EMPTY_TEXT)
       drawGalaxy(galaxy)
       render()
       if (host.events && stopEvents === null) {
@@ -2499,17 +2610,13 @@ export function createMap(host: MapHost): MapView {
     }
   }
 
-  async function start() {
-    if (!hasWebGL(() => document.createElement('canvas'))) {
-      say('This map needs WebGL, which this browser has turned off or does not offer.')
-      return
-    }
-    try {
-      lib = (await import(LIB_URL)) as MapLib
-    } catch (err) {
-      say(`The map library could not load (${err instanceof Error ? err.message : String(err)}).`)
-      return
-    }
+  /** Makes the force graph for Timeline and Meaning (or Galaxy when the host brought no solar scene). A start overtaken by a layout change gives up. */
+  async function startGraph() {
+    if (graph !== null || solarWanted()) return
+    const ticket = ++graphTicket
+    const loaded = libraryReady ?? (await library())
+    if (loaded === null || ticket !== graphTicket || graph !== null || solarWanted()) return
+    lib = loaded
     try {
       graph = new lib.ForceGraph3D(canvasBox, { controlType: 'orbit' })
       three = threeFrom(lib)
@@ -2520,7 +2627,7 @@ export function createMap(host: MapHost): MapView {
       makeSparkSprites()
       makeMoonSprites()
     } catch (err) {
-      graph = null
+      stopGraph()
       say(`The 3D map could not start (${err instanceof Error ? err.message : String(err)}).`)
       return
     }
@@ -2567,24 +2674,115 @@ export function createMap(host: MapHost): MapView {
       graph.width(Math.max(1, Math.floor(box.width))).height(Math.max(1, Math.floor(box.height)))
     }
     fit()
-    if (typeof ResizeObserver === 'function') new ResizeObserver(fit).observe(stage)
+    if (typeof ResizeObserver === 'function') {
+      resizer = new ResizeObserver(fit)
+      resizer.observe(stage)
+    }
     controls.autoRotate = state.rotating && shown
     if (!shown) graph.pauseAnimation()
     lastFrame = performance.now()
     if (shown) raf = requestAnimationFrame(frame)
+    seen = null
     if (galaxy !== null) {
       drawGalaxy(galaxy)
       render()
     }
   }
 
+  /**
+   * Frees the force graph: the sparks in flight land, the library tears down its scene, controls, renderer and composer
+   * (`_destructor`), and the renderer's WebGL context is ended at once (browsers hold only a few). Everything the map
+   * kept from that scene is dropped, so a graph made later starts clean. Safe to call when there is no graph.
+   */
+  function stopGraph() {
+    graphTicket++
+    if (graph === null) return
+    const stopping = graph
+    const renderer = (stopping as unknown as Loose).renderer?.() as Any
+    try {
+      dropLayer('recall')
+      dropLayer('write')
+    } catch {
+      // the sparks only carried changes the next load brings back
+    }
+    if (raf !== 0) cancelAnimationFrame(raf)
+    raf = 0
+    resizer?.disconnect()
+    resizer = null
+    if (findTimer) clearTimeout(findTimer)
+    findTimer = 0
+    lastFound = null
+    try {
+      disposeVisuals()
+      disposeLanes()
+      disposeTicks()
+    } catch {
+      // the library's own teardown below frees the scene anyway
+    }
+    graph = null
+    try {
+      stopping._destructor()
+    } catch (err) {
+      host.status(`The 3D map did not close cleanly (${err instanceof Error ? err.message : String(err)}).`, 'error')
+    }
+    try {
+      renderer?.forceContextLoss?.()
+    } catch {
+      // the context goes when the canvas is collected
+    }
+    canvasBox.replaceChildren()
+    for (const style of moonLabelStyle.values()) style.map?.dispose?.()
+    moonLabelStyle.clear()
+    glowTexture.glow?.dispose?.()
+    glowTexture.ring?.dispose?.()
+    glowTexture.glow = null
+    glowTexture.ring = null
+    visuals = []
+    starVisual.clear()
+    hubVisual.clear()
+    coreVisual.clear()
+    claudeVisual = null
+    graphNodes = []
+    graphLinks = []
+    labelNudge.clear()
+    sparkSprites = []
+    moonSprites = []
+    moonLines = []
+    moonLabels = []
+    moonKey = ''
+    moonPlan = null
+    moonSpots = []
+    moonLinesTold = false
+    sceneChecks = 0
+    lineClasses = null
+    similarLines = null
+    similarCapacity = 0
+    similarKey = []
+    similarShown = []
+    similarMoves = -1
+    meaningCache = null
+    placesCache = null
+    starfieldMade = false
+    bloomPass = null
+    bloomPassBasic = null
+    three = null
+    flight = null
+    down = null
+    hovered = ''
+    pointer = { x: 0, y: 0, moved: false, inside: false }
+    placeDirty = true
+    linksDirty = true
+    linkFade = 1
+    seen = null
+    tip.hidden = true
+  }
+
   host.streamStatus?.(status => {
     connected = status === 'live'
     if (galaxy !== null) renderControls(galaxy)
   })
-  solarPage?.sync(state.layout)
   void loadGalaxy()
-  void start()
+  syncRenderer()
 
   return {
     visible(next: boolean) {

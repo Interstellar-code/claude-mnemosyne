@@ -16,6 +16,7 @@
 
 import { createMap, type MapView } from './map'
 import { fragmentAfterToken } from './map-state'
+import { createSolarScene } from './solar'
 import { extractionState, hasStatus, itemHead, NO_FILTER, neverUsedText, ownersOf, summaryLine, kindTabs, notice as knowledgeNotice, dotClass, ownerColour, ownerColours, parseKnowledge, tableRows, total as knowledgeTotal, type KnowledgeData, type KnowledgeFilter, type KnowledgeSort, type KnowledgeHost, type KnowledgeKind } from './knowledge'
 import { chartBars, chartText, coverageRows, dayBars, kpiTiles as healthKpiTiles, parseHealth, projectRows as healthProjectRows, storageList, storageSummary, tableFilterButtons, type HealthData, type HealthHost, type TableFilter } from './health'
 import { filterButtons, parseReview, reviewCounts, reviewList, reviewRow, reviewText, type ReviewData, type ReviewFilter, type ReviewHost } from './review'
@@ -689,7 +690,7 @@ export function show(view: View) {
     if (view === 'activity') startActivity()
     if (view === 'search') byId<HTMLInputElement>('search-query').focus()
     // The map (and its library, under /vendor/) loads only when the Map tab first opens.
-    if (view === 'map') map = createMap({ api: path => api(path), openMemory: openInMemories, status: setStatus, events: listener => useEvents().subscribe(listener), streamStatus: watcher => useEvents().onStatus(status => watcher(status)) })
+    if (view === 'map') map = createMap({ api: path => api(path), openMemory: openInMemories, status: setStatus, events: listener => useEvents().subscribe(listener), streamStatus: watcher => useEvents().onStatus(status => watcher(status)), solar: { createScene: options => createSolarScene({ canvas: options.canvas, three: options.three as Parameters<typeof createSolarScene>[0]['three'], onHover: options.onHover, onPick: options.onPick, onLevel: options.onLevel }), post: (path, body) => api(path, { method: 'POST', body }), embeddings: () => embeddingsOn, searchMode: () => searchMode } })
   }
   if (view === 'activity' && feedDirty) {
     feedDirty = false
