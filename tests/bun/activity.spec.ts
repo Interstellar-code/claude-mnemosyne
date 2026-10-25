@@ -2,8 +2,8 @@
 // 1 MB under an O_EXCL lock (one backup), takes over a stale lock, and never
 // throws. Real files in a temp folder, real Bun processes for the races.
 import { afterAll, describe, expect, test } from 'bun:test'
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { join, dirname } from 'node:path'
 import { appendActivity, LOCK_STALE_MS, MAX_BYTES, rotate } from '../../bin/activity'
 import { activityLine } from '../../hooks/activity-log'
 import { ROOT, tempDir, isolatedEnv } from './helpers'
@@ -204,4 +204,185 @@ describe('bin/activity.ts as a script', () => {
     expect(all).toEqual(Array.from({ length: 12 }, (_, w) => `q${w}`).sort())
     expect(existsSync(`${path}.lock`)).toBe(false)
   }, 60_000)
+})
+
+describe('activity daily tally (MAPX.3)', () => {
+  test('counting: remember/update add count, recall adds recalls, missing/non-positive count is 1, ok:false and other actions count nothing', () => {
+    const path = fresh()
+    const lines = [
+      activityLine({ action: 'remember', origin: 'tool', owner: 'p', text: 'a', ok: true, count: 2 }),
+      activityLine({ action: 'update', origin: 'tool', owner: 'p', text: 'b', ok: true, count: 3 }),
+      activityLine({ action: 'recall', origin: 'tool', owner: 'p', text: 'q', ok: true, count: 0 }),
+      activityLine({ action: 'recall', origin: 'tool', owner: 'p', text: 'q', ok: true }),
+      activityLine({ action: 'forget', origin: 'tool', owner: 'p', text: 'x', ok: true, count: 5 }),
+      activityLine({ action: 'remember', origin: 'tool', owner: 'p', text: 'c', ok: false, count: 7 }),
+    ]
+    appendActivity(path, lines)
+    const tally = JSON.parse(readFileSync(join(dirname(path), 'activity-daily.json'), 'utf8'))
+    const day = new Date().toISOString().slice(0, 10)
+    expect(tally.days.p[day].writes).toBe(5)
+    expect(tally.days.p[day].recalls).toBe(2)
+  })
+
+  test('UTC day: a late negative-offset t lands on the UTC day; missing t lands on today UTC', () => {
+    const path = fresh()
+    const now = new Date()
+    const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000)
+    const t = `${yesterday.toISOString().slice(0, 10)}T23:30:00-05:00`
+    const expected = new Date(t).toISOString().slice(0, 10)
+    appendActivity(path, [activityLine({ action: 'remember', origin: 'tool', owner: 'p', text: 'a', ok: true, t })])
+    appendActivity(path, [activityLine({ action: 'recall', origin: 'tool', owner: 'p', text: 'q', ok: true })])
+    const tally = JSON.parse(readFileSync(join(dirname(path), 'activity-daily.json'), 'utf8'))
+    expect(tally.days.p[expected]).toBeDefined()
+    expect(tally.days.p[new Date().toISOString().slice(0, 10)]).toBeDefined()
+  })
+
+  test('90-day drop: a day older than 90 days is gone after the next write, a recent one stays', () => {
+    const path = fresh()
+    const dir = dirname(path)
+    mkdirSync(dir, { recursive: true })
+    const oldDay = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), new Date().getUTCDate() - 100)).toISOString().slice(0, 10)
+    const recentDay = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), new Date().getUTCDate() - 10)).toISOString().slice(0, 10)
+    writeFileSync(join(dir, 'activity-daily.json'), JSON.stringify({ version: 1, days: { p: { [oldDay]: { writes: 1, recalls: 0 }, [recentDay]: { writes: 2, recalls: 0 } } } }))
+    appendActivity(path, [activityLine({ action: 'remember', origin: 'tool', owner: 'p', text: 'a', ok: true, t: new Date().toISOString() })])
+    const tally = JSON.parse(readFileSync(join(dir, 'activity-daily.json'), 'utf8'))
+    expect(tally.days.p[oldDay]).toBeUndefined()
+    expect(tally.days.p[recentDay]).toBeDefined()
+  })
+
+  test('corrupt tally file: garbage is rebuilt as valid JSON and the log line is still appended', () => {
+    const path = fresh()
+    const dir = dirname(path)
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'activity-daily.json'), '{garbage')
+    const line = activityLine({ action: 'remember', origin: 'tool', owner: 'p', text: 'a', ok: true })
+    appendActivity(path, [line])
+    const tally = JSON.parse(readFileSync(join(dir, 'activity-daily.json'), 'utf8'))
+    expect(tally.days.p).toBeDefined()
+    expect(readLines(path)).toEqual([line])
+  })
+
+  test('two writers at once leave a parseable file and both log lines', async () => {
+    const path = fresh()
+    const lineA = activityLine({ action: 'remember', origin: 'tool', owner: 'p', text: 'a', ok: true })
+    const lineB = activityLine({ action: 'remember', origin: 'tool', owner: 'p', text: 'b', ok: true })
+    const r1 = script(path, `${lineA}\n`)
+    const r2 = script(path, `${lineB}\n`)
+    const [a, b] = await Promise.all([r1, r2])
+    expect(a.exitCode).toBe(0)
+    expect(b.exitCode).toBe(0)
+    const tally = JSON.parse(readFileSync(join(dirname(path), 'activity-daily.json'), 'utf8'))
+    const day = new Date().toISOString().slice(0, 10)
+    expect(typeof tally.days?.p?.[day]?.writes).toBe('number')
+    expect(tally.days.p[day].writes).toBeLessThanOrEqual(2)
+    expect(readLines(path).length).toBe(2)
+  }, 60_000)
+
+  test("a recall with origin 'ui' is not counted", () => {
+    const path = fresh()
+    appendActivity(path, [activityLine({ action: 'recall', origin: 'ui', owner: 'p', text: 'q', ok: true, count: 9 })])
+    const tally = JSON.parse(readFileSync(join(dirname(path), 'activity-daily.json'), 'utf8'))
+    const day = new Date().toISOString().slice(0, 10)
+    expect(tally.days?.p?.[day]?.recalls ?? 0).toBe(0)
+  })
+
+  test('no text or id enters the tally file', () => {
+    const path = fresh()
+    appendActivity(path, [activityLine({ action: 'remember', origin: 'tool', owner: 'p', text: 'secret text', ok: true, ids: ['id-1', 'id-2'] })])
+    const raw = readFileSync(join(dirname(path), 'activity-daily.json'), 'utf8')
+    expect(raw).not.toContain('secret text')
+    expect(raw).not.toContain('id-1')
+    expect(raw).not.toContain('id-2')
+    expect(raw).not.toContain('"text"')
+    expect(raw).not.toContain('"ids"')
+  })
+
+  test.skipIf(!isPosix)('tally file mode is 0600', () => {
+    const path = fresh()
+    appendActivity(path, [activityLine({ action: 'remember', origin: 'tool', owner: 'p', text: 'a', ok: true })])
+    const st = statSync(join(dirname(path), 'activity-daily.json'))
+    expect((st.mode & 0o777).toString(8)).toBe('600')
+  })
+
+  test('a line the log drops is not counted; a log path not named activity.jsonl still tallies beside it', () => {
+    const path = join(fresh().replace('activity.jsonl', ''), 'other.jsonl')
+    mkdirSync(dirname(path), { recursive: true })
+    const longLine = JSON.stringify({ t: new Date().toISOString(), action: 'remember', origin: 'tool', owner: 'p', text: 'x'.repeat(20000), ids: [], count: 1, ok: true })
+    // ensure dropped by length
+    expect(longLine.length).toBeGreaterThan(16 * 1024)
+    const valid = activityLine({ action: 'remember', origin: 'tool', owner: 'p', text: 'ok', ok: true })
+    appendActivity(path, ['not an object', longLine, valid])
+    const tally = JSON.parse(readFileSync(join(dirname(path), 'activity-daily.json'), 'utf8'))
+    const day = new Date().toISOString().slice(0, 10)
+    expect(tally.days?.p?.[day]?.writes ?? 0).toBe(1)
+    expect(existsSync(join(dirname(path), 'activity-daily.json'))).toBe(true)
+  })
+  test.skipIf(!isPosix || process.getuid?.() === 0)('tally write failure leaves no tmp file and the log line is still written', () => {
+    const path = fresh()
+    const dir = dirname(path)
+    mkdirSync(dir, { recursive: true })
+    const tally = join(dir, 'activity-daily.json')
+    mkdirSync(tally) // make rename target a directory -> failure
+    try {
+      const line = activityLine({ action: 'remember', origin: 'tool', owner: 'p', text: 'a', ok: true })
+      appendActivity(path, [line])
+      expect(readLines(path)).toEqual([line])
+      const tmps = readdirSync(dir).filter(f => f.endsWith('.tmp'))
+      expect(tmps.length).toBe(0)
+    } finally {
+      rmSync(tally, { recursive: true, force: true })
+    }
+  })
+
+  test('owner "__proto__" keeps the tally valid and does not pollute Object.prototype', () => {
+    const before = Object.keys(Object.prototype).sort()
+    const path = fresh()
+    appendActivity(path, [activityLine({ action: 'remember', origin: 'tool', owner: '__proto__', text: 'a', ok: true, count: 1 })])
+    const after = Object.keys(Object.prototype).sort()
+    expect(after).toEqual(before)
+    const tally = JSON.parse(readFileSync(join(dirname(path), 'activity-daily.json'), 'utf8'))
+    expect(tally).toBeDefined()
+    expect(typeof tally.days).toBe('object')
+    expect(tally.days['__proto__']).toBeDefined()
+  })
+
+  test.skipIf(!isPosix)(`a stale tally lock older than ${LOCK_STALE_MS / 1000}s is taken over and the tally is written`, () => {
+    const path = fresh()
+    const dir = dirname(path)
+    mkdirSync(dir, { recursive: true })
+    const tally = join(dir, 'activity-daily.json')
+    const lockFile = `${tally}.lock`
+    writeFileSync(lockFile, '')
+    const old = new Date(Date.now() - LOCK_STALE_MS - 1000)
+    utimesSync(lockFile, old, old)
+    appendActivity(path, [activityLine({ action: 'remember', origin: 'tool', owner: 'p', text: 'a', ok: true })])
+    const parsed = JSON.parse(readFileSync(tally, 'utf8'))
+    const day = new Date().toISOString().slice(0, 10)
+    expect(parsed.days?.p?.[day]?.writes).toBe(1)
+    expect(existsSync(lockFile)).toBe(false)
+  })
+
+  test.skipIf(!isPosix)('skip under contention: a fresh tally lock is not taken, log line written, tally unchanged, no wait', () => {
+    const path = fresh()
+    const dir = dirname(path)
+    mkdirSync(dir, { recursive: true })
+    const tally = join(dir, 'activity-daily.json')
+    writeFileSync(tally, JSON.stringify({ version: 1, days: {} }))
+    const before = readFileSync(tally, 'utf8')
+    const lockFile = `${tally}.lock`
+    writeFileSync(lockFile, '')
+    const line = activityLine({ action: 'remember', origin: 'tool', owner: 'p', text: 'a', ok: true })
+    appendActivity(path, [line])
+    const after = readFileSync(tally, 'utf8')
+    expect(after).toBe(before)
+    expect(readLines(path)).toEqual([line])
+    rmSync(lockFile, { force: true })
+  })
+
+  test.skipIf(!isPosix)('tally creates its folder with mode 0700', () => {
+    const path = join(temp.dir, `case-${++n}`, 'nested', 'activity.jsonl')
+    appendActivity(path, [activityLine({ action: 'remember', origin: 'tool', owner: 'p', text: 'a', ok: true })])
+    const st = statSync(dirname(path))
+    expect((st.mode & 0o777).toString(8)).toBe('700')
+  })
 })
