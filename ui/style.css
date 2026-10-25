@@ -1054,7 +1054,7 @@ button.toggle-name:focus-visible { outline: 2px solid var(--accent); outline-off
 .solar-tour { position: absolute; left: 12px; bottom: 44px; z-index: 160; max-width: 50%; display: flex; flex-wrap: wrap; gap: 4px; }
 .solar-tour .tour-stop { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .solar-tour .tour-stop:focus { position: static; width: auto; height: auto; overflow: visible; clip-path: none; padding: 6px 10px; border-radius: 8px; border: 2px solid var(--stage-ink); background: var(--stage-panel); color: var(--stage-ink); font: inherit; font-size: 12px; }
-.bodies-strip { height: 132px; box-sizing: border-box; display: none; flex-direction: column; gap: 8px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+.bodies-strip { height: 146px; box-sizing: border-box; display: none; flex-direction: column; gap: 8px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
 .bodies-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
 .bodies-head .rail-title { margin: 0; }
 .bodies-all { margin-left: auto; min-height: 28px; padding: 0 10px; background: transparent; color: var(--text); border-color: var(--line-strong); font-size: 12px; }
@@ -1096,3 +1096,24 @@ button.toggle-name:focus-visible { outline: 2px solid var(--accent); outline-off
   .solar-hint { display: none; }
 }
 @media (prefers-reduced-motion: reduce) { .solar-canvas { cursor: default; } }
+/* The Galaxy page's placement, as in the mockup: the rail beside the map and the Bodies strip, the map running to the
+   right edge (no right column), then one full-width row with Details and, beside it, Live activity. */
+@media (min-width: 901px) {
+  #view-map.solar-on {
+    display: grid;
+    grid-template-columns: minmax(220px, 250px) minmax(0, 1.4fr) minmax(320px, 1fr);
+    grid-template-areas: 'rail stage stage' 'rail bodies bodies' 'details details live';
+    grid-template-rows: auto auto auto;
+    align-items: start;
+  }
+  .solar-on .map-centre, .solar-on .map-side { display: contents; }
+  .solar-on .map-rail { grid-area: rail; max-width: none; }
+  .solar-on .stage { grid-area: stage; height: clamp(480px, 58vh, 680px); }
+  .solar-on .bodies-strip { grid-area: bodies; }
+  .solar-on #map-inspector { grid-area: details; align-self: stretch; }
+  .solar-on .live-strip { grid-area: live; align-self: stretch; padding: 16px 18px; }
+}
+.solar-sim { display: flex; flex-wrap: wrap; gap: 6px; }
+.solar-sim .stage-btn { min-height: 34px; padding: 0 12px; font-size: 13px; background: transparent; color: var(--text); border-color: var(--line-strong); }
+.solar-sim .sim-recall { border-color: var(--data-recall); }
+.solar-sim .sim-write { border-color: var(--data-blue); }

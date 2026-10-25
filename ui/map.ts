@@ -414,7 +414,7 @@ type GraphLinkData = { source: string; target: string; kind: 'spoke' | 'bridge';
 // map-state.ts. It reaches the scene only through C13 (SolarSceneApi) and never imports ui/solar.ts.
 
 const GALAXY: Target = { level: 'galaxy' }
-const SOLAR_ONLY = ['solar-card-arrange', 'solar-card-colour', 'solar-card-show', 'solar-canvas', 'solar-path', 'solar-bodies', 'solar-legend-left', 'solar-legend-right', 'solar-tour', 'solar-hint', 'solar-views']
+const SOLAR_ONLY = ['solar-card-arrange', 'solar-card-colour', 'solar-card-show', 'solar-canvas', 'solar-path', 'solar-bodies', 'solar-legend-left', 'solar-legend-right', 'solar-tour', 'solar-hint', 'solar-views', 'solar-live-note', 'solar-sim']
 
 // ---- The Details panel (MAPX.7) ----
 //
@@ -690,7 +690,7 @@ export function renderPanel(box: HTMLElement, model: PanelModel, on: { tag: (nam
   box.replaceChildren(...parts)
 }
 
-type SolarMount = { sync: (layout: string) => void; active: () => boolean; failed: () => boolean }
+type SolarMount = { sync: (layout: string) => void; active: () => boolean; failed: () => boolean; simulate: (kind: 'recall' | 'write') => void }
 
 /** What the solar page needs from the map around it: the library (null when there is no WebGL, and the stage has said so) and the stage message. */
 type SolarShell = { library: () => Promise<MapLib | null>; loaded: () => MapLib | null; notice: (text: string) => void; clear: () => void }
@@ -1170,6 +1170,12 @@ function mountSolarPage(host: MapHost, solar: SolarHost, shell: SolarShell, stor
   return {
     active: () => active,
     failed: () => broken,
+    // The demo buttons (mockup and 0.6.0): a made-up event drawn by the scene; it never calls the server.
+    simulate(kind) {
+      if (!active || galaxy === null) return
+      const event = simulate(kind, galaxy)
+      if (event) send(scene => scene.event(event))
+    },
     sync(layout: string) {
       const on = layout === 'galaxy'
       if (on === active) return
@@ -2728,6 +2734,7 @@ export function createMap(host: MapHost): MapView {
   }
 
   function simulateOnce(kind: 'recall' | 'write') {
+    if (solarPage?.active()) return solarPage.simulate(kind)
     if (galaxy === null) return
     const event = simulate(kind, simulationInput(galaxy))
     if (event) enqueueEvent(event)
@@ -2822,7 +2829,8 @@ export function createMap(host: MapHost): MapView {
   }
   // Glow control: three buttons built here (index.html has no Glow card), placed after the Colour card.
   {
-    const card = el('details', undefined, 'rail-card')
+    // Timeline and Meaning only: the solar scene keeps the approved bloom.
+    const card = el('details', undefined, 'rail-card legacy-only')
     card.id = 'map-card-glow'
     const title = el('summary', 'Glow', 'rail-title')
     const body = el('div', undefined, 'rail-body')
@@ -2892,6 +2900,8 @@ export function createMap(host: MapHost): MapView {
   // Simulate a recall / write play demo events: they never call the server and never reach the Activity tab.
   byId<HTMLButtonElement>('map-sim-recall').addEventListener('click', () => simulateOnce('recall'))
   byId<HTMLButtonElement>('map-sim-write').addEventListener('click', () => simulateOnce('write'))
+  byId<HTMLButtonElement>('solar-sim-recall').addEventListener('click', () => simulateOnce('recall'))
+  byId<HTMLButtonElement>('solar-sim-write').addEventListener('click', () => simulateOnce('write'))
   // The two Simulate buttons hide behind a Demo toggle, closed at the start.
   const demo = byId<HTMLButtonElement>('map-demo')
   demo.addEventListener('click', () => {
