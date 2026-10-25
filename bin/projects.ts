@@ -9,12 +9,12 @@
 // real Mnemosyne root by itself, and only a file named projects.json is written.
 // The folder is created owner-only (0700) and the file is set to 0600 at every
 // write. The new text goes to a temp file that is renamed over the old one, under a
-// <path>.lock taken with O_EXCL (a lock older than LOCK_STALE_MS is taken over; a
+// <path>.lock taken with O_EXCL (a lock older than LOCK_STALE_MS is taken over by renaming it away, so only one writer can; a
 // writer that cannot get it gives up, and the next session start records the
 // project). firstSeen is kept, lastSeen is today's UTC date, and a registry that is
 // corrupt is rebuilt. Every error is swallowed and the script always exits 0: a
 // registry must never break the session that records it.
-import { chmodSync, closeSync, existsSync, fchmodSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeSync } from 'node:fs'
+import { chmodSync, closeSync, existsSync, fchmodSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeSync } from 'node:fs'
 import { basename, dirname } from 'node:path'
 import { formatProjects, mergeProject, parseProjects, PROJECTS_FILE, sanitizeInput } from '../hooks/projects'
 
@@ -31,6 +31,13 @@ const sleep = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(
 /** Today's date in UTC, YYYY-MM-DD. */
 export const utcToday = () => new Date().toISOString().slice(0, 10)
 
+const isStale = (file: string) => Date.now() - statSync(file).mtimeMs > LOCK_STALE_MS
+
+// Takes <path>.lock with O_EXCL. A lock older than LOCK_STALE_MS is first renamed to
+// a name of this writer's own, the way bin/activity.ts does it: of two writers that
+// both saw it stale, only one rename succeeds. If what was renamed is fresh, it was
+// a lock another writer had just taken, so it is linked back (link, like O_EXCL,
+// never replaces) and this writer waits for it like any other.
 function lock(path: string): string | undefined {
   const file = `${path}.lock`
   for (let attempt = 0; attempt < LOCK_TRIES; attempt++) {
@@ -41,7 +48,19 @@ function lock(path: string): string | undefined {
       if ((err as NodeJS.ErrnoException).code !== 'EEXIST') return undefined
       try {
         // A writer that died holding the lock must not block the registry for good.
-        if (Date.now() - statSync(file).mtimeMs > LOCK_STALE_MS) unlinkSync(file)
+        if (isStale(file)) {
+          const mine = `${file}.${process.pid}.${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`
+          renameSync(file, mine)
+          if (isStale(mine)) {
+            unlinkSync(mine)
+          } else {
+            try {
+              linkSync(mine, file)
+            } finally {
+              unlinkSync(mine)
+            }
+          }
+        }
       } catch {
         // another writer moved it first: the next attempt finds its lock or none
       }

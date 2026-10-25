@@ -5,7 +5,7 @@
 // are in tests/bun/projects.spec.ts, because this folder is typed and run without Node or
 // Bun (no file work, no dynamic import).
 import { expect, test } from 'claude-code/testing'
-import { formatProjects, mergeProject, parseProjects, projectName, remoteHostOf, sanitizeInput } from '../hooks/projects'
+import { formatProjects, MAX_NAME, mergeProject, parseProjects, projectName, remoteHostOf, sanitizeInput } from '../hooks/projects'
 
 const OWNER = 'project-My-Repo-apu5fc'
 const input = (over: Record<string, unknown> = {}) => ({ owner: OWNER, name: 'My Repo', kind: 'repo', remoteHost: 'github.com', ...over })
@@ -29,6 +29,13 @@ test('MAPX.8: every remote form gives its host alone: lower-case, no user, passw
     '  git@gitlab.com:o/r.git  ': 'gitlab.com',
   }
   for (const [remote, host] of Object.entries(hosts)) expect(remoteHostOf(remote)).toBe(host)
+})
+
+test('MAPX.8: a password with a raw slash in it still gives the host: everything up to the last @ is user info', () => {
+  expect(remoteHostOf('https://user:12/34@host/r')).toBe('host')
+  expect(remoteHostOf('https://user:12/34@Host.Example.org:8443/o/r.git')).toBe('host.example.org')
+  expect(remoteHostOf('https://u:p/a/b@c@github.com/o/r.git')).toBe('github.com')
+  expect(remoteHostOf('ssh://git:s3/cret@git.example.org/o/r')).toBe('git.example.org')
 })
 
 test("MAPX.8: a remote with no network host gives 'local'", () => {
@@ -102,6 +109,17 @@ test('MAPX.8: formatProjects sorts the owners, ends with a newline and round-tri
   expect(text.endsWith('\n')).toBe(true)
   expect(Object.keys(JSON.parse(text).projects)).toEqual(['project-a-1', 'project-b-2'])
   expect(parseProjects(text)).toEqual(file)
+})
+
+test('MAPX.8: a long folder name is kept: the display name is cut, the owner is not', () => {
+  const long = 'x'.repeat(250)
+  const owner = `project-${long}-1a2b3c4`
+  expect(projectName(`/work/${long}`)).toBe('x'.repeat(MAX_NAME))
+  const input = { owner, name: projectName(`/work/${long}`), kind: 'folder', remoteHost: null }
+  expect(sanitizeInput(input)).toEqual(input)
+  expect(sanitizeInput({ ...input, name: long })?.name).toBe('x'.repeat(MAX_NAME)) // a long name in the input is cut, not refused
+  const file = mergeProject(parseProjects(undefined), sanitizeInput(input)!, '2026-10-25')
+  expect(parseProjects(formatProjects(file)).projects[owner]?.name).toBe('x'.repeat(MAX_NAME))
 })
 
 test('MAPX.8: sanitizeInput refuses the global owner, a bad kind and any host that is not a bare host', () => {

@@ -713,8 +713,8 @@ const projectsSent = new WeakMap<object, Set<string>>()
 
 // C12: hands the project registry one record, { owner, name, kind, remoteHost }, at
 // session start, the way record() hands over activity lines: a detached $.process.spawn
-// drained in a task of its own, the script capping itself. Waits only for host calls,
-// never for the write, and never throws, so a registry failure cannot change the
+// drained in a task of its own, the script capping itself. The caller does not await
+// it (so a slow or hung $.session.repo() delays nothing), and it never throws or rejects, so a registry failure cannot change the
 // session start, a save or a recall. The owner is the one owner() gives; 'global'
 // (scope not per-project) is never recorded. The remote is cut to its host here, so
 // no URL, user name or token leaves the hook.
@@ -1350,7 +1350,7 @@ export const register: Register = (on, options) => {
       await Promise.all([secure($, options), syncWrapper($, options)]).catch(() => undefined)
       activity($, options, 'memory ready', 'ready')
     }
-    await registerProject($, options)
+    void registerProject($, options) // fire and forget: no host call it makes (repo, cwd, env) delays the session start
 
     return next(e)
   })

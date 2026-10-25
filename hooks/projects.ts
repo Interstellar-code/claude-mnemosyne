@@ -43,7 +43,8 @@ const DAY = /^\d{4}-\d{2}-\d{2}$/
 // A DNS name, an IPv4 address or an IPv6 address, lower-case; nothing that could carry a user, a port or a path.
 const HOST = /^(?:[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?|(?:[0-9a-f]{0,4}:){2,7}[0-9a-f.]{0,45})$/
 // 'project-<name>-<hash>' as owner() builds it; the prefix keeps 'global' and '__proto__' out of the registry.
-const OWNER = /^project-[A-Za-z0-9_-]{1,200}$/
+// owner() does not cap the folder name (up to 255 on most file systems), so the owner is kept whole; only the display name is cut to MAX_NAME.
+const OWNER = /^project-[A-Za-z0-9_-]{1,300}$/
 
 const isHost = (text: string) => text.length <= 253 && HOST.test(text)
 
@@ -88,7 +89,10 @@ export function remoteHostOf(remote: string | null | undefined): string | null {
   const url = /^([a-z][a-z0-9+.-]*):\/\/(.*)$/is.exec(text)
   if (url !== null) {
     if (url[1]!.toLowerCase() === 'file') return LOCAL_HOST
-    return hostOfAuthority(url[2]!.split(/[/?#]/, 1)[0] ?? '')
+    // Everything up to the last '@' before the query is user info, even a password with a raw '/' in it (user:12/34@host).
+    const beforeQuery = url[2]!.split(/[?#]/, 1)[0] ?? ''
+    const at = beforeQuery.lastIndexOf('@')
+    return hostOfAuthority((at < 0 ? beforeQuery : beforeQuery.slice(at + 1)).split('/', 1)[0] ?? '')
   }
   // scp-like: [user@]host:path. The colon must come before any slash, or it is a path (/a/b:c, ./a:b).
   const head = text.split('/', 1)[0] ?? ''

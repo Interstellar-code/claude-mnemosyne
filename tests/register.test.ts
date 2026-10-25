@@ -40,6 +40,8 @@ type Extra = {
   // MAPX.8: what $.session.repo() answers (null: a plain folder; default: a repo at /work/My Repo with no remote), whether it throws, and the folder $.session.cwd() names.
   repo?: { root: string; remote?: string | null } | null
   repoThrows?: boolean
+  // MAPX.8: the first $.session.repo() call (the registry's, at session start) never resolves; later calls answer.
+  repoHangsOnce?: boolean
   cwd?: string
   // MAPX.8: each `bun bin/projects.ts write <path>` spawn finishes (default), never finishes, or throws.
   projects?: 'ok' | 'hang' | 'throw'
@@ -71,8 +73,10 @@ function world(on: On, reply: string, isInstalled = true, exitCode = 0, build: s
     if (extra.session === 'throw') throw new Error('session store unavailable')
     return { value: 's1' }
   })
-  on('session.repo', () => {
+  let repoCalls = 0
+  on('session.repo', async () => {
     if (extra.repoThrows) throw new Error('git unavailable')
+    if (extra.repoHangsOnce && repoCalls++ === 0) await new Promise(() => {})
     return { value: extra.repo === undefined ? { root: '/work/My Repo', remote: null } : extra.repo } as never
   })
   on('session.cwd', () => ({ value: extra.cwd ?? '/work/scratch' }) as never)
@@ -2987,13 +2991,18 @@ const PROJECTS_PATH = '/home/u/.claude/mnemosyne/projects.json'
 const REPO_OWNER = 'project-My-Repo-apu5fc'
 const perProject = { options: { scope: 'per-project' } } as const
 
-/** Registers what a session start needs and starts one; resolves to the start's result. */
-async function startSession($: Engine, on: On) {
+/** Lets the registry's fire-and-forget task run: session start does not wait for it. */
+const settle = () => new Promise(resolve => setTimeout(resolve, 25))
+
+/** Registers what a session start needs and starts one; resolves to the start's result once the registry's task has had its turn (settled = false: at once). */
+async function startSession($: Engine, on: On, settled = true) {
   on('command.register', () => ({ value: {} }) as never)
   on('tool.register', () => ({ value: {} }) as never)
   on('ui.toast', () => ({ value: undefined }) as never)
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
-  return $.session.start({ cwd: '/w', surface: null, isInteractive: false } as never)
+  const started = await $.session.start({ cwd: '/w', surface: null, isInteractive: false } as never)
+  if (settled) await settle()
+  return started
 }
 
 const registered = (runs: { projects: Run[] }) => runs.projects.map(run => JSON.parse(run.init?.stdin ?? '{}'))
@@ -3053,6 +3062,7 @@ test('MAPX.8: at most one registry write per owner per process', perProject, asy
   const runs = world(on, '{}', true, 0, ENGINE_BUILD, { repo: { root: '/work/My Repo', remote: 'git@github.com:o/r.git' } })
   await startSession($, on)
   await $.session.start({ cwd: '/w', surface: null, isInteractive: false } as never)
+  await settle()
   expect(runs.projects.length).toBe(1)
 })
 
@@ -3075,9 +3085,34 @@ for (const [label, extra] of [
   })
 }
 
+// The registry is fire-and-forget: a host call it makes (here $.session.repo()) that
+// never answers cannot hold the session start, a save or the start's result.
+test('MAPX.8: a $.session.repo() that never resolves does not hold the session start, and a save still completes', perProject, async ($, on) => {
+  const runs = world(on, '{"status":"stored"}', true, 0, ENGINE_BUILD, { repoHangsOnce: true })
+  // Raced against a timer: a start that awaited the registry would lose the race (and a hang would time the test out).
+  const started = await Promise.race([startSession($, on, false), new Promise(resolve => setTimeout(() => resolve('held'), 2_000))])
+  expect(started).toMatchObject({ cwd: '/w' })
+  const saved = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', kind: 'fact', content: 'a local project fact' })
+  expect(JSON.parse(String(saved.result))).toEqual({ status: 'stored' })
+  expect(saved.deny).toBeUndefined()
+  expect(runs[runs.length - 1]!.init?.env?.MNEMOPI_SESSION_ID).toBe(REPO_OWNER)
+  expect(runs.projects).toEqual([]) // the registry is still waiting on the repo, and nothing was written
+})
+
 test('MAPX.8: a repo lookup that throws leaves the session start as it is and records nothing', perProject, async ($, on) => {
   const runs = world(on, '{}', true, 0, ENGINE_BUILD, { repoThrows: true })
   const started = await startSession($, on)
   expect(started).toMatchObject({ cwd: '/w' })
   expect(runs.projects).toEqual([])
+})
+
+// A folder name past the registry's display cap is recorded, cut for display; the owner stays as owner() gives it.
+test('MAPX.8: a folder name over the cap is recorded with a cut name and the whole owner', perProject, async ($, on) => {
+  const long = 'x'.repeat(240)
+  const runs = world(on, '{}', true, 0, ENGINE_BUILD, { repo: null, cwd: `/work/${long}` })
+  await startSession($, on)
+  const [sent] = registered(runs)
+  expect(sent.name).toBe('x'.repeat(200))
+  expect(sent.owner).toMatch(new RegExp(`^project-${long}-[a-z0-9]+$`))
+  expect(sent.kind).toBe('folder')
 })

@@ -113,6 +113,36 @@ describe('writeProjects', () => {
     utimesSync(`${path}.lock`, old, old)
     expect(writeProjects(path, input(), '2026-10-25')).toBe(true)
     expect(existsSync(`${path}.lock`)).toBe(false)
+    expect(readdirSync(dirname(path))).toEqual(['projects.json']) // the stale lock was renamed away and removed, not left behind
+  })
+
+  test('a stale lock taken over by several writers at once leaves a valid registry, no debris and no wedged lock', async () => {
+    const path = fresh()
+    mkdirSync(dirname(path), { recursive: true })
+    writeFileSync(`${path}.lock`, '')
+    const old = new Date(Date.now() - 60_000)
+    utimesSync(`${path}.lock`, old, old)
+    const owners = ['a', 'b', 'c', 'd', 'e'].map(c => `project-${c}-1`)
+    const write = (owner: string) => script(['write', path], JSON.stringify(input({ owner, name: owner })))
+    const runs = await Promise.all(owners.map(write))
+    expect(runs.map(run => run.exitCode)).toEqual(owners.map(() => 0))
+    expect(readdirSync(dirname(path))).toEqual(['projects.json']) // no .lock.<pid> leftover from the rename, no temp file
+    // A writer on a loaded machine may give up its 2 s wait (by design: its next session start records it), so
+    // what must hold is that the registry parses and a second round completes it: the takeover left no wedged lock.
+    expect(Object.keys(read(path).projects).length).toBeGreaterThan(0)
+    const missing = owners.filter(owner => read(path).projects[owner] === undefined)
+    for (const owner of missing) await write(owner)
+    expect(Object.keys(read(path).projects).sort()).toEqual(owners)
+  })
+
+  test('a stale lock that another writer has just replaced with a fresh one is linked back, not stolen', () => {
+    const path = fresh()
+    mkdirSync(dirname(path), { recursive: true })
+    // A fresh lock is the state after a rival's takeover: it must survive our attempt, and we must not write.
+    writeFileSync(`${path}.lock`, '')
+    expect(writeProjects(path, input(), '2026-10-25')).toBe(false)
+    expect(existsSync(`${path}.lock`)).toBe(true)
+    expect(readdirSync(dirname(path)).sort()).toEqual(['projects.json.lock'])
   })
 
   test('gives up on a fresh lock without writing, and leaves that lock alone', () => {
