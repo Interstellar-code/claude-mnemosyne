@@ -38,6 +38,14 @@ test('MAPX.8: a password with a raw slash in it still gives the host: everything
   expect(remoteHostOf('ssh://git:s3/cret@git.example.org/o/r')).toBe('git.example.org')
 })
 
+test('MAPX.8: an @ in the path is not user info: the host is read from the authority, with or without a port', () => {
+  expect(remoteHostOf('https://github.com/o/r@x')).toBe('github.com')
+  expect(remoteHostOf('https://host.com/path/with@at')).toBe('host.com')
+  expect(remoteHostOf('https://user@Host.com/path/with@at')).toBe('host.com')
+  expect(remoteHostOf('https://github.com:8443/o/r.git')).toBe('github.com')
+  expect(remoteHostOf('https://github.com/o/r.git?ref=a@b#c@d')).toBe('github.com')
+})
+
 test("MAPX.8: a remote with no network host gives 'local'", () => {
   for (const remote of ['/srv/git/r.git', '../r.git', './r', '~/code/r', 'r', 'file:///srv/git/r.git', 'file://localhost/srv/r', 'C:\\code\\r', 'C:/code/r', '/a/b:c', 'https:///o/r']) {
     expect(remoteHostOf(remote)).toBe('local')

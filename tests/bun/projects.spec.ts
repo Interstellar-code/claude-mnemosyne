@@ -138,11 +138,24 @@ describe('writeProjects', () => {
   test('a stale lock that another writer has just replaced with a fresh one is linked back, not stolen', () => {
     const path = fresh()
     mkdirSync(dirname(path), { recursive: true })
-    // A fresh lock is the state after a rival's takeover: it must survive our attempt, and we must not write.
-    writeFileSync(`${path}.lock`, '')
-    expect(writeProjects(path, input(), '2026-10-25')).toBe(false)
-    expect(existsSync(`${path}.lock`)).toBe(true)
-    expect(readdirSync(dirname(path)).sort()).toEqual(['projects.json.lock'])
+    const lock = `${path}.lock`
+    writeFileSync(lock, '')
+    const inode = statSync(lock).ino
+    // The rival's takeover lands between our staleness check and our rename: the first check sees a stale lock, the file we
+    // then rename away is fresh. The clock reads 60 s ahead once, then true.
+    const realNow = Date.now
+    let reads = 0
+    Date.now = () => (reads++ === 0 ? realNow() + 60_000 : realNow())
+    try {
+      // Without the link-back the renamed lock would be gone and the next attempt would take it and write (true).
+      expect(writeProjects(path, input(), '2026-10-25')).toBe(false)
+    } finally {
+      Date.now = realNow
+    }
+    expect(reads).toBeGreaterThan(1)
+    expect(existsSync(path)).toBe(false)
+    expect(statSync(lock).ino).toBe(inode) // the same lock file, linked back
+    expect(readdirSync(dirname(path)).sort()).toEqual(['projects.json.lock']) // no .lock.<pid> leftover
   })
 
   test('gives up on a fresh lock without writing, and leaves that lock alone', () => {
