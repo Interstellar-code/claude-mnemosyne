@@ -399,6 +399,8 @@ describe('POST /api/settings/update: plugin options go through the CLI only', ()
       join(world.home, '.omp'),
       join(world.home, '.omp', 'x'),
       '~/.omp/x',
+      // A drive letter is a path only on Windows; elsewhere the engine would read it as a relative folder.
+      ...(process.platform === 'win32' ? [] : ['C:/foo', 'c:\\foo']),
       '~/.claude/mnemosyne/Engine/s',
       '~/.claude/mnemosyne/engine.next/s',
       join(world.root, 'ENGINE.old', 's'),

@@ -240,7 +240,7 @@ function written(field: OptionField, value: unknown): string {
 
 /** memoryDir's own rules, rule for rule as hooks/register.ts paths() (a value it refuses throws on every save and recall): absolute or ~/..., no control characters, not inside ~/.omp or the engine folders (case ignored, as the macOS and Windows file systems do). */
 function memoryDirProblem(value: string, root: string, home: string): string | undefined {
-  if (!(value.startsWith('/') || value === '~' || value.startsWith('~/') || /^[A-Za-z]:[\\/]/.test(value))) return 'must be an absolute path or start with ~/'
+  if (!(value.startsWith('/') || value === '~' || value.startsWith('~/') || (process.platform === 'win32' && /^[A-Za-z]:[\\/]/.test(value)))) return 'must be an absolute path or start with ~/'
   if (process.platform === 'win32' && /["%]/.test(value)) return 'must not hold " or %'
   if (value.startsWith('/') || value === '~' || value.startsWith('~/')) {
     const full = resolvePath(value === '~' || value.startsWith('~/') ? join(home, value.slice(2)) : value).toLowerCase()
