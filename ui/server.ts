@@ -62,10 +62,17 @@ import { dirname, join, sep } from 'node:path'
 import { appendActivity } from '../bin/activity'
 import { liveUsers, UI_USERS } from '../bin/ui-users'
 import { hasTagSql, tagsSql, untaggedSql } from '../bin/memories'
+import { readConfig } from '../bin/settings'
+import { admitTag, aliasTag, listVocabulary } from '../bin/vocab'
 import { activityEntry, preview } from '../hooks/activity-log'
 import type { ActivityFields } from '../hooks/activity-log'
 import { buildRequests, engineEnv, parseReplies } from '../hooks/engine'
 import type { EngineRequest } from '../hooks/engine'
+import { admit, guardConfigOf, nearDuplicateFlags, nearDuplicateMessage, nearMatchesOf, NEAR_DUPLICATE_SCORE } from '../hooks/guard'
+import type { GuardHit, NearMatch } from '../hooks/guard'
+import { expiresInDaysProblem, isKind, KIND_LIST, validUntilFor } from '../hooks/kinds'
+import { cleanTags, normalizeTag } from '../hooks/tags'
+import { tagRules, VOCAB_FILE } from '../hooks/vocab'
 import { CORE_SPREAD } from './map-layout'
 import { settingsRoutes } from './settings-routes'
 import type { SettingsDeps } from './settings-routes'
@@ -111,6 +118,8 @@ export const SEARCH_OWNERS = 10
 export const MAX_QUERY_CHARS = 500
 // A POST body past this is refused unread.
 export const MAX_BODY_BYTES = 4096
+// Create and update carry a memory's text (the guard allows up to 8000 characters, 4000 by default), so their cap is larger.
+export const MAX_WRITE_BODY_BYTES = 24 * 1024
 // GET /api/activity: the last lines, newest first.
 export const ACTIVITY_DEFAULT = 200
 export const ACTIVITY_MAX = 1000
@@ -1970,8 +1979,9 @@ type Views = {
   run: (config: Pick<Config, 'cli' | 'store'>, requests: readonly EngineRequest[], owner: string, runOptions?: RunOptions) => Promise<(string | Error)[]>
   // True while a search runs: one at a time.
   searching: boolean
-  // Forgets reach the engine one at a time: two engine processes deleting at once can fail with "database is locked".
-  forgets: ReturnType<typeof limiter>
+  // Writes reach the engine one at a time (create, update, retire, restore and forget share this): two engine
+  // processes writing at once can fail with "database is locked".
+  writes: ReturnType<typeof limiter>
 }
 
 // What the page gets when the engine fails: the detail goes to the activity log only.
@@ -2058,7 +2068,7 @@ async function forget(views: Views, text: string): Promise<Answer> {
   const owner = row.owner
   if (typeof owner !== 'string' || owner === '') return { status: 409, body: { error: 'this memory has no owner to forget it as' } }
   // One at a time (and once more if the store was busy with a write from outside this server).
-  const forgetOnce = () => views.forgets.run(async () => (await views.run(views.config, [['mnemopi_forget', { memory_id: id }]], owner))[0])
+  const forgetOnce = () => views.writes.run(async () => (await views.run(views.config, [['mnemopi_forget', { memory_id: id }]], owner))[0])
   let answer = await forgetOnce()
   if (isLocked(answer)) {
     await new Promise(resolve => setTimeout(resolve, LOCK_RETRY_MS))
@@ -2090,6 +2100,262 @@ async function forget(views: Views, text: string): Promise<Answer> {
   }
   views.log({ ...logged, count: 0, ok: false, error: message }, extra)
   return { status: 502, body: { error: `${ENGINE_FAILED} Nothing was deleted.` } }
+}
+
+// ---- Dashboard writes (CRUDX): create and update, then retire and restore ----
+//
+// Every route here is reached only through post() (the page's own Origin, JSON, a body cap) behind the outer Host
+// and token checks. A save runs the same guard as the other save paths (hooks/guard.ts, the settings resolved
+// from <root>/config.json at each call) and goes through the engine as the row's owner. Nothing here retires or
+// deletes more than the one memory named. The activity line holds ids and rule ids, never memory text (C8).
+
+/** The vocabulary file's text for tagRules; undefined when there is none or it cannot be read (a write never fails on it). */
+function vocabularyText(root: string): string | undefined {
+  try {
+    return readFileSync(join(root, VOCAB_FILE), 'utf8')
+  } catch {
+    return undefined
+  }
+}
+
+/** Why an optional field of a create or update body cannot be used, or undefined when they are fine. */
+function writeFieldProblem(body: Record<string, unknown>): string | undefined {
+  const { tags, importance, expires_in_days: days, confirm, pinned } = body
+  if (tags !== undefined && !(Array.isArray(tags) && tags.length <= 50 && tags.every(tag => typeof tag === 'string'))) return 'tags must be an array of strings'
+  if (importance !== undefined && !(typeof importance === 'number' && Number.isFinite(importance))) return 'importance must be a number from 0 to 1'
+  if (days !== undefined) {
+    const bad = expiresInDaysProblem(days)
+    if (bad !== undefined) return bad
+  }
+  if (confirm !== undefined && typeof confirm !== 'boolean') return 'confirm must be true or false'
+  if (pinned !== undefined && typeof pinned !== 'boolean') return 'pinned must be true or false'
+  return undefined
+}
+
+const clampImportance = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : 0.5)
+
+/** The engine's reply as an object, or why it failed: `class` is safe to log, `detail` is the engine's own message. */
+function engineReply(answer: string | Error | undefined): { reply: Record<string, unknown> } | { class: string; detail: string } {
+  if (answer === undefined) return { class: 'the engine gave no reply', detail: 'the engine gave no reply' }
+  if (answer instanceof Error) return { class: 'the engine failed', detail: answer.message }
+  const reply = parseMetadata(answer)
+  if (reply === null) return { class: 'the engine reply is not JSON', detail: 'the engine reply is not JSON' }
+  if (typeof reply.error === 'string') return { class: 'the engine refused the call', detail: reply.error }
+  return { reply }
+}
+
+/**
+ * G3 for a dashboard save: the close memories (setting G5's score) of `content`, from the engine's mnemopi_similar,
+ * as `owner`. Advisory and so open on failure, as the plugin's own save path is: embeddings off, the check switched off
+ * (G5) or any failure gives none. `ownId` is a row being edited, which is never a near-duplicate of itself.
+ */
+async function nearDuplicates(views: Views, content: string, owner: string, threshold: number, ownId?: string): Promise<NearMatch[]> {
+  if (!embeddingsOn()) return []
+  try {
+    const [answer] = await views.run(views.config, [['mnemopi_similar', { content, top_k: 3, min_score: threshold }]], owner)
+    const reply = typeof answer === 'string' ? parseMetadata(answer) : null
+    return reply?.embeddings === true ? nearMatchesOf(reply.matches, content, owner, threshold).filter(match => match.id !== ownId) : []
+  } catch {
+    return []
+  }
+}
+
+type SaveChecked = { answer: Answer } | { flags: string[] }
+
+/**
+ * The guard for a dashboard save of `content` (C7): a block is 422 with the rule ids and no override; a warning (the
+ * guard's, or a near-duplicate) is 409 with the hits unless `confirm` is true. A confirmed save still carries the rule
+ * ids and near-duplicate ids as metadata.guard, as a warned save does on the other paths.
+ */
+async function checkSave(views: Views, input: { content: string; kind: string | undefined; owner: string; confirm: boolean; ownId?: string; logged: ActivityFields }): Promise<SaveChecked> {
+  const settings = readConfig(views.config.root)
+  const guard = admit({ content: input.content, kind: input.kind, origin: 'dashboard' }, guardConfigOf(settings))
+  if (guard.verdict === 'block') {
+    const ids = [...new Set(guard.hits.map(hit => hit.rule))]
+    views.log({ ...input.logged, ok: false, error: `guard:${ids.join(',')}` }, { client: 'dashboard' })
+    return { answer: { status: 422, body: { error: 'The save guard blocked this text.', verdict: 'block', hits: guard.hits } } }
+  }
+  const near = settings.guard.nearDuplicate ? await nearDuplicates(views, input.content, input.owner, settings.guard.nearDuplicateScore, input.ownId) : []
+  const warnings: GuardHit[] = guard.verdict === 'warn' ? guard.hits : []
+  if ((warnings.length > 0 || near.length > 0) && !input.confirm) {
+    const hits = [...warnings, ...(near.length > 0 ? [{ rule: 'G3', message: nearDuplicateMessage(near) }] : [])]
+    return { answer: { status: 409, body: { error: 'The save guard warns about this text. Send it again with confirm: true to save it anyway.', verdict: 'warn', hits, near } } }
+  }
+  return { flags: [...new Set(warnings.map(hit => hit.rule)), ...nearDuplicateFlags(near)] }
+}
+
+const OWNERS_MISSING = { status: 400, body: { error: 'no such owner in the store' } }
+
+/** POST /api/memory/create {owner, content, kind, tags?, importance?, expires_in_days?, confirm?}: the engine's remember, as `owner`. */
+async function createMemory(views: Views, text: string): Promise<Answer> {
+  const body = plainBody(text, ['owner', 'content', 'kind', 'tags', 'importance', 'expires_in_days', 'confirm'])
+  if (typeof body === 'string') return { status: 400, body: { error: body } }
+  const { owner, content, kind, tags } = body
+  if (typeof owner !== 'string' || owner === '') return { status: 400, body: { error: 'owner must be a non-empty string' } }
+  if (typeof content !== 'string') return { status: 400, body: { error: 'content must be a string' } }
+  if (!isKind(kind)) return { status: 400, body: { error: `kind is required: one of ${KIND_LIST}.` } }
+  const problem = writeFieldProblem(body)
+  if (problem !== undefined) return { status: 400, body: { error: problem } }
+  views.store.db ??= openStore(views.config.store)
+  if (owner !== 'global' && !storeOwners(views.store.db).includes(owner)) return OWNERS_MISSING
+  const logged = { action: 'remember', origin: 'ui', owner, count: 0, ok: false, author_type: 'human', veracity: 'stated' } as const
+  const checked = await checkSave(views, { content, kind, owner, confirm: body.confirm === true, logged })
+  if ('answer' in checked) return checked.answer
+  const settings = readConfig(views.config.root)
+  const clean = Array.isArray(tags) ? cleanTags(tags, { ...tagRules(vocabularyText(views.config.root), owner), max: settings.tags.maxPerMemory }) : []
+  // A context note fades after the context days (setting E1) unless expires_in_days says otherwise, as on the other save paths.
+  const validUntil = validUntilFor(kind, body.expires_in_days, Date.now(), settings.expiry.contextDays)
+  const metadata = { ...(clean.length > 0 ? { tags: clean } : {}), ...(checked.flags.length > 0 ? { guard: checked.flags } : {}) }
+  const request: EngineRequest = [
+    'mnemopi_remember',
+    {
+      content,
+      importance: clampImportance(body.importance),
+      // C4: a dashboard save is the person's own, stated; scope keeps the row out of the engine's 24-hour trim.
+      source: 'dashboard',
+      trust_tier: 'STATED',
+      veracity: 'stated',
+      scope: owner === 'global' ? 'global' : 'channel',
+      author_id: 'dashboard',
+      author_type: 'human',
+      memory_type: kind,
+      ...(validUntil === undefined ? {} : { valid_until: validUntil }),
+      ...(Object.keys(metadata).length > 0 ? { metadata } : {}),
+    },
+  ]
+  const outcome = engineReply((await views.writes.run(() => views.run(views.config, [request], owner)))[0])
+  const id = 'reply' in outcome && outcome.reply.status === 'stored' && isMemoryId(outcome.reply.memory_id) ? outcome.reply.memory_id : undefined
+  if (id === undefined) {
+    views.log({ ...logged, error: 'class' in outcome ? outcome.class : 'the engine did not store the memory' }, { client: 'dashboard' })
+    return { status: 502, body: { error: `${ENGINE_FAILED} Nothing was saved.` } }
+  }
+  views.log({ ...logged, ids: [id], count: 1, ok: true }, { client: 'dashboard' })
+  return { status: 200, body: { status: 'stored', memory_id: id, owner, kind, ...(validUntil === undefined ? {} : { valid_until: validUntil }), ...(checked.flags.length > 0 ? { guard: checked.flags } : {}) } }
+}
+
+/** POST /api/memory/update {memory_id, content?, kind?, tags?, importance?, expires_in_days?, pinned?, confirm?}: the engine's update, as the row's owner. */
+async function updateMemory(views: Views, text: string): Promise<Answer> {
+  const body = plainBody(text, ['memory_id', 'content', 'kind', 'tags', 'importance', 'expires_in_days', 'pinned', 'confirm'])
+  if (typeof body === 'string') return { status: 400, body: { error: body } }
+  const { memory_id: id, content, kind, tags, pinned } = body
+  if (!isMemoryId(id)) return { status: 400, body: { error: 'memory_id must be a non-empty string of at most 64 characters' } }
+  if (content !== undefined && typeof content !== 'string') return { status: 400, body: { error: 'content must be a string' } }
+  if (kind !== undefined && !isKind(kind)) return { status: 400, body: { error: `unknown kind: use one of ${KIND_LIST}.` } }
+  const problem = writeFieldProblem(body)
+  if (problem !== undefined) return { status: 400, body: { error: problem } }
+  if (['content', 'kind', 'tags', 'importance', 'expires_in_days', 'pinned'].every(key => body[key] === undefined)) {
+    return { status: 400, body: { error: 'give at least one of content, kind, tags, importance, expires_in_days or pinned' } }
+  }
+  views.store.db ??= openStore(views.config.store)
+  const row = views.store.db?.query('SELECT session_id AS owner, memory_type AS kind FROM working_memory WHERE id = ?').get(id) as { owner: string | null; kind: string | null } | null | undefined
+  if (row === null || row === undefined) return { status: 404, body: { status: 'not_found', memory_id: id, error: 'That memory is gone; nothing was changed.' } }
+  const owner = row.owner
+  if (typeof owner !== 'string' || owner === '') return { status: 409, body: { error: 'this memory has no owner to update it as' } }
+  const logged = { action: 'update', origin: 'ui', owner, ids: [id], count: 0, ok: false } as const
+  const settings = readConfig(views.config.root)
+  const metadata: Record<string, unknown> = {}
+  if (Array.isArray(tags)) {
+    const clean = cleanTags(tags, { ...tagRules(vocabularyText(views.config.root), owner), max: settings.tags.maxPerMemory })
+    // Tags that all clean away must not read as "remove the tags": [] is how those are removed.
+    if (clean.length === 0 && tags.length > 0) {
+      return { status: 400, body: { error: 'none of those tags can be stored (a tag may not be the project name, and needs a letter or digit). Send tags: [] to remove the tags.' } }
+    }
+    metadata.tags = clean.length > 0 ? clean : null
+  }
+  if (typeof pinned === 'boolean') metadata.pinned = pinned
+  if (typeof content === 'string') {
+    const checked = await checkSave(views, { content, kind: typeof kind === 'string' ? kind : (row.kind ?? undefined), owner, confirm: body.confirm === true, ownId: id, logged })
+    if ('answer' in checked) return checked.answer
+    // A content change that is clean now clears an old guard flag.
+    metadata.guard = checked.flags.length > 0 ? checked.flags : null
+  }
+  const days = body.expires_in_days
+  const request: EngineRequest = [
+    'mnemopi_update',
+    {
+      memory_id: id,
+      validator: 'dashboard',
+      ...(typeof content === 'string' ? { content } : {}),
+      ...(body.importance === undefined ? {} : { importance: clampImportance(body.importance) }),
+      ...(typeof kind === 'string' ? { memory_type: kind } : {}),
+      // expires_in_days null clears the expiry; a number sets it from now.
+      ...(days === undefined ? {} : { valid_until: days === null ? null : validUntilFor(kind, days) }),
+      ...(Object.keys(metadata).length > 0 ? { metadata } : {}),
+    },
+  ]
+  const outcome = engineReply((await views.writes.run(() => views.run(views.config, [request], owner)))[0])
+  if ('reply' in outcome && outcome.reply.status === 'updated') {
+    views.log({ ...logged, count: 1, ok: true }, { client: 'dashboard' })
+    return { status: 200, body: { status: 'updated', memory_id: id, owner } }
+  }
+  if ('reply' in outcome && outcome.reply.status === 'not_found') {
+    views.log({ ...logged, error: 'not_found' }, { client: 'dashboard' })
+    return { status: 404, body: { status: 'not_found', memory_id: id, error: 'That memory is gone; nothing was changed.' } }
+  }
+  views.log({ ...logged, error: 'class' in outcome ? outcome.class : 'the engine did not update the memory' }, { client: 'dashboard' })
+  return { status: 502, body: { error: `${ENGINE_FAILED} Nothing was changed.` } }
+}
+
+/** POST /api/memory/retire {memory_id, replaced_by?}: the engine's invalidate as the row's owner. Never deletes; restore undoes it. */
+async function retireMemory(views: Views, text: string): Promise<Answer> {
+  const body = plainBody(text, ['memory_id', 'replaced_by'])
+  if (typeof body === 'string') return { status: 400, body: { error: body } }
+  const { memory_id: id, replaced_by: replacement } = body
+  if (!isMemoryId(id)) return { status: 400, body: { error: 'memory_id must be a non-empty string of at most 64 characters' } }
+  views.store.db ??= openStore(views.config.store)
+  const found = (memoryId: string) =>
+    views.store.db?.query('SELECT session_id AS owner, valid_until, superseded_by FROM working_memory WHERE id = ?').get(memoryId) as
+      | { owner: string | null; valid_until: string | null; superseded_by: string | null }
+      | null
+      | undefined
+  if (replacement !== undefined && (!isMemoryId(replacement) || replacement === id || found(replacement) == null)) {
+    return { status: 400, body: { error: 'replaced_by must be the id of another memory in the store' } }
+  }
+  const row = found(id)
+  if (row === null || row === undefined) return { status: 404, body: { status: 'not_found', memory_id: id, error: 'That memory is gone; nothing was retired.' } }
+  const owner = row.owner
+  if (typeof owner !== 'string' || owner === '') return { status: 409, body: { error: 'this memory has no owner to retire it as' } }
+  if (memoryState(row) !== 'live') return { status: 409, body: { error: 'That memory is already not live; restore it first to retire it again.' } }
+  const logged = { action: 'retire', origin: 'ui', owner, ids: [id], count: 0, ok: false } as const
+  const request: EngineRequest = ['mnemopi_invalidate', { memory_id: id, validator: 'dashboard', ...(typeof replacement === 'string' ? { replacement_id: replacement } : {}) }]
+  const outcome = engineReply((await views.writes.run(() => views.run(views.config, [request], owner)))[0])
+  if ('reply' in outcome && outcome.reply.status === 'invalidated') {
+    views.log({ ...logged, count: 1, ok: true }, { client: 'dashboard' })
+    return { status: 200, body: { status: 'retired', memory_id: id, owner, ...(typeof replacement === 'string' ? { replaced_by: replacement } : {}) } }
+  }
+  if ('reply' in outcome && outcome.reply.status === 'not_found') {
+    views.log({ ...logged, error: 'not_found' }, { client: 'dashboard' })
+    return { status: 404, body: { status: 'not_found', memory_id: id, error: 'That memory is gone; nothing was retired.' } }
+  }
+  views.log({ ...logged, error: preview('detail' in outcome ? outcome.detail : 'the engine did not retire the memory') }, { client: 'dashboard' })
+  return { status: 502, body: { error: `${ENGINE_FAILED} Nothing was retired.` } }
+}
+
+/** POST /api/memory/restore {memory_id}: the engine's update with restore: true, as the row's owner. */
+async function restoreMemory(views: Views, text: string): Promise<Answer> {
+  const body = plainBody(text, ['memory_id'])
+  if (typeof body === 'string') return { status: 400, body: { error: body } }
+  const id = body.memory_id
+  if (!isMemoryId(id)) return { status: 400, body: { error: 'memory_id must be a non-empty string of at most 64 characters' } }
+  views.store.db ??= openStore(views.config.store)
+  const row = views.store.db?.query('SELECT session_id AS owner FROM working_memory WHERE id = ?').get(id) as { owner: string | null } | null | undefined
+  if (row === null || row === undefined) return { status: 404, body: { status: 'not_found', memory_id: id, error: 'That memory is gone; nothing was restored.' } }
+  const owner = row.owner
+  if (typeof owner !== 'string' || owner === '') return { status: 409, body: { error: 'this memory has no owner to restore it as' } }
+  const logged = { action: 'restore', origin: 'ui', owner, ids: [id], count: 0, ok: false } as const
+  const request: EngineRequest = ['mnemopi_update', { memory_id: id, restore: true, validator: 'dashboard' }]
+  const outcome = engineReply((await views.writes.run(() => views.run(views.config, [request], owner)))[0])
+  const status = 'reply' in outcome ? outcome.reply.status : undefined
+  if (status === 'restored' || status === 'unchanged') {
+    views.log({ ...logged, count: status === 'restored' ? 1 : 0, ok: true }, { client: 'dashboard' })
+    return { status: 200, body: { status, memory_id: id, owner } }
+  }
+  if (status === 'not_found') {
+    views.log({ ...logged, error: 'not_found' }, { client: 'dashboard' })
+    return { status: 404, body: { status: 'not_found', memory_id: id, error: 'That memory is gone; nothing was restored.' } }
+  }
+  views.log({ ...logged, error: preview('detail' in outcome ? outcome.detail : 'the engine did not restore the memory') }, { client: 'dashboard' })
+  return { status: 502, body: { error: `${ENGINE_FAILED} Nothing was restored.` } }
 }
 
 export type Started = { port: number; token: string; stop: () => void }
@@ -2164,7 +2430,7 @@ export async function startServer(config: Config, options: ServerOptions = {}): 
     log,
     run: (cfg, requests, owner, runOptions) => engines.run(() => runEngine(cfg, requests, owner, process.env, engineTimeoutMs, runOptions)),
     searching: false,
-    forgets: limiter(1),
+    writes: limiter(1),
   }
   const settings = settingsRoutes(config, fields => log(fields, { client: 'dashboard' }), options.settings)
   const streams = new Set<() => void>()
@@ -2172,15 +2438,15 @@ export async function startServer(config: Config, options: ServerOptions = {}): 
   const meaning = options.meaningRunner ?? new MeaningRunner()
   const meaningWaitMs = options.meaningWaitMs ?? MEANING_WAIT_MS
 
-  // The two POST routes: the page's own origin, JSON, a small body; then the handler.
-  async function post(request: Request, handle: (views: Views, text: string) => Promise<Answer>) {
+  // Every POST route: the page's own origin, JSON, a body within the route's cap (4096 bytes unless the route says more); then the handler.
+  async function post(request: Request, handle: (views: Views, text: string) => Promise<Answer>, maxBytes = MAX_BODY_BYTES) {
     if (request.method !== 'POST') return notAllowed('POST')
     if (request.headers.get('origin') !== `http://${host}`) return json({ error: 'forbidden origin' }, 403)
     const type = (request.headers.get('content-type') ?? '').split(';')[0]?.trim().toLowerCase()
     if (type !== 'application/json') return json({ error: 'the body must be application/json' }, 415)
-    if (Number(request.headers.get('content-length') ?? 0) > MAX_BODY_BYTES) return json({ error: 'the body is too large' }, 413)
+    if (Number(request.headers.get('content-length') ?? 0) > maxBytes) return json({ error: 'the body is too large' }, 413)
     const text = await request.text()
-    if (Buffer.byteLength(text) > MAX_BODY_BYTES) return json({ error: 'the body is too large' }, 413)
+    if (Buffer.byteLength(text) > maxBytes) return json({ error: 'the body is too large' }, 413)
     const answer = await handle(views, text)
     return json(answer.body, answer.status)
   }
@@ -2295,6 +2561,10 @@ export async function startServer(config: Config, options: ServerOptions = {}): 
     }
     if (path === '/api/search') return post(request, search)
     if (path === '/api/forget') return post(request, forget)
+    if (path === '/api/memory/create') return post(request, createMemory, MAX_WRITE_BODY_BYTES)
+    if (path === '/api/memory/update') return post(request, updateMemory, MAX_WRITE_BODY_BYTES)
+    if (path === '/api/memory/retire') return post(request, retireMemory)
+    if (path === '/api/memory/restore') return post(request, restoreMemory)
     // These wait on the claude CLI (20 s) or a backup (120 s), longer than Bun's 10 s idle timeout,
     // so a cut connection would leave the write running and `busy` set.
     if (path === '/api/settings') {
