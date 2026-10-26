@@ -48,6 +48,10 @@ export type UiPaths = {
   extraction?: string
   /** Whether embeddings are on for this server ('on'/'off'), or 'unknown' (C11). */
   embeddings?: string
+  /** The plugin's id (`name@marketplace`) the settings page asks `claude plugin configure` about; defaults to `<name>@<name>`. */
+  pluginId?: string
+  /** The claude CLI the settings page runs; the server uses `claude` when absent. */
+  claudeCli?: string
 }
 
 type State = { port: number; token: string; pid: number }
@@ -148,6 +152,8 @@ function start($: EngineInterface, paths: UiPaths, session: string) {
     settle = resolve
   })
   const entry: Entry = { stop: () => stopLoop(), ended: Promise.resolve() }
+  // The settings page asks the claude CLI about the plugin's options by this id (a --plugin-dir install has none that answers).
+  const pluginId = paths.pluginId ?? `${$.plugin.name}@${$.plugin.name}`
   const loop = (async () => {
     const stream = $.process.spawn({
       argv: ['bun', `${paths.plugin}/ui/server.ts`, '--hold'],
@@ -161,6 +167,8 @@ function start($: EngineInterface, paths: UiPaths, session: string) {
         MNEMOSYNE_EXTRACTION: paths.extraction ?? 'unknown',
         // C11: and the embeddings setting it started with ('on'/'off'/'unknown').
         MNEMOSYNE_EMBEDDINGS: paths.embeddings ?? 'unknown',
+        ...(pluginId ? { MNEMOSYNE_PLUGIN_ID: pluginId } : {}),
+        ...(paths.claudeCli ? { MNEMOSYNE_CLAUDE_CLI: paths.claudeCli } : {}),
       },
     })
     const pieces = stream[Symbol.asyncIterator]()
