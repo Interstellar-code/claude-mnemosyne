@@ -335,7 +335,7 @@ The extracted items are stored in the engine's own tables (facts, preferences, i
 ### What 0.7.0 does not do yet
 
 1. Moons for a memory saved or extracted after the page loaded show only after you reload the dashboard page: the map reads the knowledge once, when the page loads.
-2. The dashboard keeps the `extractionModel` and the `embeddings` setting it started with. After you change either, `/mnemosyne-ui` on the running dashboard says it must be restarted: end the session that started it, then run `/mnemosyne-ui` again.
+2. The dashboard keeps the `extractionModel` and the `embeddings` setting it started with. After you change either, `/mnemosyne-ui` on the running dashboard says it must be restarted: end every session that opened or reused it (`/clear` counts), then run `/mnemosyne-ui` again.
 3. Saves by outside agents (Codex, Cursor and others, through the proxy) get no automatic extraction. They need `/mnemosyne-knowledge apply`.
 4. This update needs the plugin's newer engine build (`18.12.3-mnemosyne.10`, which has the knowledge tools, local embeddings and `reembed`): run `/mnemosyne-setup` once after updating. Until then extraction stays off and says so in the activity log (`engine out of date`), and embeddings are off: they switch on only after setup has downloaded the model.
 5. Embeddings are tested on macOS on Apple Silicon only. On Windows and Linux they are off under `auto`, and turning them on is not verified there.
