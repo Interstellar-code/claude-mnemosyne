@@ -547,6 +547,7 @@ The 0.9.0 phases were written on 2026-10-24, before waves 1-3b were built. On 20
 13. SESSION task order disagreed. The wave table said SESSION.1, .2, .4; the blocks ran 1, 4, 2. The blocks are reordered to 1, 2, 4.
 14. REL9 was blocked by Rohit's manual runs (HARDEN.4, HARDEN.5). Coordinator default: REL9 now needs only HARDEN.3. The review-and-retire pass and the knowledge backfill use the shipped tools and can happen after the 0.9.0 tag.
 15. Engine log growth is still real. `~/.claude/mnemosyne/model-cache/logs` holds 481 files today (2026-10-25), so HARDEN.3 stays as written.
+16. 0.8.5 landed first (2026-10-26) and added `hooks/settings.ts` (the schema and resolver for `<root>/config.json`), the `settings` activity action (`ActivityAction` in `hooks/activity-log.ts`) and the four settings routes (`GET /api/settings`, `POST /api/settings/update`, `POST /api/settings/reset`, `POST /api/backup`, in `ui/settings-routes.ts`). CRUDX.0 adds its actions on top of `settings`, and CRUDX and CRUD rebase onto the new route table and the Settings tab, not onto the 0.8.4 files.
 
 Checked and correct as written: the engine tools `mnemopi_similar`, `mnemopi_expire_unused` (days at least 30, default kinds context, event, error and artifact, dry run by default, honours `metadata.pinned`), update's `restore` and metadata merge, and the `validator` argument; `bin/vocab.ts admit` and `alias`; `bin/memories.ts backup`; the `guardMode` option; `$.model.complete` for Haiku calls; HARDEN.1 and HARDEN.2, done in 0.8.0.
 
