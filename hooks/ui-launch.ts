@@ -5,14 +5,17 @@
 // One server is shared: any session's later call pings the server ui.json
 // names and reuses it while it answers. Every session that opens or reuses it
 // is listed in <root>/ui-users.json (bin/ui-users.ts, with its Claude process id),
-// and the server stays up until the last of them is gone. The session that
-// started it ends its spawn loop from its session.end (any reason, /clear
-// included): with no other session listed, that kills the holder process, whose
-// pipe was the server's stdin, and then also sends the server a plain `kill`;
-// with others listed it only leaves, and the server (its stdin closed) sees them
-// and stays. The server's own backstops are stdin closing, its parent vanishing
-// and the users file: it ends when no listed session's process runs.
+// and the server stays up until the last of them is gone. A session's
+// session.end (any reason, /clear included) runs one `bin/ui-users.ts leave`:
+// it takes the session off the list and, when no live user is left, sends the
+// server SIGTERM. At the same time the session ends the spawn loops of the
+// servers it started, which kills their holder processes (whose pipe was the
+// server's stdin); a server that loses its holder stays while the list names a
+// live session. Whenever the list cannot be read or changed, nothing is killed:
+// the server's own backstops (stdin closing, its parent vanishing, and its poll
+// of the list) end it once no listed session's process runs.
 import type { EngineInterface } from 'claude-code'
+import { CLAUDE_PID_SCRIPT, claudeFromChain } from './ui-pid'
 
 export const UI_STATE = 'ui.json'
 // The sessions using the server (bin/ui-users.ts writes it; ui/server.ts reads it).
@@ -22,12 +25,19 @@ export const UI_USERS = 'ui-users.json'
 export const EXTRACTION_STATE = 'ui-extraction.json'
 export const PING_TIMEOUT_MS = 3_000
 export const READY_TIMEOUT_MS = 20_000
-// session.end has 1.5 s in all: ending the loop waits at most STOP_WAIT_MS,
-// then the `kill` of the server gets at most KILL_TIMEOUT_MS.
+// Waiting for a spawn loop to end; a `kill` of a server this session started and no longer wants.
 export const STOP_WAIT_MS = 600
 export const KILL_TIMEOUT_MS = 500
 export const ALIVE_TIMEOUT_MS = 1_000
 export const OPEN_TIMEOUT_MS = 5_000
+// Listing a session (`add`, when /mnemosyne-ui answers): a cold `bun` start can take a few hundred
+// ms on a busy machine, so each try gets USERS_TIMEOUT_MS and a failed one is tried once more.
+export const USERS_TIMEOUT_MS = 3_000
+export const USERS_TRIES = 2
+// session.end has 1.5 s in all (SessionEndInput). Its path is one fs.read of the list and one
+// `leave` run (bounded by LEAVE_TIMEOUT_MS), with the spawn loops ending (STOP_WAIT_MS) beside it.
+export const SESSION_END_BUDGET_MS = 1_500
+export const LEAVE_TIMEOUT_MS = 1_000
 
 // The ping must never go through a proxy: the proxy would see the token.
 export const PING_ENV: Readonly<Record<string, string>> = {
@@ -67,8 +77,8 @@ type Entry = { stop: () => void; ended: Promise<void>; pid?: number }
 
 // The servers each session started; that session's session.end stops them.
 const running = new Map<string, Set<Entry>>()
-// The sessions this process listed in ui-users.json, with the plugin and root they used.
-const joined = new Map<string, { plugin: string; root: string }>()
+// The sessions this process listed in ui-users.json, with the plugin and root they used and the Claude pid last read for them.
+const joined = new Map<string, { plugin: string; root: string; pid?: number }>()
 
 const isState = (value: unknown): value is State => {
   const state = value as Partial<State> | null
@@ -247,35 +257,55 @@ async function stopEntry($: EngineInterface, session: string, entry: Entry) {
   forget(session, entry)
 }
 
-// The Claude process this hook runs under: the parent of a shell we start (null when it cannot be read).
+// The Claude process this hook runs under: the nearest `claude` above a shell we start (hooks/ui-pid.ts),
+// or null when there is none or it cannot be read.
 async function claudePid($: EngineInterface) {
   try {
-    const ran = await $.process.run(['sh', '-c', 'echo $PPID'], { timeoutMs: ALIVE_TIMEOUT_MS })
-    const pid = Number(ran.stdout.trim())
-    return ran.exitCode === 0 && Number.isInteger(pid) && pid > 1 && (await isAlive($, pid)) ? pid : null
+    const ran = await $.process.run(['sh', '-c', CLAUDE_PID_SCRIPT], { timeoutMs: ALIVE_TIMEOUT_MS })
+    return ran.exitCode === 0 ? claudeFromChain(ran.stdout) : null
   } catch {
     return null
   }
 }
 
-// Runs bin/ui-users.ts; the number of live users left, or undefined when it failed.
-async function usersOp($: EngineInterface, plugin: string, args: string[]) {
-  try {
-    const ran = await $.process.run(['bun', `${plugin}/bin/ui-users.ts`, ...args], { timeoutMs: ALIVE_TIMEOUT_MS })
-    if (ran.exitCode !== 0) return undefined
-    const live = (JSON.parse(ran.stdout) as { live?: unknown }).live
-    return typeof live === 'number' ? live : undefined
-  } catch {
-    return undefined
+type UsersAnswer = { live: number; listed?: boolean; stopped?: number[] }
+
+// Runs bin/ui-users.ts; its answer, or undefined when every try failed (no answer is never "no users").
+async function usersOp($: EngineInterface, plugin: string, args: string[], timeoutMs: number, tries: number): Promise<UsersAnswer | undefined> {
+  for (let attempt = 0; attempt < tries; attempt++) {
+    try {
+      const ran = await $.process.run(['bun', `${plugin}/bin/ui-users.ts`, ...args], { timeoutMs })
+      if (ran.exitCode !== 0) continue
+      const answer = JSON.parse(ran.stdout) as Partial<UsersAnswer>
+      if (typeof answer.live === 'number') return answer as UsersAnswer
+    } catch {
+      // timed out or could not start: try again while tries are left
+    }
   }
+  return undefined
 }
 
-// This session uses the server from now on: it is listed with its Claude process id.
-// `fresh`: a server just started, so no earlier list belongs to it and this session is the only user.
-async function join($: EngineInterface, paths: UiPaths, session: string, fresh = false) {
-  joined.set(session, { plugin: paths.plugin, root: paths.root })
-  const pid = await claudePid($)
-  await usersOp($, paths.plugin, [fresh ? 'reset' : 'add', `${paths.root}/${UI_USERS}`, session, pid === null ? '-' : String(pid)])
+// This session uses the server from now on: it is listed (again, with a fresh time) with its Claude
+// process id. Whether that worked: a session that could not be listed is told so in the reply.
+// A lookup that fails this time (a slow `ps`) keeps the pid read before: a session is never relisted as unknown
+// for it (and bin/ui-users.ts keeps a listed pid and start time on a `-` too, for a reloaded module).
+async function join($: EngineInterface, paths: UiPaths, session: string) {
+  const pid = (await claudePid($)) ?? joined.get(session)?.pid ?? null
+  joined.set(session, { plugin: paths.plugin, root: paths.root, ...(pid === null ? {} : { pid }) })
+  const answer = await usersOp($, paths.plugin, ['add', `${paths.root}/${UI_USERS}`, session, pid === null ? '-' : String(pid)], USERS_TIMEOUT_MS, USERS_TRIES)
+  return answer !== undefined
+}
+
+const NOT_LISTED = ' (this session could not be listed as one using the dashboard, so it may stop when another session ends; run /mnemosyne-ui again to retry)'
+
+// Whether ui-users.json lists `session`: the lookup that survives a reload of this module (its maps start empty).
+async function listedIn($: EngineInterface, root: string, session: string) {
+  try {
+    const users = (JSON.parse(await $.fs.read(`${root}/${UI_USERS}`)) as { users?: unknown }).users
+    return Array.isArray(users) && users.some(user => (user as { session?: unknown } | null)?.session === session)
+  } catch {
+    return false
+  }
 }
 
 type StartedWith = { extraction?: string; embeddings?: string }
@@ -335,14 +365,19 @@ export async function openDashboard($: EngineInterface, paths: UiPaths, session:
   if (known !== undefined) {
     // Asked twice: one slow answer does not replace a working server.
     if ((await answers($, paths.plugin, known)) || (await answers($, paths.plugin, known))) {
-      await join($, paths, session)
-      return handOver($, known, 'running', await restartNote($, paths, known))
+      const listed = await join($, paths, session)
+      return handOver($, known, 'running', `${await restartNote($, paths, known)}${listed ? '' : NOT_LISTED}`)
     }
     // This session's own server, still running, is never killed for a missed ping.
     const own = [...(running.get(session) ?? [])].find(entry => entry.pid === known.pid)
     if (own !== undefined && (await isAlive($, known.pid))) {
-      await join($, paths, session)
-      return handOver($, known, 'running', `${await restartNote($, paths, known)} (it did not answer a health check just now; if the page does not load, run /mnemosyne-ui again)`)
+      const listed = await join($, paths, session)
+      return handOver(
+        $,
+        known,
+        'running',
+        `${await restartNote($, paths, known)} (it did not answer a health check just now; if the page does not load, run /mnemosyne-ui again)${listed ? '' : NOT_LISTED}`,
+      )
     }
   }
   // This session's servers whose process is gone make way for the new one (one
@@ -360,47 +395,46 @@ export async function openDashboard($: EngineInterface, paths: UiPaths, session:
   const state = await readState($, paths.root)
   if (state !== undefined && state.pid === up.pid && state.port === up.port) {
     await recordStartedWith($, paths, up.pid)
-    await join($, paths, session, true)
-    return handOver($, state, 'started')
+    // A plain add, never a reset: a session that reused this server between its ui.json and this
+    // line is already listed and must stay listed. Users left from an earlier server are live
+    // sessions (dead ones are dropped on every change), and each leaves at its own session.end.
+    const listed = await join($, paths, session)
+    return handOver($, state, 'started', listed ? '' : NOT_LISTED)
   }
   // Another start won ui.json in the meantime: hand its server over and stop ours.
   if (state !== undefined && state.pid !== up.pid && (await answers($, paths.plugin, state))) {
     await stopEntry($, session, entry)
-    await join($, paths, session)
-    return handOver($, state, 'running', await restartNote($, paths, state))
+    const listed = await join($, paths, session)
+    return handOver($, state, 'running', `${await restartNote($, paths, state)}${listed ? '' : NOT_LISTED}`)
   }
   await stopEntry($, session, entry)
   return { text: `Mnemosyne dashboard did not start: ${paths.root}/${UI_STATE} does not name the new server.` }
 }
 
+// Ends one spawn loop (which kills its holder) and waits for it, at most STOP_WAIT_MS; the server itself is not signalled.
+async function endLoop($: EngineInterface, session: string, entry: Entry) {
+  entry.stop()
+  await Promise.race([entry.ended, wait($, STOP_WAIT_MS)])
+  forget(session, entry)
+}
+
 /**
- * session.end: this session stops using the server. The server stops with its last user: the servers this session
- * started are stopped when no other live session uses the dashboard (they only lose their holder otherwise, and
- * keep running for the others), and a server it only reused is stopped when it was the last user.
+ * session.end: this session stops using the server, which stops with its last user. One `bin/ui-users.ts leave`
+ * takes the session off the list and, when no live user is left, sends SIGTERM to the server (the ones this
+ * session started and the one ui.json names); beside it, the spawn loops this session started end. `where` is
+ * the plugin and root for this session, read from the settings, so a session is found in ui-users.json even
+ * after this module was reloaded and its maps are empty. No answer from `leave` kills nothing: the server's own
+ * poll of the list ends it once no listed session's process runs.
  */
-export async function stopDashboard($: EngineInterface, session: string) {
+export async function stopDashboard($: EngineInterface, session: string, where?: { plugin: string; root: string }) {
   const mine = [...(running.get(session) ?? [])]
-  const used = joined.get(session)
+  const known = joined.get(session)
   joined.delete(session)
-  // Failing to update the list reads as "no one else": the server stops with its session, as it always did.
-  const others = used === undefined ? 0 : ((await usersOp($, used.plugin, ['remove', `${used.root}/${UI_USERS}`, session])) ?? 0)
-  if (others > 0) {
-    // The holder ends; the server, its stdin closed, sees the others in the list and stays.
-    await Promise.all(
-      mine.map(async entry => {
-        entry.stop()
-        await Promise.race([entry.ended, wait($, STOP_WAIT_MS)])
-        forget(session, entry)
-      }),
-    )
-    return
-  }
-  await Promise.all(mine.map(entry => stopEntry($, session, entry)))
-  // A server this session only reused (its starter has ended), and it was the last user: stop it, if it is ours.
-  if (mine.length === 0 && used !== undefined) {
-    const state = await readState($, used.root)
-    if (state !== undefined && (await answers($, used.plugin, state))) {
-      await $.process.run(['kill', String(state.pid)], { timeoutMs: KILL_TIMEOUT_MS }).catch(() => undefined)
-    }
-  }
+  const used = known ?? where
+  const loops = Promise.all(mine.map(entry => endLoop($, session, entry)))
+  if (used === undefined) return void (await loops)
+  // Only a session that used the dashboard runs a process here: every other session.end is one fs.read.
+  if (known === undefined && mine.length === 0 && !(await listedIn($, used.root, session))) return void (await loops)
+  const servers = mine.flatMap(entry => (entry.pid === undefined ? [] : [String(entry.pid)]))
+  await Promise.all([usersOp($, used.plugin, ['leave', `${used.root}/${UI_USERS}`, session, ...servers], LEAVE_TIMEOUT_MS, 1), loops])
 }

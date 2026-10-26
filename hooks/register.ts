@@ -1558,7 +1558,12 @@ export const register: Register = (on, options) => {
 
   // A session that opened or reused the dashboard ends (exit, /clear, resume...): the server stops with its last user.
   on('session.end', async ($, e, next) => {
-    await stopDashboard($, e.sessionId).catch(() => undefined)
+    // Where the list is, from the settings rather than this module's memory (a reload empties it).
+    const where = await paths($, options).then(
+      found => ({ plugin: slashes($.plugin.root), root: found.root }),
+      () => undefined,
+    )
+    await stopDashboard($, e.sessionId, where).catch(() => undefined)
     registered.delete(e.sessionId)
     return next(e)
   }).catch((_$, e, next) => next(e))
