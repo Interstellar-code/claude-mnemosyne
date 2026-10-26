@@ -569,6 +569,10 @@ describe('SRV.1: the server runs the engine as the hooks do', () => {
     MNEMOPI_AUTHOR_ID: '',
     MNEMOPI_AUTHOR_TYPE: '',
     MNEMOPI_POLYPHONIC_RECALL: '0',
+    // R5.2 (0.8.5 settings): the recall ranking is pinned too.
+    MNEMOPI_VEC_WEIGHT: '0.5',
+    MNEMOPI_FTS_WEIGHT: '0.3',
+    MNEMOPI_IMPORTANCE_WEIGHT: '0.2',
     // EMB.3.a1: the local-only embedding pins; MNEMOSYNE_EMBEDDINGS absent means off.
     MNEMOPI_EMBEDDING_API_URL: '',
     MNEMOPI_EMBEDDINGS_VIA_API: '',

@@ -149,6 +149,10 @@ test('remember runs the private engine against the private store, global bank', 
     MNEMOPI_EMBEDDINGS_API_OPT_IN: '0',
     HF_ENDPOINT: 'https://huggingface.co',
     PI_CONFIG_DIR: '.claude/mnemosyne/model-cache',
+    // R5.2: the recall ranking is pinned (the engine's own 0.5 / 0.3 / 0.2 with no config.json), so a shell variable cannot change it.
+    MNEMOPI_VEC_WEIGHT: '0.5',
+    MNEMOPI_FTS_WEIGHT: '0.3',
+    MNEMOPI_IMPORTANCE_WEIGHT: '0.2',
     MNEMOPI_NO_EMBEDDINGS: '1',
   })
   // C4: Claude's own save is source 'claude-code', tier DERIVED, veracity left to the engine's 'unknown'; the scope (global) keeps it out of the 24 h trim.
@@ -3118,4 +3122,365 @@ test('MAPX.8: a folder name over the cap is recorded with a cut name and the who
   expect(sent.name).toBe('x'.repeat(200))
   expect(sent.owner).toMatch(new RegExp(`^project-${long}-[a-z0-9]+$`))
   expect(sent.kind).toBe('folder')
+})
+
+// ---- WIRE (0.8.5 settings plan): the hooks read their numbers from <root>/config.json ----
+
+const CONFIG_PATH = '/home/u/.claude/mnemosyne/config.json'
+const withConfig = (config: unknown, extra: Extra = {}): Extra => ({ ...extra, files: { ...extra.files, [CONFIG_PATH]: JSON.stringify(config) } })
+/** One world whose config.json can change between calls: `files` is read at each call. */
+const configWorld = (on: On, reply: string, config?: unknown, extra: Extra = {}) => {
+  const files: Record<string, string> = { ...extra.files }
+  const setConfig = (value: unknown) => {
+    if (value === undefined) delete files[CONFIG_PATH]
+    else files[CONFIG_PATH] = typeof value === 'string' ? value : JSON.stringify(value)
+  }
+  setConfig(config)
+  return { runs: world(on, reply, true, 0, ENGINE_BUILD, { ...extra, files }), setConfig }
+}
+const longText = (length: number) => 'a fact about the build and the release '.repeat(Math.ceil(length / 39)).slice(0, length)
+/** The engine runs of one tool (the runs that carry a request; a `bun -e` folder step carries none). */
+const engineRuns = (runs: Run[], name: string) => runs.filter(run => run.init?.stdin !== undefined && request(run).name === name)
+const SESSION_START = { cwd: '/w', surface: null, isInteractive: false } as never
+
+/** The tools registered at session start, by name. */
+async function registeredTools($: Engine, on: On, extra: Extra = {}) {
+  world(on, '{}', true, 0, ENGINE_BUILD, extra)
+  const registered: { name: string; description: string; inputSchema: { properties?: Record<string, { description?: string }> } }[] = []
+  on('tool.register', (_$, e) => {
+    registered.push(e as never)
+    return { value: {} } as never
+  })
+  on('command.register', () => ({ value: {} }) as never)
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  await $.session.start(SESSION_START)
+  return registered
+}
+
+test('WIRE.1.a2: a raised max length lets a longer fact in; without the config it is refused as before (C3)', async ($, on) => {
+  const text = longText(5000)
+  const refusedRuns = world(on, STORED_REPLY)
+  const refused = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: text, kind: 'fact' })
+  expect(refused.deny).toContain('G2')
+  expect(refused.deny).toContain('over 4000 characters')
+  expect(refusedRuns.length).toBe(0)
+})
+
+test('WIRE.1.a2: with max length 8000 and warn length 7000 a 5000-character fact is saved', async ($, on) => {
+  const runs = world(on, STORED_REPLY, true, 0, ENGINE_BUILD, withConfig({ version: 1, guard: { warnLength: 7000, maxLength: 8000 } }))
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: longText(5000), kind: 'fact' })
+  expect(ran.deny).toBeUndefined()
+  expect(names(runs)).toEqual(['mnemopi_remember'])
+})
+
+test('WIRE.1.a2: a lowered warn length asks for a confirm in strict mode and quotes the number', async ($, on) => {
+  const runs = world(on, STORED_REPLY, true, 0, ENGINE_BUILD, withConfig({ version: 1, guard: { warnLength: 300 } }))
+  const text = longText(400)
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: text, kind: 'fact' })
+  expect(ran.deny).toContain('over 300 characters')
+  expect(ran.deny).toContain('confirm: true')
+  expect(runs.length).toBe(0)
+  const confirmed = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: text, kind: 'fact', confirm: true })
+  expect(confirmed.deny).toBeUndefined()
+  expect(request(runs[0]!).arguments.metadata).toEqual({ guard: ['G2'] })
+})
+
+test('WIRE.1.a2: a never-save word blocks the save, no engine run starts, and neither the reply nor the log holds the word', async ($, on) => {
+  const runs = world(on, STORED_REPLY, true, 0, ENGINE_BUILD, withConfig({ version: 1, guard: { neverSave: ['Project Falcon'] } }))
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'The roadmap for project falcon ships in the spring with the new dashboard.', kind: 'fact', confirm: true })
+  expect(ran.deny).toContain('G7')
+  expect(ran.deny?.toLowerCase().includes('falcon')).toBe(false)
+  expect(runs.length).toBe(0)
+  const logged = lines(runs).find(entry => entry.action === 'remember')!
+  expect(logged).toMatchObject({ ok: false, error: 'guard:G7' })
+  expect(runs.appends.map(run => run.init?.stdin ?? '').join('').toLowerCase().includes('falcon')).toBe(false)
+  // an update that changes the text goes through the same check
+  const updated = await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1', content: 'Now it is all about project falcon and the spring plan.' })
+  expect(updated.deny).toContain('G7')
+})
+
+test('WIRE.1.a3: a secret is still blocked under a config that loosens every limit', async ($, on) => {
+  const runs = world(on, STORED_REPLY, true, 0, ENGINE_BUILD, withConfig({ version: 1, guard: { minLength: 5, warnLength: 7000, maxLength: 8000, chatter: 'off', nearDuplicate: false } }))
+  const secret = `the CI token is ${'ghp_' + 'a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8'} for pushes`
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: secret, kind: 'fact', confirm: true })
+  expect(ran.deny).toContain('G1')
+  const empty = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: '   ', kind: 'fact', confirm: true })
+  expect(empty.deny).toContain('empty')
+  expect(runs.length).toBe(0)
+})
+
+test('WIRE.1.a2: the chatter check off lets a dated note in; strict asks for a confirm even in warn mode', async ($, on) => {
+  const dated = '2026-10-24 released 0.7.6 with the dashboard polish'
+  const offRuns = world(on, STORED_REPLY, true, 0, ENGINE_BUILD, withConfig({ version: 1, guard: { chatter: 'off' } }))
+  const off = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: dated, kind: 'fact' })
+  expect(off.deny).toBeUndefined()
+  expect('metadata' in request(offRuns[0]!).arguments).toBe(false)
+})
+
+test('WIRE.1.a2: chatter strict asks for the confirm whatever the guard mode', { options: { guardMode: 'warn' } }, async ($, on) => {
+  const dated = '2026-10-24 released 0.7.6 with the dashboard polish'
+  const runs = world(on, STORED_REPLY, true, 0, ENGINE_BUILD, withConfig({ version: 1, guard: { chatter: 'strict' } }))
+  const asked = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: dated, kind: 'fact' })
+  expect(asked.deny).toContain('G4')
+  expect(asked.deny).toContain('confirm: true')
+  expect(runs.length).toBe(0)
+  const confirmed = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: dated, kind: 'fact', confirm: true })
+  expect(confirmed.deny).toBeUndefined()
+  expect(request(runs[0]!).arguments.metadata).toEqual({ guard: ['G4'] })
+})
+
+test('WIRE.1.a1: in warn mode a dated note with no config just saves, flagged G4, as before (C3)', { options: { guardMode: 'warn' } }, async ($, on) => {
+  const runs = world(on, STORED_REPLY)
+  const warned = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: '2026-10-24 released 0.7.6 with the dashboard polish', kind: 'fact' })
+  expect(warned.deny).toBeUndefined()
+  expect(request(runs[0]!).arguments.metadata).toEqual({ guard: ['G4'] })
+})
+
+test('WIRE.1.a2: near-duplicate off asks the engine nothing; a 0.95 threshold is sent and a 0.93 match no longer counts', async ($, on) => {
+  const offRuns = nearWorld(on, [NEAR], withConfig({ version: 1, guard: { nearDuplicate: false } }))
+  const off = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: NEAR_TEXT, kind: 'fact' })
+  expect(off.deny).toBeUndefined()
+  expect(names(offRuns)).toEqual(['mnemopi_remember'])
+})
+
+test('WIRE.1.a2: the near-duplicate threshold from the settings is the min_score sent', async ($, on) => {
+  const runs = nearWorld(on, [NEAR], withConfig({ version: 1, guard: { nearDuplicateScore: 0.95 } }))
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: NEAR_TEXT, kind: 'fact' })
+  expect(request(runs[0]!).arguments).toEqual({ content: NEAR_TEXT, top_k: 3, min_score: 0.95 })
+  // the engine answered with a 0.93 match anyway; below the person's threshold it is not a near-duplicate
+  expect(ran.deny).toBeUndefined()
+  expect(names(runs)).toEqual(['mnemopi_similar', 'mnemopi_remember'])
+})
+
+test('WIRE.1.a5: the rules text with no config is the 0.8.4 text, byte for byte (C3)', async ($, on) => {
+  on('prompt.compose', () => ({ sections: [] }))
+  world(on, '{}')
+  const base = { model: 'm', promptModel: 'm', surfaces: [], outputStyle: null }
+  const composed = await $.prompt.compose({ ...base, tools: ['mcp__mnemosyne__memory_remember'], traits: [] } as never)
+  expect(composed.sections.find(s => s.id === 'mnemosyne:rules')?.text).toBe(`# Long-term memory (Mnemosyne)
+mcp__mnemosyne__memory_remember / _recall / _update / _forget keep facts across sessions and repos.
+- Remember: lasting preferences, conventions, decisions, runbooks the user states. One self-contained fact per call.
+- With each fact, pass kind (required: a save without it is refused): fact, preference, instruction (a rule or runbook), decision, context (project state), error (a bug note), artifact (a reference) or event (a session summary).
+- With each fact, pass tags: 2 to 5 short lowercase topic words (for example ["git", "ci"]).
+- Never remember secrets, credentials, or one-off task details.
+- Recall before answering about past decisions or preferences ("what did we…", "how do I usually…").
+- To change or tag a fact, update it by id and owner with memory_update. Use memory_forget only to delete. Never save a near-duplicate: recall first, and if a close memory exists, update it (or save the new fact with replaces: the old id, which retires the old one) instead of saving another.`)
+})
+
+test('WIRE.1.a5: the tool descriptions with no config are the 0.8.4 texts (C3)', async ($, on) => {
+  const registered = await registeredTools($, on)
+  const by = (name: string) => registered.find(tool => tool.name === name)!
+  expect(by('memory_remember').inputSchema.properties?.tags?.description).toBe('2 to 5 short lowercase topic tags for the fact, e.g. ["git", "ci"].')
+  expect(by('memory_remember').inputSchema.properties?.expires_in_days?.description).toBe('Forget this memory after this many days (1 to 365). A context note expires after 14 days when this is not given.')
+  expect(by('memory_recall').inputSchema.properties?.limit?.description).toBe('1 to 50; default 5.')
+  expect(by('memory_update').inputSchema.properties?.tags?.description).toBe('Short lowercase topic tags (at most 5); replaces the old ones. [] removes them.')
+})
+
+test('WIRE.2.a1: the tag count, the context days and the recall limits show in the tool descriptions and the rules text', async ($, on) => {
+  const config = { version: 1, tags: { maxPerMemory: 3 }, expiry: { contextDays: 30 }, recall: { defaultLimit: 8, maxLimit: 30 } }
+  const registered = await registeredTools($, on, withConfig(config))
+  const by = (name: string) => registered.find(tool => tool.name === name)!
+  expect(by('memory_remember').inputSchema.properties?.tags?.description).toBe('2 to 3 short lowercase topic tags for the fact, e.g. ["git", "ci"].')
+  expect(by('memory_remember').inputSchema.properties?.expires_in_days?.description).toContain('after 30 days')
+  expect(by('memory_recall').inputSchema.properties?.limit?.description).toBe('1 to 30; default 8.')
+  expect(by('memory_update').inputSchema.properties?.tags?.description).toContain('at most 3')
+})
+
+test('WIRE.2.a1: the rules text follows the tag count', async ($, on) => {
+  on('prompt.compose', () => ({ sections: [] }))
+  world(on, '{}', true, 0, ENGINE_BUILD, withConfig({ version: 1, tags: { maxPerMemory: 3 } }))
+  const base = { model: 'm', promptModel: 'm', surfaces: [], outputStyle: null }
+  const composed = await $.prompt.compose({ ...base, tools: ['mcp__mnemosyne__memory_remember'], traits: [] } as never)
+  const text = composed.sections.find(s => s.id === 'mnemosyne:rules')?.text ?? ''
+  expect(text).toContain('pass tags: 2 to 3 short lowercase topic words')
+  expect(text.includes('2 to 5')).toBe(false)
+})
+
+test('WIRE.2.a1: a memory keeps at most the tag count of the settings, on remember and on update', async ($, on) => {
+  const { runs, setConfig } = configWorld(on, STORED_REPLY, { version: 1, tags: { maxPerMemory: 2 } })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'we deploy the service on fridays only', kind: 'fact', tags: ['ops', 'deploy', 'friday', 'release'] })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1', tags: ['a1', 'b2', 'c3'] })
+  const sent = runs.filter(run => ['mnemopi_remember', 'mnemopi_update'].includes(request(run).name))
+  expect(request(sent[0]!).arguments.metadata).toEqual({ tags: ['ops', 'deploy'] })
+  expect(request(sent[1]!).arguments.metadata).toEqual({ tags: ['a1', 'b2'] })
+  setConfig({ version: 1, tags: { maxPerMemory: 8 } })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'we deploy the service on fridays only', kind: 'fact', tags: ['a1', 'b2', 'c3', 'd4', 'e5', 'f6', 'g7'] })
+  const wide = runs.filter(run => request(run).name === 'mnemopi_remember').at(-1)!
+  expect((request(wide).arguments.metadata as { tags: string[] }).tags).toHaveLength(7)
+})
+
+test('WIRE.2.a2: memory_recall defaults and clamps by the settings and sends the ranking weights; with no config it is 5, 50 and 0.5 / 0.3 / 0.2 (C3)', async ($, on) => {
+  const { runs, setConfig } = configWorld(on, '{"results":[]}')
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_recall', query: 'x' })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_recall', query: 'x', limit: 999 })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_recall', query: 'x', limit: 12 })
+  expect(runs.map(run => request(run).arguments.limit)).toEqual([5, 50, 12])
+  expect(request(runs[0]!).arguments).toMatchObject({ query: 'x', vec_weight: 0.5, fts_weight: 0.3, importance_weight: 0.2 })
+
+  setConfig({ version: 1, recall: { defaultLimit: 8, maxLimit: 30, vectorWeight: 0.6, keywordWeight: 0.25, importanceWeight: 0.15 } })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_recall', query: 'x' })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_recall', query: 'x', limit: 999 })
+  expect(runs.slice(3).map(run => request(run).arguments.limit)).toEqual([8, 30])
+  expect(request(runs[3]!).arguments).toMatchObject({ vec_weight: 0.6, fts_weight: 0.25, importance_weight: 0.15 })
+})
+
+test('WIRE.2.a3: the engine env pins the ranking weights from the settings on every engine run', async ($, on) => {
+  const { runs, setConfig } = configWorld(on, STORED_REPLY)
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_stats' })
+  expect(runs[0]!.init?.env).toMatchObject({ MNEMOPI_VEC_WEIGHT: '0.5', MNEMOPI_FTS_WEIGHT: '0.3', MNEMOPI_IMPORTANCE_WEIGHT: '0.2' })
+  setConfig({ version: 1, recall: { vectorWeight: 0.7, keywordWeight: 0.2, importanceWeight: 0.1 } })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_stats' })
+  expect(runs[1]!.init?.env).toMatchObject({ MNEMOPI_VEC_WEIGHT: '0.7', MNEMOPI_FTS_WEIGHT: '0.2', MNEMOPI_IMPORTANCE_WEIGHT: '0.1' })
+})
+
+test('WIRE.2.a2: first-prompt recall off means no automatic recall; a recall term still recalls', async ($, on) => {
+  const runs = world(on, JSON.stringify({ results: [{ id: 'm1', session_id: 'global', content: 'use pnpm' }] }), true, 0, ENGINE_BUILD, withConfig({ version: 1, recall: { firstPrompt: false } }))
+  const seen: (readonly string[] | undefined)[] = []
+  on('prompt.submit', (_$, e) => {
+    seen.push(e.context)
+    return { text: e.text, context: e.context }
+  })
+  await $.prompt.submit({ text: 'How do I install deps? Then run the build.', origin: { kind: 'composer' } } as never)
+  expect(runs.length).toBe(0)
+  expect(seen[0]).toBeUndefined()
+  // the first prompt has passed: a later prompt does not become "the first"
+  await $.prompt.submit({ text: 'what do you remember about pnpm? answer briefly.', origin: { kind: 'composer' } } as never)
+  expect(runs.length).toBe(1)
+  expect(request(runs[0]!).arguments.query).toBe('pnpm')
+  expect(seen[1]?.at(-1)).toContain('- [m1 owner=global] use pnpm')
+})
+
+test('WIRE.2.a2: first-prompt recall uses the count and the sentences from the settings', async ($, on) => {
+  const rows = Array.from({ length: 6 }, (_, i) => ({ id: `m${i}`, session_id: 'global', content: `fact number ${i}` }))
+  const runs = world(on, JSON.stringify({ results: rows }), true, 0, ENGINE_BUILD, withConfig({ version: 1, recall: { firstPromptCount: 2, firstPromptSentences: 1 } }))
+  const seen: (readonly string[] | undefined)[] = []
+  on('prompt.submit', (_$, e) => {
+    seen.push(e.context)
+    return { text: e.text, context: e.context }
+  })
+  await $.prompt.submit({ text: 'First sentence here. Second one follows. Third as well.' } as never)
+  const queries = (runs[0]!.init?.stdin ?? '').split('\n').filter(Boolean).map(line => JSON.parse(line).params.arguments)
+  expect(queries.map(args => args.query)).toEqual(['First sentence here.'])
+  expect(queries[0]).toMatchObject({ limit: 2, vec_weight: 0.5 })
+  expect(seen[0]?.at(-1)?.match(/- \[m/g)).toHaveLength(2)
+})
+
+test('WIRE.2.a2: with no config the first prompt recalls per sentence, 4 sentences, 5 results (C3)', async ($, on) => {
+  const runs = world(on, JSON.stringify({ results: [] }))
+  on('prompt.submit', (_$, e) => ({ text: e.text, context: e.context }))
+  await $.prompt.submit({ text: 'One a. Two b. Three c. Four d. Five e.' } as never)
+  const sent = (runs[0]!.init?.stdin ?? '').split('\n').filter(Boolean).map(line => JSON.parse(line).params.arguments)
+  expect(sent.map(args => args.query)).toEqual(['One a.', 'Two b.', 'Three c.', 'Four d.'])
+  expect(sent.every(args => args.limit === 5)).toBe(true)
+})
+
+test('WIRE.2.a4: a context note gets the context days of the settings; other kinds get none; 14 with no config (C3)', async ($, on) => {
+  const day = 86_400_000
+  const days = (run: Run) => Math.round((Date.parse(String(request(run).arguments.valid_until)) - Date.now()) / day)
+  const { runs, setConfig } = configWorld(on, STORED_REPLY)
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'the release branch is frozen for the week', kind: 'context' })
+  expect(days(engineRuns(runs, 'mnemopi_remember')[0]!)).toBe(14)
+  setConfig({ version: 1, expiry: { contextDays: 30 } })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'the release branch is frozen for the week', kind: 'context' })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'the release branch is frozen for the week', kind: 'fact' })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'the release branch is frozen for the week', kind: 'context', expires_in_days: 3 })
+  const tuned = engineRuns(runs, 'mnemopi_remember').slice(1)
+  expect(days(tuned[0]!)).toBe(30)
+  expect('valid_until' in request(tuned[1]!).arguments).toBe(false)
+  expect(days(tuned[2]!)).toBe(3)
+})
+
+test('WIRE.2: a broken or hostile config.json gives the defaults and never stops a save', async ($, on) => {
+  const { runs, setConfig } = configWorld(on, STORED_REPLY)
+  for (const text of ['{"version": 1, "guard": {"maxLength": 99999999}, "tags": {"maxPerMemory": "many"}', 'not json', '[]', '{"__proto__": {"x": 1}, "guard": {"maxLength": -1}}']) {
+    setConfig(text)
+    const before = engineRuns(runs, 'mnemopi_remember').length
+    const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: longText(5000), kind: 'fact' })
+    expect([text.slice(0, 12), ran.deny?.includes('over 4000 characters')]).toEqual([text.slice(0, 12), true])
+    expect(engineRuns(runs, 'mnemopi_remember').length).toBe(before)
+    const ok = await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', content: 'we deploy the service on fridays only', kind: 'fact', tags: ['a1', 'b2', 'c3', 'd4', 'e5', 'f6'] })
+    expect(ok.deny).toBeUndefined()
+    expect((request(engineRuns(runs, 'mnemopi_remember')[before]!).arguments.metadata as { tags: string[] }).tags).toHaveLength(5)
+  }
+})
+
+test('WIRE.3.a1: all five tools are registered by default (C3)', async ($, on) => {
+  const registered = await registeredTools($, on)
+  expect(registered.map(tool => tool.name)).toEqual(['memory_remember', 'memory_recall', 'memory_update', 'memory_forget', 'memory_stats'])
+})
+
+test('WIRE.3.a1: a tool switched off is not registered at the next session start; the others are', async ($, on) => {
+  const registered = await registeredTools($, on, withConfig({ version: 1, tools: { memory_forget: false, memory_stats: false } }))
+  expect(registered.map(tool => tool.name)).toEqual(['memory_remember', 'memory_recall', 'memory_update'])
+})
+
+test('WIRE.3.a2: with memory_remember off, the remember trigger and the rules block are not added', async ($, on) => {
+  const config = withConfig({ version: 1, tools: { memory_remember: false } })
+  const runs = world(on, JSON.stringify({ results: [] }), true, 0, ENGINE_BUILD, config)
+  on('tool.register', () => ({ value: {} }) as never)
+  on('command.register', () => ({ value: {} }) as never)
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  const seen: (readonly string[] | undefined)[] = []
+  on('prompt.submit', (_$, e) => {
+    seen.push(e.context)
+    return { text: e.text, context: e.context }
+  })
+  on('prompt.compose', () => ({ sections: [] }))
+  await $.session.start(SESSION_START)
+  await $.prompt.submit({ text: 'hello', origin: { kind: 'composer' } } as never)
+  await $.prompt.submit({ text: 'remember that we deploy on Fridays', origin: { kind: 'composer' } } as never)
+  expect(seen[1]).toBeUndefined()
+  const base = { model: 'm', promptModel: 'm', surfaces: [], outputStyle: null }
+  const composed = await $.prompt.compose({ ...base, tools: ['mcp__mnemosyne__memory_remember'], traits: [] } as never)
+  expect(composed.sections.some(s => s.id === 'mnemosyne:rules')).toBe(false)
+  expect(engineRuns(runs, 'mnemopi_recall').length).toBe(1) // only the first-prompt recall; the remember term saved nothing
+})
+
+test('WIRE.3.a2: a tool switched on after the session started is not offered until the next session', async ($, on) => {
+  const files: Record<string, string> = { [CONFIG_PATH]: JSON.stringify({ version: 1, tools: { memory_remember: false } }) }
+  world(on, JSON.stringify({ results: [] }), true, 0, ENGINE_BUILD, { files })
+  on('tool.register', () => ({ value: {} }) as never)
+  on('command.register', () => ({ value: {} }) as never)
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  const seen: (readonly string[] | undefined)[] = []
+  on('prompt.submit', (_$, e) => {
+    seen.push(e.context)
+    return { text: e.text, context: e.context }
+  })
+  on('prompt.compose', () => ({ sections: [] }))
+  await $.session.start(SESSION_START)
+  files[CONFIG_PATH] = JSON.stringify({ version: 1 })
+  await $.prompt.submit({ text: 'hello', origin: { kind: 'composer' } } as never)
+  await $.prompt.submit({ text: 'remember that we deploy on Fridays', origin: { kind: 'composer' } } as never)
+  expect(seen[1]).toBeUndefined()
+  const base = { model: 'm', promptModel: 'm', surfaces: [], outputStyle: null }
+  const composed = await $.prompt.compose({ ...base, tools: ['mcp__mnemosyne__memory_remember'], traits: [] } as never)
+  expect(composed.sections.some(s => s.id === 'mnemosyne:rules')).toBe(false)
+})
+
+test('WIRE.3.a2: a remember trigger and the rules block are there when memory_remember is on, with every other tool off', async ($, on) => {
+  const config = withConfig({ version: 1, tools: { memory_recall: false, memory_update: false, memory_forget: false, memory_stats: false } })
+  world(on, JSON.stringify({ results: [] }), true, 0, ENGINE_BUILD, config)
+  on('prompt.compose', () => ({ sections: [] }))
+  const base = { model: 'm', promptModel: 'm', surfaces: [], outputStyle: null }
+  const composed = await $.prompt.compose({ ...base, tools: ['mcp__mnemosyne__memory_remember'], traits: [] } as never)
+  const text = composed.sections.find(s => s.id === 'mnemosyne:rules')?.text ?? ''
+  // Claude is never told to call a tool that is off
+  for (const gone of ['_recall', '_update', '_forget', 'memory_update', 'memory_forget', 'Recall before answering']) expect([gone, text.includes(gone)]).toEqual([gone, false])
+  expect(text).toContain('mcp__mnemosyne__memory_remember keep facts')
+  expect(text).toContain('save the new fact with replaces')
+})
+
+test('WIRE.1.a4: the wrapper tells the proxy where config.json is (MNEMOSYNE_ROOT)', { options: { externalMcp: true } }, async ($, on) => {
+  const runs = world(on, '{}')
+  on('command.register', () => ({ value: {} }) as never)
+  on('tool.register', () => ({ value: {} }) as never)
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  await $.session.start(SESSION_START)
+  const text = runs.find(r => r.argv[2]?.includes('writeFileSync'))?.argv[4] ?? ''
+  expect(text).toContain("export MNEMOSYNE_ROOT='/home/u/.claude/mnemosyne'\n")
 })

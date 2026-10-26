@@ -15,6 +15,7 @@ import { dirname, join, resolve } from 'node:path'
 import { AGENT_SEEDS, AUTO_ADMIT_COUNT, aliasMap, emptyVocabulary, foldTag, normalizeTag, nsOf, parseVocabulary, projectNameOf, VOCAB_FILE, vocabularyText } from '../hooks/vocab'
 import type { Vocabulary } from '../hooks/vocab'
 import { openReadOnly, tagsSql } from './memories'
+import { readConfig } from './settings'
 
 const IS_WINDOWS = process.platform === 'win32'
 
@@ -174,14 +175,23 @@ export function aliasTag(root: string, rawFrom: string, rawTo: string): { from: 
   return { from, to, ...(moved !== undefined && moved !== to ? { moved } : {}) }
 }
 
+/** Setting T2, the memories that admit a proposed tag, from <root>/config.json: AUTO_ADMIT_COUNT when there is no file or it is not usable. Never throws. */
+function autoAdmitCount(root: string) {
+  try {
+    return readConfig(root).tags.autoAdmitCount
+  } catch {
+    return AUTO_ADMIT_COUNT
+  }
+}
+
 export type CandidatesResult = { recorded: number; admitted: string[]; ignored: number }
 
 /**
  * Counts one more memory for each proposed new tag (a tag the tagger offered that is not admitted yet). A candidate
- * reaching AUTO_ADMIT_COUNT memories is admitted, as 'auto', with that count. A tag that is already admitted, an
+ * reaching `admitAt` memories (setting T2 in <root>/config.json, AUTO_ADMIT_COUNT = 3 by default) is admitted, as 'auto', with that count. A tag that is already admitted, an
  * alias of one, or not a usable tag is ignored. Tags only: no memory text, no memory id.
  */
-export function recordCandidates(root: string, raw: readonly unknown[], now: Date = new Date()): CandidatesResult {
+export function recordCandidates(root: string, raw: readonly unknown[], now: Date = new Date(), admitAt: number = autoAdmitCount(root)): CandidatesResult {
   const vocab = readVocabulary(root)
   const aliases = aliasMap(vocab)
   const result: CandidatesResult = { recorded: 0, admitted: [], ignored: 0 }
@@ -194,7 +204,7 @@ export function recordCandidates(root: string, raw: readonly unknown[], now: Dat
     const entry = vocab.candidates[tag] ?? { count: 0, firstSeen: now.toISOString() }
     entry.count++
     result.recorded++
-    if (entry.count >= AUTO_ADMIT_COUNT) {
+    if (entry.count >= admitAt) {
       vocab.tags[tag] = { ns: nsOf(tag), description: '', aliases: [], admitted: 'auto', count: entry.count }
       delete vocab.candidates[tag]
       result.admitted.push(tag)

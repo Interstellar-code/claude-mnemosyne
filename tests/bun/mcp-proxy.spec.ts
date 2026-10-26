@@ -4,7 +4,7 @@
 // engine installed by bin/install-engine.ts into a temp folder, and a temp store.
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { Database } from 'bun:sqlite'
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { cliOf } from '../../bin/install-engine'
 import { ENGINE_BUILD } from '../../hooks/engine-build'
@@ -826,5 +826,196 @@ describe('hooks/kinds.ts', () => {
     const engine = readFileSync(join(ROOT, 'engine', 'src', 'core', 'typed-memory.ts'), 'utf8')
     for (const name of KIND_NAMES) expect(engine).toContain(`"${name}"`)
     expect(KIND_NAMES.length).toBe(8)
+  })
+})
+
+// WIRE (0.8.5 settings plan): the proxy reads <root>/config.json at each call, like the vocabulary. A stand-in engine records
+// what the proxy forwards, so the spec sees the exact arguments without an installed engine.
+describe('WIRE: the proxy follows config.json', () => {
+  const temp = tempDir('proxy-wire')
+  const capture = join(temp.dir, 'forwarded.txt')
+  const root = join(temp.dir, 'root')
+  mkdirSync(join(temp.dir, 'engine', 'src'), { recursive: true })
+  mkdirSync(root, { recursive: true })
+  writeFileSync(join(temp.dir, 'engine', 'package.json'), JSON.stringify({ name: '@oh-my-pi/pi-mnemopi', version: ENGINE_BUILD }))
+  const fakeEngine = join(temp.dir, 'engine', 'src', 'fake-engine.ts')
+  writeFileSync(fakeEngine, `
+import { appendFileSync } from 'node:fs'
+const out = process.env.MNEMOSYNE_CAPTURE as string
+const decoder = new TextDecoder()
+let buffer = ''
+for await (const chunk of Bun.stdin.stream()) {
+  buffer += decoder.decode(chunk, { stream: true })
+  let end: number
+  while ((end = buffer.indexOf('\\n')) >= 0) {
+    const line = buffer.slice(0, end)
+    buffer = buffer.slice(end + 1)
+    appendFileSync(out, line + '\\n')
+    let message: any
+    try { message = JSON.parse(line) } catch { continue }
+    if (message?.id === undefined) continue
+    if (message.method === 'tools/call') {
+      process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: '{"status":"stored","memory_id":"m1"}' }] } }) + '\\n')
+    } else if (message.method === 'tools/list') {
+      const tool = (name: string) => ({ name: 'mnemopi_' + name, description: 'Mnemopi ' + name, inputSchema: { type: 'object', properties: { content: { type: 'string' } } } })
+      const tools = ['remember', 'recall', 'update', 'forget', 'stats', 'get'].map(tool)
+      process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { tools } }) + '\\n')
+    }
+  }
+}
+`)
+  afterAll(() => temp.dispose())
+
+  const configFile = join(root, 'config.json')
+  const setConfig = (config: object | undefined) => (config === undefined ? rmSync(configFile, { force: true }) : writeFileSync(configFile, JSON.stringify(config)))
+  const secret = `the CI token is ${'ghp_' + 'a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8'} for pushes`
+
+  /** The real proxy over stdin lines; the lines it forwarded, its replies by id and its activity lines. `rootEnv` false leaves MNEMOSYNE_ROOT out. */
+  async function run(messages: readonly object[], env: Record<string, string> = {}, log = '') {
+    writeFileSync(capture, '')
+    const child = Bun.spawn([process.execPath, PROXY], {
+      env: { ...(process.env as Record<string, string>), ...isolatedEnv(), ...engineEnv(join(temp.dir, 'store'), 'global'), MNEMOSYNE_CLI: fakeEngine, MNEMOSYNE_ACTIVITY_LOG: log, MNEMOSYNE_CAPTURE: capture, MNEMOSYNE_ROOT: root, ...env },
+      stdin: 'pipe',
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    child.stdin.write(messages.map(message => `${JSON.stringify(message)}\n`).join(''))
+    child.stdin.end()
+    const [stdout] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
+    const replies = new Map<unknown, any>()
+    for (const line of stdout.split('\n')) {
+      try {
+        const message = JSON.parse(line)
+        if (message?.id !== undefined) replies.set(message.id, message)
+      } catch {
+        // not JSON
+      }
+    }
+    const forwarded = readFileSync(capture, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line))
+    return { forwarded, replies, args: (id: number) => forwarded.find(message => message.id === id)?.params?.arguments as Record<string, any> | undefined }
+  }
+  const call = (id: number, name: string, args: Record<string, unknown>) => ({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } })
+  const FACT = 'we deploy the service on fridays only'
+  const longText = (length: number) => 'a fact about the build and the release '.repeat(Math.ceil(length / 39)).slice(0, length)
+
+  test('WIRE.1.a4: with no config.json the proxy is the 0.8.4 proxy: 4000 characters is the limit, 5 tags, 14 days (C3)', async () => {
+    setConfig(undefined)
+    const { replies, args } = await run([
+      call(1, 'memory_remember', { kind: 'fact', content: longText(5000) }),
+      call(2, 'memory_remember', { kind: 'fact', content: FACT, tags: ['a1', 'b2', 'c3', 'd4', 'e5', 'f6', 'g7'] }),
+      call(3, 'memory_remember', { kind: 'context', content: FACT }),
+    ])
+    expect(replies.get(1).error.message).toContain('over 4000 characters')
+    expect(args(2)?.metadata.tags).toHaveLength(5)
+    expect(Math.round((Date.parse(args(3)?.valid_until) - Date.now()) / 86_400_000)).toBe(14)
+  })
+
+  test('WIRE.1.a4: the proxy applies the guard limits, the tag count and the context days from config.json, read at each call', async () => {
+    setConfig({ version: 1, guard: { warnLength: 7000, maxLength: 8000 }, tags: { maxPerMemory: 2 }, expiry: { contextDays: 30 } })
+    const { replies, args } = await run([
+      call(1, 'memory_remember', { kind: 'fact', content: longText(5000) }),
+      call(2, 'memory_remember', { kind: 'fact', content: FACT, tags: ['a1', 'b2', 'c3'] }),
+      call(3, 'memory_remember', { kind: 'context', content: FACT }),
+    ])
+    expect(replies.get(1).error).toBeUndefined()
+    expect(args(1)?.content).toHaveLength(5000)
+    expect(args(2)?.metadata.tags).toEqual(['a1', 'b2'])
+    expect(Math.round((Date.parse(args(3)?.valid_until) - Date.now()) / 86_400_000)).toBe(30)
+    // a second process after a change sees the change: nothing is cached across runs, and a reset puts the defaults back
+    setConfig({ version: 1, guard: { maxLength: 6000, warnLength: 5000 } })
+    const again = await run([call(1, 'memory_remember', { kind: 'fact', content: longText(5500) })])
+    expect(again.replies.get(1).error.message).toContain('over 5000 characters')
+  })
+
+  test('WIRE.1.a4: a never-save word blocks through the proxy, naming the rule and never the word; the log line holds ids only', async () => {
+    setConfig({ version: 1, guard: { neverSave: ['Project Falcon'] } })
+    const log = join(temp.dir, 'logs-g7', 'activity.jsonl')
+    const { replies, forwarded } = await run([call(1, 'memory_remember', { kind: 'fact', content: 'The roadmap for project falcon ships in the spring with the new dashboard.', confirm: true })], {}, log)
+    expect(replies.get(1).error.code).toBe(-32602)
+    expect(replies.get(1).error.message).toContain('G7')
+    expect(replies.get(1).error.data).toEqual({ rules: ['G7'] })
+    expect(forwarded).toEqual([])
+    const logged = readFileSync(log, 'utf8')
+    expect(logged).toContain('guard:G7')
+    expect(logged.toLowerCase().includes('falcon')).toBe(false)
+    expect(replies.get(1).error.message.toLowerCase().includes('falcon')).toBe(false)
+  })
+
+  test('WIRE.1.a3: the built-in secret rules block through the proxy under every config', async () => {
+    for (const config of [undefined, { version: 1, guard: { minLength: 5, warnLength: 7000, maxLength: 8000, chatter: 'off' } }, { version: 1, guard: { neverSave: ['zzz'], chatter: 'strict' } }, 'not json']) {
+      if (typeof config === 'string') writeFileSync(configFile, config)
+      else setConfig(config)
+      const { replies, forwarded } = await run([call(1, 'memory_remember', { kind: 'fact', content: secret, confirm: true }), call(2, 'memory_remember', { kind: 'fact', content: '   ', confirm: true })])
+      expect([JSON.stringify(config)?.slice(0, 30), replies.get(1).error.message.includes('G1')]).toEqual([JSON.stringify(config)?.slice(0, 30), true])
+      expect(replies.get(2).error.message).toContain('empty')
+      expect(forwarded).toEqual([])
+    }
+  })
+
+  test('WIRE.1.a2: chatter strict asks for the confirm through the proxy even in warn mode', async () => {
+    setConfig({ version: 1, guard: { chatter: 'strict' } })
+    const dated = '2026-10-24 released 0.7.6 with the dashboard polish'
+    const asked = await run([call(1, 'memory_remember', { kind: 'fact', content: dated })], { MNEMOSYNE_GUARD_MODE: 'warn' })
+    expect(asked.replies.get(1).error.message).toContain('confirm: true')
+    const confirmed = await run([call(1, 'memory_remember', { kind: 'fact', content: dated, confirm: true })], { MNEMOSYNE_GUARD_MODE: 'warn' })
+    expect(confirmed.replies.get(1).error).toBeUndefined()
+    expect(confirmed.args(1)?.metadata.guard).toEqual(['G4'])
+  })
+
+  test('WIRE.2: a recall carries the ranking weights from the settings (the engine defaults with no config)', async () => {
+    setConfig(undefined)
+    const plain = await run([call(1, 'memory_recall', { query: 'heron' })])
+    expect(plain.args(1)).toMatchObject({ query: 'heron', vec_weight: 0.5, fts_weight: 0.3, importance_weight: 0.2 })
+    setConfig({ version: 1, recall: { vectorWeight: 0.7, keywordWeight: 0.2, importanceWeight: 0.1 } })
+    const tuned = await run([call(1, 'memory_recall', { query: 'heron' })])
+    expect(tuned.args(1)).toMatchObject({ vec_weight: 0.7, fts_weight: 0.2, importance_weight: 0.1 })
+  })
+
+  test('WIRE.2: tools/list texts that quote a number follow the settings', async () => {
+    setConfig({ version: 1, tags: { maxPerMemory: 3 }, expiry: { contextDays: 21 } })
+    const { replies } = await run([{ jsonrpc: '2.0', id: 1, method: 'tools/list' }])
+    const tools = replies.get(1).result.tools as { name: string; inputSchema: { properties: Record<string, { description?: string }> } }[]
+    const remember = tools.find(tool => tool.name === 'memory_remember')!
+    expect(remember.inputSchema.properties.tags?.description).toContain('at most 3')
+    expect(remember.inputSchema.properties.expires_in_days?.description).toContain('after 21 days')
+    setConfig(undefined)
+    const plain = (await run([{ jsonrpc: '2.0', id: 1, method: 'tools/list' }])).replies.get(1).result.tools as typeof tools
+    expect(plain.find(tool => tool.name === 'memory_remember')!.inputSchema.properties.tags?.description).toBe('Short lowercase topic tags, at most 5. On update they replace the old ones; [] removes them.')
+    expect(plain.find(tool => tool.name === 'memory_remember')!.inputSchema.properties.expires_in_days?.description).toContain('after 14 days')
+  })
+
+  test('WIRE.3.a3: a tool outside the allow-list answers -32601 Tool not available and is not listed; the rest are served', async () => {
+    setConfig({ version: 1, tools: { externalAllow: ['memory_recall', 'memory_stats'] } })
+    const { replies, forwarded } = await run([
+      { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+      call(2, 'memory_forget', { memory_id: 'm1' }),
+      call(3, 'memory_remember', { kind: 'fact', content: FACT }),
+      call(4, 'memory_recall', { query: 'heron' }),
+      call(5, 'memory_stats', {}),
+    ])
+    expect((replies.get(1).result.tools as { name: string }[]).map(tool => tool.name).sort()).toEqual(['memory_recall', 'memory_stats'])
+    for (const id of [2, 3]) expect([id, replies.get(id).error.code, replies.get(id).error.message]).toEqual([id, -32601, id === 2 ? 'Tool not available: memory_forget' : 'Tool not available: memory_remember'])
+    expect(replies.get(4).error).toBeUndefined()
+    expect(replies.get(5).error).toBeUndefined()
+    expect(forwarded.filter(message => message.method === 'tools/call').map(message => message.params.name)).toEqual(['mnemopi_recall', 'mnemopi_stats'])
+  })
+
+  test('WIRE.3.a4: all five tools are served by default, with no config or a broken one (C3); a typo in the list never widens it', async () => {
+    for (const config of [undefined, 'not json']) {
+      if (typeof config === 'string') writeFileSync(configFile, config)
+      else setConfig(config)
+      const { replies } = await run([{ jsonrpc: '2.0', id: 1, method: 'tools/list' }, call(2, 'memory_forget', { memory_id: 'm1' })])
+      expect((replies.get(1).result.tools as { name: string }[]).map(tool => tool.name).sort()).toEqual(['memory_forget', 'memory_recall', 'memory_remember', 'memory_stats', 'memory_update'])
+      expect(replies.get(2).error).toBeUndefined()
+    }
+    setConfig({ version: 1, tools: { externalAllow: ['memory_recal'] } })
+    const { replies } = await run([call(1, 'memory_forget', { memory_id: 'm1' })])
+    expect(replies.get(1).error.code).toBe(-32601)
+  })
+
+  test('WIRE.1.a4: an older wrapper that sets only MNEMOSYNE_VOCABULARY finds config.json beside it', async () => {
+    setConfig({ version: 1, tools: { externalAllow: ['memory_stats'] } })
+    const { replies } = await run([call(1, 'memory_forget', { memory_id: 'm1' })], { MNEMOSYNE_ROOT: '', MNEMOSYNE_VOCABULARY: join(root, 'vocabulary.json') })
+    expect(replies.get(1).error.code).toBe(-32601)
   })
 })

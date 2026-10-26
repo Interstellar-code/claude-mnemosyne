@@ -22,7 +22,8 @@ import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync
 import { basename, dirname, join, resolve } from 'node:path'
 import { BACKFILL_TEXT_LIMIT, isProposalId } from '../hooks/backfill'
 import { isKind } from '../hooks/kinds'
-import { cleanTags, normalizeTag } from '../hooks/tags'
+import { cleanTags, MAX_TAGS, normalizeTag } from '../hooks/tags'
+import { readConfig } from './settings'
 
 const IS_WINDOWS = process.platform === 'win32'
 export const PROPOSALS_NAME = 'tags-proposed.json'
@@ -130,12 +131,12 @@ export function getRows(db: Database | null, ids: readonly string[]): StoredRow[
  * kind, the one proposed new tag and sha256 of each proposal are kept, so a
  * memory's text can never reach it.
  */
-export function proposalsText(input: string): string {
+export function proposalsText(input: string, maxTags: number = MAX_TAGS): string {
   const value = JSON.parse(input)
   const list = value?.proposals
   if (!Array.isArray(list)) throw new Error('stdin must be {"proposals":[...]}')
   const proposals = list.map((item: Record<string, unknown>, i: number) => {
-    const tags = Array.isArray(item?.tags) ? cleanTags(item.tags) : []
+    const tags = Array.isArray(item?.tags) ? cleanTags(item.tags, { max: maxTags }) : []
     if (!isProposalId(item?.id) || typeof item.owner !== 'string' || typeof item.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(item.sha256) || tags.length === 0) {
       throw new Error(`proposal ${i} needs id, owner, sha256 and tags`)
     }
@@ -282,6 +283,8 @@ function storeBytes(store: string) {
 
 export type BackupResult = { path: string; rows: number; pruned: number }
 export type BackupOptions = {
+  /** How many of the newest backups to keep; defaults to setting S5 in <root>/config.json (10 when there is none). */
+  keep?: number
   /** Free bytes on the backups folder's disk; defaults to statfs. A spec injects a full disk. */
   freeBytes?: (dir: string) => number
   now?: Date
@@ -292,9 +295,18 @@ const freeBytesOf = (dir: string) => {
   return Number(stats.bavail) * Number(stats.bsize)
 }
 
+/** Setting S5, backups to keep, from <root>/config.json: the default (BACKUP_KEEP) when there is no file or it is not usable. Never throws. */
+function keepFor(root: string) {
+  try {
+    return readConfig(root).storage.backupsKeep
+  } catch {
+    return BACKUP_KEEP
+  }
+}
+
 /**
  * Copies the store's database to <root>/backups/mnemopi-<UTC stamp>.db with VACUUM INTO, mode 0600,
- * then keeps the newest BACKUP_KEEP. Refuses, before copying, when the disk has less free space than
+ * then keeps the newest `keep` (setting S5, BACKUP_KEEP = 10 by default). Refuses, before copying, when the disk has less free space than
  * twice the store. Throws on any failure and leaves no partial file; the caller stops on a throw.
  */
 export function backupStore(store: string, root: string, options: BackupOptions = {}): BackupResult {
@@ -338,7 +350,8 @@ export function backupStore(store: string, root: string, options: BackupOptions 
     rmSync(file, { force: true })
     throw err
   }
-  const old = readdirSync(folder).filter(name => BACKUP_NAME.test(name)).sort().reverse().slice(BACKUP_KEEP)
+  const keep = options.keep ?? keepFor(root)
+  const old = readdirSync(folder).filter(name => BACKUP_NAME.test(name)).sort().reverse().slice(keep)
   for (const name of old) rmSync(join(folder, name), { force: true })
   return { path: file, rows, pruned: old.length }
 }
@@ -418,7 +431,8 @@ async function main(argv: readonly string[]) {
     }
   } else if (command === 'save') {
     if (store || rest.length !== 1 || !rest[0] || rest[0].startsWith('-')) throw new Error('usage: save <file>  (the proposals JSON on stdin)')
-    saveProposals(rest[0], proposalsText(await Bun.stdin.text()))
+    // The most tags a proposal keeps is setting T1, from the config.json beside the proposals file (the data root).
+    saveProposals(rest[0], proposalsText(await Bun.stdin.text(), readConfig(dirname(resolve(rest[0]))).tags.maxPerMemory))
   } else {
     throw new Error('usage: memories.ts --store <dir> list --untagged|--no-knowledge | --store <dir> get <id>... | pending write|remove|list <root> ... | save <file>')
   }

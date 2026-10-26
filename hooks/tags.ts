@@ -36,18 +36,21 @@ export function normalizeTag(raw: unknown): string | undefined {
 export interface TagRules {
   aliases?: ReadonlyMap<string, string>
   drop?: ReadonlySet<string>
+  /** Most tags kept (setting T1); default MAX_TAGS. */
+  max?: number
 }
 
 /** The cleaned tags of a list; anything that is not a string, or has nothing left, is dropped. */
 export function cleanTags(tags: readonly unknown[], rules: TagRules = {}): string[] {
   const clean: string[] = []
+  const most = rules.max ?? MAX_TAGS
   for (const raw of tags) {
     const normal = normalizeTag(raw)
     if (normal === undefined) continue
     const tag = rules.aliases?.get(normal) ?? normal
     if (rules.drop?.has(normal) || rules.drop?.has(tag)) continue
     if (!clean.includes(tag)) clean.push(tag)
-    if (clean.length === MAX_TAGS) break
+    if (clean.length >= most) break
   }
   return clean
 }

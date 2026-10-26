@@ -5,7 +5,7 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { Database } from 'bun:sqlite'
 import { createHash } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { backupName, backupStore, BACKUP_KEEP, getRows } from '../../bin/memories'
 import { BACKFILL_TEXT_LIMIT, hasTags, judge, parseProposals, parseRows, PROPOSALS_FILE } from '../../hooks/backfill'
@@ -246,6 +246,20 @@ describe('bin/memories.ts on a real store', () => {
       expect(parseProposals(readFileSync(file(), 'utf8')).map(p => p.id)).toEqual(['zzz'])
       expect(readdirSync(join(temp.dir, 'root')).filter(name => name.endsWith('.tmp'))).toEqual([])
       expect(statSync(file()).mode & 0o777).toBe(0o600)
+    })
+
+    test('WIRE.2.a1: a proposal keeps at most the tag count of setting T1, from the config.json beside the file (5 with none)', async () => {
+      const many = { ...good, tags: ['a1', 'b2', 'c3', 'd4', 'e5', 'f6', 'g7'] }
+      await memories(['save', file()], JSON.stringify({ proposals: [many] }))
+      expect(JSON.parse(readFileSync(file(), 'utf8')).proposals[0].tags).toEqual(['a1', 'b2', 'c3', 'd4', 'e5'])
+      const config = join(temp.dir, 'root', 'config.json')
+      writeFileSync(config, JSON.stringify({ version: 1, tags: { maxPerMemory: 2 } }))
+      try {
+        await memories(['save', file()], JSON.stringify({ proposals: [many] }))
+        expect(JSON.parse(readFileSync(file(), 'utf8')).proposals[0].tags).toEqual(['a1', 'b2'])
+      } finally {
+        rmSync(config, { force: true })
+      }
     })
 
     test('a looser existing file is replaced by a 0600 one', async () => {
@@ -539,6 +553,41 @@ describe('bin/memories.ts backup', () => {
     // The newest ten: the last ten of the 2031 series, none of the earlier ones.
     expect(backups).toEqual(Array.from({ length: 10 }, (_, i) => backupName(new Date(Date.UTC(2031, 0, 1, 0, 0, i + 4)))))
     expect(existsSync(stray)).toBe(true)
+  })
+
+  test('WIRE.4.a2: backup keeps the number of files setting S5 names (config.json in the data root); 10 with no file, a broken file or a bad value (C3)', async () => {
+    const data = join(temp.dir, 'data-keep')
+    const backups = () => (existsSync(join(data, 'backups')) ? readdirSync(join(data, 'backups')).filter(name => name.startsWith('mnemopi-')) : [])
+    const stamp = (i: number) => ({ now: new Date(Date.UTC(2032, 0, 1, 0, 0, i)) })
+    mkdirSync(data, { recursive: true })
+    for (let i = 0; i < 12; i++) backupStore(store, data, stamp(i))
+    expect(backups().length).toBe(BACKUP_KEEP)
+    // S5 = 3 keeps the newest three and says how many it removed
+    writeFileSync(join(data, 'config.json'), JSON.stringify({ version: 1, storage: { backupsKeep: 3 } }))
+    const result = backupStore(store, data, stamp(20))
+    expect(result.pruned).toBe(8)
+    expect(backups().sort()).toEqual([20, 11, 10].map(i => backupName(new Date(Date.UTC(2032, 0, 1, 0, 0, i)))).sort())
+    // S5 = 50 keeps them all
+    writeFileSync(join(data, 'config.json'), JSON.stringify({ version: 1, storage: { backupsKeep: 50 } }))
+    for (let i = 21; i < 31; i++) backupStore(store, data, stamp(i))
+    expect(backups().length).toBe(13)
+    // a value out of range (below 3), a wrong type and a file that is not JSON all mean the default 10
+    for (const text of [JSON.stringify({ version: 1, storage: { backupsKeep: 1 } }), JSON.stringify({ version: 1, storage: { backupsKeep: 'all' } }), '{ not json']) {
+      writeFileSync(join(data, 'config.json'), text)
+      backupStore(store, data, stamp(40 + text.length))
+      expect([text.slice(0, 20), backups().length]).toEqual([text.slice(0, 20), BACKUP_KEEP])
+    }
+  })
+
+  test('WIRE.4.a2: the backup command line follows S5 too', async () => {
+    const data = join(temp.dir, 'data-cli')
+    mkdirSync(data, { recursive: true })
+    writeFileSync(join(data, 'config.json'), JSON.stringify({ version: 1, storage: { backupsKeep: 3 } }))
+    for (let i = 0; i < 5; i++) backupStore(store, data, { now: new Date(Date.UTC(2033, 0, 1, 0, 0, i)), keep: 50 })
+    const ran = await memories(['--store', store, 'backup', data])
+    expect(ran.exitCode).toBe(0)
+    expect(JSON.parse(ran.stdout).pruned).toBe(3)
+    expect(readdirSync(join(data, 'backups')).filter(name => name.startsWith('mnemopi-')).length).toBe(3)
   })
 
   test('META.5.a3: a read-only backups folder makes it fail with a non-zero exit and leaves no file', async () => {

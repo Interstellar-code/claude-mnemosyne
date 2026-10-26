@@ -6,7 +6,7 @@
 // helpers at the end of this file. A message names the rule, never the matched text, so a
 // caller can log or show it without leaking what it caught. No imports, so the
 // hooks, the proxy, the dashboard server and the importers can all use it.
-export type GuardRule = 'G1' | 'G2' | 'G3' | 'G4'
+export type GuardRule = 'G1' | 'G2' | 'G3' | 'G4' | 'G7'
 export type GuardVerdict = 'allow' | 'warn' | 'block'
 export interface GuardHit {
   rule: GuardRule
@@ -21,11 +21,38 @@ export interface GuardInput {
 export interface GuardResult {
   verdict: GuardVerdict
   hits: GuardHit[]
+  /** Present (true) when a warning must be confirmed whatever the guard mode says: the chatter check set to strict. */
+  mustConfirm?: true
 }
 
 export const MIN_LENGTH = 15
 export const WARN_LENGTH = 1500
 export const MAX_LENGTH = 4000
+
+/**
+ * The guard's numbers and switches (settings G2-G7; hooks/settings.ts holds the schema and the ranges). `contextDays` is
+ * the context-note expiry (E1) that the chatter message quotes. Every field is optional: what a caller leaves out is the
+ * default below, which equals the numbers that were hard-coded before, so admit(input) with no config is the 0.8.4 guard.
+ * The built-in secret rules and the empty-text block are not in here: no config reaches them (C4).
+ */
+export interface GuardConfig {
+  warnLength?: number
+  maxLength?: number
+  minLength?: number
+  chatter?: 'strict' | 'warn' | 'off'
+  neverSave?: readonly string[]
+  contextDays?: number
+}
+
+/** The guard config out of resolved settings (anything with the `guard` and `expiry` groups). */
+export const guardConfigOf = (settings: { guard: GuardConfig; expiry: { contextDays: number } }): GuardConfig => ({
+  warnLength: settings.guard.warnLength,
+  maxLength: settings.guard.maxLength,
+  minLength: settings.guard.minLength,
+  chatter: settings.guard.chatter,
+  neverSave: settings.guard.neverSave,
+  contextDays: settings.expiry.contextDays,
+})
 
 // Known secret shapes only. High-entropy runs alone are not secrets: the store is
 // full of file paths and hashes.
@@ -65,14 +92,33 @@ function secretHits(content: string): GuardHit[] {
   return hits
 }
 
-/** G2: empty, too short and too long text blocks; long text only warns. */
-function sizeCheck(content: string): { block?: GuardHit; warn?: GuardHit } {
+/** G2: empty, too short and too long text blocks; long text only warns. The empty-text block holds under every config. */
+function sizeCheck(content: string, config: GuardConfig): { block?: GuardHit; warn?: GuardHit } {
+  const minLength = config.minLength ?? MIN_LENGTH
+  const warnLength = config.warnLength ?? WARN_LENGTH
+  const maxLength = config.maxLength ?? MAX_LENGTH
   const length = content.trim().length
   if (length === 0) return { block: { rule: 'G2', message: 'G2 size: text is empty' } }
-  if (length < MIN_LENGTH) return { block: { rule: 'G2', message: `G2 size: text is under ${MIN_LENGTH} characters; say what the fact is in a full sentence` } }
-  if (length > MAX_LENGTH) return { block: { rule: 'G2', message: `G2 size: text is over ${MAX_LENGTH} characters; split it into one fact per call` } }
-  if (length > WARN_LENGTH) return { warn: { rule: 'G2', message: `G2 size: text is over ${WARN_LENGTH} characters; one fact per call is easier to find again` } }
+  if (length < minLength) return { block: { rule: 'G2', message: `G2 size: text is under ${minLength} characters; say what the fact is in a full sentence` } }
+  if (length > maxLength) return { block: { rule: 'G2', message: `G2 size: text is over ${maxLength} characters; split it into one fact per call` } }
+  if (length > warnLength) return { warn: { rule: 'G2', message: `G2 size: text is over ${warnLength} characters; one fact per call is easier to find again` } }
   return {}
+}
+
+/** Text compared the way a person reads it: compatibility-normalised and lowercased, so a full-width or capitalised spelling still matches. */
+const folded = (text: string) => text.normalize('NFKC').toLowerCase()
+
+/** G7: the person's own never-save words and phrases. Plain text, never a pattern. The message names the rule, never the word. */
+function neverSaveHits(content: string, words: readonly string[] | undefined): GuardHit[] {
+  if (words === undefined || words.length === 0) return []
+  const text = folded(content)
+  for (const word of words) {
+    const needle = typeof word === 'string' ? folded(word.trim()) : ''
+    if (needle !== '' && text.includes(needle)) {
+      return [{ rule: 'G7', message: 'G7 never-save: text holds a word or phrase on your never-save list; remove it and save the fact without it' }]
+    }
+  }
+  return []
 }
 
 const MONTHS = 'jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?'
@@ -84,20 +130,26 @@ const NOW_WORDS = /\b(?:today|tonight|this session)\b/i
 // summary), and a rule, preference or decision often quotes the date it was made ("user 2026-10-13: ...").
 const DATED_OK = new Set(['context', 'event', 'instruction', 'preference', 'decision'])
 
-function chatterHits(content: string, kind: string | undefined): GuardHit[] {
+function chatterHits(content: string, kind: string | undefined, config: GuardConfig): GuardHit[] {
+  if (config.chatter === 'off') return []
   if (kind !== undefined && DATED_OK.has(kind)) return []
   if (!(DATE.test(content) && STATUS.test(content)) && !NOW_WORDS.test(content)) return []
-  return [{ rule: 'G4', message: "G4 task chatter: text reads like dated progress; save it as kind 'context' with an expiry (valid_until, about 14 days) instead" }]
+  return [{ rule: 'G4', message: `G4 task chatter: text reads like dated progress; save it as kind 'context' with an expiry (valid_until, about ${config.contextDays ?? 14} days) instead` }]
 }
 
-/** Checks text before it is saved: block (never reaches the engine), warn (saved, with the hits shown) or allow. */
-export function admit(input: GuardInput): GuardResult {
+/**
+ * Checks text before it is saved: block (never reaches the engine), warn (saved, with the hits shown) or allow.
+ * `config` (settings G2-G7) moves the length limits, the chatter check and the never-save words; with none, the
+ * guard is the 0.8.4 one. The secret rules (G1) and the empty-text block run whatever the config says.
+ */
+export function admit(input: GuardInput, config: GuardConfig = {}): GuardResult {
   const content = typeof input.content === 'string' ? input.content : ''
-  const size = sizeCheck(content)
-  const blocks = [...(size.block ? [size.block] : []), ...secretHits(content)]
-  const warnings = [...(size.warn ? [size.warn] : []), ...chatterHits(content, input.kind)]
+  const size = sizeCheck(content, config)
+  const blocks = [...(size.block ? [size.block] : []), ...secretHits(content), ...neverSaveHits(content, config.neverSave)]
+  const chatter = chatterHits(content, input.kind, config)
+  const warnings = [...(size.warn ? [size.warn] : []), ...chatter]
   if (blocks.length > 0) return { verdict: 'block', hits: [...blocks, ...warnings] }
-  if (warnings.length > 0) return { verdict: 'warn', hits: warnings }
+  if (warnings.length > 0) return { verdict: 'warn', hits: warnings, ...(config.chatter === 'strict' && chatter.length > 0 ? { mustConfirm: true as const } : {}) }
   return { verdict: 'allow', hits: [] }
 }
 
@@ -118,15 +170,15 @@ export interface NearMatch {
  * The matches that are real near-duplicates. A match that is the save's own text again (score about 1 and the same
  * first 80 characters) in the saver's own rows is the engine's dedupe: the same memory written again, no new row, so
  * no warning. The same text in another owner's row is a different memory (the engine's dedupe is per owner), so it
- * is still a near-duplicate; without the saver's owner nothing is skipped.
+ * is still a near-duplicate; without the saver's owner nothing is skipped. `threshold` is setting G5 (default 0.88).
  */
-export function nearMatchesOf(matches: unknown, content: string, saver?: string): NearMatch[] {
+export function nearMatchesOf(matches: unknown, content: string, saver?: string, threshold: number = NEAR_DUPLICATE_SCORE): NearMatch[] {
   if (!Array.isArray(matches)) return []
   const out: NearMatch[] = []
   for (const item of matches) {
     const m = item as Partial<NearMatch> | null
     if (m === null || typeof m !== 'object' || typeof m.id !== 'string' || typeof m.owner !== 'string' || typeof m.score !== 'number' || typeof m.preview !== 'string') continue
-    if (m.score < NEAR_DUPLICATE_SCORE) continue
+    if (m.score < threshold) continue
     if (m.score >= 0.9999 && m.preview === content.slice(0, 80) && saver !== undefined && m.owner === saver) continue
     out.push({ id: m.id, owner: m.owner, score: m.score, preview: m.preview })
   }

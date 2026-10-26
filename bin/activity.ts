@@ -10,7 +10,7 @@
 // (no chmod on Windows). Past MAX_BYTES the file is renamed to <path>.1, one
 // backup kept; only the writer that creates <path>.lock with O_EXCL rotates, and
 // it checks the size again under the lock, so two writers never rotate twice. A
-// lock older than LOCK_STALE_MS is taken over. Every error is swallowed: a log
+// lock older than LOCK_STALE_MS is taken over. MAX_BYTES is the default; setting S4 in config.json moves it. Every error is swallowed: a log
 // must never break the call it records.
 //
 // MAPX.3: appendActivity also maintains <root>/activity-daily.json beside the
@@ -18,6 +18,7 @@
 // a tally failure never stops or throws.
 import { chmodSync, closeSync, existsSync, fchmodSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
+import { readConfig } from './settings'
 
 export const MAX_BYTES = 1024 * 1024
 export const LOCK_STALE_MS = 10_000
@@ -27,6 +28,18 @@ export const MAX_LINE = 16 * 1024
 export const SCRIPT_TIMEOUT_MS = 5_000
 
 export type Limits = { maxBytes?: number; staleMs?: number }
+
+/**
+ * The size the log rolls over at: setting S4 in config.json, which sits in the log's own folder (the data root).
+ * 1 MiB (MAX_BYTES) when there is no file or it is not usable. Read at each append, so a change applies at once. Never throws.
+ */
+function maxBytesFor(path: string) {
+  try {
+    return readConfig(dirname(path)).storage.activityLogMaxBytes
+  } catch {
+    return MAX_BYTES
+  }
+}
 
 export const tallyPath = (path: string) => join(dirname(path), 'activity-daily.json')
 
@@ -129,7 +142,8 @@ export function appendActivity(path: string, lines: readonly unknown[], limits: 
       mkdirSync(folder, { recursive: true, mode: 0o700 })
       if (!isWindows) chmodSync(folder, 0o700)
     }
-    if (sizeOf(path) > (limits.maxBytes ?? MAX_BYTES)) rotate(path, limits)
+    const maxBytes = limits.maxBytes ?? maxBytesFor(path)
+    if (sizeOf(path) > maxBytes) rotate(path, { ...limits, maxBytes })
     const fd = openSync(path, 'a', 0o600)
     try {
       // Owner-only at every open: the umask may have taken bits off a new file, and an old one may be looser.
