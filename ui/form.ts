@@ -29,7 +29,8 @@ export type FormValues = {
   owner: string
   content: string
   kind: string
-  tags: string[]
+  /** null until the tag picker has drawn: the tags are then unknown, not empty. */
+  tags: string[] | null
   importance: string
   expires: string
   removeExpiry: boolean
@@ -69,7 +70,7 @@ export function createRequest(values: FormValues): Request {
       owner: values.owner,
       content: values.content,
       kind: values.kind,
-      tags: values.tags,
+      tags: values.tags ?? [],
       ...(values.importance.trim() === '' ? {} : { importance: Number(values.importance) }),
       ...(values.expires.trim() === '' ? {} : { expires_in_days: Number(values.expires) }),
     },
@@ -93,7 +94,7 @@ export function updateRequest(memory: FormMemory, values: FormValues): Request {
     if (!isKind(values.kind)) return { error: 'Pick a kind.' }
     body.kind = values.kind
   }
-  if (!sameList(values.tags, tagsOf(memory))) body.tags = values.tags
+  if (values.tags !== null && !sameList(values.tags, tagsOf(memory))) body.tags = values.tags
   const was = typeof memory.importance === 'number' ? memory.importance : null
   if (values.importance.trim() !== '' && Number(values.importance) !== was) body.importance = Number(values.importance)
   if (values.removeExpiry) body.expires_in_days = null
@@ -257,6 +258,7 @@ export function buildForm(host: FormHost, memory?: FormMemory): BuiltForm {
   const picker = el('div', undefined, 'tag-picker')
   picker.append(el('p', 'Loading the tags…', 'muted small'))
   const boxes = new Map<string, HTMLInputElement>()
+  let drawn = false
   const own = memory === undefined ? [] : tagsOf(memory)
   const drawPicker = (vocabulary: VocabData | null) => {
     const offered = vocabulary?.tags ?? []
@@ -283,6 +285,7 @@ export function buildForm(host: FormHost, memory?: FormMemory): BuiltForm {
       parts.push(set)
     }
     picker.replaceChildren(...parts)
+    drawn = true
   }
 
   // Messages: one status line, and the warning block (with Save anyway) or the block list (without).
@@ -296,6 +299,7 @@ export function buildForm(host: FormHost, memory?: FormMemory): BuiltForm {
   save.type = 'submit'
   const cancel = el('button', 'Cancel', 'btn')
   cancel.type = 'button'
+  save.disabled = true
   buttons.append(save, cancel)
 
   let warned: Record<string, unknown> | null = null
@@ -319,7 +323,7 @@ export function buildForm(host: FormHost, memory?: FormMemory): BuiltForm {
     owner: creating ? owner.value : (memory?.owner ?? ''),
     content: content.value,
     kind: kind.value,
-    tags: [...boxes.entries()].filter(([, box]) => box.checked).map(([tag]) => tag),
+    tags: !drawn ? null : [...boxes.entries()].filter(([, box]) => box.checked).map(([tag]) => tag),
     importance: importance.value,
     expires: expires.value,
     removeExpiry: removeExpiry.checked,
@@ -333,7 +337,7 @@ export function buildForm(host: FormHost, memory?: FormMemory): BuiltForm {
     say('Saving…', false)
     const reply = await host.post(creating ? '/api/memory/create' : '/api/memory/update', body)
     busy = false
-    save.disabled = false
+    save.disabled = !drawn
     cancel.disabled = false
     const answer = answerOf(reply.status, reply.body, creating)
     if (answer.kind === 'saved') {
@@ -366,7 +370,7 @@ export function buildForm(host: FormHost, memory?: FormMemory): BuiltForm {
   }
 
   const submit = () => {
-    if (busy) return
+    if (busy || !drawn) return
     clearNotes()
     const built = memory === undefined ? createRequest(values()) : updateRequest(memory, values())
     if ('error' in built) return say(built.error)
@@ -416,6 +420,8 @@ export function buildForm(host: FormHost, memory?: FormMemory): BuiltForm {
   const ready = host.vocabulary().then(
     vocabulary => drawPicker(vocabulary),
     () => drawPicker(null),
-  )
+  ).then(() => {
+    save.disabled = false
+  })
   return { element: form, ready, focus: () => content.focus() }
 }

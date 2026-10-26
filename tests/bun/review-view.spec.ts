@@ -390,4 +390,29 @@ describe('The Review tab on a real store', () => {
     const back = parseQueue(await (await answer('/api/review')).json())!
     expect(back.notLive.some((n: { id: string }) => n.id === superseded)).toBe(false)
   })
+
+  test('the real /api/memory/retire with replaced_by: the server names the replacement, and the row is retired', async () => {
+    const old = await remember(11, 'the old way of doing it', ['a'])
+    const fresh = await remember(12, 'the new way of doing it', ['a'])
+    const post = async (payload: unknown) =>
+      fetch(`http://127.0.0.1:${started.port}/api/memory/retire`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${started.token}`, 'Content-Type': 'application/json', Origin: `http://127.0.0.1:${started.port}` },
+        body: JSON.stringify(payload),
+      })
+    // A replacement that is not in the store is refused, and nothing is retired.
+    expect((await post({ memory_id: old, replaced_by: 'no-such-memory' })).status).toBe(400)
+    const retire = await post({ memory_id: old, replaced_by: fresh })
+    expect(retire.status).toBe(200)
+    expect(await retire.json()).toMatchObject({ status: 'retired', memory_id: old, replaced_by: fresh })
+    const list = parseReview(await (await fetch(`http://127.0.0.1:${started.port}/api/memories?sort=newest`, { headers: { Authorization: `Bearer ${started.token}` } })).json())
+    expect(list.rows.find((m: { id: string }) => m.id === old)?.state).toBe('retired')
+    expect(list.rows.find((m: { id: string }) => m.id === fresh)?.state).not.toBe('retired')
+    const db = new Database(join(store, 'mnemopi.db'), { readonly: true })
+    try {
+      expect((db.query('SELECT superseded_by FROM working_memory WHERE id = ?').get(old) as { superseded_by: string | null }).superseded_by).toBe(fresh)
+    } finally {
+      db.close()
+    }
+  })
 })

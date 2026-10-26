@@ -1870,6 +1870,54 @@ describe('CRUD.1 and CRUD.3: the form and the vocabulary panel', () => {
     expect(odd.box('not-in-vocab').checked).toBe(true)
   })
 
+  test('an early save on an edit form leaves the tags alone; a tag change after the vocabulary loads is sent', async () => {
+    const memory = { id: 'm1', owner: 'project-alpha-1a2b', content: 'old text', memory_type: 'fact', importance: 0.5, tags: ['plain-tag'] }
+    const posts: Record<string, any>[] = []
+    let release!: (value: unknown) => void
+    const pending = new Promise(resolve => (release = resolve))
+    const host = {
+      post: async (_path: string, body: Record<string, any>) => (posts.push(body), { status: 200, body: { status: 'updated', memory_id: 'm1' } }),
+      vocabulary: async () => vocab.parseVocabulary(await pending),
+      owners: () => ['global'],
+      owner: () => 'global',
+      ownerName: (owner: string) => owner,
+      done: () => {},
+      cancel: () => {},
+    }
+    const built = form.buildForm(host, memory)
+    const root = built.element as FNode
+    const find = (test: (node: FNode) => boolean) => root.all().find(test)!
+    const save = find(n => n.tagName === 'button' && n.type === 'submit')
+    const text = find(n => n.tagName === 'textarea')
+    const tick = (value: string, checked: boolean) => void (find(n => n.tagName === 'input' && n.type === 'checkbox' && n.value === value).checked = checked)
+    // Before the vocabulary arrives: Save is off, and pressing it (or submitting) sends nothing.
+    expect(save.disabled).toBe(true)
+    text.value = 'edited early'
+    save.fire('click')
+    root.fire('submit')
+    await flush()
+    expect(posts).toHaveLength(0)
+    expect(form.updateRequest(memory, { owner: 'x', content: 'edited early', kind: 'fact', tags: null, importance: '0.5', expires: '', removeExpiry: false, pinned: false })).toEqual({ body: { memory_id: 'm1', content: 'edited early' } })
+    release(VOCAB)
+    await built.ready
+    expect(save.disabled).toBe(false)
+    // Settled, tags untouched: only the text goes, no tags key.
+    save.fire('click')
+    await flush()
+    expect(posts).toEqual([{ memory_id: 'm1', content: 'edited early' }])
+    // A real tag change after load is still sent.
+    tick('entity:alice', true)
+    save.fire('click')
+    await flush()
+    expect(posts[1]).toEqual({ memory_id: 'm1', content: 'edited early', tags: ['entity:alice', 'plain-tag'] })
+    // Unticking every tag after load clears them, on purpose.
+    tick('entity:alice', false)
+    tick('plain-tag', false)
+    save.fire('click')
+    await flush()
+    expect(posts[2]).toEqual({ memory_id: 'm1', content: 'edited early', tags: [] })
+  })
+
   test('answerOf: saved, warned, blocked, too long and failed, in the words the form shows', () => {
     expect(form.answerOf(200, { status: 'stored', memory_id: 'mem-1' }, true)).toEqual({ kind: 'saved', id: 'mem-1', text: 'Saved memory mem-1.' })
     expect(form.answerOf(200, { status: 'updated', memory_id: 'mem-2' }, false).text).toBe('Updated memory mem-2.')
