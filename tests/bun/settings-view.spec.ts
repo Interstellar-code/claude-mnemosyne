@@ -272,7 +272,7 @@ describe('UI.1: the Settings tab draws from /api/settings only', () => {
 
   test('the tab is the last one and has its own markup and styles', () => {
     const app = readFileSync(join(ROOT, 'ui', 'app.ts'), 'utf8')
-    expect(app).toMatch(/const VIEWS = \[[^\]]*'health', 'settings'\] as const/)
+    expect(app).toMatch(/const VIEWS = \[[^\]]*'health', 'vocabulary', 'settings'\] as const/)
     expect(app).toMatch(/settings: 'Settings'/)
     expect(app).toMatch(/if \(view === 'settings'\) void loadSettings\(\)/)
     const css = readFileSync(join(ROOT, 'ui', 'style.css'), 'utf8')

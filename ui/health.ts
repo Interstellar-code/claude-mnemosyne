@@ -18,6 +18,8 @@ export type HealthData = {
   storeSize: number
   logSize: number
   tables: { name: string; rows: number }[]
+  /** Tables that are empty by design, each with the reason (C10); `{}` from an older server, which then shows plain "empty". */
+  unusedByDesign: Record<string, string>
   coverage: { tagged: number; knowledge: number; embeddings: number; provenance: number }
 }
 
@@ -37,6 +39,7 @@ export function parseHealth(body: unknown): HealthData | null {
   const never = raw.neverRecalled !== null && typeof raw.neverRecalled === 'object' ? (raw.neverRecalled as Record<string, unknown>) : {}
   const coverage = raw.coverage !== null && typeof raw.coverage === 'object' ? (raw.coverage as Record<string, unknown>) : {}
   const tables = raw.tables !== null && typeof raw.tables === 'object' && !Array.isArray(raw.tables) ? (raw.tables as Record<string, unknown>) : {}
+  const unused = raw.unusedByDesign !== null && typeof raw.unusedByDesign === 'object' && !Array.isArray(raw.unusedByDesign) ? (raw.unusedByDesign as Record<string, unknown>) : {}
   const sizes = raw.sizes !== null && typeof raw.sizes === 'object' ? (raw.sizes as Record<string, unknown>) : {}
   return {
     total: whole(raw.total),
@@ -53,6 +56,7 @@ export function parseHealth(body: unknown): HealthData | null {
     tables: Object.entries(tables)
       .map(([name, rows]) => ({ name: plainLabel(name, 60), rows: whole(rows) }))
       .sort((a, b) => (a.name === 'working_memory' ? -1 : b.name === 'working_memory' ? 1 : a.name.localeCompare(b.name))),
+    unusedByDesign: Object.fromEntries(Object.entries(unused).filter(([, reason]) => typeof reason === 'string').map(([name, reason]) => [plainLabel(name, 60), plainLabel(String(reason), 300)])),
     coverage: { tagged: whole(coverage.tagged), knowledge: whole(coverage.knowledge), embeddings: whole(coverage.embeddings), provenance: whole(coverage.provenance ?? coverage.author_type) },
   }
 }
@@ -180,12 +184,16 @@ export function chartText(days: readonly Day[], data: HealthData): { label: stri
   }
 }
 
-/** The storage rows: the two files, then each table with its row count ('empty' for none). */
-export function storageRows(data: HealthData): { name: string; value: string; empty: boolean }[] {
+/** The storage rows: the two files, then each table with its row count. An empty table the server names in `unusedByDesign` says "unused by design" and its reason, and is not a gap (`byDesign`). */
+export function storageRows(data: HealthData): { name: string; value: string; empty: boolean; byDesign: boolean; reason: string }[] {
+  const reasonOf = (name: string) => (Object.hasOwn(data.unusedByDesign, name) ? data.unusedByDesign[name]! : '')
   return [
-    { name: 'database file', value: bytes(data.storeSize), empty: false },
-    { name: 'activity log', value: bytes(data.logSize), empty: false },
-    ...data.tables.map(table => ({ name: table.name, value: table.rows === 0 ? 'empty' : plural(table.rows, 'row', 'rows'), empty: table.rows === 0 })),
+    { name: 'database file', value: bytes(data.storeSize), empty: false, byDesign: false, reason: '' },
+    { name: 'activity log', value: bytes(data.logSize), empty: false, byDesign: false, reason: '' },
+    ...data.tables.map(table => {
+      const reason = table.rows === 0 ? reasonOf(table.name) : ''
+      return { name: table.name, value: table.rows === 0 ? (reason === '' ? 'empty' : 'unused by design') : plural(table.rows, 'row', 'rows'), empty: table.rows === 0, byDesign: reason !== '', reason }
+    }),
   ]
 }
 
@@ -203,7 +211,8 @@ export function filterTables<T extends { rows: number }>(rows: readonly T[], fil
 
 /** The Storage summary line: the size, the tables and how many are empty. */
 export function storageSummary(data: HealthData): string {
-  const empty = data.tables.filter(table => table.rows === 0).length
+  // A table that is empty by design is not counted: it is not a fault.
+  const empty = data.tables.filter(table => table.rows === 0 && !Object.hasOwn(data.unusedByDesign, table.name)).length
   return `Storage · ${bytes(data.storeSize + data.logSize)} · ${plural(data.tables.length, 'table', 'tables')}, ${empty} empty`
 }
 
@@ -292,7 +301,11 @@ export function storageList(data: HealthData, filter: TableFilter = 'all'): HTML
   if (filter !== 'all' && tables.length === 0) return [el('p', 'No tables match.', 'muted small')]
   return [...(filter === 'all' ? rows.slice(0, 2) : []), ...tables].map(row => {
     const item = el('div', undefined, 'list-row')
-    item.append(el('span', row.name, 'mono small'), el('span', row.value, row.empty ? 'small is-stale' : 'small'))
+    // Empty by design reads as a note, not a warning: the reason sits under the name.
+    const name = el('span', undefined, 'storage-name')
+    name.append(el('span', row.name, 'mono small'))
+    if (row.byDesign) name.append(el('span', row.reason, 'muted small storage-reason'))
+    item.append(name, el('span', row.value, row.byDesign ? 'small muted' : row.empty ? 'small is-stale' : 'small'))
     return item
   })
 }

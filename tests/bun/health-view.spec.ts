@@ -323,10 +323,42 @@ describe('VIEWS.2: the Health tab on a real store', () => {
     expect(rowsOfStorage.find((r: { name: string }) => r.name === 'working_memory')).toMatchObject({ value: '5 rows', empty: false })
     expect(rowsOfStorage.find((r: { name: string }) => r.name === 'memoria_facts')).toMatchObject({ value: 'empty', empty: true })
     expect(rowsOfStorage[2]!.name).toBe('working_memory')
-    const empty = data.tables.filter((t: { rows: number }) => t.rows === 0).length
+    // A table that is empty by design is not counted in "N empty" (CRUD.4).
+    const empty = data.tables.filter((t: { rows: number; name: string }) => t.rows === 0 && !Object.hasOwn(data.unusedByDesign, t.name)).length
     expect(empty).toBeGreaterThan(0)
     expect(storageSummary(data)).toBe(`Storage · ${bytes(data.storeSize + data.logSize)} · ${data.tables.length} tables, ${empty} empty`)
     expect(storageSummary({ ...data, tables: [{ name: 'one', rows: 0 }] })).toContain('1 table, 1 empty')
+  })
+
+  test('CRUD.4: a table the server names in unusedByDesign says "unused by design" and its reason, is not counted as empty, and the Empty filter still lists it, marked', () => {
+    const names = Object.keys(data.unusedByDesign)
+    expect(names.length).toBeGreaterThan(0)
+    const reason = data.unusedByDesign[names[0]!]
+    expect(typeof reason).toBe('string')
+    const byDesign = storageRows(data).find((r: { name: string }) => r.name === names[0])
+    expect(byDesign).toMatchObject({ value: 'unused by design', empty: true, byDesign: true, reason })
+    // A table nothing explains is still plain "empty".
+    expect(storageRows(data).find((r: { name: string }) => r.name === 'memoria_facts')).toMatchObject({ value: 'empty', byDesign: false })
+    const tables = [{ name: 'gists', rows: 0 }, { name: 'plain', rows: 0 }, { name: 'full', rows: 2 }]
+    const some = { ...data, tables, unusedByDesign: { gists: 'Written only by the sleep tool, which the plugin never exposes.', full: 'ignored: it has rows' } }
+    expect(storageSummary(some)).toBe(`Storage · ${bytes(data.storeSize + data.logSize)} · 3 tables, 1 empty`)
+    expect(storageRows(some).find((r: { name: string }) => r.name === 'full')).toMatchObject({ value: '2 rows', byDesign: false })
+    withDocumentSync(() => {
+      const empty = storageList(some, 'empty') as FakeNode[]
+      expect(empty.map(r => r.texts().join('|'))).toEqual(['gists|Written only by the sleep tool, which the plugin never exposes.|unused by design', 'plain|empty'])
+      expect((storageList(some, 'data') as FakeNode[]).map(r => r.texts()[0])).toEqual(['full'])
+      // The reason is text: markup in it stays text.
+      const hostile = storageList({ ...some, unusedByDesign: { gists: MARKUP } }, 'empty') as FakeNode[]
+      expect(hostile[0]!.texts()).toContain(MARKUP)
+      expect(hostile[0]!.all().map(n => n.tagName).filter(tag => !['div', 'span'].includes(tag))).toEqual([])
+    })
+    // An older server sends no unusedByDesign: every empty table reads "empty" and counts.
+    const old = parseHealth({ total: 1, tables: { working_memory: 1, gists: 0 } })
+    expect(old.unusedByDesign).toEqual({})
+    expect(storageRows(old).find((r: { name: string }) => r.name === 'gists')).toMatchObject({ value: 'empty', byDesign: false })
+    expect(storageSummary(old)).toContain('2 tables, 1 empty')
+    expect(parseHealth({ unusedByDesign: [1], tables: {} }).unusedByDesign).toEqual({})
+    expect(parseHealth({ unusedByDesign: { a: 1, b: 'why' }, tables: {} }).unusedByDesign).toEqual({ b: 'why' })
   })
 
   test('filterTables: All keeps every table, Has data the ones with rows, Empty the ones without; storageList draws them and says when none match', () => {
