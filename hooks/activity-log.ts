@@ -7,7 +7,7 @@
 // the call's preview (query, fact, tags): secret-shaped strings are replaced by
 // [redacted] first, then it is cut to TEXT_LIMIT characters.
 
-export type ActivityAction = 'recall' | 'remember' | 'update' | 'forget' | 'stats' | 'rearm' | 'extract' | 'retire'
+export type ActivityAction = 'recall' | 'remember' | 'update' | 'forget' | 'stats' | 'rearm' | 'extract' | 'retire' | 'settings'
 export type ActivityOrigin = 'hook' | 'trigger' | 'tool' | 'external' | 'ui' | 'backfill'
 
 export type ActivityEntry = {
@@ -197,6 +197,27 @@ export function callText(action: ActivityAction, args: Record<string, unknown>) 
     // forget names only an id, which goes in `ids` (an id-shaped run would read as [redacted] here)
     default:
       return ''
+  }
+}
+
+// A settings change is logged by the setting's key and the kind of value before and after, never the
+// value: a list item (a "never save" word) must not reach the log (C8 of the settings plan).
+const SETTING_KEY = /^[A-Za-z][A-Za-z0-9_]{0,31}(?:\.[A-Za-z][A-Za-z0-9_]{0,31})?$/
+const SETTING_KINDS = new Set(['default', 'boolean', 'number', 'text', 'list', 'various'])
+
+/** One settings change as the activity fields: `guard.maxLength number>default` per key. Holds key names and kinds only; anything else becomes `?`. */
+export function settingsFields(changes: readonly { key: string; old: string; new: string }[], fields: { origin: ActivityOrigin; owner?: string; ok?: boolean; error?: unknown; t?: string }): ActivityFields {
+  const kind = (value: unknown) => (typeof value === 'string' && SETTING_KINDS.has(value) ? value : '?')
+  const key = (value: unknown) => (typeof value === 'string' && (value === 'all' || SETTING_KEY.test(value)) ? value : '?')
+  return {
+    action: 'settings',
+    origin: fields.origin,
+    owner: fields.owner ?? 'global',
+    text: changes.map(change => `${key(change?.key)} ${kind(change?.old)}>${kind(change?.new)}`).join(' · '),
+    count: changes.length,
+    ok: fields.ok ?? true,
+    ...(fields.ok === false ? { error: fields.error } : {}),
+    ...(fields.t === undefined ? {} : { t: fields.t }),
   }
 }
 
