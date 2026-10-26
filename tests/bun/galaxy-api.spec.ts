@@ -101,7 +101,7 @@ describe('GET /api/galaxy on a real store', () => {
   test('GDATA.1.a2: the reply shape, with labels and text cut to 80 and control characters removed', async () => {
     const reply = await galaxy()
     // no vectors in this store: `links` is absent (MAPX.2)
-    expect(Object.keys(reply).sort()).toEqual(['globalLive', 'knowledge', 'meaning', 'memories', 'projects', 'shown', 'total', 'writers'])
+    expect(Object.keys(reply).sort()).toEqual(['globalLive', 'knowledge', 'meaning', 'memories', 'projects', 'shown', 'stationMin', 'total', 'writers'])
     expect(reply.meaning).toBe(false)
     const alpha = reply.projects.find(project => project.owner === 'project-alpha-1a2b')!
     expect(alpha).toMatchObject({ owner: 'project-alpha-1a2b', label: 'alpha', count: 4, recalls: 10 })
@@ -189,7 +189,7 @@ describe('GET /api/galaxy on a real store', () => {
     // galaxyLevel(null): the server's store file is absent.
     const none = galaxyLevel(null)
     expect(none.status).toBe(200)
-    expect(none.body).toEqual({ projects: [], memories: [], knowledge: [], writers: [], globalLive: 0, meaning: false, total: 0, shown: 0 })
+    expect(none.body).toEqual({ projects: [], memories: [], knowledge: [], writers: [], globalLive: 0, stationMin: 50, meaning: false, total: 0, shown: 0 })
 
     // A store that has only working_memory: every memoria table is missing.
     const bare = tempDir('galaxy-only-memory')

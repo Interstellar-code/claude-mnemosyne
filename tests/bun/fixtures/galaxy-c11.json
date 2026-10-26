@@ -882,6 +882,7 @@
     }
   ],
   "globalLive": 6,
+  "stationMin": 5,
   "links": [
     {
       "a": "project-hermes-switchui-4d5e6f",

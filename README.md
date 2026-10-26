@@ -269,7 +269,7 @@ The mapping (how a thing on the map comes from the store):
 | Sun | the memory store (all live memories) |
 | Writer nodules | the writers (claude-code, dashboard, …), sized by count |
 | Planets (gas 30+, ice 10–29, rocky, dwarf <3) | git repos, styled by live memory count |
-| Crafts (space station 5+, starship under 5) | plain folders (no git repo) |
+| Crafts (space station at 50+ memories, starship below; the Settings tab's `map.stationMin`) | plain folders (no git repo) |
 | Land masses / bands | a project's tags (top 12 by uses) |
 | Moons | memory kinds present (one per kind; none for dwarfs and crafts, never for kind unknown; at most 8; size = count) |
 | Asteroids | that kind's memories (size = importance, brightness = recalls, colour = writer or recalls or age) |
@@ -413,6 +413,7 @@ Defaults and ranges are the ones in the schema (`hooks/settings.ts`); a spec (`t
 | `tools.externalAllow` | all 5 tools | any of the 5 tool names | now | Which of the five tools the outside-agent wrapper serves (see [Use the memory from other tools](#use-the-memory-from-other-tools)). Needs `externalMcp` on. |
 | `storage.activityLogMaxBytes` | 1048576 | 262144 to 16777216 | now | The activity log rolls over to its one backup file past this many bytes (1 MiB by default; 256 KiB to 16 MiB). |
 | `storage.backupsKeep` | 10 | 3 to 50 | now | A backup keeps this many of the newest files and removes older ones. |
+| `map.stationMin` | 50 | 2 to 1000 | now | On the map, a plain folder with at least this many live memories is a space station; with fewer, a starship. Git repos are always planets. |
 
 Rules between settings are checked together: `guard.minLength` must stay below `guard.warnLength`, and that below `guard.maxLength`; `recall.defaultLimit` cannot be above `recall.maxLimit`; the three ranking weights cannot all be 0, and they are scaled to add up to 1. A change that would break a rule is refused and the message names the setting.
 
@@ -432,8 +433,10 @@ The ranking weights are sent with every recall and also pinned in the engine's e
 | `externalMcp` | off | on, off | Lets other MCP clients use the same memory (see [Use the memory from other tools](#use-the-memory-from-other-tools)). |
 | `extractionModel` | haiku | text | The model that pulls facts, preferences, instructions, dated events and relations out of each saved memory in the background (an alias or a full model id). It also drives `/mnemosyne-tags`. `off` turns extraction off: no model call, and `/mnemosyne-tags` and `/mnemosyne-knowledge` say so. |
 | `embeddings` | auto | auto, on, off | `auto`: meaning-based recall on only on macOS on Apple Silicon, off elsewhere. `on`: always on. `off`: keyword-only recall. Local only; `/mnemosyne-setup` downloads the model once (see [Embeddings](#embeddings-meaning-based-recall)). |
+| `sessionSummary` | off | off, on | `off`: nothing. `on`: when a session ends (exit, `/clear` or resume) a small marker is left (the session id, its owner and its transcript path; no text). On a later session's first prompt, after the reply and in the background, Haiku (the `extractionModel`) summarises that session's redacted conversation (at most 30,000 characters leave this machine) into one session-summary memory of at most 600 characters, kept 30 days. The next session's first prompt shows the newest summary and the pinned memories. |
+| `expireUnusedDays` | 90 | text | Once a day, in the background, a memory of the kinds project state, session summary, bug note or reference that nobody has recalled for this many days gets an end date and stops being recalled. Nothing is deleted and it can be restored in the dashboard's Review tab. Pinned memories, facts, preferences, rules and decisions are never touched, and the store is backed up first. `0` turns the sweep off; 1 to 29 are refused. Preview it: `bun bin/memories.ts --store <store> expire`. |
 
-The tab draws the plugin options from the schema the `claude` command reports, so an option a later version adds appears there by itself, in an "Other plugin options" group. In 0.8.5 the tab also shows a placeholder for `expireUnusedDays`, which arrives in 0.9.0.
+The tab draws the plugin options from the schema the `claude` command reports, so an option a later version adds appears there by itself, in an "Other plugin options" group.
 
 Changing `memoryDir` or `scope` changes which memories you see, and the memories already saved are not moved to the new place. So the tab asks you to type the new value again before it saves, and warns you.
 

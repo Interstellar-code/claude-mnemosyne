@@ -188,7 +188,7 @@ describe('UI.1: the Settings tab draws from /api/settings only', () => {
       host.browser = [{ label: 'Theme', help: 'h', choices: [{ value: 'auto', label: 'Auto' }], get: () => 'auto', set: () => {} }]
       const cards = drawGroups(data, view, host) as FakeNode[]
       const titles = cards.map(card => card.find('h2')!.textContent)
-      expect(titles).toEqual(['Guard', 'Tags', 'Recall and embeddings', 'Expiry', 'Storage', 'Tools', 'Setup', 'Other plugin options', 'This browser'])
+      expect(titles).toEqual(['Guard', 'Tags', 'Recall and embeddings', 'Expiry', 'Storage', 'Map', 'Tools', 'Setup', 'Other plugin options', 'This browser'])
       const max = rowOf(cards, 'guard.maxLength')!
             const joined = max.all().map(node => node.textContent).join(' | ')
       expect(joined).toContain('Max length')
@@ -272,7 +272,7 @@ describe('UI.1: the Settings tab draws from /api/settings only', () => {
 
   test('the tab is the last one and has its own markup and styles', () => {
     const app = readFileSync(join(ROOT, 'ui', 'app.ts'), 'utf8')
-    expect(app).toMatch(/const VIEWS = \[[^\]]*'health', 'settings'\] as const/)
+    expect(app).toMatch(/const VIEWS = \[[^\]]*'health', 'vocabulary', 'settings'\] as const/)
     expect(app).toMatch(/settings: 'Settings'/)
     expect(app).toMatch(/if \(view === 'settings'\) void loadSettings\(\)/)
     const css = readFileSync(join(ROOT, 'ui', 'style.css'), 'utf8')

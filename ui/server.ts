@@ -63,6 +63,7 @@ import { appendActivity } from '../bin/activity'
 import { liveUsers, UI_USERS } from '../bin/ui-users'
 import { hasTagSql, tagsSql, untaggedSql } from '../bin/memories'
 import { readConfig } from '../bin/settings'
+import { defaults as settingDefaults } from '../hooks/settings'
 import { admitTag, aliasTag, listVocabulary } from '../bin/vocab'
 import { activityEntry, preview } from '../hooks/activity-log'
 import type { ActivityFields } from '../hooks/activity-log'
@@ -1589,8 +1590,11 @@ export type GalaxyOptions = {
  * per-project numbers are over every live row of the store (the same rows `count` counts,
  * minus the retired, expired and lapsed ones), never the capped list.
  */
+// The map's station threshold (map.stationMin in config.json, read per call; the default without a root).
+const stationMinOf = (root: string | undefined) => (root === undefined ? settingDefaults().map.stationMin : readConfig(root).map.stationMin)
+
 export function galaxyLevel(db: Database | null, limit = GALAXY_LIMIT, meaning: Meaning = NO_MEANING, options: GalaxyOptions = {}): Answer {
-  if (db === null) return { status: 200, body: { projects: [], memories: [], knowledge: [], writers: [], globalLive: 0, meaning: false, total: 0, shown: 0 } }
+  if (db === null) return { status: 200, body: { projects: [], memories: [], knowledge: [], writers: [], globalLive: 0, stationMin: stationMinOf(options.root), meaning: false, total: 0, shown: 0 } }
   const present = new Set(
     (db.query("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map(row => row.name),
   )
@@ -1802,7 +1806,7 @@ export function galaxyLevel(db: Database | null, limit = GALAXY_LIMIT, meaning: 
   const links = meaning.meaning ? linksOf(db, meaning.pairs ?? [], firstSaved, now) : undefined
   return {
     status: 200,
-    body: { projects, memories, knowledge, writers, globalLive, ...(links ? { links } : {}), meaning: meaning.meaning, total, shown: memories.length },
+    body: { projects, memories, knowledge, writers, globalLive, stationMin: stationMinOf(options.root), ...(links ? { links } : {}), meaning: meaning.meaning, total, shown: memories.length },
   }
 }
 

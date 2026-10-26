@@ -1154,3 +1154,24 @@ button.toggle-name:focus-visible { outline: 2px solid var(--accent); outline-off
   .set-edit { align-items: stretch; flex-direction: column; }
   .set-edit .btn { align-self: flex-start; }
 }
+
+/* ---- New memory and Edit, Review's queue lists, the Vocabulary tab, retired rows (plan CRUD) ---- */
+.memory-form { display: flex; flex-direction: column; gap: 14px; max-width: 720px; }
+.memory-content { min-height: 140px; resize: vertical; font: inherit; }
+.tag-picker { display: flex; flex-direction: column; gap: 8px; }
+.tag-group { display: flex; flex-wrap: wrap; gap: 6px 12px; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin: 0; }
+.tag-group legend { padding: 0 4px; }
+.tag-choice { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }
+.check-field { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; min-height: 36px; }
+.detail-edit { display: flex; gap: 8px; }
+.row.is-dim td { opacity: 0.6; }
+.state-mark { font-size: 12px; font-weight: 600; color: var(--amber-ink); }
+.state-mark.is-retired { color: var(--danger-ink); }
+.reasons { margin: 0 0 4px; padding-left: 16px; }
+.confirm-inline .input { min-width: 180px; }
+.vocab-section { display: flex; flex-direction: column; gap: 12px; margin-bottom: 12px; }
+.vocab-group .list-row { align-items: center; gap: 12px; }
+.vocab-name { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.vocab-actions { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.storage-name { display: inline-flex; flex-direction: column; gap: 2px; }
+.storage-reason { max-width: 60ch; }

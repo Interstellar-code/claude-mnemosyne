@@ -2060,7 +2060,7 @@ const legend = (rows: [string, string, string][]): LegendRow[] => rows.map(([col
 
 export const LEGEND_LEFT: readonly LegendRow[] = legend([
   ['#ffd25a', 'Sun', 'the store; it turns'], ['#56B4E9', 'Nodule', 'a writer, on the sun'], ['#c48a5a', 'Planet', 'a project; size = memories'],
-  ['#e4d09c', 'Planet style', 'gas 30+, ice 10-29, rocky, dwarf <3'], ['#c3ccd8', 'Space station', 'plain folder, 5+ memories'], ['#6fb8ff', 'Starship', 'plain folder, under 5'],
+  ['#e4d09c', 'Planet style', 'gas 30+, ice 10-29, rocky, dwarf <3'], ['#c3ccd8', 'Space station', 'plain folder, 50+ memories (setting)'], ['#6fb8ff', 'Starship', 'plain folder, fewer'],
   ['#8fb07a', 'Land, bands', 'tags; area = uses'], ['#eef2f8', 'Moon', 'a memory kind'], ['#56B4E9', 'Asteroid', 'a memory; colour = writer'],
   ['#ffffff', 'Brightness', 'recalls'], ['#9fb0c8', 'Asteroid size', 'importance'], ['#F0E442', 'Halo · satellite', 'pinned · knowledge item'],
 ])

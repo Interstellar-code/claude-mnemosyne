@@ -234,6 +234,8 @@
           <input id="mem-filter" class="input filter" type="search" placeholder="Text or tag" maxlength="200">
         </label>
         <button id="mem-tag" type="button" class="chip-btn" aria-label="Clear tag filter" hidden></button>
+        <label class="check-field"><input id="mem-retired" type="checkbox"> Show retired</label>
+        <button id="mem-new" type="button" class="btn primary push-right">New memory</button>
       </div>
       <div class="table-wrap">
         <table class="table table-dense">
@@ -377,7 +379,7 @@
   <main id="view-review" class="main view column wide" hidden>
     <div class="titlebar">
       <h1 id="review-title" tabindex="-1">Memory review</h1>
-      <span class="muted small">Memories to review or forget: ones that were never used, have no tags, have gone cold or matter little.</span>
+      <span class="muted small">Memories to review or retire: ones that were never used, have no tags, have gone cold, matter little, or look out of date. A retired memory can be restored from Not live.</span>
     </div>
     <div class="status-row">
       <p id="review-status" class="notice-line small muted" role="status">Loading…</p>
@@ -394,8 +396,25 @@
           </table>
         </div>
       </section>
+      <section id="review-candidates-box" class="card" aria-label="Retire candidates" hidden>
+        <div class="table-wrap">
+          <table class="table compact">
+            <thead><tr><th>Memory</th><th>Project</th><th>Why</th><th>Actions</th></tr></thead>
+            <tbody id="review-candidate-rows"></tbody>
+          </table>
+        </div>
+      </section>
+      <section id="review-notlive-box" class="card" aria-label="Not live" hidden>
+        <div class="table-wrap">
+          <table class="table compact">
+            <thead><tr><th>Memory</th><th>Project</th><th>State</th><th>History</th><th>Actions</th></tr></thead>
+            <tbody id="review-notlive-rows"></tbody>
+          </table>
+        </div>
+      </section>
     </div>
   </main>
+
 
   <main id="view-health" class="main view column wide" hidden>
     <div class="titlebar">
@@ -434,6 +453,22 @@
     <footer id="foot" class="foot" hidden>
       <dl id="facts" class="facts"></dl>
     </footer>
+  </main>
+
+  <main id="view-vocabulary" class="main view column wide" hidden>
+    <div class="titlebar">
+      <h1 id="vocab-title" tabindex="-1">Tag vocabulary</h1>
+      <span class="muted small">The shared list of tags a memory may carry, by namespace. Admit a candidate, or make a spelling count as an admitted tag. Nothing is removed from here on its own.</span>
+    </div>
+    <div class="status-row">
+      <p id="vocab-status" class="notice-line small muted" role="status">Loading…</p>
+      <button id="vocab-retry" class="btn" type="button" hidden>Try again</button>
+    </div>
+    <div id="vocab-body" hidden>
+      <p id="vocab-text" class="muted small"></p>
+      <div id="vocab-candidates" class="vocab-section"></div>
+      <div id="vocab-tags" class="vocab-section"></div>
+    </div>
   </main>
 
   <main id="view-settings" class="main view column wide" hidden>

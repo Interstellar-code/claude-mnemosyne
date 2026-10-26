@@ -6,6 +6,7 @@ import { describe, expect, test } from 'bun:test'
 import fixture from './fixtures/galaxy-c11.json'
 import {
   buildBodies,
+  STATION_MIN,
   describe as describeBody,
   dotColour,
   extent,
@@ -39,7 +40,8 @@ const DAY = 86400000
 const galaxy = fixture as unknown as SolarGalaxy
 const ARRANGES: Arrange[] = ['activity', 'size', 'age', 'recalls']
 
-const bodiesOf = (g: Pick<SolarGalaxy, 'projects'> = galaxy): Body[] => buildBodies(g, NOW)
+// The fixture is the mockup's, drawn at the mockup's station threshold of 5 (the setting's default is 50).
+const bodiesOf = (g: Pick<SolarGalaxy, 'projects' | 'stationMin'> = { ...galaxy, stationMin: 5 }): Body[] => buildBodies(g, NOW)
 const byLabel = (bodies: Body[]): Record<string, Body> => Object.fromEntries(bodies.map(b => [b.label, b]))
 const must = <T>(value: T | undefined): T => {
   if (value === undefined) throw new Error('missing')
@@ -235,12 +237,20 @@ describe('size, speed and style', () => {
 })
 
 describe('plain folders and unregistered owners', () => {
-  test('a plain folder: station at 5 or more memories, else a starship', () => {
+  test('a plain folder: station at map.stationMin (50 by default) or more memories, else a starship', () => {
+    const at = (stationMin: number | undefined, liveCount: number) =>
+      buildBodies({ projects: [project('project-craft-aa', { projectKind: 'folder', liveCount })], ...(stationMin === undefined ? {} : { stationMin }) }, NOW)[0]?.craft
+    expect(STATION_MIN).toBe(50)
+    expect([at(undefined, 49), at(undefined, 50)]).toEqual(['ship', 'station'])
+    expect([at(10, 9), at(10, 10)]).toEqual(['ship', 'station'])
+  })
+
+  test('the sample folders at a threshold of 5', () => {
     const m = byLabel(bodiesOf())
     expect(['cowork', 'notes', 'research'].map(l => must(m[l]).craft)).toEqual(['station', 'station', 'station'])
     expect(['scratch', 'sandbox', 'downloads'].map(l => must(m[l]).craft)).toEqual(['ship', 'ship', 'ship'])
     expect(['matrixkoder', 'hermes-switchui', 'cc-workflows'].map(l => must(m[l]).craft)).toEqual([null, null, null])
-    const edge = bodiesOf(galaxyOf([project('project-four-aa', { projectKind: 'folder', liveCount: 4 }), project('project-five-aa', { projectKind: 'folder', liveCount: 5 })]))
+    const edge = bodiesOf(galaxyOf([project('project-four-aa', { projectKind: 'folder', liveCount: 4 }), project('project-five-aa', { projectKind: 'folder', liveCount: 5 })], { stationMin: 5 }))
     expect(edge.map(b => [b.label, b.craft])).toEqual([['five', 'station'], ['four', 'ship']])
   })
 
@@ -511,7 +521,7 @@ describe('any order, same answer', () => {
 
   test('shuffling the projects changes no body, ring, style or search result', () => {
     const base = bodiesOf()
-    const mixed = bodiesOf(galaxyOf(shuffled(galaxy.projects)))
+    const mixed = bodiesOf(galaxyOf(shuffled(galaxy.projects), { stationMin: 5 }))
     expect(mixed).toEqual(base)
     for (const arrange of ARRANGES) expect(targets(mixed, arrange)).toEqual(targets(base, arrange))
     expect(searchResults(mixed, 'plan')).toEqual(searchResults(base, 'plan'))
