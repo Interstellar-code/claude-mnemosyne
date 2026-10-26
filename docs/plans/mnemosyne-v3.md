@@ -714,6 +714,7 @@ The UI half of CRUDX. Rohit can write and edit memories with a kind, vocabulary 
 4. May touch: `ui/app.ts`, `ui/index.html`, `ui/style.css`, `ui/review.ts`, `ui/health.ts`, `ui/tsconfig.json`, `tests/bun/ui-views.spec.ts`, `tests/bun/review-view.spec.ts`, `tests/bun/health-view.spec.ts`.
 5. Must not touch: `ui/server.ts`, `engine/`, `hooks/`, `tests/bun/helpers.ts`.
 6. Review level: standard. Hazard: a bulk retire creeping in (guard: CRUD.2 acceptance 3 and its spec).
+6a. From the CRUDX review (2026-10-26, all low, CRUDX merged as 5debd36): (1) the near-duplicate review reason marks both rows of a pair, each naming the other; CRUD.2 shows such rows as "keep one of these" so a person never retires both by accident; (2) `/api/review` compares every pair of up to 1000 vectors on each call, which can stall the dashboard briefly on a big store; if CRUD.2's Review tab calls it on every filter change, call it once per tab open instead; (3) vocabulary admit and alias write no activity line (no action name exists); a `vocabulary` action, added on `main` like CRUDX.0, is a later follow-up, not CRUD's.
 7. Manual QA steps (Rohit, in the dashboard, after the phase merges):
    1. New memory: write a note, pick a kind and two vocabulary tags, see a near-duplicate warning, Save anyway, find it in Memories.
    2. Edit: change kind and tags of a memory; pin it; a secret pasted in is refused with the rule name.
