@@ -1029,7 +1029,7 @@ test('memory_update with nothing to change, or tags that are not an array, is de
   const empty = await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1' })
   const bad = await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1', tags: 'build' })
 
-  expect(empty.deny).toBe('Mnemosyne: memory_update needs content, importance, tags or kind.')
+  expect(empty.deny).toBe('Mnemosyne: memory_update needs content, importance, tags, kind or pinned.')
   expect(bad.deny).toBe('Mnemosyne: tags must be an array of strings.')
   expect(runs.length).toBe(0)
 })
@@ -1325,7 +1325,7 @@ test('a refused tool call logs ok false with the refusal', async ($, on) => {
     ['update', 'tool', false],
   ])
   expect(got[0].error).toContain('Mnemosyne Memory engine is out of date')
-  expect(got[1].error).toBe('Mnemosyne: memory_update needs content, importance, tags or kind.')
+  expect(got[1].error).toBe('Mnemosyne: memory_update needs content, importance, tags, kind or pinned.')
 })
 
 test('a compaction logs action rearm, origin hook', async ($, on) => {
@@ -3593,4 +3593,37 @@ test('IMPORT.1: a failed bin/import.ts is reported with its reason and nothing i
   expect(text).toContain('Mnemosyne import failed')
   expect(state.backups).toEqual([])
   expect(state.engine.some(run => String(run.init?.stdin).includes('mnemopi_remember'))).toBe(false)
+})
+
+test('IMPORT.3: memory_update offers pinned as a boolean, and the description names it', async ($, on) => {
+  world(on, '{}')
+  const registered: { name: string; description: string; inputSchema: { properties: Record<string, { type?: string; description?: string }> } }[] = []
+  on('tool.register', (_$, e) => {
+    registered.push(e as never)
+    return { value: {} } as never
+  })
+  on('command.register', () => ({ value: {} }) as never)
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/w', surface: null, isInteractive: false } as never)
+  const update = registered.find(t => t.name === 'memory_update')!
+  expect(update.inputSchema.properties.pinned?.type).toBe('boolean')
+  expect(update.description).toContain('pin')
+  expect(registered.find(t => t.name === 'memory_remember')!.inputSchema.properties.pinned).toBeUndefined()
+})
+
+test('IMPORT.3: pinned: true is sent as the engine metadata merge { pinned }, with no other field', async ($, on) => {
+  const runs = world(on, '{"status":"updated"}')
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1', pinned: true })
+  expect(ran.deny).toBeUndefined()
+  expect(request(runs[0]!).arguments).toEqual({ memory_id: 'm1', metadata: { pinned: true } })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1', pinned: false, tags: ['ops'] })
+  expect(request(runs[1]!).arguments).toEqual({ memory_id: 'm1', metadata: { tags: ['ops'], pinned: false } })
+})
+
+test('IMPORT.3: a pinned value that is not a boolean is refused before any engine run', async ($, on) => {
+  const runs = world(on, '{"status":"updated"}')
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1', pinned: 'yes' })
+  expect(ran.deny).toBe('Mnemosyne: pinned must be true or false.')
+  expect(runs).toEqual([])
 })

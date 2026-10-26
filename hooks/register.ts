@@ -171,7 +171,7 @@ const toolsFor = (settings: ResolvedSettings) => [
   {
     name: 'memory_update',
     description:
-      'Change a memory in place, by the id and owner memory_recall returned: its content, importance, kind or topic tags. Keeps its id and recall history. Use this rather than forgetting and saving again.',
+      'Change a memory in place, by the id and owner memory_recall returned: its content, importance, kind, topic tags or pin. Keeps its id and recall history. Use this rather than forgetting and saving again.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -184,6 +184,7 @@ const toolsFor = (settings: ResolvedSettings) => [
           description: `Short lowercase topic tags (at most ${settings.tags.maxPerMemory}); replaces the old ones. [] removes them.`,
         },
         kind: { ...KIND_PROPERTY, description: 'Change what kind of memory this is.' },
+        pinned: { type: 'boolean', description: 'true pins the memory: it is never a retirement candidate and never expires on its own. false unpins it. Nothing else about it changes.' },
         confirm: CONFIRM_PROPERTY,
         owner: { type: 'string', description: "The row's owner from memory_recall; default this project's." },
       },
@@ -542,7 +543,10 @@ function updateArgs(input: Record<string, unknown>, rules: TagRules = {}): Recor
   const hasKind = input.kind !== undefined && input.kind !== null
   const refused = kindProblem(input.kind)
   if (refused !== undefined) return refused
-  if (!hasContent && !hasImportance && input.tags === undefined && !hasKind) return 'memory_update needs content, importance, tags or kind.'
+  // IMPORT.3: pin and unpin ride the engine's metadata merge as { pinned }; nothing else of the row changes.
+  const hasPinned = input.pinned !== undefined && input.pinned !== null
+  if (hasPinned && typeof input.pinned !== 'boolean') return 'pinned must be true or false.'
+  if (!hasContent && !hasImportance && input.tags === undefined && !hasKind && !hasPinned) return 'memory_update needs content, importance, tags, kind or pinned.'
   const tags = Array.isArray(input.tags) ? cleanTags(input.tags, rules) : undefined
   // A list whose tags all clean away (the project name, punctuation, blanks) must not read as "remove the tags": [] is how those are removed.
   if (tags !== undefined && tags.length === 0 && Array.isArray(input.tags) && input.tags.length > 0) return 'none of those tags can be stored (a tag may not be the project name, and needs a letter or digit). Send tags: [] to remove the tags.'
@@ -552,8 +556,8 @@ function updateArgs(input: Record<string, unknown>, rules: TagRules = {}): Recor
     ...(hasImportance ? { importance: clamp(input.importance, 0, 1, 0.5) } : {}),
     // The kind goes to the engine as memory_type.
     ...(hasKind ? { memory_type: input.kind } : {}),
-    // An empty list removes the key (C7).
-    ...(tags !== undefined ? { metadata: { tags: tags.length > 0 ? tags : null } } : {}),
+    // An empty list removes the key (C7); the engine merges the keys given and keeps the others.
+    ...(tags !== undefined || hasPinned ? { metadata: { ...(tags !== undefined ? { tags: tags.length > 0 ? tags : null } : {}), ...(hasPinned ? { pinned: input.pinned } : {}) } } : {}),
     // C10.2: a content change names Claude in the audit trail.
     ...(hasContent ? { validator: 'claude-code' } : {}),
   }
