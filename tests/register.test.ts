@@ -29,6 +29,8 @@ type Extra = {
   env?: Record<string, string>
   session?: 'ok' | 'throw'
   darwinArm64?: boolean
+  // HARDEN.3: the uname probe answers an Intel Mac (Darwin, x86_64); wins over darwinArm64.
+  intelMac?: boolean
   // True to report the setup marker + model files as present (embeddings ready).
   embeddingsReady?: boolean
   // L4: the marker is present but the model files are missing (a half-finished setup).
@@ -99,7 +101,8 @@ function world(on: On, reply: string, isInstalled = true, exitCode = 0, build: s
     }
     // The platform probe /mnemosyne-setup asks (hooks/register.ts isMacArm64).
     if (e.argv[0] === 'uname') {
-      const stdout = e.argv[1] === '-s' ? (extra.darwinArm64 ? 'Darwin\n' : 'Linux\n') : extra.darwinArm64 ? 'arm64\n' : 'x86_64\n'
+      const darwin = extra.darwinArm64 || extra.intelMac
+      const stdout = e.argv[1] === '-s' ? (darwin ? 'Darwin\n' : 'Linux\n') : extra.darwinArm64 && !extra.intelMac ? 'arm64\n' : 'x86_64\n'
       return { value: { exitCode: 0, stdout, stderr: '' } } as never
     }
     // SESSION: the session commands of bin/memories.ts are kept apart, so the engine runs these specs count stay the engine's.
@@ -3676,4 +3679,38 @@ test('IMPORT.2: apply for a session proposal whose memories this process does no
   const text = (await importRun($, 'apply')).text ?? ''
   expect(text).toContain('no longer in this Claude Code process')
   expect(runs.filter(run => String(run.argv[1] ?? '').endsWith('/bin/memories.ts') || run.argv[2] === 'mcp')).toEqual([])
+})
+
+// ---- HARDEN.3: platform notes and log pruning ----
+
+test('HARDEN.3.a2: setup on an Intel Mac says embeddings are not supported and leaves them off', { options: { embeddings: 'on' } }, async ($, on) => {
+  const runs = world(on, '{"status":"stored"}', true, 0, ENGINE_BUILD, { intelMac: true })
+  on('fs.write', () => ({ value: undefined }))
+  const ran = await $.command.run({ command: 'mnemosyne-setup', args: '' } as never)
+  expect((ran as { text: string }).text).toContain('not supported on an Intel Mac')
+  const install = runs.find(r => (r.argv[1] ?? '').endsWith('/bin/install-engine.ts'))
+  expect(install?.argv.slice(3)).toEqual(['/home/u/.claude/mnemosyne/engine', '/home/u/.claude/mnemosyne/store'])
+})
+
+test('HARDEN.3.a3: the setup reply names Linux and Windows as untested', async ($, on) => {
+  world(on, '{"status":"stored"}', true, 0, ENGINE_BUILD, { darwinArm64: false })
+  on('fs.write', () => ({ value: undefined }))
+  const ran = await $.command.run({ command: 'mnemosyne-setup', args: '' } as never)
+  const text = (ran as { text: string }).text
+  expect(text).toContain('Linux and Windows are untested')
+  expect(text).not.toContain('Intel Mac')
+})
+
+test('HARDEN.3.a1: session start prunes the logs folder in the background, and a failing prune is swallowed', async ($, on) => {
+  const runs = world(on, '{"status":"stored"}', true, 0, ENGINE_BUILD, { darwinArm64: true })
+  on('command.register', () => ({ value: {} }) as never)
+  on('tool.register', () => ({ value: {} }) as never)
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/w', surface: null, isInteractive: false } as never)
+  // The prune is not awaited by the hook: wait for its run to show up.
+  for (let waited = 0; !runs.some(r => r.argv.includes('prune-logs')) && waited < 50; waited++) await new Promise(resolve => setTimeout(resolve, 20))
+  const prune = runs.find(r => r.argv.includes('prune-logs'))
+  expect(prune?.argv[1]).toMatch(/\/bin\/install-engine\.ts$/)
+  expect(prune?.argv.slice(2)).toEqual(['prune-logs', '/home/u/.claude/mnemosyne/model-cache/logs'])
 })

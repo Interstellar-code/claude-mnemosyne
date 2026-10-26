@@ -15,7 +15,7 @@
 // and refuses a store inside any of them, compared as real paths (symlinks
 // followed, case-folded on macOS and Windows). The cli path stays
 // <engine dir>/node_modules/@oh-my-pi/pi-mnemopi/src/cli.ts.
-import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { Database } from 'bun:sqlite'
 import { INSTALL_CHECK_TIMEOUT_MS, INSTALL_STEP_TIMEOUT_MS } from '../hooks/engine-build'
@@ -292,7 +292,47 @@ export async function install(pluginRoot: string, engineDir: string, storeDir: s
   return { engine, build, cli: cliOf(engine) }
 }
 
-if (import.meta.main) {
+// HARDEN.3: the engine writes one omp.*.log per run into <model cache>/logs and
+// never trims them. Pruning removes only regular files named omp.*.log directly in
+// that folder, older than `maxAgeDays`, and always keeps the newest `keep`. It
+// follows no symlink (a linked folder is skipped, a linked file is left alone),
+// touches nothing else, and stops after `limit` deletions so one run stays short.
+export const LOG_KEEP = 20
+export const LOG_MAX_AGE_DAYS = 7
+const LOG_NAME = /^omp\..*\.log$/
+export function pruneEngineLogs(dir: string, now = Date.now(), keep = LOG_KEEP, maxAgeDays = LOG_MAX_AGE_DAYS, limit = 1000): number {
+  try {
+    if (!lstatSync(dir).isDirectory()) return 0
+    const logs: { path: string; mtime: number }[] = []
+    for (const name of readdirSync(dir)) {
+      if (!LOG_NAME.test(name)) continue
+      const path = join(dir, name)
+      const stat = lstatSync(path)
+      if (stat.isFile()) logs.push({ path, mtime: stat.mtimeMs })
+    }
+    logs.sort((a, b) => b.mtime - a.mtime)
+    const cutoff = now - maxAgeDays * 24 * 60 * 60 * 1000
+    let removed = 0
+    for (const log of logs.slice(keep)) {
+      if (removed >= limit) break
+      if (log.mtime >= cutoff) continue
+      try {
+        unlinkSync(log.path)
+        removed++
+      } catch {
+        // Held open or already gone: leave it for the next run.
+      }
+    }
+    return removed
+  } catch {
+    return 0
+  }
+}
+
+if (import.meta.main && process.argv[2] === 'prune-logs') {
+  // bun bin/install-engine.ts prune-logs <logs dir>: prints the number removed, never fails.
+  console.log(pruneEngineLogs(process.argv[3] ?? ''))
+} else if (import.meta.main) {
   const [pluginRoot = '', engineDir = '', storeDir = '', embeddingsArg = ''] = process.argv.slice(2)
   try {
     // The 4th argument is "embeddings" when /mnemosyne-setup's option is on:
