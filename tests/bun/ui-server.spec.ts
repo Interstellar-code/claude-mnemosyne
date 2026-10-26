@@ -9,8 +9,8 @@ import { connect } from 'node:net'
 import { networkInterfaces } from 'node:os'
 import { join } from 'node:path'
 import { engineEnv } from '../../hooks/engine'
-import { buildApp, CSP, DEFAULT_PARENT_CHECK_MS, openStore, parentCheckMs, runEngine, startServer } from '../../ui/server'
-import { engineCall, ROOT, tempDir, toolCall, isolatedEnv } from './helpers'
+import { buildApp, CSP, DEFAULT_PARENT_CHECK_MS, openStore, parentCheckMs, runEngine, startServer, unusedByDesign, UNUSED_BY_DESIGN } from '../../ui/server'
+import { body, engineCall, ROOT, tempDir, toolCall, isolatedEnv } from './helpers'
 
 const SERVER = join(ROOT, 'ui', 'server.ts')
 const CLI = join(ROOT, 'engine', 'src', 'cli.ts')
@@ -633,5 +633,83 @@ for (const line of lines) {
     } finally {
       temp.dispose()
     }
+  })
+})
+
+// CRUDX.5 (C10.5): GET /api/health-report names the tables that stay empty by design, with the reason for each. The real
+// server on a temp store made by the real engine, under a temp HOME; nothing here names the real ~/.claude.
+describe('GET /api/health-report: unusedByDesign', () => {
+  const unused = ['consolidation_log', 'episodic_memory', 'facts', 'gists', 'graph_edges', 'scratchpad', 'triples']
+  const temp = tempDir('ui-unused')
+  const savedHome = process.env.HOME
+  const started: { stop: () => void }[] = []
+
+  beforeAll(() => {
+    process.env.HOME = isolatedEnv('ui-unused').HOME
+  })
+  afterAll(() => {
+    for (const server of started) server.stop()
+    if (savedHome === undefined) delete process.env.HOME
+    else process.env.HOME = savedHome
+    temp.dispose()
+  })
+
+  async function report(store: string) {
+    mkdirSync(store, { recursive: true })
+    const server = await startServer({ root: join(temp.dir, `root-${started.length}`), store, cli: CLI, activityLog: '', pluginRoot: ROOT })
+    started.push(server)
+    const response = await fetch(`http://127.0.0.1:${server.port}/api/health-report`, { headers: { Authorization: `Bearer ${server.token}` } })
+    expect(response.status).toBe(200)
+    return (await response.json()) as Record<string, any>
+  }
+
+  test('the seven tables and the search indexes of episodes and facts each carry a reason; tables is unchanged', async () => {
+    const store = join(temp.dir, 'store')
+    mkdirSync(store, { recursive: true })
+    expect(body((await engineCall(CLI, store, 'global', [toolCall(1, 'mnemopi_remember', { content: 'A fact so the engine makes its tables' })])).get(1)).status).toBe('stored')
+    const reply = await report(store)
+    const map = reply.unusedByDesign as Record<string, string>
+    for (const name of unused) {
+      expect(typeof map[name]).toBe('string')
+      expect(map[name]!.length).toBeGreaterThan(20)
+      // the table is still in `tables`, as the plain empty count it always was
+      expect(reply.tables[name]).toBe(0)
+    }
+    expect(Object.keys(map).filter(name => name.startsWith('fts_episodes')).length).toBeGreaterThan(0)
+    expect(Object.keys(map).filter(name => name.startsWith('fts_facts')).length).toBeGreaterThan(0)
+    // every table named in the map exists in the store, and the tables in use are not named
+    for (const name of Object.keys(map)) expect(Object.hasOwn(reply.tables, name)).toBe(true)
+    for (const name of ['working_memory', 'memory_validations', 'memory_embeddings', 'fts_working']) expect(map[name]).toBeUndefined()
+    expect(reply.tables.working_memory).toBe(1)
+  })
+
+  test('a table in the map that does not exist in the store is left out', async () => {
+    const store = join(temp.dir, 'store-missing')
+    mkdirSync(store, { recursive: true })
+    await engineCall(CLI, store, 'global', [toolCall(1, 'mnemopi_remember', { content: 'A fact so the engine makes its tables' })])
+    const db = new Database(join(store, 'mnemopi.db'))
+    try {
+      db.run('DROP TABLE scratchpad')
+      db.run('DROP TABLE gists')
+    } finally {
+      db.close()
+    }
+    const reply = await report(store)
+    expect(reply.unusedByDesign.scratchpad).toBeUndefined()
+    expect(reply.unusedByDesign.gists).toBeUndefined()
+    expect(reply.unusedByDesign.triples).toBeDefined()
+    expect(reply.tables.scratchpad).toBeUndefined()
+  })
+
+  test('a store with no database yet answers an empty map', async () => {
+    const reply = await report(join(temp.dir, 'store-none'))
+    expect(reply.unusedByDesign).toEqual({})
+    expect(reply.tables).toEqual({})
+  })
+
+  test('the map is matched by exact name or by the index prefix with an underscore, and own names only', () => {
+    const found = unusedByDesign(new Set(['facts', 'fts_facts', 'fts_facts_data', 'fts_episodes_idx', 'factsheet', 'fts_factsy', 'constructor', 'toString', 'working_memory']))
+    expect(Object.keys(found).sort()).toEqual(['facts', 'fts_episodes_idx', 'fts_facts', 'fts_facts_data'])
+    expect(Object.keys(UNUSED_BY_DESIGN).sort()).toEqual(unused)
   })
 })
