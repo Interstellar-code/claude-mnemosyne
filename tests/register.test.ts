@@ -1029,7 +1029,7 @@ test('memory_update with nothing to change, or tags that are not an array, is de
   const empty = await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1' })
   const bad = await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1', tags: 'build' })
 
-  expect(empty.deny).toBe('Mnemosyne: memory_update needs content, importance, tags or kind.')
+  expect(empty.deny).toBe('Mnemosyne: memory_update needs content, importance, tags, kind or pinned.')
   expect(bad.deny).toBe('Mnemosyne: tags must be an array of strings.')
   expect(runs.length).toBe(0)
 })
@@ -1325,7 +1325,7 @@ test('a refused tool call logs ok false with the refusal', async ($, on) => {
     ['update', 'tool', false],
   ])
   expect(got[0].error).toContain('Mnemosyne Memory engine is out of date')
-  expect(got[1].error).toBe('Mnemosyne: memory_update needs content, importance, tags or kind.')
+  expect(got[1].error).toBe('Mnemosyne: memory_update needs content, importance, tags, kind or pinned.')
 })
 
 test('a compaction logs action rearm, origin hook', async ($, on) => {
@@ -3543,4 +3543,120 @@ test('WIRE.3.a2: session.end drops the session from the registered record', asyn
   await $.session.end({ sessionId: 's1', reason: 'other' } as never)
   // The record is gone, so the settings decide again.
   expect((await compose()).sections.some(s => s.id === 'mnemosyne:rules')).toBe(true)
+})
+
+// ---- IMPORT.1: /mnemosyne-import (the real work is specced in tests/bun/import.spec.ts over a real engine and store) ----
+
+const importRun = ($: Engine, args = '') => $.command.run({ command: 'mnemosyne-import', args } as never) as Promise<{ text?: string }>
+
+test('IMPORT.1: /mnemosyne-import is registered at session start', async ($, on) => {
+  const names: string[] = []
+  world(on, '{}', true, 0, ENGINE_BUILD)
+  on('command.register', (_$, e) => {
+    names.push((e as { name: string }).name)
+    return { value: {} } as never
+  })
+  on('tool.register', () => ({ value: {} }) as never)
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/w', surface: null, isInteractive: false } as never)
+  expect(names).toContain('mnemosyne-import')
+})
+
+test('IMPORT.1: a bad argument gets the usage text and starts no process', async ($, on) => {
+  const state = tagsWorld(on, [])
+  for (const args of ['', 'tags', 'doc', 'apply now']) expect((await importRun($, args)).text).toContain('Usage: /mnemosyne-import')
+  expect(state.other).toEqual([])
+  expect(state.backups).toEqual([])
+  expect(state.engine).toEqual([])
+})
+
+test('IMPORT.1: apply with no dry run makes no backup and runs no engine', async ($, on) => {
+  const state = tagsWorld(on, [])
+  expect((await importRun($, 'apply')).text).toContain('There is no dry run to apply')
+  expect(state.backups).toEqual([])
+  expect(state.other.filter(run => String(run.argv[1] ?? '').endsWith('/bin/import.ts'))).toEqual([])
+  expect(state.engine).toEqual([])
+})
+
+test('IMPORT.1: a stale engine stops both modes before bin/import.ts reads anything', async ($, on) => {
+  const state = tagsWorld(on, [], { build: '18.12.3-mnemosyne.1' })
+  expect((await importRun($, 'doc /w/notes.md')).text).toContain('out of date')
+  expect((await importRun($, 'apply')).text).toContain('out of date')
+  expect(state.other).toEqual([])
+  expect(state.backups).toEqual([])
+})
+
+test('IMPORT.1: a failed bin/import.ts is reported with its reason and nothing is written', async ($, on) => {
+  const state = tagsWorld(on, [])
+  const text = (await importRun($, 'doc /w/notes.md')).text ?? ''
+  expect(text).toContain('Mnemosyne import failed')
+  expect(state.backups).toEqual([])
+  expect(state.engine.some(run => String(run.init?.stdin).includes('mnemopi_remember'))).toBe(false)
+})
+
+test('IMPORT.3: memory_update offers pinned as a boolean, and the description names it', async ($, on) => {
+  world(on, '{}')
+  const registered: { name: string; description: string; inputSchema: { properties: Record<string, { type?: string; description?: string }> } }[] = []
+  on('tool.register', (_$, e) => {
+    registered.push(e as never)
+    return { value: {} } as never
+  })
+  on('command.register', () => ({ value: {} }) as never)
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/w', surface: null, isInteractive: false } as never)
+  const update = registered.find(t => t.name === 'memory_update')!
+  expect(update.inputSchema.properties.pinned?.type).toBe('boolean')
+  expect(update.description).toContain('pin')
+  expect(registered.find(t => t.name === 'memory_remember')!.inputSchema.properties.pinned).toBeUndefined()
+})
+
+test('IMPORT.3: pinned: true is sent as the engine metadata merge { pinned }, with no other field', async ($, on) => {
+  const runs = world(on, '{"status":"updated"}')
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1', pinned: true })
+  expect(ran.deny).toBeUndefined()
+  expect(request(runs[0]!).arguments).toEqual({ memory_id: 'm1', metadata: { pinned: true } })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1', pinned: false, tags: ['ops'] })
+  expect(request(runs[1]!).arguments).toEqual({ memory_id: 'm1', metadata: { tags: ['ops'], pinned: false } })
+})
+
+test('IMPORT.3: a pinned value that is not a boolean is refused before any engine run', async ($, on) => {
+  const runs = world(on, '{"status":"updated"}')
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1', pinned: 'yes' })
+  expect(ran.deny).toBe('Mnemosyne: pinned must be true or false.')
+  expect(runs).toEqual([])
+})
+
+test('IMPORT.2: a session import with extractionModel off makes no model call and reads no transcript', { options: { extractionModel: 'off' } }, async ($, on) => {
+  const state = tagsWorld(on, [])
+  const text = (await importRun($, 'session last')).text ?? ''
+  expect(text).toContain('extractionModel')
+  expect(state.model).toEqual([])
+  expect(state.other.filter(run => String(run.argv[1] ?? '').endsWith('/bin/import.ts'))).toEqual([])
+  expect(state.backups).toEqual([])
+})
+
+test('IMPORT.2: "last" with an unknown running session id is refused before any transcript is read', { options: { extractionModel: 'haiku' } }, async ($, on) => {
+  const runs = world(on, '{}', true, 0, ENGINE_BUILD, { session: 'throw' })
+  const text = (await importRun($, 'session last')).text ?? ''
+  expect(text).toContain('id is not known')
+  expect(runs.filter(run => String(run.argv[1] ?? '').endsWith('/bin/import.ts'))).toEqual([])
+})
+
+test('IMPORT.2: the transcripts folder is <HOME>/.claude/projects, from the hook\'s environment', { options: { extractionModel: 'haiku' } }, async ($, on) => {
+  const runs = world(on, '{}', true, 0, ENGINE_BUILD, { cwd: '/work/My Repo' })
+  await importRun($, 'session abc-123')
+  const ran = runs.find(run => String(run.argv[1] ?? '').endsWith('/bin/import.ts') && run.argv.includes('session'))!
+  expect(ran.argv[ran.argv.indexOf('--projects') + 1]).toBe('/home/u/.claude/projects')
+  expect(ran.argv[ran.argv.indexOf('--cwd') + 1]).toBe('/work/My Repo')
+  expect(ran.argv[ran.argv.indexOf('--current') + 1]).toBe('s1')
+})
+
+test('IMPORT.2: apply for a session proposal whose memories this process does not hold makes no backup and saves nothing', async ($, on) => {
+  const proposal = JSON.stringify({ version: 1, kind: 'session', created: 'x', sessionId: 'abc-123', chunks: [{ heading: 'memory 1', sha256: 'a'.repeat(64), verdict: 'allow', rules: [] }] })
+  const runs = world(on, '{}', true, 0, ENGINE_BUILD, { files: { '/home/u/.claude/mnemosyne/import-proposed.json': proposal } })
+  const text = (await importRun($, 'apply')).text ?? ''
+  expect(text).toContain('no longer in this Claude Code process')
+  expect(runs.filter(run => String(run.argv[1] ?? '').endsWith('/bin/memories.ts') || run.argv[2] === 'mcp')).toEqual([])
 })

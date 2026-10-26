@@ -49,6 +49,29 @@ import { ENGINE_BUILD, SETUP_TIMEOUT_MS } from './engine-build'
 import { mnemosyneStats } from './surface'
 import { admit, guardConfigOf, nearDuplicateFlags, nearDuplicateMessage, nearMatchesOf } from './guard'
 import type { GuardResult, NearMatch } from './guard'
+import {
+  classifyChunks,
+  countEntries,
+  docOrigin,
+  docProposalInput,
+  entryLines,
+  IMPORT_MAX_CHUNKS,
+  IMPORT_PROPOSALS_FILE,
+  IMPORT_USAGE,
+  importProvenance,
+  parseImportArgs,
+  parseImportProposal,
+  parseSessionMemories,
+  savesEntry,
+  SESSION_CALL_TIMEOUT_MS,
+  SESSION_MAX_TOKENS,
+  sessionOrigin,
+  sessionPrompt,
+  sessionProposalInput,
+  sessionSystemPrompt,
+  sessionTagContext,
+} from './import'
+import type { ChunkEntry, DocRead, ExistingChunk, SessionCandidate, SessionRead } from './import'
 import { expiresInDaysProblem, KIND_NAMES, kindProblem, missingKindMessage, validUntilFor } from './kinds'
 import { CONFIG_FILE, parseConfig, TOOL_NAMES } from './settings'
 import type { ResolvedSettings, ToolName } from './settings'
@@ -169,7 +192,7 @@ const toolsFor = (settings: ResolvedSettings) => [
   {
     name: 'memory_update',
     description:
-      'Change a memory in place, by the id and owner memory_recall returned: its content, importance, kind or topic tags. Keeps its id and recall history. Use this rather than forgetting and saving again.',
+      'Change a memory in place, by the id and owner memory_recall returned: its content, importance, kind, topic tags or pin. Keeps its id and recall history. Use this rather than forgetting and saving again.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -182,6 +205,7 @@ const toolsFor = (settings: ResolvedSettings) => [
           description: `Short lowercase topic tags (at most ${settings.tags.maxPerMemory}); replaces the old ones. [] removes them.`,
         },
         kind: { ...KIND_PROPERTY, description: 'Change what kind of memory this is.' },
+        pinned: { type: 'boolean', description: 'true pins the memory: it is never a retirement candidate and never expires on its own. false unpins it. Nothing else about it changes.' },
         confirm: CONFIRM_PROPERTY,
         owner: { type: 'string', description: "The row's owner from memory_recall; default this project's." },
       },
@@ -268,6 +292,7 @@ async function paths($: EngineInterface, options: PluginOptions) {
   }
   return {
     windows,
+    home,
     root,
     engine,
     cli: `${engine}/node_modules/${ENGINE_PACKAGE}/src/cli.ts`,
@@ -540,7 +565,10 @@ function updateArgs(input: Record<string, unknown>, rules: TagRules = {}): Recor
   const hasKind = input.kind !== undefined && input.kind !== null
   const refused = kindProblem(input.kind)
   if (refused !== undefined) return refused
-  if (!hasContent && !hasImportance && input.tags === undefined && !hasKind) return 'memory_update needs content, importance, tags or kind.'
+  // IMPORT.3: pin and unpin ride the engine's metadata merge as { pinned }; nothing else of the row changes.
+  const hasPinned = input.pinned !== undefined && input.pinned !== null
+  if (hasPinned && typeof input.pinned !== 'boolean') return 'pinned must be true or false.'
+  if (!hasContent && !hasImportance && input.tags === undefined && !hasKind && !hasPinned) return 'memory_update needs content, importance, tags, kind or pinned.'
   const tags = Array.isArray(input.tags) ? cleanTags(input.tags, rules) : undefined
   // A list whose tags all clean away (the project name, punctuation, blanks) must not read as "remove the tags": [] is how those are removed.
   if (tags !== undefined && tags.length === 0 && Array.isArray(input.tags) && input.tags.length > 0) return 'none of those tags can be stored (a tag may not be the project name, and needs a letter or digit). Send tags: [] to remove the tags.'
@@ -550,8 +578,8 @@ function updateArgs(input: Record<string, unknown>, rules: TagRules = {}): Recor
     ...(hasImportance ? { importance: clamp(input.importance, 0, 1, 0.5) } : {}),
     // The kind goes to the engine as memory_type.
     ...(hasKind ? { memory_type: input.kind } : {}),
-    // An empty list removes the key (C7).
-    ...(tags !== undefined ? { metadata: { tags: tags.length > 0 ? tags : null } } : {}),
+    // An empty list removes the key (C7); the engine merges the keys given and keeps the others.
+    ...(tags !== undefined || hasPinned ? { metadata: { ...(tags !== undefined ? { tags: tags.length > 0 ? tags : null } : {}), ...(hasPinned ? { pinned: input.pinned } : {}) } } : {}),
     // C10.2: a content change names Claude in the audit trail.
     ...(hasContent ? { validator: 'claude-code' } : {}),
   }
@@ -608,18 +636,35 @@ async function call($: EngineInterface, options: PluginOptions, name: string, ar
  * needs the matches for its metadata.guard and, in strict mode, may have to be refused.)
  */
 async function nearDuplicates($: EngineInterface, options: PluginOptions, content: string, settings: ResolvedSettings, as?: string): Promise<NearMatch[]> {
+  return (await nearDuplicatesMany($, options, [content], settings, as))[0] ?? []
+}
+
+/**
+ * G3 for many texts at once: one engine process answers one mnemopi_similar per text, in order. Same rules as
+ * nearDuplicates (advisory, fails open to no matches, the owner the saves will use); the importers call it for a
+ * whole document's chunks, with a longer wait.
+ */
+async function nearDuplicatesMany($: EngineInterface, options: PluginOptions, contents: readonly string[], settings: ResolvedSettings, as?: string, timeoutMs = 20_000): Promise<NearMatch[][]> {
+  const none = contents.map((): NearMatch[] => [])
   // G5: switched off, no check and no engine run.
-  if (!settings.guard.nearDuplicate) return []
+  if (!settings.guard.nearDuplicate || contents.length === 0) return none
   const saver = as ?? (await owner($, options).catch(() => GLOBAL_OWNER))
   const threshold = settings.guard.nearDuplicateScore
   try {
-    if (!(await isInstalled($, options)) || !(await isCurrent($, options)) || !(await embeddingsOn($, options))) return []
-    const [answer] = await runAll($, options, [['mnemopi_similar', { content, top_k: 3, min_score: threshold }]], as)
-    if (typeof answer !== 'string') return []
-    const reply = JSON.parse(answer) as { embeddings?: unknown; matches?: unknown }
-    return reply.embeddings === true ? nearMatchesOf(reply.matches, content, saver, threshold) : []
+    if (!(await isInstalled($, options)) || !(await isCurrent($, options)) || !(await embeddingsOn($, options))) return none
+    const answers = await runAll($, options, contents.map(content => ['mnemopi_similar', { content, top_k: 3, min_score: threshold }] as const), as, timeoutMs)
+    return contents.map((content, i) => {
+      const answer = answers[i]
+      if (typeof answer !== 'string') return []
+      try {
+        const reply = JSON.parse(answer) as { embeddings?: unknown; matches?: unknown }
+        return reply.embeddings === true ? nearMatchesOf(reply.matches, content, saver, threshold) : []
+      } catch {
+        return []
+      }
+    })
   } catch {
-    return []
+    return none
   }
 }
 
@@ -1326,6 +1371,316 @@ export async function tagsApply($: EngineInterface, options: PluginOptions, sign
   ].join('\n')
 }
 
+// ---- /mnemosyne-import: documents and session logs, through the guard (plan phase IMPORT) ----
+
+const IMPORT_CLI_TIMEOUT_MS = 60_000
+// One engine process answers a batch of similar or remember requests; the longest wait is the batch's.
+const IMPORT_ENGINE_TIMEOUT_MS = 120_000
+const IMPORT_SAVE_BATCH = 25
+const basenameOf = (path: string) => path.slice(path.lastIndexOf('/') + 1)
+
+/** bin/import.ts. A failure carries its own stderr line (a reason, never a piece of the file), nothing else. */
+async function importCli($: EngineInterface, options: PluginOptions, args: readonly string[], stdin?: string, timeoutMs = IMPORT_CLI_TIMEOUT_MS) {
+  const { store } = await paths($, options)
+  // --store goes first and only for the commands that read the store.
+  const ran = await $.process.run(['bun', `${slashes($.plugin.root)}/bin/import.ts`, ...(args[0] === 'origins' || args[0] === 'exact' ? ['--store', store] : []), ...args], {
+    ...(stdin === undefined ? {} : { stdin }),
+    timeoutMs,
+  })
+  if (ran.exitCode !== 0) throw new Error(ran.stderr.trim().replace(/^mnemosyne import: /, '').slice(-300) || `bin/import.ts ${args[0]} failed (exit ${ran.exitCode})`)
+  if (ran.isStdoutTruncated) throw new Error(`the output of bin/import.ts ${args[0]} was cut at 4 MiB`)
+  return ran.stdout
+}
+
+/** A document path as the person typed it: ~ is the home, a relative path is under the session's folder. */
+async function docPathOf($: EngineInterface, raw: string): Promise<string> {
+  let path = slashes(raw)
+  if (path === '~' || path.startsWith('~/')) path = `${slashes((await $.env.get('HOME')) ?? '')}${path.slice(1)}`
+  if (!isAbsolute(path)) path = `${slashes(await $.session.cwd())}/${path}`
+  return normalize(path)
+}
+
+/** Guard, then near-duplicates, then the verdicts: the check every importer runs on its candidates, with the settings read now. */
+async function checkCandidates(
+  $: EngineInterface,
+  options: PluginOptions,
+  settings: ResolvedSettings,
+  items: readonly { heading: string; sha256: string; content: string; kind: string }[],
+  existing: readonly ExistingChunk[],
+) {
+  const config = guardConfigOf(settings)
+  const guards = items.map(item => admit({ content: item.content, kind: item.kind, origin: 'import' }, config))
+  // Text the owner already holds exactly is not saved again: the engine would answer with the old row's id.
+  // A blocked text goes nowhere further: not to this lookup, not to the engine.
+  const me = await owner($, options)
+  const open = items.map((_item, i) => guards[i]!.verdict !== 'block')
+  const present = open.some(Boolean)
+    ? (JSON.parse(await importCli($, options, ['exact', me], JSON.stringify({ texts: items.filter((_item, i) => open[i]).map(item => item.content) }))) as { present: boolean[] }).present
+    : []
+  let seen = 0
+  const stored = items.map((_item, i) => (open[i] ? present[seen++] === true : false))
+  // The near-duplicate check is for text that could be saved: not for what is already stored, nor a block.
+  const known = new Set(existing.map(row => row.sha256))
+  const wanted = items.map((item, i) => !known.has(item.sha256) && stored[i] !== true && guards[i]!.verdict !== 'block')
+  const answers = await nearDuplicatesMany($, options, items.filter((_item, i) => wanted[i]).map(item => item.content), settings, undefined, IMPORT_ENGINE_TIMEOUT_MS)
+  let next = 0
+  const near = items.map((_item, i) => (wanted[i] ? answers[next++] ?? [] : []))
+  const nearChecked = settings.guard.nearDuplicate && (await embeddingsOn($, options))
+  return { entries: classifyChunks(items, existing, guards, near, stored), nearChecked }
+}
+
+type DocEvaluation = { read: DocRead; entries: ChunkEntry[]; nearChecked: boolean }
+
+/**
+ * Reads the document and decides what every chunk would become (the dry run and the apply both call this, so apply
+ * never trusts a verdict from the file): the guard with the settings read now, then the near-duplicate check, then the
+ * earlier import's rows. A refusal is a string. Writes nothing.
+ */
+async function evaluateDoc($: EngineInterface, options: PluginOptions, path: string, settings: ResolvedSettings): Promise<DocEvaluation | string> {
+  const read = JSON.parse(await importCli($, options, ['doc', path])) as DocRead
+  if (read.tooMany) return `${basenameOf(path)} splits into ${read.total} chunks, over the limit of ${IMPORT_MAX_CHUNKS} per import: split the file, or keep only the part worth remembering. Nothing was imported.`
+  if (read.chunks.length === 0) return `${basenameOf(path)} has no text under its headings; nothing to import.`
+  // Per-project scope: only this project's earlier rows, so the import never retires another project's copy of the file.
+  const existing = JSON.parse(await importCli($, options, ['origins', path, ...(options.scope === 'per-project' ? ['--owner', await owner($, options)] : [])])) as ExistingChunk[]
+  const { entries, nearChecked } = await checkCandidates($, options, settings, read.chunks.map(chunk => ({ heading: chunk.heading, sha256: chunk.sha256, content: chunk.text, kind: 'artifact' })), existing)
+  return { read, nearChecked, entries }
+}
+
+const nearLine = (checked: boolean) => (checked ? 'Near-duplicate check: on (a close match is a warning).' : 'Near-duplicate check: skipped (embeddings are off, or setting G5 is off); exact repeats are still caught per owner.')
+
+/** /mnemosyne-import doc <path>: the dry run. Writes the proposals file (hashes and verdicts, never text) and no memory. */
+export async function importDocDryRun($: EngineInterface, options: PluginOptions, rawPath: string) {
+  const { root } = await paths($, options)
+  const path = await docPathOf($, rawPath)
+  const settings = await settingsFor($, options)
+  progress($, 'checking the document')
+  const done = await evaluateDoc($, options, path, settings)
+  if (typeof done === 'string') return done
+  const { read, entries, nearChecked } = done
+  const counts = countEntries(entries)
+  const saveable = counts.allow + counts.warn
+  await importCli($, options, ['save', `${root}/${IMPORT_PROPOSALS_FILE}`], JSON.stringify(docProposalInput(path, read.fileSha256, entries)))
+  progress($, `${counts.total} chunks checked`)
+  const strict = guardModeOf(options) === 'strict'
+  return [
+    `Dry run for ${basenameOf(path)}: ${plural(counts.total, 'chunk')}${read.skippedEmpty > 0 ? ` (${plural(read.skippedEmpty, 'heading')} with no text under ${read.skippedEmpty === 1 ? 'it was' : 'them were'} skipped)` : ''}. No memory was changed.`,
+    `Would save ${counts.allow} clean${counts.replace > 0 ? ` (${counts.replace} of the chunks replace a row from an earlier import of this file: the old row is retired, not deleted, and can be restored)` : ''}; ${counts.warn} with a warning${counts.warn > 0 ? (strict ? ' (guard mode strict: saved only with /mnemosyne-import apply confirm)' : ' (guard mode warn: saved and flagged in metadata.guard)') : ''}; ${counts.unchanged} already in the store (skipped); ${counts.block} blocked (never saved).`,
+    ...entryLines(entries),
+    nearLine(nearChecked),
+    `Saved to ${root}/${IMPORT_PROPOSALS_FILE} (path, headings, hashes and verdicts; never the text).`,
+    saveable === 0 ? 'Nothing to import.' : `Run /mnemosyne-import apply to save ${strict && counts.warn > 0 ? `the ${counts.allow} clean chunks (add confirm for the ${counts.warn} with a warning)` : `${saveable} chunks`}. Apply backs the store up first and stops if that fails.`,
+  ].join('\n')
+}
+
+// IMPORT.2: what a session dry run proposed, kept in this process only. C8: a memory's text is never written to a
+// file, so the proposals file holds hashes and verdicts, and apply takes the text from here. A reload or a new process
+// empties it, and apply then asks for a new dry run.
+const sessionPending = new Map<string, { sessionId: string; items: Map<string, SessionCandidate> }>()
+
+/** /mnemosyne-import session <id | last>: asks Haiku for up to 5 durable memories, checks each, writes a proposals file (hashes only) and no memory. */
+export async function importSessionDryRun($: EngineInterface, options: PluginOptions, target: string, signal: AbortSignal) {
+  const { root, home } = await paths($, options)
+  const model = extractionModelOf(options)
+  if (extractionOff(model)) return 'Knowledge extraction is off (extractionModel in the plugin settings is "off"): a session import needs the model. Set extractionModel, then try again.'
+  const settings = await settingsFor($, options)
+  progress($, 'reading the session')
+  // Claude Code keeps transcripts under <home>/.claude/projects, one folder per project.
+  const projects = `${home}/.claude/projects`
+  const current = await $.session.id().catch(() => undefined)
+  // `last` skips the running session; if its id is unknown, the newest file may be the running one.
+  if (target === 'last' && !current) return 'The running session\'s id is not known, so "last" could pick the session in progress. Give the session id: /mnemosyne-import session <id>. Nothing was read.'
+  const read = JSON.parse(await importCli($, options, ['session', '--projects', projects, '--cwd', slashes(await $.session.cwd()), ...(current === undefined ? [] : ['--current', current]), target])) as SessionRead
+  if (read.text === '') return `Session ${read.sessionId} has no conversation text to read; nothing to import.`
+  const vocabulary = await readVocabulary($, root)
+  const me = await owner($, options)
+  progress($, 'asking the model')
+  // The conversation text (redacted by bin/import.ts) goes to the extractionModel, Haiku by default, as a quoted string.
+  const reply = await withRateLimitRetry(
+    () => $.model.complete({ model, system: sessionSystemPrompt(vocabulary, settings.tags.maxPerMemory), prompt: sessionPrompt(read.text), maxTokens: SESSION_MAX_TOKENS, timeoutMs: SESSION_CALL_TIMEOUT_MS }, { signal }),
+    ms => $.clock.sleep(ms, { signal }),
+  )
+  if (!reply.isAnswered) {
+    if (reply.reason === 'aborted') return 'Stopped. Nothing was saved and no memory was changed.'
+    return `The model call failed (${reply.reason === 'api-error' ? `api-error ${reply.status ?? 'no response'} ${reply.error}` : reply.reason}). Nothing was saved and no memory was changed.`
+  }
+  const candidates = parseSessionMemories(reply.text, sessionTagContext(vocabulary, me), settings.tags.maxPerMemory)
+  // A candidate the guard blocks is hashed as a placeholder: its text goes to no process.
+  const config = guardConfigOf(settings)
+  const hashed = candidates.map((candidate, i) => (admit({ content: candidate.content, kind: candidate.kind, origin: 'import' }, config).verdict === 'block' ? `blocked ${read.sessionId} ${i}` : candidate.content))
+  const hashes = candidates.length === 0 ? [] : (JSON.parse(await importCli($, options, ['hash'], JSON.stringify({ texts: hashed }))) as { sha256: string[] }).sha256
+  const items = candidates.map((candidate, i) => ({ heading: `memory ${i + 1}`, sha256: hashes[i]!, content: candidate.content, kind: candidate.kind }))
+  const { entries, nearChecked } = await checkCandidates($, options, settings, items, [])
+  await importCli($, options, ['save', `${root}/${IMPORT_PROPOSALS_FILE}`], JSON.stringify(sessionProposalInput(read.sessionId, entries)))
+  sessionPending.set(root, { sessionId: read.sessionId, items: new Map(candidates.map((candidate, i) => [hashes[i]!, candidate])) })
+  progress($, `${plural(candidates.length, 'memory', 'memories')} proposed`)
+  if (candidates.length === 0) return `Dry run for session ${read.sessionId}: the model found nothing durable worth remembering (${plural(read.turns, 'turn')} read). No memory was changed.`
+  const counts = countEntries(entries)
+  const strict = guardModeOf(options) === 'strict'
+  const lines = entries.map((entry, i) => {
+    const candidate = candidates[i]!
+    const text = entry.verdict === 'block' ? '(text hidden: blocked)' : Array.from(candidate.content.replace(/\s+/g, ' ')).slice(0, 160).join('')
+    return `${String(i + 1).padStart(3)}  ${entry.verdict}${entry.rules.length > 0 ? ` [${entry.rules.join(',')}]` : ''}  ${candidate.kind}${candidate.tags.length > 0 ? ` [${candidate.tags.join(', ')}]` : ''}  ${text}`
+  })
+  return [
+    `Dry run for session ${read.sessionId}: ${plural(candidates.length, 'memory', 'memories')} proposed from ${plural(read.turns, 'turn')}${read.truncated ? ` (the newest ${read.turns} of ${read.totalTurns}; the text is capped)` : ''}. No memory was changed.`,
+    `Would save ${counts.allow} clean; ${counts.warn} with a warning${counts.warn > 0 ? (strict ? ' (guard mode strict: saved only with /mnemosyne-import apply confirm)' : ' (guard mode warn: saved and flagged in metadata.guard)') : ''}; ${counts.unchanged} already in the store (skipped); ${counts.block} blocked (never saved).`,
+    ...lines,
+    nearLine(nearChecked),
+    `Saved to ${root}/${IMPORT_PROPOSALS_FILE} (hashes and verdicts; never the text). The memories themselves are kept in this Claude Code process until another dry run replaces them, so apply can be repeated (for confirm); text already saved is skipped.`,
+    counts.allow + counts.warn === 0 ? 'Nothing to import.' : 'Run /mnemosyne-import apply to save them. Apply backs the store up first and stops if that fails.',
+  ].join('\n')
+}
+
+type SaveItem = { entry: ChunkEntry; content: string; kind: string; metadata: Record<string, unknown> }
+
+/**
+ * Saves the items, 25 to an engine process, as the current owner, with the C4 provenance of `kind` and scope by the scope
+ * setting. A failed save is counted and the rest go on. Stops between batches when `signal` aborts.
+ */
+async function saveImported($: EngineInterface, options: PluginOptions, kind: 'doc' | 'session', todo: readonly SaveItem[], signal: AbortSignal) {
+  const isGlobal = options.scope !== 'per-project'
+  const saved: { id: string; entry: ChunkEntry }[] = []
+  let failed = 0
+  let firstError = ''
+  let notReached = 0
+  for (let at = 0; at < todo.length; at += IMPORT_SAVE_BATCH) {
+    if (signal.aborted) {
+      notReached = todo.length - at
+      break
+    }
+    const batch = todo.slice(at, at + IMPORT_SAVE_BATCH)
+    progress($, `saving ${Math.min(at + batch.length, todo.length)}/${todo.length}`)
+    const answers = await runAll(
+      $,
+      options,
+      batch.map(
+        item =>
+          [
+            'mnemopi_remember',
+            { content: item.content, importance: 0.5, ...importProvenance(kind), scope: isGlobal ? 'global' : 'channel', memory_type: item.kind, metadata: item.metadata },
+          ] as const,
+      ),
+      undefined,
+      IMPORT_ENGINE_TIMEOUT_MS,
+    ).catch((err: unknown) => batch.map(() => (err instanceof Error ? err : new Error(String(err)))))
+    answers.forEach((answer, i) => {
+      const id = answer instanceof Error ? undefined : savedId(answer)
+      if (id === undefined) {
+        failed++
+        firstError ||= answer instanceof Error ? answer.message.slice(0, 200) : 'the engine gave no memory id'
+      } else saved.push({ id, entry: batch[i]!.entry })
+    })
+  }
+  return { saved, failed, firstError, notReached }
+}
+
+/** A changed chunk's old row is retired once its replacement is saved (as the old row's owner); it is not deleted and can be restored. */
+async function retireImported($: EngineInterface, options: PluginOptions, saved: readonly { id: string; entry: ChunkEntry }[]) {
+  const retired: string[] = []
+  let failed = 0
+  const pairs = saved.filter(item => item.entry.replaces !== undefined && item.entry.replaces.id !== item.id)
+  for (const ownerId of [...new Set(pairs.map(item => item.entry.replaces!.owner))]) {
+    const group = pairs.filter(item => item.entry.replaces!.owner === ownerId)
+    const answers = await runAll($, options, group.map(item => ['mnemopi_invalidate', { memory_id: item.entry.replaces!.id, replacement_id: item.id }] as const), ownerId || undefined, IMPORT_ENGINE_TIMEOUT_MS).catch(() => group.map(() => new Error('the engine did not answer')))
+    answers.forEach((answer, i) => {
+      let ok = false
+      try {
+        ok = !(answer instanceof Error) && (JSON.parse(String(answer)) as { status?: unknown }).status === 'invalidated'
+      } catch {
+        ok = false
+      }
+      if (ok) retired.push(group[i]!.entry.replaces!.id, group[i]!.id)
+      else failed++
+    })
+  }
+  return { retired, failed, pairs: pairs.length }
+}
+
+/**
+ * /mnemosyne-import apply: saves what the last dry run checked. The store is backed up first (C9) and nothing is read
+ * or written if that fails. Every candidate is checked again with the settings read now: the guard, the near-duplicate
+ * check and the rows an earlier import left. Only candidates whose text the dry run saw are saved (a chunk edited since
+ * is skipped). A document's chunks are read again from the file; a session's memories come from the dry run in this process.
+ */
+export async function importApply($: EngineInterface, options: PluginOptions, confirm: boolean, signal: AbortSignal) {
+  const { root } = await paths($, options)
+  let proposalText: string
+  try {
+    proposalText = await $.fs.read(`${root}/${IMPORT_PROPOSALS_FILE}`)
+  } catch {
+    return 'There is no dry run to apply. Run /mnemosyne-import doc <path> or /mnemosyne-import session <id | last> first.'
+  }
+  const proposal = parseImportProposal(proposalText)
+  if (proposal === undefined) return `${root}/${IMPORT_PROPOSALS_FILE} is not a proposal this version can apply; run the dry run again.`
+  const pending = proposal.kind === 'session' ? sessionPending.get(root) : undefined
+  if (proposal.kind === 'session' && (pending === undefined || pending.sessionId !== proposal.sessionId)) {
+    return 'The memories of the last session dry run are no longer in this Claude Code process (their text is never written to a file): run /mnemosyne-import session <id | last> again, then apply.'
+  }
+  const stopped = await backupFirst($, options, '/mnemosyne-import apply')
+  if (stopped !== undefined) return stopped
+  const settings = await settingsFor($, options)
+  const approved = new Set(proposal.chunks.filter(chunk => chunk.verdict === 'allow' || chunk.verdict === 'warn').map(chunk => chunk.sha256))
+  const mode = guardModeOf(options)
+  const skipped = { unchanged: 0, blocked: 0, edited: 0, confirm: 0 }
+  const todo: SaveItem[] = []
+  let label: string
+  if (proposal.kind === 'doc') {
+    const done = await evaluateDoc($, options, proposal.path, settings)
+    if (typeof done === 'string') return done
+    label = basenameOf(proposal.path)
+    done.entries.forEach((entry, i) => {
+      if (entry.verdict === 'unchanged') skipped.unchanged++
+      else if (entry.verdict === 'block') skipped.blocked++
+      else if (!approved.has(entry.sha256)) skipped.edited++
+      else if (!savesEntry(entry, mode, confirm)) skipped.confirm++
+      else {
+        const chunk = done.read.chunks[i]!
+        todo.push({ entry, content: chunk.text, kind: 'artifact', metadata: { origin: docOrigin(proposal.path, chunk), ...(entry.verdict === 'warn' ? { guard: [...entry.rules.filter(rule => rule !== 'G3'), ...nearDuplicateFlags(entry.near)] } : {}) } })
+      }
+    })
+  } else {
+    label = `session ${proposal.sessionId}`
+    const shas = [...pending!.items.keys()]
+    const candidates = shas.map(sha => pending!.items.get(sha)!)
+    const { entries } = await checkCandidates($, options, settings, candidates.map((candidate, i) => ({ heading: `memory ${i + 1}`, sha256: shas[i]!, content: candidate.content, kind: candidate.kind })), [])
+    const rules = await tagRulesFor($, options, settings)
+    entries.forEach((entry, i) => {
+      const candidate = candidates[i]!
+      if (entry.verdict === 'unchanged') skipped.unchanged++
+      else if (entry.verdict === 'block') skipped.blocked++
+      else if (!approved.has(entry.sha256)) skipped.edited++
+      else if (!savesEntry(entry, mode, confirm)) skipped.confirm++
+      else {
+        const tags = cleanTags(candidate.tags, rules)
+        todo.push({
+          entry,
+          content: candidate.content,
+          kind: candidate.kind,
+          metadata: { origin: sessionOrigin(proposal.sessionId, entry.sha256), ...(tags.length > 0 ? { tags } : {}), ...(entry.verdict === 'warn' ? { guard: [...entry.rules.filter(rule => rule !== 'G3'), ...nearDuplicateFlags(entry.near)] } : {}) },
+        })
+      }
+    })
+  }
+  const me = await owner($, options)
+  const { saved, failed, firstError, notReached } = await saveImported($, options, proposal.kind, todo, signal)
+  const { retired, failed: retireFailed, pairs } = await retireImported($, options, saved)
+  const noun = proposal.kind === 'doc' ? 'chunk' : 'memory'
+  const nouns = proposal.kind === 'doc' ? 'chunks' : 'memories'
+  await record($, options, [
+    { action: 'import', origin: proposal.kind === 'doc' ? 'import' : 'session', owner: me, client: 'mnemosyne-import', text: `import ${label}: ${plural(saved.length, noun, nouns)} saved`, ids: saved.map(item => item.id), count: saved.length, ok: failed === 0, error: firstError },
+    ...(retired.length > 0 ? [{ action: 'retire' as const, origin: 'import' as const, owner: me, client: 'mnemosyne-import', text: `import ${label}: ${plural(retired.length / 2, 'earlier chunk')} replaced`, ids: retired, count: retired.length / 2, ok: retireFailed === 0 }] : []),
+  ])
+  progress($, `${plural(saved.length, noun, nouns)} imported`)
+  return [
+    `Imported ${plural(saved.length, noun, nouns)} of ${label} (${plural(todo.length, noun, nouns)} ${todo.length === 1 ? 'was' : 'were'} due).`,
+    `Skipped: ${skipped.unchanged} already in the store, ${skipped.blocked} blocked, ${skipped.edited} edited since the dry run (run it again), ${skipped.confirm} with a warning (resend as /mnemosyne-import apply confirm to save them).`,
+    ...(pairs > 0 ? [`Replaced ${retired.length / 2} of ${plural(pairs, 'earlier chunk')}: each old row is retired, not deleted, and can be restored.${retireFailed > 0 ? ` ${plural(retireFailed, 'retire')} failed; the new chunks are saved and the old rows were left as they were.` : ''}`] : []),
+    ...(failed > 0 ? [`${plural(failed, 'save')} failed (${firstError}).`] : []),
+    ...(notReached > 0 ? [`Stopped early: ${plural(notReached, noun, nouns)} not reached; run /mnemosyne-import apply again to finish.`] : []),
+    'Knowledge is not extracted from imported memories (no model call each): /mnemosyne-knowledge does that when you want it.',
+  ].join('\n')
+}
+
 export const register: Register = (on, options) => {
   const isPerProject = options.scope === 'per-project'
   // Per session, the tail of its extraction chain (one at a time).
@@ -1388,6 +1743,10 @@ export const register: Register = (on, options) => {
     await $.command.register({
       name: 'mnemosyne-tags',
       description: 'Tag the existing memories once: a dry run lets Haiku propose topic tags; "apply" writes them (no new model calls)',
+    })
+    await $.command.register({
+      name: 'mnemosyne-import',
+      description: 'Import a .md or .txt document, or boil a past session down to a few memories: a dry run checks everything and writes nothing; "apply" backs the store up, then saves',
     })
     await $.command.register({
       name: 'mnemosyne-ui',
@@ -1509,6 +1868,23 @@ export const register: Register = (on, options) => {
       return { text: `Mnemosyne tag backfill failed: ${(err as Error).message}` }
     }
   }).catch(() => ({ text: 'Mnemosyne: the tag backfill failed.' }))
+
+  // The importers: doc and session are dry runs (nothing is written); apply backs the store up, then saves what the last dry run checked.
+  on('command.run', { command: 'mnemosyne-import' }, async ($, e, next) => {
+    const parsed = parseImportArgs(e.args)
+    if (parsed.mode === 'usage') return { text: IMPORT_USAGE }
+    const bun = await $.process.run(['bun', '--version']).catch(() => null)
+    if (bun?.exitCode !== 0) return { text: 'The importers need Bun on PATH: https://bun.sh' }
+    try {
+      if (!(await isInstalled($, options))) return { text: 'The importers need the engine: run /mnemosyne-setup first.' }
+      if (!(await isCurrent($, options))) return { text: 'The Mnemosyne engine is out of date (an import saves with this build\'s provenance): run /mnemosyne-setup, then try again.' }
+      if (parsed.mode === 'doc') return { text: await importDocDryRun($, options, parsed.path) }
+      if (parsed.mode === 'apply') return { text: await importApply($, options, parsed.confirm, next.signal) }
+      return { text: await importSessionDryRun($, options, parsed.target, next.signal) }
+    } catch (err) {
+      return { text: `Mnemosyne import failed: ${(err as Error).message.slice(0, 300)}` }
+    }
+  }).catch(() => ({ text: 'Mnemosyne: the import failed.' }))
 
   // The knowledge backfill: no argument is a dry run; apply extracts pending and older memories.
   on('command.run', { command: 'mnemosyne-knowledge' }, async ($, e, next) => {
