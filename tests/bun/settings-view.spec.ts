@@ -476,6 +476,102 @@ describe('UI.2: editors, list add and remove, reset', () => {
     })
   })
 
+  test('scope saves: the choice editor asks for the value typed again and sends it as confirm', async () => {
+    const world = await boot()
+    const data = await load(world)
+    const sent = realHost(world)
+    await withDocument(async () => {
+      const cards = drawGroups(data, newView(), sent.host) as FakeNode[]
+      const row = rowOf(cards, 'scope')!
+      const info = data.settings.find((r: any) => r.id === 'scope')
+      expect(row.all().map(node => node.textContent).join(' ')).toContain('Type the new value again to confirm')
+      const other = (info.choices as string[]).find(c => c !== info.value)!
+      row.find('select')!.value = other
+      const [again] = row.findAll('input')
+      again!.value = 'nope'
+      row.find('button', 'Save')!.fire('click')
+      await settle()
+      expect(sent.posted).toHaveLength(0)
+      expect(row.all().map(node => node.textContent).join(' ')).toContain('The two entries differ')
+      again!.value = other
+      row.find('button', 'Save')!.fire('click')
+      await settle()
+      expect(last(sent.posted)).toEqual({ path: '/api/settings/update', body: { id: 'scope', value: other, confirm: other } })
+      expect(row.all().map(node => node.textContent).join(' | ')).toContain(`Current: ${other}`)
+    })
+  })
+
+  test('saved at its default an option stops saying (default); Reset to default on memoryDir and scope sends the default as confirm and the real route accepts it', async () => {
+    const world = await boot()
+    const data = await load(world)
+    const sent = realHost(world)
+    await withDocument(async () => {
+      const cards = drawGroups(data, newView(), sent.host) as FakeNode[]
+      const textOf = (row: FakeNode) => row.all().map(node => node.textContent).join(' | ')
+      for (const id of ['memoryDir', 'scope']) {
+        const info = data.settings.find((r: any) => r.id === id)
+        const def = String(info.default)
+        const choice = id === 'scope'
+        const alt = choice ? (info.choices as string[]).find(c => c !== def)! : '~/mnemo-elsewhere'
+        const row = () => rowOf(cards, id)!
+        const fill = (value: string) => {
+          if (choice) row().find('select')!.value = value
+          else row().findAll('input')[0]!.value = value
+          row().findAll('input')[choice ? 0 : 1]!.value = value
+        }
+        fill(alt)
+        row().find('button', 'Save')!.fire('click')
+        await settle()
+        expect(last(sent.posted).body).toEqual({ id, value: alt, confirm: alt })
+        fill(def)
+        row().find('button', 'Save')!.fire('click')
+        await settle()
+        expect(last(sent.posted).body).toEqual({ id, value: def, confirm: def })
+        expect(textOf(row())).toContain(`Current: ${def}`)
+        expect(textOf(row())).not.toContain('(default)')
+        // Reset without the default typed: refused on the page.
+        const before = sent.posted.length
+        row().find('button', 'Reset to default')!.fire('click')
+        await settle()
+        expect(sent.posted).toHaveLength(before)
+        expect(textOf(row())).toContain('Type the default exactly')
+        const inputs = row().findAll('input')
+        inputs[inputs.length - 1]!.value = def
+        row().find('button', 'Reset to default')!.fire('click')
+        await settle()
+        expect(last(sent.posted)).toEqual({ path: '/api/settings/reset', body: { id, confirm: def } })
+        expect(textOf(row())).toContain('Nothing changed.')
+        expect(textOf(row())).toContain('(default)')
+      }
+    })
+  })
+
+  test('the restart badge and the banner follow each reply, and clear when a later reply no longer needs one', async () => {
+    const world = await boot()
+    const data = await load(world)
+    const view = newView()
+    const answers: any[] = [{ ok: true, value: 4100, restartNeeded: true }, { ok: true, value: 4000 }]
+    const host = { post: async () => ({ status: 200, body: answers.shift() }), copy: async () => true, reload: () => {}, browser: [] as unknown[] }
+    await withDocument(async () => {
+      const top = drawTop(data, view, host, () => {}) as FakeNode[]
+      const cards = drawGroups(data, view, host) as FakeNode[]
+      const row = rowOf(cards, 'guard.maxLength')!
+      const banner = top[0]!
+      const text = (node: FakeNode) => node.all().map(n => n.textContent).join(' | ')
+      row.find('input')!.value = '4100'
+      row.find('button', 'Save')!.fire('click')
+      await settle()
+      expect(text(row)).toContain('Restart needed')
+      expect(text(banner)).toContain('Restart needed for:')
+      expect(banner.hidden).toBe(false)
+      row.find('input')!.value = '4000'
+      row.find('button', 'Save')!.fire('click')
+      await settle()
+      expect(text(row)).not.toContain('Restart needed')
+      expect(text(banner)).not.toContain('Restart needed for:')
+    })
+  })
+
   test('Reset all needs the word reset typed, then posts the confirm and reloads', async () => {
     const world = await boot()
     const data = await load(world)

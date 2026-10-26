@@ -258,9 +258,11 @@ export type SettingsView = {
   /** Setup card extras: the last backup answer and the live backup list. */
   backup: { text: string; error: boolean; list: { name: string; size: number; date: string }[] | null }
   resetAll: boolean
+  /** The drawn banner, so a reply that changes the restart list can redraw it alone. */
+  banner: { node: HTMLElement; data: SettingsData; view: SettingsView } | null
 }
 
-export const newView = (): SettingsView => ({ data: null, filter: '', busy: false, notice: '', copied: '', backup: { text: '', error: false, list: null }, resetAll: false })
+export const newView = (): SettingsView => ({ data: null, filter: '', busy: false, notice: '', copied: '', backup: { text: '', error: false, list: null }, resetAll: false, banner: null })
 
 const BUSY_TEXT = 'Another change is still saving. Try again in a moment.'
 
@@ -289,13 +291,24 @@ function badgeList(row: SettingRow): HTMLElement[] {
 }
 
 /** A confirmed change: the row takes the value from the server's reply, never from the field. */
-function takeReply(row: SettingRow, reply: Record<string, unknown>, parts: RowParts) {
+function takeReply(row: SettingRow, reply: Record<string, unknown>, parts: RowParts, view: SettingsView) {
   if ('value' in reply) row.value = reply.value
   if ('default' in reply) row.default = reply.default
   if (typeof reply.applies === 'string') row.applies = reply.applies
-  if (reply.restartNeeded === true) row.restartNeeded = true
-  // An option keeps a stored value until it is reset; a config row is "default" when its value matches.
-  if (row.home === 'option') row.configured = !sameJson(row.value, row.default) || row.configured === true
+  // The server says again on every reply whether this row needs a restart: a later save can clear it.
+  if (row.restartNeeded !== (reply.restartNeeded === true)) {
+    if (reply.restartNeeded === true) row.restartNeeded = true
+    else delete row.restartNeeded
+  }
+  const live = view.banner?.data
+  if (live !== undefined) {
+    const listed = live.restartNeeded.includes(row.id)
+    if (reply.restartNeeded === true && !listed) live.restartNeeded = [...live.restartNeeded, row.id]
+    else if (reply.restartNeeded !== true && listed) live.restartNeeded = live.restartNeeded.filter(id => id !== row.id)
+    if (view.banner !== null) fillBanner(view.banner.node, live, view)
+  }
+  // An option keeps a stored value once saved (even at the default) until it is reset; a config row is "default" when its value matches.
+  if (row.home === 'option') row.configured = reply.reset !== true
   showCurrent(row, parts)
 }
 
@@ -342,7 +355,7 @@ function editorFor(row: SettingRow, view: SettingsView, host: SettingsHost, part
       void (async () => {
         const reply = await update({ value: box.checked })
         if (reply === null) return
-        takeReply(row, reply, parts)
+        takeReply(row, reply, parts, view)
         box.checked = row.value === true
         done(parts, reply)
       })()
@@ -358,18 +371,26 @@ function editorFor(row: SettingRow, view: SettingsView, host: SettingsHost, part
       select.append(option)
     }
     select.value = text(row.value)
+    const again = row.confirm === true ? el('input', undefined, 'input') : null
+    let againField: HTMLElement | null = null
+    if (again !== null) {
+      again.type = 'text'
+      againField = labelled('Type the new value again to confirm', again, 'Memories already saved are not moved to the new place.')
+    }
     const save = button('Save', 'primary', () => {
       const checked = checkValue(row, select.value)
       if (!checked.ok) return say(parts, checked.reason, true)
+      if (again !== null && again.value.trim() !== String(checked.value)) return say(parts, 'The two entries differ. Type the new value again exactly to confirm.', true)
       void (async () => {
-        const reply = await update({ value: checked.value })
+        const reply = await update({ value: checked.value, ...(again !== null ? { confirm: again.value.trim() } : {}) })
         if (reply === null) return
-        takeReply(row, reply, parts)
+        takeReply(row, reply, parts, view)
         select.value = text(row.value)
+        if (again !== null) again.value = ''
         done(parts, reply)
       })()
     })
-    return [fieldLine(labelled('New value', select), save)]
+    return againField === null ? [fieldLine(labelled('New value', select), save)] : [fieldLine(labelled('New value', select), save), againField]
   }
 
   if (row.type === 'integer' || row.type === 'number' || row.type === 'text') {
@@ -392,7 +413,7 @@ function editorFor(row: SettingRow, view: SettingsView, host: SettingsHost, part
       void (async () => {
         const reply = await update({ value: checked.value, ...(again !== null ? { confirm: again.value.trim() } : {}) })
         if (reply === null) return
-        takeReply(row, reply, parts)
+        takeReply(row, reply, parts, view)
         input.value = row.value === null ? '' : String(row.value)
         if (again !== null) again.value = ''
         done(parts, reply)
@@ -414,7 +435,7 @@ function editorFor(row: SettingRow, view: SettingsView, host: SettingsHost, part
                 void (async () => {
                   const reply = await update({ remove: item })
                   if (reply === null) return
-                  takeReply(row, reply, parts)
+                  takeReply(row, reply, parts, view)
                   draw()
                   refill()
                   done(parts, reply)
@@ -455,7 +476,7 @@ function editorFor(row: SettingRow, view: SettingsView, host: SettingsHost, part
       void (async () => {
         const reply = await update({ add: checked.value })
         if (reply === null) return
-        takeReply(row, reply, parts)
+        takeReply(row, reply, parts, view)
         clear()
         draw()
         refill()
@@ -514,13 +535,20 @@ export function settingRow(row: SettingRow, view: SettingsView, host: SettingsHo
   if (isEditable(row)) {
     box.append(...editorFor(row, view, host, parts))
     // Reset to default: asks the server; the row changes only on its reply, then is drawn again so the editors hold the new value.
+    // memoryDir and scope: the server wants the default typed again as confirm.
+    const sure = row.confirm === true ? el('input', undefined, 'input') : null
+    if (sure !== null) {
+      sure.type = 'text'
+      box.append(labelled('Type the default again to reset', sure, `The default is ${formatValue(row.default)}. Memories already saved are not moved.`))
+    }
     box.append(
       button('Reset to default', 'link-btn', () => {
+        const want = String(row.default ?? '')
+        if (sure !== null && sure.value.trim() !== want) return say(parts, 'The entry differs from the default. Type the default exactly to confirm.', true)
         void (async () => {
-          const reply = await send(view, host, parts, '/api/settings/reset', { id: row.id }, 'Resetting…')
+          const reply = await send(view, host, parts, '/api/settings/reset', sure !== null ? { id: row.id, confirm: sure.value.trim() } : { id: row.id }, 'Resetting…')
           if (reply === null) return
-          takeReply(row, reply, parts)
-          if (row.home === 'option') row.configured = false
+          takeReply(row, { ...reply, reset: true }, parts, view)
           box.replaceWith(settingRow(row, view, host, doneText(reply, true)))
         })()
       }),
@@ -763,16 +791,21 @@ export function drawGroups(data: SettingsData, view: SettingsView, host: Setting
   return out
 }
 
+/** The banner lines drawn into the banner box; the box is hidden when there are none. */
+function fillBanner(banner: HTMLElement, data: SettingsData, view: SettingsView) {
+  const lines = bannerLines(data, view)
+  banner.replaceChildren(...lines.map(line => el('p', line, 'small')))
+  banner.hidden = lines.length === 0
+}
+
 /** The banner and the Reset all control, above the groups. */
 export function drawTop(data: SettingsData, view: SettingsView, host: SettingsHost, redraw: () => void): HTMLElement[] {
   const out: HTMLElement[] = []
-  const lines = bannerLines(data, view)
-  if (lines.length > 0) {
-    const banner = el('div', undefined, 'set-banner')
-    banner.setAttribute('role', 'status')
-    for (const line of lines) banner.append(el('p', line, 'small'))
-    out.push(banner)
-  }
+  const banner = el('div', undefined, 'set-banner')
+  banner.setAttribute('role', 'status')
+  view.banner = { node: banner, data, view }
+  fillBanner(banner, data, view)
+  out.push(banner)
   const all = el('div', undefined, 'set-resetall')
   if (!view.resetAll) {
     all.append(button('Reset all', 'danger-outline', () => {
