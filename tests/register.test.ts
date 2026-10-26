@@ -3484,3 +3484,63 @@ test('WIRE.1.a4: the wrapper tells the proxy where config.json is (MNEMOSYNE_ROO
   const text = runs.find(r => r.argv[2]?.includes('writeFileSync'))?.argv[4] ?? ''
   expect(text).toContain("export MNEMOSYNE_ROOT='/home/u/.claude/mnemosyne'\n")
 })
+
+/** The heading of the first-prompt recall after a session start under `tools`, and the engine rows it lists. */
+async function recallHeadingWith($: Engine, on: On, tools: Record<string, boolean>) {
+  const reply = JSON.stringify({ results: [{ id: 'm1', session_id: 'global', content: 'use pnpm' }] })
+  world(on, reply, true, 0, ENGINE_BUILD, withConfig({ version: 1, tools }))
+  on('tool.register', () => ({ value: {} }) as never)
+  on('command.register', () => ({ value: {} }) as never)
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  const seen: (readonly string[] | undefined)[] = []
+  on('prompt.submit', (_$, e) => {
+    seen.push(e.context)
+    return { text: e.text, context: e.context }
+  })
+  await $.session.start(SESSION_START)
+  await $.prompt.submit({ text: 'How do I install deps?', origin: { kind: 'composer' } } as never)
+  return seen[0]?.at(-1) ?? ''
+}
+
+test('WIRE.3.a3: the recall heading names update and forget when both are on (C3, the 0.8.4 text)', async ($, on) => {
+  const text = await recallHeadingWith($, on, {})
+  expect(text).toBe('Long-term memories that may be relevant (Mnemosyne; mcp__mnemosyne__memory_update and _forget take the id and owner):\n- [m1 owner=global] use pnpm')
+})
+
+test('WIRE.3.a3: the recall heading does not name memory_forget when it is off', async ($, on) => {
+  const text = await recallHeadingWith($, on, { memory_forget: false })
+  expect(text).toBe('Long-term memories that may be relevant (Mnemosyne; mcp__mnemosyne__memory_update takes the id and owner):\n- [m1 owner=global] use pnpm')
+  expect(text).not.toContain('forget')
+})
+
+test('WIRE.3.a3: the recall heading does not name memory_update when it is off', async ($, on) => {
+  const text = await recallHeadingWith($, on, { memory_update: false })
+  expect(text).toBe('Long-term memories that may be relevant (Mnemosyne; mcp__mnemosyne__memory_forget takes the id and owner):\n- [m1 owner=global] use pnpm')
+  expect(text).not.toContain('update')
+})
+
+test('WIRE.3.a3: the recall heading names neither tool when both are off', async ($, on) => {
+  const text = await recallHeadingWith($, on, { memory_update: false, memory_forget: false })
+  expect(text).toBe('Long-term memories that may be relevant (Mnemosyne):\n- [m1 owner=global] use pnpm')
+})
+
+test('WIRE.3.a2: session.end drops the session from the registered record', async ($, on) => {
+  const files: Record<string, string> = { [CONFIG_PATH]: JSON.stringify({ version: 1, tools: { memory_remember: false } }) }
+  world(on, JSON.stringify({ results: [] }), true, 0, ENGINE_BUILD, { files })
+  on('tool.register', () => ({ value: {} }) as never)
+  on('command.register', () => ({ value: {} }) as never)
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  on('session.end', (_$, e) => ({ sessionId: e.sessionId }) as never)
+  on('prompt.compose', () => ({ sections: [] }))
+  const base = { model: 'm', promptModel: 'm', surfaces: [], outputStyle: null }
+  const compose = () => $.prompt.compose({ ...base, tools: ['mcp__mnemosyne__memory_remember'], traits: [] } as never)
+  await $.session.start(SESSION_START)
+  files[CONFIG_PATH] = JSON.stringify({ version: 1 })
+  // The record of the start says memory_remember was not registered, so the switch-on waits for the next session.
+  expect((await compose()).sections.some(s => s.id === 'mnemosyne:rules')).toBe(false)
+  await $.session.end({ sessionId: 's1', reason: 'other' } as never)
+  // The record is gone, so the settings decide again.
+  expect((await compose()).sections.some(s => s.id === 'mnemosyne:rules')).toBe(true)
+})

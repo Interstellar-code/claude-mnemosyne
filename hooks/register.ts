@@ -93,6 +93,13 @@ function rulesSection(settings: ResolvedSettings) {
   return { id: 'mnemosyne:rules', scope: 'session', text: lines.join('\n') } as const
 }
 
+// The heading of the first-prompt recall: names only the tools this session has (M1). With update and forget both on it is the 0.8.4 text, byte for byte.
+function recallHeading(has: (tool: ToolName) => boolean) {
+  const rowTools = [...(has('memory_update') ? ['mcp__mnemosyne__memory_update'] : []), ...(has('memory_forget') ? [has('memory_update') ? '_forget' : 'mcp__mnemosyne__memory_forget'] : [])]
+  const note = rowTools.length === 0 ? '' : `; ${rowTools.join(' and ')} ${rowTools.length === 1 ? 'takes' : 'take'} the id and owner`
+  return `Long-term memories that may be relevant (Mnemosyne${note}):`
+}
+
 const recalled = atom({ plugin: 'mnemosyne', key: 'recalled' } as const, {} as Recalled)
 // A remember phrase matched this turn: the first MAIN-THREAD save of the turn is
 // the human's, and consumes it (KNOWX.1). A subagent's save never does.
@@ -1552,6 +1559,7 @@ export const register: Register = (on, options) => {
   // The session that started the dashboard ends (exit, /clear, resume...): its server stops.
   on('session.end', async ($, e, next) => {
     await stopDashboard($, e.sessionId).catch(() => undefined)
+    registered.delete(e.sessionId)
     return next(e)
   }).catch((_$, e, next) => next(e))
 
@@ -1812,7 +1820,9 @@ export const register: Register = (on, options) => {
       else if (autoRecall) activity($, options, n > 0 ? `recalled ${n} ${noun} for ${where}` : `recall found nothing for ${where}`, n > 0 ? `recalled ${n}` : 'found nothing')
       if (found.length > 0) {
         const lines = found.map(r => `- [${r.id} owner=${r.owner}] ${r.content}`)
-        context.push(`Long-term memories that may be relevant (Mnemosyne; mcp__mnemosyne__memory_update and _forget take the id and owner):\n${lines.join('\n')}`)
+        // M1: the heading names a tool only when this session has it (the settings decide without a record of the start).
+        const tools = registered.get(session)
+        context.push(`${recallHeading(tool => (tools === undefined ? settings.tools[tool] : tools.has(tool)))}\n${lines.join('\n')}`)
       } else if (asked !== undefined) {
         context.push(`Mnemosyne recall for "${topic ?? asked}" found nothing.`)
       }
