@@ -1556,7 +1556,7 @@ export const register: Register = (on, options) => {
     }
   }).catch(() => ({ text: 'Mnemosyne: the embeddings backfill failed.' }))
 
-  // The session that started the dashboard ends (exit, /clear, resume...): its server stops.
+  // A session that opened or reused the dashboard ends (exit, /clear, resume...): the server stops with its last user.
   on('session.end', async ($, e, next) => {
     await stopDashboard($, e.sessionId).catch(() => undefined)
     registered.delete(e.sessionId)

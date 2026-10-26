@@ -235,7 +235,7 @@ Starts a small local web page for your memories and opens it in your default bro
 
 The Theme button in the header switches the whole dashboard between Auto (follows your system), Light and Dark, and remembers your choice. The header shows the plugin version the dashboard runs (for example `v0.8.0`) beside the engine's. The block at the bottom of the Health tab shows the store, the server process and whether the activity log is on.
 
-One dashboard runs at a time: running `/mnemosyne-ui` again, in this session or another, hands over the same link. It stops when the session that started it ends; `/clear` in that session counts as an end. Run `/mnemosyne-ui` again for a fresh one.
+One dashboard runs at a time: running `/mnemosyne-ui` again, in this session or another, hands over the same link. It keeps running until every session that opened or reused it has ended (`/clear` counts as an end), so a session ending does not take it away from another one; a session that crashed does not hold it up. Run `/mnemosyne-ui` again for a fresh one.
 
 **Security.** The server binds `127.0.0.1` only, so nothing outside your machine can reach it. It makes a new random token each time it starts; the link carries it after `#`, which a browser never sends, and the page sends it only in a request header. Without it, every data route answers 401. The page loads no outside files, and a strict content security policy blocks inline script and style. The server reads the database read-only: a forget or a search goes through the engine, as Claude's would. Anyone who can run programs as your user can read the token from `~/.claude/mnemosyne/ui.json`, as they could read the database itself.
 

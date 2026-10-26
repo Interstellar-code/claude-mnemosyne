@@ -3,14 +3,20 @@
 // (DESIGN.md §3.3, "The dashboard server").
 //
 // One server is shared: any session's later call pings the server ui.json
-// names and reuses it while it answers. The server stops when the session that
-// started it ends (any reason, /clear included): this module ends the spawn
-// loop from that session's session.end, which kills the holder process, whose
-// pipe was the server's stdin, and then also sends the server a plain `kill`.
-// The server's own backstops are stdin closing and its parent vanishing.
+// names and reuses it while it answers. Every session that opens or reuses it
+// is listed in <root>/ui-users.json (bin/ui-users.ts, with its Claude process id),
+// and the server stays up until the last of them is gone. The session that
+// started it ends its spawn loop from its session.end (any reason, /clear
+// included): with no other session listed, that kills the holder process, whose
+// pipe was the server's stdin, and then also sends the server a plain `kill`;
+// with others listed it only leaves, and the server (its stdin closed) sees them
+// and stays. The server's own backstops are stdin closing, its parent vanishing
+// and the users file: it ends when no listed session's process runs.
 import type { EngineInterface } from 'claude-code'
 
 export const UI_STATE = 'ui.json'
+// The sessions using the server (bin/ui-users.ts writes it; ui/server.ts reads it).
+export const UI_USERS = 'ui-users.json'
 // What the running dashboard started with. ui.json is the server's own file ({port, token, pid}),
 // so the hook keeps the extraction setting beside it: { pid, extraction } for the server it started.
 export const EXTRACTION_STATE = 'ui-extraction.json'
@@ -61,6 +67,8 @@ type Entry = { stop: () => void; ended: Promise<void>; pid?: number }
 
 // The servers each session started; that session's session.end stops them.
 const running = new Map<string, Set<Entry>>()
+// The sessions this process listed in ui-users.json, with the plugin and root they used.
+const joined = new Map<string, { plugin: string; root: string }>()
 
 const isState = (value: unknown): value is State => {
   const state = value as Partial<State> | null
@@ -239,6 +247,37 @@ async function stopEntry($: EngineInterface, session: string, entry: Entry) {
   forget(session, entry)
 }
 
+// The Claude process this hook runs under: the parent of a shell we start (null when it cannot be read).
+async function claudePid($: EngineInterface) {
+  try {
+    const ran = await $.process.run(['sh', '-c', 'echo $PPID'], { timeoutMs: ALIVE_TIMEOUT_MS })
+    const pid = Number(ran.stdout.trim())
+    return ran.exitCode === 0 && Number.isInteger(pid) && pid > 1 && (await isAlive($, pid)) ? pid : null
+  } catch {
+    return null
+  }
+}
+
+// Runs bin/ui-users.ts; the number of live users left, or undefined when it failed.
+async function usersOp($: EngineInterface, plugin: string, args: string[]) {
+  try {
+    const ran = await $.process.run(['bun', `${plugin}/bin/ui-users.ts`, ...args], { timeoutMs: ALIVE_TIMEOUT_MS })
+    if (ran.exitCode !== 0) return undefined
+    const live = (JSON.parse(ran.stdout) as { live?: unknown }).live
+    return typeof live === 'number' ? live : undefined
+  } catch {
+    return undefined
+  }
+}
+
+// This session uses the server from now on: it is listed with its Claude process id.
+// `fresh`: a server just started, so no earlier list belongs to it and this session is the only user.
+async function join($: EngineInterface, paths: UiPaths, session: string, fresh = false) {
+  joined.set(session, { plugin: paths.plugin, root: paths.root })
+  const pid = await claudePid($)
+  await usersOp($, paths.plugin, [fresh ? 'reset' : 'add', `${paths.root}/${UI_USERS}`, session, pid === null ? '-' : String(pid)])
+}
+
 type StartedWith = { extraction?: string; embeddings?: string }
 
 /** The settings the server `pid` was started with, or undefined when none is recorded for it. */
@@ -295,10 +334,14 @@ export async function openDashboard($: EngineInterface, paths: UiPaths, session:
   const known = await readState($, paths.root)
   if (known !== undefined) {
     // Asked twice: one slow answer does not replace a working server.
-    if ((await answers($, paths.plugin, known)) || (await answers($, paths.plugin, known))) return handOver($, known, 'running', await restartNote($, paths, known))
+    if ((await answers($, paths.plugin, known)) || (await answers($, paths.plugin, known))) {
+      await join($, paths, session)
+      return handOver($, known, 'running', await restartNote($, paths, known))
+    }
     // This session's own server, still running, is never killed for a missed ping.
     const own = [...(running.get(session) ?? [])].find(entry => entry.pid === known.pid)
     if (own !== undefined && (await isAlive($, known.pid))) {
+      await join($, paths, session)
       return handOver($, known, 'running', `${await restartNote($, paths, known)} (it did not answer a health check just now; if the page does not load, run /mnemosyne-ui again)`)
     }
   }
@@ -317,19 +360,47 @@ export async function openDashboard($: EngineInterface, paths: UiPaths, session:
   const state = await readState($, paths.root)
   if (state !== undefined && state.pid === up.pid && state.port === up.port) {
     await recordStartedWith($, paths, up.pid)
+    await join($, paths, session, true)
     return handOver($, state, 'started')
   }
   // Another start won ui.json in the meantime: hand its server over and stop ours.
   if (state !== undefined && state.pid !== up.pid && (await answers($, paths.plugin, state))) {
     await stopEntry($, session, entry)
+    await join($, paths, session)
     return handOver($, state, 'running', await restartNote($, paths, state))
   }
   await stopEntry($, session, entry)
   return { text: `Mnemosyne dashboard did not start: ${paths.root}/${UI_STATE} does not name the new server.` }
 }
 
-/** session.end: stops the servers this session started, if any; another session's stay. */
+/**
+ * session.end: this session stops using the server. The server stops with its last user: the servers this session
+ * started are stopped when no other live session uses the dashboard (they only lose their holder otherwise, and
+ * keep running for the others), and a server it only reused is stopped when it was the last user.
+ */
 export async function stopDashboard($: EngineInterface, session: string) {
   const mine = [...(running.get(session) ?? [])]
+  const used = joined.get(session)
+  joined.delete(session)
+  // Failing to update the list reads as "no one else": the server stops with its session, as it always did.
+  const others = used === undefined ? 0 : ((await usersOp($, used.plugin, ['remove', `${used.root}/${UI_USERS}`, session])) ?? 0)
+  if (others > 0) {
+    // The holder ends; the server, its stdin closed, sees the others in the list and stays.
+    await Promise.all(
+      mine.map(async entry => {
+        entry.stop()
+        await Promise.race([entry.ended, wait($, STOP_WAIT_MS)])
+        forget(session, entry)
+      }),
+    )
+    return
+  }
   await Promise.all(mine.map(entry => stopEntry($, session, entry)))
+  // A server this session only reused (its starter has ended), and it was the last user: stop it, if it is ours.
+  if (mine.length === 0 && used !== undefined) {
+    const state = await readState($, used.root)
+    if (state !== undefined && (await answers($, used.plugin, state))) {
+      await $.process.run(['kill', String(state.pid)], { timeoutMs: KILL_TIMEOUT_MS }).catch(() => undefined)
+    }
+  }
 }

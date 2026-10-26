@@ -28,13 +28,17 @@
 //   bun ui/server.ts          the server. It prints one ready line
 //                             {"port","pid"} (never the token), writes
 //                             <root>/ui.json {port, token, pid} with mode 0600,
-//                             and exits when its stdin closes, when its parent
-//                             is gone, or on a signal.
+//                             and exits on SIGTERM or SIGINT. When its stdin
+//                             closes, its parent is gone or it gets SIGHUP, it
+//                             exits unless <root>/ui-users.json (bin/ui-users.ts)
+//                             names a live session still using it: then it stays
+//                             and exits when the last of them is gone.
 //
 // Environment: MNEMOSYNE_ROOT (<root>, where ui.json lives), MNEMOSYNE_STORE,
 // MNEMOSYNE_CLI, MNEMOSYNE_ACTIVITY_LOG (empty when the log is off),
 // MNEMOSYNE_PLUGIN_ROOT; MNEMOSYNE_UI_PARENT_CHECK_MS (default 10000, held to
-// 100 ms - 10 s) sets how often the parent is checked.
+// 100 ms - 10 s) sets how often the parent (and, once the starter is gone,
+// the users) is checked.
 import { Database } from 'bun:sqlite'
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import {
@@ -56,6 +60,7 @@ import {
 } from 'node:fs'
 import { dirname, join, sep } from 'node:path'
 import { appendActivity } from '../bin/activity'
+import { liveUsers, UI_USERS } from '../bin/ui-users'
 import { hasTagSql, tagsSql, untaggedSql } from '../bin/memories'
 import { activityEntry, preview } from '../hooks/activity-log'
 import type { ActivityFields } from '../hooks/activity-log'
@@ -2409,12 +2414,27 @@ async function serve() {
     removeState(config.root, process.pid)
     process.exit(code)
   }
-  for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) process.on(signal, () => stop(0))
+  // What starts this server (its holder, and the Claude session behind that) may end while other sessions still use it
+  // (<root>/ui-users.json, kept by the hooks). Then the server stays, and ends when the last live user is gone.
+  const users = join(config.root, UI_USERS)
+  let shared = false
+  const starterGone = () => {
+    if (shared) return
+    if (liveUsers(users).length === 0) return stop(0)
+    shared = true
+    const timer = setInterval(() => {
+      if (liveUsers(users).length === 0) stop(0)
+    }, parentCheckMs())
+    timer.unref()
+  }
+  for (const signal of ['SIGTERM', 'SIGINT'] as const) process.on(signal, () => stop(0))
+  // A closed terminal sends SIGHUP to the starter's whole group, this server included.
+  process.on('SIGHUP', starterGone)
   process.on('exit', () => removeState(config.root, process.pid))
   writeState(config.root, { port: started.port, token: started.token, pid: process.pid })
   // The ready line: port and pid only; the hook reads the token from ui.json.
   process.stdout.write(`${JSON.stringify({ port: started.port, pid: process.pid })}\n`)
-  watchParent(() => stop(0))
+  watchParent(starterGone)
   // stdin is the holder's pipe: it closes when the holder (or whatever started us) ends.
   void (async () => {
     try {
@@ -2424,12 +2444,13 @@ async function serve() {
     } catch {
       // a broken pipe is a closed one
     }
-    stop(0)
+    starterGone()
   })()
 }
 
-// What /mnemosyne-ui spawns: holds the server's stdin open, passes its output
-// through, and takes it down when this process is stopped or orphaned.
+// What /mnemosyne-ui spawns: holds the server's stdin open and passes its output
+// through. When this process is stopped or orphaned it leaves, and the server (whose
+// stdin then closes) decides: it ends unless other sessions still use it.
 async function hold() {
   const child = Bun.spawn([process.execPath, import.meta.path], {
     stdin: 'pipe',
@@ -2437,10 +2458,7 @@ async function hold() {
     stderr: 'inherit',
     env: process.env,
   })
-  const end = () => {
-    child.kill()
-    process.exit(0)
-  }
+  const end = () => process.exit(0)
   for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const) process.on(signal, end)
   watchParent(end)
   process.exit(await child.exited)

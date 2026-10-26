@@ -29,6 +29,8 @@ type Options = {
   ping?: number
   // What the spawned holder does: print a ready line (in two pieces) and run, or fail first.
   server?: 'ready' | 'fails' | 'garbage'
+  // The Claude pid the hook reads for its session (default 4242).
+  claudePid?: number
   // What ui.json holds once a server of the test started (default: that server's own state).
   afterStart?: (pid: number) => { port: number; token: string; pid: number }
 }
@@ -57,6 +59,9 @@ function world(on: On, o: Options = {}) {
     toasts: [] as string[],
     logs: [] as string[],
     registered: [] as string[],
+    // ui-users.json as bin/ui-users.ts keeps it: session -> the Claude pid it was listed with ('-' when unknown).
+    users: new Map<string, string>(),
+    userCalls: [] as string[][],
   }
   on('env.get', () => ({ value: '/home/u' }))
   on('session.id', () => ({ value: seen.session }))
@@ -82,6 +87,15 @@ function world(on: On, o: Options = {}) {
       seen.startedWithScript = e.argv[2]
       seen.startedWith = e.argv[4]
       return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
+    }
+    if (e.argv[0] === 'sh' && e.argv[2] === 'echo $PPID') return { value: { exitCode: 0, stdout: `${o.claudePid ?? 4242}\n`, stderr: '' } } as never
+    if (e.argv[0] === 'bun' && e.argv[1]?.endsWith('/bin/ui-users.ts')) {
+      const [action, file, session, pid] = e.argv.slice(2) as [string, string, string, string]
+      seen.userCalls.push([action, file, session, pid])
+      if (action === 'reset') seen.users.clear()
+      if (action === 'remove') seen.users.delete(session)
+      else seen.users.set(session, pid)
+      return { value: { exitCode: 0, stdout: `${JSON.stringify({ live: seen.users.size })}\n`, stderr: '' } } as never
     }
     if (isPing(e.argv)) return { value: { exitCode: seen.ping, stdout: '', stderr: '' } } as never
     if (e.argv[0] === 'kill' && e.argv[1] === '-0') return { value: { exitCode: seen.alive ? 0 : 1, stdout: '', stderr: '' } } as never
@@ -452,3 +466,98 @@ for (const [why, startedWith] of [
     expect(textOf(await openUi($))).toContain('restart')
   })
 }
+
+// ---- The server stays up until every session that opened or reused it has ended ----
+
+test('the starter lists itself with its Claude pid, and a session that reuses the server is listed too', async ($, on) => {
+  const seen = world(on)
+  await openUi($)
+  expect(seen.userCalls).toEqual([['reset', `${ROOT}/ui-users.json`, 's1', '4242']])
+  seen.session = 's2'
+  await openUi($)
+  expect(seen.spawned.length).toBe(1)
+  expect(seen.userCalls[1]).toEqual(['add', `${ROOT}/ui-users.json`, 's2', '4242'])
+  expect([...seen.users.keys()]).toEqual(['s1', 's2'])
+})
+
+test('a pid that cannot be read is listed as unknown, not guessed', async ($, on) => {
+  const seen = world(on, { claudePid: 0 })
+  await openUi($)
+  expect(seen.userCalls).toEqual([['reset', `${ROOT}/ui-users.json`, 's1', '-']])
+})
+
+test('SHARE.1: the starter ends while another session still uses the server: its loop ends, the server is not killed', async ($, on) => {
+  const clock = mock.clock(on)
+  const seen = world(on)
+  await openUi($)
+  const child = seen.spawned[0]!
+  seen.session = 's2'
+  await openUi($)
+
+  const ending = $.session.end(end('s1', 'clear'))
+  await clock.settle()
+  expect(child.ended).toBe(true)
+  await ending
+  expect(kills(seen)).toEqual([])
+  expect(seen.userCalls.at(-1)).toEqual(['remove', `${ROOT}/ui-users.json`, 's1', undefined as never])
+  expect([...seen.users.keys()]).toEqual(['s2'])
+})
+
+test('SHARE.2: the last session ends, whoever started the server: the server is stopped (once its ping names it)', async ($, on) => {
+  const clock = mock.clock(on)
+  const seen = world(on)
+  await openUi($)
+  seen.session = 's2'
+  await openUi($)
+  const first = $.session.end(end('s1', 'other'))
+  await clock.settle()
+  await first
+  expect(kills(seen)).toEqual([])
+
+  // s2 reused the server and is the last user: it stops it, after checking ui.json's server answers with its token and pid.
+  const pingsBefore = pings(seen).length
+  await $.session.end(end('s2', 'other'))
+  expect(pings(seen).length).toBe(pingsBefore + 1)
+  expect(kills(seen)).toEqual(['kill 901'])
+  expect(seen.users.size).toBe(0)
+})
+
+test('SHARE.2: a last user whose ui.json server does not answer kills nothing', async ($, on) => {
+  const clock = mock.clock(on)
+  const seen = world(on)
+  await openUi($)
+  seen.session = 's2'
+  await openUi($)
+  const first = $.session.end(end('s1', 'other'))
+  await clock.settle()
+  await first
+  seen.ping = 1
+  await $.session.end(end('s2', 'other'))
+  expect(kills(seen)).toEqual([])
+})
+
+test('SHARE.4: /clear in the only session stops the server as before, and the next /mnemosyne-ui starts a new one', async ($, on) => {
+  const clock = mock.clock(on)
+  const seen = world(on)
+  await openUi($)
+  const ending = $.session.end(end('s1', 'clear'))
+  await clock.settle()
+  await ending
+  expect(kills(seen)).toEqual(['kill 901'])
+  seen.session = 's1b'
+  seen.state = undefined
+  await openUi($)
+  expect(seen.spawned.length).toBe(2)
+  expect([...seen.users.keys()]).toEqual(['s1b'])
+})
+
+test('a session that never opened the dashboard ends without touching the list', async ($, on) => {
+  const clock = mock.clock(on)
+  const seen = world(on)
+  await openUi($)
+  const calls = seen.userCalls.length
+  const ending = $.session.end(end('other-session', 'other'))
+  await clock.settle()
+  await ending
+  expect(seen.userCalls.length).toBe(calls)
+})
