@@ -49,6 +49,7 @@ function writeDoc(host: Host, name: string, text: string) {
 type Row = { id: string; content: string; source: string | null; trust_tier: string; veracity: string; memory_type: string; scope: string; valid_until: string | null; superseded_by: string | null; metadata_json: string | null; session_id: string }
 function rows(host: Host): Row[] {
   const db = new Database(join(host.store, 'mnemopi.db'), { readonly: true })
+  db.exec('PRAGMA busy_timeout = 10000')
   try {
     return db.query('SELECT id, content, source, trust_tier, veracity, memory_type, scope, valid_until, superseded_by, metadata_json, session_id FROM working_memory ORDER BY timestamp, id').all() as Row[]
   } catch {

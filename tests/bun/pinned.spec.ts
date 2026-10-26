@@ -25,6 +25,8 @@ const FACT = 'The release branch is cut from main on the first Monday of the mon
 type Row = { id: string; content: string; importance: number; memory_type: string; valid_until: string | null; superseded_by: string | null; metadata_json: string | null; session_id: string; created_at: string | null }
 function row(host: Host, id: string): Row {
   const db = new Database(join(host.store, 'mnemopi.db'), { readonly: true })
+  // the save's own background extraction may still be writing: wait for it instead of failing on SQLITE_BUSY
+  db.exec('PRAGMA busy_timeout = 10000')
   try {
     return db.query('SELECT id, content, importance, memory_type, valid_until, superseded_by, metadata_json, session_id, created_at FROM working_memory WHERE id = ?').get(id) as Row
   } finally {
@@ -103,6 +105,7 @@ describe('IMPORT.3: a pinned memory never gets an automatic expiry', () => {
     // 120 days old, never recalled
     const old = new Date(Date.now() - 120 * 86_400_000).toISOString()
     const db = new Database(join(host.store, 'mnemopi.db'))
+    db.exec('PRAGMA busy_timeout = 10000')
     try {
       db.run('UPDATE working_memory SET created_at = ?, valid_until = NULL, last_recalled = NULL WHERE id IN (?, ?)', [old, loose, kept])
     } finally {
