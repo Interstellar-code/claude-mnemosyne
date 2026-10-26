@@ -2,9 +2,9 @@
 // checks it answers, and only then swaps it in. Real installs into temp folders.
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { Database } from 'bun:sqlite'
-import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { cliOf, installStep, installStepEnv, type Runner } from '../../bin/install-engine'
+import { cliOf, installStep, installStepEnv, pruneEngineLogs, type Runner } from '../../bin/install-engine'
 import { ENGINE_BUILD } from '../../hooks/engine-build'
 import { body, engineCall, isolatedEnv, liveTempDirs, ROOT, runInstaller, tempDir, toolCall } from './helpers'
 
@@ -386,5 +386,71 @@ describe('the install step skips onnxruntime-node\'s GPU download (H1)', () => {
     // The env is layered over the real one, so bun keeps its registry, proxy and cache settings.
     expect(call!.env?.PATH).toBe(process.env.PATH)
     expect(call!.timeoutMs).toBeGreaterThan(0)
+  })
+})
+
+// HARDEN.3: engine log pruning, in temp folders only.
+describe('pruneEngineLogs', () => {
+  const DAY = 24 * 60 * 60 * 1000
+  const now = Date.UTC(2026, 9, 26)
+  const temp = tempDir('prune')
+  afterAll(() => temp.dispose())
+  const touch = (path: string, ageDays: number) => {
+    writeFileSync(path, 'x')
+    const at = new Date(now - ageDays * DAY)
+    utimesSync(path, at, at)
+  }
+
+  test('removes omp.*.log older than 7 days, keeps the newest 20, and touches nothing else', () => {
+    const logs = join(temp.dir, 'a', 'logs')
+    mkdirSync(logs, { recursive: true })
+    for (let i = 0; i < 30; i++) touch(join(logs, `omp.${i}.log`), 8 + i) // all old: 20 newest stay
+    for (let i = 0; i < 3; i++) touch(join(logs, `omp.fresh${i}.log`), 1) // fresh
+    touch(join(logs, 'other.log'), 90)
+    touch(join(logs, 'omp.notes.txt'), 90)
+    mkdirSync(join(logs, 'omp.dir.log'))
+    expect(pruneEngineLogs(logs, now)).toBe(13)
+    const left = readdirSync(logs).sort()
+    expect(left.filter(n => /^omp\..*\.log$/.test(n) && n !== 'omp.dir.log')).toHaveLength(20)
+    expect(left).toContain('omp.fresh0.log')
+    expect(left).toContain('other.log')
+    expect(left).toContain('omp.notes.txt')
+    expect(left).toContain('omp.dir.log')
+    expect(left).not.toContain('omp.29.log')
+  })
+
+  test('keeps the newest 20 even when every file is old, and removes nothing when fewer remain', () => {
+    const logs = join(temp.dir, 'b', 'logs')
+    mkdirSync(logs, { recursive: true })
+    for (let i = 0; i < 20; i++) touch(join(logs, `omp.${i}.log`), 100 + i)
+    expect(pruneEngineLogs(logs, now)).toBe(0)
+    expect(readdirSync(logs)).toHaveLength(20)
+  })
+
+  test('follows no symlink: a linked file is left alone and a linked folder is skipped', () => {
+    const outside = join(temp.dir, 'c', 'outside')
+    mkdirSync(outside, { recursive: true })
+    for (let i = 0; i < 25; i++) touch(join(outside, `omp.${i}.log`), 50)
+    const logs = join(temp.dir, 'c', 'logs')
+    mkdirSync(logs)
+    for (let i = 0; i < 21; i++) touch(join(logs, `omp.${i}.log`), 50)
+    symlinkSync(join(outside, 'omp.0.log'), join(logs, 'omp.link.log'))
+    pruneEngineLogs(logs, now)
+    expect(lstatSync(join(logs, 'omp.link.log')).isSymbolicLink()).toBe(true)
+    expect(readdirSync(outside)).toHaveLength(25)
+    const linked = join(temp.dir, 'c', 'linked-logs')
+    symlinkSync(outside, linked)
+    expect(pruneEngineLogs(linked, now)).toBe(0)
+    expect(readdirSync(outside)).toHaveLength(25)
+  })
+
+  test('a missing folder is not an error', () => {
+    expect(pruneEngineLogs(join(temp.dir, 'nope'), now)).toBe(0)
+  })
+
+  test('the command form prints the count and exits 0 on a missing folder', async () => {
+    const ran = Bun.spawnSync(['bun', join(ROOT, 'bin', 'install-engine.ts'), 'prune-logs', join(temp.dir, 'nope')], { env: { ...(process.env as Record<string, string>), ...isolatedEnv() } })
+    expect(ran.exitCode).toBe(0)
+    expect(ran.stdout.toString().trim()).toBe('0')
   })
 })

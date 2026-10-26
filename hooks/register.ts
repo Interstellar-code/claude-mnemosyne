@@ -351,16 +351,37 @@ export function embeddingsSetting(options: { embeddings?: unknown }): 'on' | 'of
   return 'auto'
 }
 
-// Whether the host is macOS on Apple Silicon (a hook cannot read process.arch, so it asks uname).
-const isMacArm64 = async ($: EngineInterface) => {
+// The host platform, for the embeddings decision (a hook cannot read process.arch, so it asks uname).
+// Intel Macs are named apart: the model's runtime has no build for them (HARDEN.3).
+type Platform = 'mac-arm64' | 'mac-intel' | 'other'
+const platformOf = async ($: EngineInterface): Promise<Platform> => {
   try {
     const [system, machine] = await Promise.all([
       $.process.run(['uname', '-s'], { timeoutMs: 2_000 }),
       $.process.run(['uname', '-m'], { timeoutMs: 2_000 }),
     ])
-    return system.exitCode === 0 && system.stdout.trim() === 'Darwin' && machine.exitCode === 0 && machine.stdout.trim() === 'arm64'
+    if (system.exitCode !== 0 || machine.exitCode !== 0 || system.stdout.trim() !== 'Darwin') return 'other'
+    const arch = machine.stdout.trim()
+    return arch === 'arm64' ? 'mac-arm64' : arch === 'x86_64' ? 'mac-intel' : 'other'
   } catch {
-    return false
+    return 'other'
+  }
+}
+
+// HARDEN.3: what /mnemosyne-setup says about platforms, on every reply.
+const PLATFORM_NOTE = 'Platforms: embeddings are tested on macOS Apple Silicon only; Linux and Windows are untested.'
+const INTEL_MAC_NOTE = 'Embeddings are not supported on an Intel Mac (darwin x64) and stay off.'
+
+// HARDEN.3: engine logs (omp.*.log in <root>/model-cache/logs) are pruned in the background: one bounded Bun run,
+// errors swallowed, nothing logged. The rules live in bin/install-engine.ts (pruneEngineLogs).
+const LOG_PRUNE_TIMEOUT_MS = 15_000
+async function pruneLogs($: EngineInterface, options: PluginOptions) {
+  try {
+    if (!(await isInstalled($, options))) return
+    const { root } = await paths($, options)
+    await $.process.run(['bun', `${slashes($.plugin.root)}/bin/install-engine.ts`, 'prune-logs', `${root}/model-cache/logs`], { timeoutMs: LOG_PRUNE_TIMEOUT_MS })
+  } catch {
+    // Housekeeping only: a failed prune is retried at the next session start.
   }
 }
 
@@ -2044,6 +2065,7 @@ export const register: Register = (on, options) => {
     const sweepSetting = expireSetting(options.expireUnusedDays)
     if (sweepSetting.mode === 'refused') $.ui.toast(`Mnemosyne: ${sweepSetting.reason}`)
     void track(options, maybeSweep($, options))
+    void track(options, pruneLogs($, options)) // HARDEN.3: after the start, bounded, errors swallowed
 
     return next(e)
   })
@@ -2061,7 +2083,9 @@ export const register: Register = (on, options) => {
       // on, the install check downloads the model once; tell the person where it
       // comes from and how big it is before that download starts (EMB.3.a4).
       const setting = embeddingsSetting(options)
-      const embeddings = setting === 'on' || (setting === 'auto' && (await isMacArm64($)))
+      const platform = setting === 'off' ? 'other' : await platformOf($)
+      const intelMac = platform === 'mac-intel'
+      const embeddings = !intelMac && (setting === 'on' || (setting === 'auto' && platform === 'mac-arm64'))
       if (embeddings) {
         progress($, 'downloading the embedding model from huggingface.co (about 63 MB)')
         $.ui.log('Mnemosyne: /mnemosyne-setup downloads the embedding model BAAI/bge-small-en-v1.5 from huggingface.co (Qdrant/bge-small-en-v1.5-onnx-Q, about 63 MB), once.')
@@ -2098,7 +2122,9 @@ export const register: Register = (on, options) => {
       // M2: embeddings are reported on only after the install check proved the
       // model loaded (the marker is written above).
       const embeddingsNote = embeddings ? '\nEmbeddings on: the model is downloaded and local only.' : ''
-      return { text: `Mnemosyne ready. Engine: ${engine}. Store: ${store}.${external}${saved}${embeddingsNote}\n${stats}` }
+      const platformNote = `\n${intelMac ? `${INTEL_MAC_NOTE}\n` : ''}${PLATFORM_NOTE}`
+      void track(options, pruneLogs($, options))
+      return { text: `Mnemosyne ready. Engine: ${engine}. Store: ${store}.${external}${saved}${embeddingsNote}${platformNote}\n${stats}` }
     } catch (err) {
       return { text: `Mnemosyne setup failed: ${(err as Error).message}` }
     }
