@@ -3637,6 +3637,22 @@ test('IMPORT.2: a session import with extractionModel off makes no model call an
   expect(state.backups).toEqual([])
 })
 
+test('IMPORT.2: "last" with an unknown running session id is refused before any transcript is read', { options: { extractionModel: 'haiku' } }, async ($, on) => {
+  const runs = world(on, '{}', true, 0, ENGINE_BUILD, { session: 'throw' })
+  const text = (await importRun($, 'session last')).text ?? ''
+  expect(text).toContain('id is not known')
+  expect(runs.filter(run => String(run.argv[1] ?? '').endsWith('/bin/import.ts'))).toEqual([])
+})
+
+test('IMPORT.2: the transcripts folder is <HOME>/.claude/projects, from the hook\'s environment', { options: { extractionModel: 'haiku' } }, async ($, on) => {
+  const runs = world(on, '{}', true, 0, ENGINE_BUILD, { cwd: '/work/My Repo' })
+  await importRun($, 'session abc-123')
+  const ran = runs.find(run => String(run.argv[1] ?? '').endsWith('/bin/import.ts') && run.argv.includes('session'))!
+  expect(ran.argv[ran.argv.indexOf('--projects') + 1]).toBe('/home/u/.claude/projects')
+  expect(ran.argv[ran.argv.indexOf('--cwd') + 1]).toBe('/work/My Repo')
+  expect(ran.argv[ran.argv.indexOf('--current') + 1]).toBe('s1')
+})
+
 test('IMPORT.2: apply for a session proposal whose memories this process does not hold makes no backup and saves nothing', async ($, on) => {
   const proposal = JSON.stringify({ version: 1, kind: 'session', created: 'x', sessionId: 'abc-123', chunks: [{ heading: 'memory 1', sha256: 'a'.repeat(64), verdict: 'allow', rules: [] }] })
   const runs = world(on, '{}', true, 0, ENGINE_BUILD, { files: { '/home/u/.claude/mnemosyne/import-proposed.json': proposal } })

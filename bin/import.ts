@@ -1,7 +1,7 @@
 // Claude Mnemosyne — the importers' file and store reader (plan phase IMPORT). A hook
 // cannot read SQLite and `$.fs.read` refuses files over 4 MiB, so /mnemosyne-import runs this file:
 //   bun bin/import.ts doc <path>                  a .md or .txt file under 1 MB, split into chunks, as JSON
-//   bun bin/import.ts --store <dir> origins <path>  the live rows an earlier import made from <path>, as JSON
+//   bun bin/import.ts --store <dir> origins <path> [--owner <owner>]  the live rows an earlier import made from <path> (only <owner>'s when given), as JSON
 //   bun bin/import.ts save <root>/import-proposed.json  the proposal on stdin, saved 0600
 //   bun bin/import.ts session --projects <dir> --cwd <dir> [--current <id>] <id | last>  one session's conversation text, as JSON
 //   bun bin/import.ts hash                        {"texts":[...]} on stdin: the sha256 of each text, as JSON
@@ -57,8 +57,12 @@ export function readDocument(path: string): DocRead {
   }
 }
 
-/** The live rows an earlier doc import made from `path`: not retired, not expired. */
-export function originRows(store: string, path: string, now: Date = new Date()): ExistingChunk[] {
+/**
+ * The live rows an earlier doc import made from `path`: not retired, not expired. With an `owner` (per-project scope) only
+ * that owner's rows, so an import never sees, and never retires, another project's copy; without one (global scope, where
+ * the owner is shared anyway) every owner's.
+ */
+export function originRows(store: string, path: string, owner?: string, now: Date = new Date()): ExistingChunk[] {
   const db = openReadOnly(store)
   if (db === null) return []
   try {
@@ -66,10 +70,10 @@ export function originRows(store: string, path: string, now: Date = new Date()):
       .query(
         `SELECT id, session_id AS owner, metadata_json FROM working_memory
          WHERE source = 'import:doc' AND json_valid(metadata_json) AND json_extract(metadata_json, '$.origin.path') = ?
-           AND superseded_by IS NULL AND (valid_until IS NULL OR valid_until > ?)
+           AND superseded_by IS NULL AND (valid_until IS NULL OR valid_until > ?)${owner === undefined ? '' : ' AND session_id = ?'}
          ORDER BY timestamp, id`,
       )
-      .all(path, now.toISOString()) as { id: string; owner: string | null; metadata_json: string }[]
+      .all(...([path, now.toISOString(), ...(owner === undefined ? [] : [owner])] as string[])) as { id: string; owner: string | null; metadata_json: string }[]
     const out: ExistingChunk[] = []
     for (const row of rows) {
       const origin = (JSON.parse(row.metadata_json) as { origin?: { heading?: unknown; sha256?: unknown } }).origin
@@ -154,16 +158,10 @@ export function findTranscript({ projects, cwd, current, target }: SessionTarget
     return { id: found.name.slice(0, -'.jsonl'.length), path: join(folder, found.name) }
   }
   if (!SESSION_ID.test(target)) throw new Error('a session id has only letters, digits, hyphens and underscores')
+  // Only this project's folder: another project's conversation is never read, nor sent to the model.
   const direct = join(folder, `${target}.jsonl`)
   if (existsSync(direct)) return { id: target, path: direct }
-  // A session started from another folder lives under that folder's name.
-  if (existsSync(projects)) {
-    for (const name of readdirSync(projects).sort()) {
-      const other = join(projects, name, `${target}.jsonl`)
-      if (existsSync(other)) return { id: target, path: other }
-    }
-  }
-  throw new Error('there is no transcript for that session id')
+  throw new Error(`there is no transcript for that session id in this project's folder (${slugOf(cwd)}); a session of another project is not imported from here`)
 }
 
 // A line longer than this is skipped unread (a huge attachment or a tool result, never the conversation).
@@ -258,8 +256,9 @@ async function main(argv: readonly string[]) {
     if (store || rest.length !== 1 || !rest[0] || rest[0].startsWith('-')) throw new Error('usage: doc <path>')
     process.stdout.write(`${JSON.stringify(readDocument(rest[0]))}\n`)
   } else if (command === 'origins') {
-    if (!store || rest.length !== 1 || !rest[0] || rest[0].startsWith('-')) throw new Error('usage: --store <dir> origins <path>')
-    process.stdout.write(`${JSON.stringify(originRows(store, rest[0]))}\n`)
+    const owner = rest[1] === '--owner' ? rest[2] : undefined
+    if (!store || !rest[0] || rest[0].startsWith('-') || (rest.length !== 1 && (rest.length !== 3 || !owner || owner.startsWith('-')))) throw new Error('usage: --store <dir> origins <path> [--owner <owner>]')
+    process.stdout.write(`${JSON.stringify(originRows(store, rest[0], owner))}\n`)
   } else if (command === 'save') {
     if (store || rest.length !== 1 || !rest[0] || rest[0].startsWith('-')) throw new Error('usage: save <file>  (the proposal JSON on stdin)')
     saveProposal(rest[0], proposalText(await Bun.stdin.text()))
@@ -290,7 +289,7 @@ async function main(argv: readonly string[]) {
     if (!Array.isArray(value?.texts) || value.texts.some(text => typeof text !== 'string')) throw new Error('stdin must be {"texts":[...]}')
     process.stdout.write(`${JSON.stringify({ sha256: (value.texts as string[]).map(sha256) })}\n`)
   } else {
-    throw new Error('usage: import.ts doc <path> | --store <dir> origins <path> | save <file> | session ... | hash | --store <dir> exact <owner>')
+    throw new Error('usage: import.ts doc <path> | --store <dir> origins <path> [--owner <owner>] | save <file> | session ... | hash | --store <dir> exact <owner>')
   }
 }
 

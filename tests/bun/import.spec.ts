@@ -298,6 +298,76 @@ describe('IMPORT.1: apply', () => {
   })
 })
 
+// ---- review r1: an import stays in its own project ----
+
+describe('IMPORT.1: per-project scope keeps one project\'s import away from another\'s', () => {
+  // The host has one working folder; a project is another repo root, so the owner changes with it.
+  const inProject = (host: Host, root: string) => {
+    host.$.session.repo = async () => ({ root })
+  }
+  const ownerOf = (row: Row) => row.session_id
+
+  test('two projects importing the same path keep separate rows, and B gets its own copy of what A imported', async () => {
+    const host = await open({ options: { scope: 'per-project' } })
+    const path = writeDoc(host, 'guide.md', doc(3))
+    inProject(host, '/work/A')
+    await host.command('mnemosyne-import', `doc ${path}`)
+    expect((await host.command('mnemosyne-import', 'apply')).text).toContain('Imported 3 chunks of guide.md')
+    const owners = new Set(live(host).map(ownerOf))
+    expect(owners.size).toBe(1)
+    inProject(host, '/work/B')
+    const dry = (await host.command('mnemosyne-import', `doc ${path}`)).text
+    expect(dry).toContain('Would save 3 clean')
+    expect(dry).toContain('0 already in the store')
+    expect((await host.command('mnemosyne-import', 'apply')).text).toContain('Imported 3 chunks of guide.md')
+    const all = live(host)
+    expect(all).toHaveLength(6)
+    expect(new Set(all.map(ownerOf)).size).toBe(2)
+    for (const owner of new Set(all.map(ownerOf))) expect(all.filter(row => ownerOf(row) === owner)).toHaveLength(3)
+    // and an unchanged file imported again by B adds nothing, as for A
+    expect((await host.command('mnemosyne-import', `doc ${path}`)).text).toContain('3 already in the store')
+  })
+
+  test('a re-import by B after the file changed never retires A\'s rows, and A\'s own re-import replaces only A\'s', async () => {
+    const host = await open({ options: { scope: 'per-project' } })
+    const path = writeDoc(host, 'guide.md', doc(3))
+    inProject(host, '/work/A')
+    await host.command('mnemosyne-import', `doc ${path}`)
+    await host.command('mnemosyne-import', 'apply')
+    const aRows = live(host)
+    expect(aRows).toHaveLength(3)
+    inProject(host, '/work/B')
+    await host.command('mnemosyne-import', `doc ${path}`)
+    await host.command('mnemosyne-import', 'apply')
+    expect(live(host)).toHaveLength(6)
+    // the file changes; B imports it again
+    writeFileSync(path, doc(3, { 2: 'Section 2 now says the output goes to the build folder and nothing is cleared.' }))
+    const dry = (await host.command('mnemosyne-import', `doc ${path}`)).text
+    expect(dry).toContain('1 of the chunks replace a row from an earlier import')
+    const reply = (await host.command('mnemosyne-import', 'apply')).text
+    expect(reply).toContain('Imported 1 chunk of guide.md')
+    expect(reply).toContain('Replaced 1 of 1 earlier chunk')
+    const aOwner = ownerOf(aRows[0]!)
+    // A's three rows are all still live, none superseded
+    for (const row of aRows) {
+      const now = rows(host).find(r => r.id === row.id)!
+      expect(now.valid_until).toBeNull()
+      expect(now.superseded_by).toBeNull()
+    }
+    const bLive = live(host).filter(row => ownerOf(row) !== aOwner)
+    expect(bLive).toHaveLength(3)
+    expect(bLive.some(row => row.content.includes('nothing is cleared'))).toBe(true)
+    // A imports the changed file: A's own part 2 is replaced, B's rows stay
+    inProject(host, '/work/A')
+    const aReply = (await host.command('mnemosyne-import', `doc ${path}`)).text
+    expect(aReply).toContain('1 of the chunks replace a row from an earlier import')
+    await host.command('mnemosyne-import', 'apply')
+    expect(live(host)).toHaveLength(6)
+    expect(live(host).filter(row => ownerOf(row) !== aOwner).map(row => row.id).sort()).toEqual(bLive.map(row => row.id).sort())
+    expect(live(host).filter(row => ownerOf(row) === aOwner).some(row => row.content.includes('nothing is cleared'))).toBe(true)
+  })
+})
+
 describe('IMPORT: no test touches the real home', () => {
   test('the temp host keeps every file under its own HOME', async () => {
     const host = await open()
@@ -436,6 +506,38 @@ describe('IMPORT.2: the dry run', () => {
     expect((await host.command('mnemosyne-import', `session ${ID2}`)).text).toContain('there is no transcript for that session id')
     expect((await host.command('mnemosyne-import', 'session ../../etc/passwd')).text).toContain('only letters, digits, hyphens and underscores')
         expect(host.model).toHaveLength(0)
+  })
+
+  test('a session id of another project is not found: only this project\'s folder is looked in, and nothing is sent to the model', async () => {
+    const host = await open({ model: answers(REPLY) })
+    writeTranscript(host, SID, transcript())
+    const other = join(host.home, '.claude', 'projects', '-work-Other-Repo')
+    mkdirSync(other, { recursive: true })
+    writeFileSync(join(other, `${ID2}.jsonl`), transcript([userTurn('OTHER-PROJECT-TURN')]))
+    const reply = (await host.command('mnemosyne-import', `session ${ID2}`)).text
+    expect(reply).toContain("there is no transcript for that session id in this project's folder")
+    expect(reply).toContain('another project')
+    expect(host.model).toHaveLength(0)
+    expect(existsSync(proposalPath(host))).toBe(false)
+    // this project's own id still works
+    expect((await host.command('mnemosyne-import', `session ${SID}`)).text).toContain(`Dry run for session ${SID}`)
+  })
+
+  test('"last" is refused when the running session\'s id is unknown, and reads nothing', async () => {
+    const host = await open({ model: answers(REPLY) })
+    writeTranscript(host, ID2, transcript(), new Date(Date.now() - 3_600_000))
+    writeTranscript(host, 's1', transcript([userTurn('RUNNING-SESSION-TURN')]), new Date())
+    host.$.session.id = async () => {
+      throw new Error('session store unavailable')
+    }
+    const before = host.runs.length
+    const reply = (await host.command('mnemosyne-import', 'session last')).text
+    expect(reply).toContain('id is not known')
+    expect(reply).toContain('session <id>')
+    expect(host.model).toHaveLength(0)
+    expect(host.runs.slice(before).filter(run => String(run.argv[1] ?? '').endsWith('/bin/import.ts'))).toEqual([])
+    // an explicit id does not need the running session's id
+    expect((await host.command('mnemosyne-import', `session ${ID2}`)).text).toContain(`Dry run for session ${ID2}`)
   })
 
   test('"last" is the newest earlier transcript of the project, never the running session', async () => {

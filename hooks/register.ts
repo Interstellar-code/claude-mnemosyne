@@ -292,6 +292,7 @@ async function paths($: EngineInterface, options: PluginOptions) {
   }
   return {
     windows,
+    home,
     root,
     engine,
     cli: `${engine}/node_modules/${ENGINE_PACKAGE}/src/cli.ts`,
@@ -1439,7 +1440,8 @@ async function evaluateDoc($: EngineInterface, options: PluginOptions, path: str
   const read = JSON.parse(await importCli($, options, ['doc', path])) as DocRead
   if (read.tooMany) return `${basenameOf(path)} splits into ${read.total} chunks, over the limit of ${IMPORT_MAX_CHUNKS} per import: split the file, or keep only the part worth remembering. Nothing was imported.`
   if (read.chunks.length === 0) return `${basenameOf(path)} has no text under its headings; nothing to import.`
-  const existing = JSON.parse(await importCli($, options, ['origins', path])) as ExistingChunk[]
+  // Per-project scope: only this project's earlier rows, so the import never retires another project's copy of the file.
+  const existing = JSON.parse(await importCli($, options, ['origins', path, ...(options.scope === 'per-project' ? ['--owner', await owner($, options)] : [])])) as ExistingChunk[]
   const { entries, nearChecked } = await checkCandidates($, options, settings, read.chunks.map(chunk => ({ heading: chunk.heading, sha256: chunk.sha256, content: chunk.text, kind: 'artifact' })), existing)
   return { read, nearChecked, entries }
 }
@@ -1477,14 +1479,16 @@ const sessionPending = new Map<string, { sessionId: string; items: Map<string, S
 
 /** /mnemosyne-import session <id | last>: asks Haiku for up to 5 durable memories, checks each, writes a proposals file (hashes only) and no memory. */
 export async function importSessionDryRun($: EngineInterface, options: PluginOptions, target: string, signal: AbortSignal) {
-  const { root } = await paths($, options)
+  const { root, home } = await paths($, options)
   const model = extractionModelOf(options)
   if (extractionOff(model)) return 'Knowledge extraction is off (extractionModel in the plugin settings is "off"): a session import needs the model. Set extractionModel, then try again.'
   const settings = await settingsFor($, options)
   progress($, 'reading the session')
   // Claude Code keeps transcripts under <home>/.claude/projects, one folder per project.
-  const projects = `${root.slice(0, -'/mnemosyne'.length)}/projects`
+  const projects = `${home}/.claude/projects`
   const current = await $.session.id().catch(() => undefined)
+  // `last` skips the running session; if its id is unknown, the newest file may be the running one.
+  if (target === 'last' && !current) return 'The running session\'s id is not known, so "last" could pick the session in progress. Give the session id: /mnemosyne-import session <id>. Nothing was read.'
   const read = JSON.parse(await importCli($, options, ['session', '--projects', projects, '--cwd', slashes(await $.session.cwd()), ...(current === undefined ? [] : ['--current', current]), target])) as SessionRead
   if (read.text === '') return `Session ${read.sessionId} has no conversation text to read; nothing to import.`
   const vocabulary = await readVocabulary($, root)
