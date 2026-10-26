@@ -26,29 +26,33 @@ import { dirname, join } from 'node:path'
 import { activityLine, callOutcome, callText, TOOL_ACTIONS } from '../hooks/activity-log'
 import type { ActivityAction } from '../hooks/activity-log'
 import { ENGINE_BUILD } from '../hooks/engine-build'
-import { admit } from '../hooks/guard'
+import { admit, guardConfigOf } from '../hooks/guard'
 import { expiresInDaysProblem, KIND_NAMES, kindProblem, missingKindMessage, validUntilFor } from '../hooks/kinds'
 import { engineTool, mnemosyneStats, publicTool } from '../hooks/surface'
 import { cleanTags } from '../hooks/tags'
 import { tagRules } from '../hooks/vocab'
 import { appendActivity } from './activity'
+import { readConfig } from './settings'
+import { parseConfig } from '../hooks/settings'
+import type { ResolvedSettings } from '../hooks/settings'
 
 const ALLOWED = new Set(['memory_remember', 'memory_recall', 'memory_update', 'memory_forget', 'memory_stats'])
 const TAGGED = new Set(['memory_remember', 'memory_update'])
-const TAGS_PROPERTY = {
+// The texts that quote a number follow the settings (C6): the tag count (T1) and the context-note days (E1).
+const tagsProperty = (settings: ResolvedSettings) => ({
   type: 'array',
   items: { type: 'string' },
-  description: 'Short lowercase topic tags, at most 5. On update they replace the old ones; [] removes them.',
-}
+  description: `Short lowercase topic tags, at most ${settings.tags.maxPerMemory}. On update they replace the old ones; [] removes them.`,
+})
 const KIND_PROPERTY = {
   type: 'string',
   enum: KIND_NAMES,
   description: 'What kind of memory this is. Required on remember: a save without it is refused.',
 }
-const EXPIRES_PROPERTY = {
+const expiresProperty = (settings: ResolvedSettings) => ({
   type: 'integer',
-  description: 'Forget this memory after this many days (1 to 365). A context note expires after 14 days when this is not given.',
-}
+  description: `Forget this memory after this many days (1 to 365). A context note expires after ${settings.expiry.contextDays} days when this is not given.`,
+})
 const CONFIRM_PROPERTY = {
   type: 'boolean',
   description: 'Send true to save text the guard warned about (only after a refusal that asked for it). Secrets and size blocks cannot be confirmed.',
@@ -62,6 +66,11 @@ const activityLog = process.env.MNEMOSYNE_ACTIVITY_LOG ?? ''
 // The vocabulary file its tags are cleaned with (set by mnemosyne-mcp; empty: none). Read at each call, never fatal:
 // no file or a file that cannot be read gives no aliases. The owner's project name is dropped from every tag list.
 const vocabularyFile = process.env.MNEMOSYNE_VOCABULARY ?? ''
+// The folder that holds config.json (set by mnemosyne-mcp; an older wrapper sets only the vocabulary file, which sits in the same folder).
+// The settings are read at each call and each tools/list, like the vocabulary: a change applies without a restart. Never fatal:
+// no folder, no file or a broken file gives the defaults, which are the numbers that were hard-coded before (C3).
+const configRoot = process.env.MNEMOSYNE_ROOT || (vocabularyFile === '' ? '' : dirname(vocabularyFile))
+const settingsNow = () => (configRoot === '' ? parseConfig(undefined) : readConfig(configRoot))
 function tagRulesNow() {
   let text: string | undefined
   try {
@@ -166,8 +175,10 @@ void (async () => {
       const raw = message.params?.arguments
       const given: Record<string, unknown> = raw !== null && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}
       // Tools outside the five are not memory calls and are not logged.
+      const settings = settingsNow()
       const action = ALLOWED.has(name) ? TOOL_ACTIONS[name] : undefined
-      if (!ALLOWED.has(name)) {
+      // M2: a tool outside the allow-list is not served, the same answer as a tool outside the five. Not logged: the line would carry no new fact.
+      if (!ALLOWED.has(name) || !(settings.tools.externalAllow as readonly string[]).includes(name)) {
         refuse(message.id, undefined, given, { code: -32601, message: `Tool not available: ${name}` })
         continue
       }
@@ -182,7 +193,7 @@ void (async () => {
       // A block is refused with the rule ids; the line holds the ids only, never the text.
       let warned: ReturnType<typeof admit>['hits'] = []
       if (name === 'memory_remember' || (name === 'memory_update' && typeof given.content === 'string')) {
-        const guard = admit({ content: given.content as string, kind: typeof given.kind === 'string' ? given.kind : undefined, origin: 'proxy' })
+        const guard = admit({ content: given.content as string, kind: typeof given.kind === 'string' ? given.kind : undefined, origin: 'proxy' }, guardConfigOf(settings))
         const ids = [...new Set(guard.hits.map(hit => hit.rule))]
         if (guard.verdict === 'block') {
           refuse(
@@ -196,7 +207,8 @@ void (async () => {
         }
         if (guard.verdict === 'warn') {
           // Strict mode: a warned save is refused until the call says confirm: true.
-          if (strictGuard && given.confirm !== true) {
+          // The chatter check set to strict (G6) asks for the confirm whatever the guard mode.
+          if ((strictGuard || guard.mustConfirm === true) && given.confirm !== true) {
             refuse(
               message.id,
               action,
@@ -231,7 +243,7 @@ void (async () => {
             continue
           }
           // A context note fades after 14 days unless the call gives expires_in_days; the engine takes valid_until.
-          const validUntil = validUntilFor(kind, args.expires_in_days)
+          const validUntil = validUntilFor(kind, args.expires_in_days, Date.now(), settings.expiry.contextDays)
           if (validUntil !== undefined) args.valid_until = validUntil
         }
       }
@@ -240,7 +252,7 @@ void (async () => {
           refuse(message.id, action, given, { code: -32602, message: 'tags must be an array of strings' })
           continue
         }
-        const clean = cleanTags(tags, tagRulesNow())
+        const clean = cleanTags(tags, { ...tagRulesNow(), max: settings.tags.maxPerMemory })
         // Tags that all clean away (the project name, punctuation, blanks) must not read as "remove the tags": [] is how those are removed.
         if (name === 'memory_update' && clean.length === 0 && Array.isArray(tags) && tags.length > 0) {
           refuse(message.id, action, {}, { code: -32602, message: 'none of those tags can be stored (a tag may not be the project name, and needs a letter or digit). Send tags: [] to remove the tags.' })
@@ -267,7 +279,7 @@ void (async () => {
       if (action && message.id !== undefined) {
         pending.set(message.id, {
           action,
-          text: callText(action, { ...args, tags: Array.isArray(tags) ? cleanTags(tags, tagRulesNow()) : undefined }),
+          text: callText(action, { ...args, tags: Array.isArray(tags) ? cleanTags(tags, { ...tagRulesNow(), max: settings.tags.maxPerMemory }) : undefined }),
           args: { ...args },
           ...(warned.length > 0 ? { warnings: warned.map(hit => `Mnemosyne guard warning: ${hit.message}`) } : {}),
         })
@@ -275,6 +287,8 @@ void (async () => {
       message.params.name = engineTool(name)
       message.params.arguments = args
       if (name === 'memory_stats') statsIds.add(message.id)
+      // R5: the ranking weights go on every recall call, as the plugin's own tool sends them.
+      if (name === 'memory_recall') Object.assign(args, { vec_weight: settings.recall.vectorWeight, fts_weight: settings.recall.keywordWeight, importance_weight: settings.recall.importanceWeight })
       if (name === 'memory_remember') {
         // An outside client never sets how far its save is trusted: its own veracity and trust tier are dropped (the plugin's own trigger save is the only 'stated').
         delete args.veracity
@@ -300,12 +314,12 @@ void (async () => {
 type Schema = { properties?: Record<string, unknown>; required?: string[] }
 
 // What a client sees of a tool's input: no bank, no metadata; tags on remember and update.
-function publicSchema(name: string, schema: Schema | undefined): Schema {
+function publicSchema(name: string, schema: Schema | undefined, settings: ResolvedSettings): Schema {
   // memory_type is the engine's name for kind: clients see kind only.
   const { bank: _bank, metadata: _metadata, memory_type: _memoryType, ...properties } = schema?.properties ?? {}
   return {
     ...schema,
-    properties: TAGGED.has(name) ? { ...properties, kind: KIND_PROPERTY, ...(name === 'memory_remember' ? { expires_in_days: EXPIRES_PROPERTY } : {}), tags: TAGS_PROPERTY, confirm: CONFIRM_PROPERTY } : properties,
+    properties: TAGGED.has(name) ? { ...properties, kind: KIND_PROPERTY, ...(name === 'memory_remember' ? { expires_in_days: expiresProperty(settings) } : {}), tags: tagsProperty(settings), confirm: CONFIRM_PROPERTY } : properties,
     // remember needs a kind, whatever the engine's own schema says.
     ...(schema?.required || name === 'memory_remember'
       ? { required: [...new Set([...(schema?.required ?? []).filter(key => key !== 'bank' && key !== 'metadata'), ...(name === 'memory_remember' ? ['kind'] : [])])] }
@@ -323,14 +337,16 @@ for await (const line of lines(engine.stdout)) {
     continue
   }
   if (listIds.delete(message?.id) && Array.isArray(message.result?.tools)) {
+    const settings = settingsNow()
     message.result.tools = message.result.tools
       .map((tool: { name: string; description?: string; inputSchema?: Schema }) => ({
         ...tool,
         name: publicTool(tool.name),
         description: tool.description?.replaceAll('Mnemopi', 'Mnemosyne'),
-        inputSchema: publicSchema(publicTool(tool.name), tool.inputSchema),
+        inputSchema: publicSchema(publicTool(tool.name), tool.inputSchema, settings),
       }))
-      .filter((tool: { name: string }) => ALLOWED.has(tool.name))
+      // M2: only the tools on the allow-list are listed (the five, by default).
+      .filter((tool: { name: string }) => ALLOWED.has(tool.name) && (settings.tools.externalAllow as readonly string[]).includes(tool.name))
   }
   if (message?.result?.serverInfo?.name === 'mnemopi') message.result.serverInfo.name = 'mnemosyne'
   const text = message?.result?.content?.[0]

@@ -14,7 +14,13 @@ export type EngineRequest = readonly [name: string, args: Record<string, unknown
 export const EMBEDDINGS_MODEL = 'BAAI/bge-small-en-v1.5'
 export const EMBEDDINGS_CACHE_DIR = '.claude/mnemosyne/model-cache'
 
+// The recall ranking weights (setting R5), the engine's own defaults unless a caller passes others.
+export type RecallWeights = { vector: number; keyword: number; importance: number }
+export const DEFAULT_RECALL_WEIGHTS: RecallWeights = { vector: 0.5, keyword: 0.3, importance: 0.2 }
+
 export type EngineEnvOptions = {
+  // The ranking weights to pin; none means the defaults above (R5.2).
+  weights?: RecallWeights
   // True only when the option is on AND the model is downloaded: setup wrote its
   // marker and the model files are there. Otherwise the engine keeps embeddings
   // off so it never downloads the model behind the user's back (EMB.2.a4).
@@ -34,6 +40,7 @@ export type EngineEnvOptions = {
 // clears an inherited one (EMB.3.a1).
 export function engineEnv(store: string, owner: string, options: EngineEnvOptions = {}): Record<string, string> {
   const embeddings = options.embeddings === true
+  const weights = options.weights ?? DEFAULT_RECALL_WEIGHTS
   return {
     MNEMOPI_DATA_DIR: store,
     MNEMOPI_SESSION_ID: owner,
@@ -72,6 +79,10 @@ export function engineEnv(store: string, owner: string, options: EngineEnvOption
     // Read directly by the engine (not through pi-utils' XDG/profile resolver),
     // so a `~/.env`/project `.env` line cannot move it (H1b).
     PI_CONFIG_DIR: EMBEDDINGS_CACHE_DIR,
+    // Recall ranking, pinned so a shell variable can never change it silently (R5.2); the settings' weights, or the engine's own 0.5 / 0.3 / 0.2.
+    MNEMOPI_VEC_WEIGHT: String(weights.vector),
+    MNEMOPI_FTS_WEIGHT: String(weights.keyword),
+    MNEMOPI_IMPORTANCE_WEIGHT: String(weights.importance),
     // On only when the caller proved the model is downloaded. Off blocks the
     // engine's lazy model download outside /mnemosyne-setup; on clears an
     // inherited MNEMOPI_NO_EMBEDDINGS (empty counts as unset in the engine).

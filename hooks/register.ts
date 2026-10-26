@@ -43,15 +43,18 @@ import type { Proposal, Row } from './backfill'
 import { extractMany, extractOne, reasonLine, storedCount } from './knowledge'
 import type { ExtractOutcome, KnowledgeEngine } from './knowledge'
 import { buildRequests, EMBEDDINGS_CACHE_DIR, EMBEDDINGS_MODEL, engineEnv, parseReplies } from './engine'
+import type { RecallWeights } from './engine'
 import type { EngineRequest } from './engine'
 import { ENGINE_BUILD, SETUP_TIMEOUT_MS } from './engine-build'
 import { mnemosyneStats } from './surface'
-import { admit, NEAR_DUPLICATE_SCORE, nearDuplicateFlags, nearDuplicateMessage, nearMatchesOf } from './guard'
+import { admit, guardConfigOf, nearDuplicateFlags, nearDuplicateMessage, nearMatchesOf } from './guard'
 import type { GuardResult, NearMatch } from './guard'
 import { expiresInDaysProblem, KIND_NAMES, kindProblem, missingKindMessage, validUntilFor } from './kinds'
+import { CONFIG_FILE, parseConfig, TOOL_NAMES } from './settings'
+import type { ResolvedSettings, ToolName } from './settings'
 import { cleanTags } from './tags'
 import type { TagRules } from './tags'
-import { AUTO_ADMIT_COUNT, parseVocabulary, tagRules, VOCAB_FILE } from './vocab'
+import { parseVocabulary, tagRules, VOCAB_FILE } from './vocab'
 import type { Vocabulary } from './vocab'
 import { openDashboard, stopDashboard } from './ui-launch'
 import { PROJECTS_FILE, projectName, remoteHostOf } from './projects'
@@ -61,7 +64,6 @@ export { ENGINE_BUILD } from './engine-build'
 export const ENGINE_VERSION = '18.12.3'
 const ENGINE_PACKAGE = '@oh-my-pi/pi-mnemopi'
 const GLOBAL_OWNER = 'global'
-const RECALL_LIMIT = 5
 const NOT_INSTALLED = 'Mnemosyne Memory engine not installed: ask the user to run /mnemosyne-setup.'
 // memory_remember is refused on a stale engine too: that engine's 24 h trim deletes every row whose trust tier is not IMPORTED, and a save made with this build's honest provenance is not.
 const NOT_CURRENT = `Mnemosyne Memory engine is out of date (memory_remember and memory_update need build ${ENGINE_BUILD}; an older engine would delete this plugin's saves after 24 hours): ask the user to run /mnemosyne-setup.`
@@ -69,18 +71,27 @@ const NOT_CURRENT = `Mnemosyne Memory engine is out of date (memory_remember and
 // Where a person typed the prompt; another plugin's or session's text never triggers a save.
 const PERSON_ORIGINS = new Set(['composer', 'bridge', 'sdk', 'slack-ping'])
 
-const RULES_SECTION = {
-  id: 'mnemosyne:rules',
-  scope: 'session',
-  text: `# Long-term memory (Mnemosyne)
-mcp__mnemosyne__memory_remember / _recall / _update / _forget keep facts across sessions and repos.
-- Remember: lasting preferences, conventions, decisions, runbooks the user states. One self-contained fact per call.
-- With each fact, pass kind (required: a save without it is refused): fact, preference, instruction (a rule or runbook), decision, context (project state), error (a bug note), artifact (a reference) or event (a session summary).
-- With each fact, pass tags: 2 to 5 short lowercase topic words (for example ["git", "ci"]).
-- Never remember secrets, credentials, or one-off task details.
-- Recall before answering about past decisions or preferences ("what did we…", "how do I usually…").
-- To change or tag a fact, update it by id and owner with memory_update. Use memory_forget only to delete. Never save a near-duplicate: recall first, and if a close memory exists, update it (or save the new fact with replaces: the old id, which retires the old one) instead of saving another.`,
-} as const
+// The rules block, built from the settings (C6): the tag count follows T1, and a tool switched off (M1) is not named.
+// With every tool on and the default T1 this is the 0.8.4 text, byte for byte. Needs memory_remember on: the block is not added without it.
+const tagCountText = (most: number) => (most >= 2 ? `2 to ${most}` : '1')
+function rulesSection(settings: ResolvedSettings) {
+  const on = (tool: ToolName) => settings.tools[tool]
+  const names = [`mcp__mnemosyne__memory_remember`, ...(on('memory_recall') ? ['_recall'] : []), ...(on('memory_update') ? ['_update'] : []), ...(on('memory_forget') ? ['_forget'] : [])]
+  const closeMemory = on('memory_update')
+    ? `${on('memory_recall') ? 'recall first, and if a close memory exists, ' : 'if a close memory exists, '}update it (or save the new fact with replaces: the old id, which retires the old one) instead of saving another.`
+    : `${on('memory_recall') ? 'recall first, and if a close memory exists, ' : 'if a close memory exists, '}save the new fact with replaces: the old id, which retires the old one, instead of saving another.`
+  const lines = [
+    '# Long-term memory (Mnemosyne)',
+    `${names.join(' / ')} keep facts across sessions and repos.`,
+    '- Remember: lasting preferences, conventions, decisions, runbooks the user states. One self-contained fact per call.',
+    '- With each fact, pass kind (required: a save without it is refused): fact, preference, instruction (a rule or runbook), decision, context (project state), error (a bug note), artifact (a reference) or event (a session summary).',
+    `- With each fact, pass tags: ${tagCountText(settings.tags.maxPerMemory)} short lowercase topic words (for example ["git", "ci"]).`,
+    '- Never remember secrets, credentials, or one-off task details.',
+    ...(on('memory_recall') ? ['- Recall before answering about past decisions or preferences ("what did we…", "how do I usually…").'] : []),
+    `- ${[...(on('memory_update') ? ['To change or tag a fact, update it by id and owner with memory_update.'] : []), ...(on('memory_forget') ? ['Use memory_forget only to delete.'] : []), `Never save a near-duplicate: ${closeMemory}`].join(' ')}`,
+  ]
+  return { id: 'mnemosyne:rules', scope: 'session', text: lines.join('\n') } as const
+}
 
 const recalled = atom({ plugin: 'mnemosyne', key: 'recalled' } as const, {} as Recalled)
 // A remember phrase matched this turn: the first MAIN-THREAD save of the turn is
@@ -101,7 +112,8 @@ const KIND_PROPERTY = {
   description: 'What kind of memory this is. Required on memory_remember: a save without it is refused.',
 } as const
 
-const TOOLS = [
+// The five tools' definitions. The numbers their texts quote follow the settings (C6): T1 tags, E1 context days, R2 recall limits.
+const toolsFor = (settings: ResolvedSettings) => [
   {
     name: 'memory_remember',
     description:
@@ -118,12 +130,12 @@ const TOOLS = [
         tags: {
           type: 'array',
           items: { type: 'string' },
-          description: '2 to 5 short lowercase topic tags for the fact, e.g. ["git", "ci"].',
+          description: `${tagCountText(settings.tags.maxPerMemory)} short lowercase topic tags for the fact, e.g. ["git", "ci"].`,
         },
         kind: KIND_PROPERTY,
         expires_in_days: {
           type: 'integer',
-          description: 'Forget this memory after this many days (1 to 365). A context note expires after 14 days when this is not given.',
+          description: `Forget this memory after this many days (1 to 365). A context note expires after ${settings.expiry.contextDays} days when this is not given.`,
         },
         replaces: {
           type: 'string',
@@ -142,7 +154,7 @@ const TOOLS = [
       type: 'object',
       properties: {
         query: { type: 'string' },
-        limit: { type: 'integer', description: '1 to 50; default 5.' },
+        limit: { type: 'integer', description: `1 to ${settings.recall.maxLimit}; default ${settings.recall.defaultLimit}.` },
       },
       required: ['query'],
     },
@@ -160,7 +172,7 @@ const TOOLS = [
         tags: {
           type: 'array',
           items: { type: 'string' },
-          description: 'Short lowercase topic tags (at most 5); replaces the old ones. [] removes them.',
+          description: `Short lowercase topic tags (at most ${settings.tags.maxPerMemory}); replaces the old ones. [] removes them.`,
         },
         kind: { ...KIND_PROPERTY, description: 'Change what kind of memory this is.' },
         confirm: CONFIRM_PROPERTY,
@@ -329,6 +341,32 @@ async function fileExists($: EngineInterface, path: string): Promise<boolean> {
 }
 
 /**
+ * The settings in <root>/config.json (C1), read per call so a change applies on the next save or recall. Never fails: no file,
+ * a file that cannot be read or is not valid, or a bad HOME gives the defaults (and a warning no caller shows). A hook cannot
+ * read a file any other way than $.fs.read, so the text is parsed here by the import-free resolver (hooks/settings.ts).
+ */
+async function settingsFor($: EngineInterface, options: PluginOptions): Promise<ResolvedSettings> {
+  let text: string | undefined
+  try {
+    text = await $.fs.read(`${(await paths($, options)).root}/${CONFIG_FILE}`)
+  } catch {
+    text = undefined
+  }
+  return parseConfig(text)
+}
+
+/** Whether Claude can call memory_remember in this session: on in the settings AND registered at this session's start (M1). Without a record of the start (no session id) the settings decide. */
+async function rememberRegistered($: EngineInterface, registered: ReadonlyMap<string, ReadonlySet<ToolName>>, settings: ResolvedSettings): Promise<boolean> {
+  const session = await $.session.id().catch(() => undefined)
+  const set = session === undefined ? undefined : registered.get(session)
+  return settings.tools.memory_remember && (set === undefined || set.has('memory_remember'))
+}
+
+const weightsOf = (settings: ResolvedSettings): RecallWeights => ({ vector: settings.recall.vectorWeight, keyword: settings.recall.keywordWeight, importance: settings.recall.importanceWeight })
+// The ranking weights go on every recall call (R5.2), beside the env pin.
+const weightArgs = (settings: ResolvedSettings) => ({ vec_weight: settings.recall.vectorWeight, fts_weight: settings.recall.keywordWeight, importance_weight: settings.recall.importanceWeight })
+
+/**
  * Writes <root>/embeddings.json (0600), the setup marker: it names the model
  * /mnemosyne-setup downloaded, and engineEnv checks it plus the model files
  * before turning embeddings on. A new file renamed over the old one, so a
@@ -390,8 +428,8 @@ async function syncWrapper($: EngineInterface, options: PluginOptions) {
   // when the model is downloaded (EMB.3.a2).
   const embeddings = await embeddingsOn($, options)
   const text = windows
-    ? cmdWrapper(store, cli, proxy, activity, embeddings, guardModeOf(options), `${root}/${VOCAB_FILE}`)
-    : shWrapper(store, cli, proxy, activity, embeddings, guardModeOf(options), `${root}/${VOCAB_FILE}`)
+    ? cmdWrapper(store, cli, proxy, activity, embeddings, guardModeOf(options), `${root}/${VOCAB_FILE}`, root)
+    : shWrapper(store, cli, proxy, activity, embeddings, guardModeOf(options), `${root}/${VOCAB_FILE}`, root)
   await bunFs($, `fs.writeFileSync(a[0], a[1]); ${windows ? '' : 'fs.chmodSync(a[0], 0o700);'}`, wrapper, text)
 }
 
@@ -400,9 +438,10 @@ serving only remember / recall / update / forget / stats.
 MNEMOSYNE_OWNER picks the owner: global (default) or a project-... id.
 MNEMOSYNE_ACTIVITY_LOG is the activity log each call is recorded in; empty when activityLog is off.
 MNEMOSYNE_GUARD_MODE is the guardMode option: strict refuses a warned save unless the call passes confirm: true, warn saves it.
-MNEMOSYNE_VOCABULARY is the tag vocabulary file its tags are cleaned with (aliases folded).`
+MNEMOSYNE_VOCABULARY is the tag vocabulary file its tags are cleaned with (aliases folded).
+MNEMOSYNE_ROOT is the folder holding config.json, the settings it reads at each call (guard limits, tag count, tools served).`
 
-const shWrapper = (store: string, cli: string, proxy: string, activity: string, embeddings: boolean, guardMode: string, vocabulary: string) => `#!/bin/sh
+const shWrapper = (store: string, cli: string, proxy: string, activity: string, embeddings: boolean, guardMode: string, vocabulary: string, root: string) => `#!/bin/sh
 ${WRAPPER_NOTE.replace(/^/gm, '# ')}
 export MNEMOPI_DATA_DIR=${shellQuote(store)}
 export MNEMOPI_SESSION_ID="\${MNEMOSYNE_OWNER:-global}"
@@ -429,11 +468,12 @@ export MNEMOSYNE_CLI=${shellQuote(cli)}
 export MNEMOSYNE_ACTIVITY_LOG=${activity ? shellQuote(activity) : ''}
 export MNEMOSYNE_GUARD_MODE=${guardMode}
 export MNEMOSYNE_VOCABULARY=${shellQuote(vocabulary)}
+export MNEMOSYNE_ROOT=${shellQuote(root)}
 exec bun ${shellQuote(proxy)}
 `
 
 // cmd has no safe quoting for " or %; paths() refuses a store holding either.
-const cmdWrapper = (store: string, cli: string, proxy: string, activity: string, embeddings: boolean, guardMode: string, vocabulary: string) => `@echo off\r
+const cmdWrapper = (store: string, cli: string, proxy: string, activity: string, embeddings: boolean, guardMode: string, vocabulary: string, root: string) => `@echo off\r
 ${WRAPPER_NOTE.replace(/^/gm, 'rem ').replace(/\n/g, '\r\n')}\r
 set "MNEMOPI_DATA_DIR=${store}"\r
 if not defined MNEMOSYNE_OWNER set "MNEMOSYNE_OWNER=global"\r
@@ -461,6 +501,7 @@ set "MNEMOSYNE_CLI=${cli}"\r
 set "MNEMOSYNE_ACTIVITY_LOG=${activity}"\r
 set "MNEMOSYNE_GUARD_MODE=${guardMode}"\r
 set "MNEMOSYNE_VOCABULARY=${vocabulary}"\r
+set "MNEMOSYNE_ROOT=${root}"\r
 bun "${proxy}"\r
 `
 
@@ -512,16 +553,17 @@ function updateArgs(input: Record<string, unknown>, rules: TagRules = {}): Recor
 /**
  * The rules cleanTags takes for a write by `ownerId` (this session's owner by default): the vocabulary's aliases,
  * read from <root>/vocabulary.json, and the owner's project name, which is dropped. Never fails: no file, or one
- * that cannot be read, gives no aliases.
+ * that cannot be read, gives no aliases. `max` is the most tags kept (setting T1).
  */
-async function tagRulesFor($: EngineInterface, options: PluginOptions, ownerId?: string): Promise<TagRules> {
+async function tagRulesFor($: EngineInterface, options: PluginOptions, settings: ResolvedSettings, ownerId?: string): Promise<TagRules> {
   let text: string | undefined
   try {
     text = await $.fs.read(`${(await paths($, options)).root}/${VOCAB_FILE}`)
   } catch {
     text = undefined
   }
-  return tagRules(text, ownerId ?? (await owner($, options).catch(() => GLOBAL_OWNER)))
+  // T1: the most tags a memory keeps.
+  return { ...tagRules(text, ownerId ?? (await owner($, options).catch(() => GLOBAL_OWNER))), max: settings.tags.maxPerMemory }
 }
 
 // One engine process answering each request in turn; per request, its text or
@@ -533,11 +575,12 @@ async function runAll(
   as?: string,
   timeoutMs = 20_000,
 ) {
-  const [id, { cli, store }] = await Promise.all([as ?? owner($, options), paths($, options)])
+  const [id, { cli, store }, settings] = await Promise.all([as ?? owner($, options), paths($, options), settingsFor($, options)])
   const embeddings = await embeddingsOn($, options)
   const ran = await $.process.run(['bun', cli, 'mcp'], {
     stdin: buildRequests(requests),
-    env: engineEnv(store, id, { embeddings }),
+    // The ranking weights are pinned from the settings (R5.2): a shell variable cannot change recall.
+    env: engineEnv(store, id, { embeddings, weights: weightsOf(settings) }),
     timeoutMs,
   })
   return parseReplies(requests.length, ran.stdout, ran.exitCode, ran.stderr)
@@ -551,20 +594,23 @@ async function call($: EngineInterface, options: PluginOptions, name: string, ar
 }
 
 /**
- * G3: the close memories (cosine 0.88 or more, the engine's mnemopi_similar) of a text about to be saved.
+ * G3: the close memories (cosine at the threshold, setting G5, 0.88 by default; the engine's mnemopi_similar) of a text about to be saved.
  * Advisory, so it fails open: embeddings off, an engine that is not installed or too old, or any failure
  * gives none and the save goes on as it would have. Runs as the owner the save will, before it.
  * (Two engine runs, similar then the save: $.process.run takes its whole stdin up front, and the save
  * needs the matches for its metadata.guard and, in strict mode, may have to be refused.)
  */
-async function nearDuplicates($: EngineInterface, options: PluginOptions, content: string, as?: string): Promise<NearMatch[]> {
+async function nearDuplicates($: EngineInterface, options: PluginOptions, content: string, settings: ResolvedSettings, as?: string): Promise<NearMatch[]> {
+  // G5: switched off, no check and no engine run.
+  if (!settings.guard.nearDuplicate) return []
   const saver = as ?? (await owner($, options).catch(() => GLOBAL_OWNER))
+  const threshold = settings.guard.nearDuplicateScore
   try {
     if (!(await isInstalled($, options)) || !(await isCurrent($, options)) || !(await embeddingsOn($, options))) return []
-    const [answer] = await runAll($, options, [['mnemopi_similar', { content, top_k: 3, min_score: NEAR_DUPLICATE_SCORE }]], as)
+    const [answer] = await runAll($, options, [['mnemopi_similar', { content, top_k: 3, min_score: threshold }]], as)
     if (typeof answer !== 'string') return []
     const reply = JSON.parse(answer) as { embeddings?: unknown; matches?: unknown }
-    return reply.embeddings === true ? nearMatchesOf(reply.matches, content, saver) : []
+    return reply.embeddings === true ? nearMatchesOf(reply.matches, content, saver, threshold) : []
   } catch {
     return []
   }
@@ -807,7 +853,7 @@ async function readVocabulary($: EngineInterface, root: string): Promise<Vocabul
 
 /**
  * VOCAB.3: counts the new tags the written proposals offered, one more memory for each, through bin/vocab.ts (the
- * vocabulary's one writer). A tag offered for AUTO_ADMIT_COUNT memories is admitted. Returns a line for the apply
+ * vocabulary's one writer). A tag offered for enough memories (setting T2, 3 by default) is admitted. Returns a line for the apply
  * reply, or nothing; never throws: the tags are written, so a failure here is only a note.
  */
 async function recordCandidates($: EngineInterface, root: string, tags: readonly string[]): Promise<string[]> {
@@ -895,7 +941,7 @@ export async function tagsDryRun($: EngineInterface, options: PluginOptions, sig
     ...lines,
     ...(notes.length > 0 ? [`Skipped: ${notes.join('; ')}.`] : []),
     ...(blockedNote ? [blockedNote] : []),
-    ...(proposals.some(p => p.candidates !== undefined) ? [`New tags proposed (counted when you apply; a tag proposed for ${AUTO_ADMIT_COUNT} memories is admitted): ${[...new Set(proposals.flatMap(p => p.candidates ?? []))].join(', ')}.`] : []),
+    ...(proposals.some(p => p.candidates !== undefined) ? [`New tags proposed (counted when you apply; a tag proposed for ${(await settingsFor($, options)).tags.autoAdmitCount} memories is admitted): ${[...new Set(proposals.flatMap(p => p.candidates ?? []))].join(', ')}.`] : []),
     ...(vocabulary === undefined ? [`No tag vocabulary yet, so these tags are free-form. Create it once with: bun ${slashes($.plugin.root)}/bin/vocab.ts --store <your store folder> init`] : []),
     `Saved to ${root}/${PROPOSALS_FILE} (ids, owners, tags and a hash of each text; never the text). Run /mnemosyne-tags apply to write them.${retag ? ' Apply backs the store up first, replaces tags only on memories unchanged since this run, and fills a kind only where a memory has none.' : ''}`,
   ].join('\n')
@@ -1231,7 +1277,9 @@ export async function tagsApply($: EngineInterface, options: PluginOptions, sign
     if (list.length === 0) continue
     let ownerError = ''
     // mnemopi_update with metadata.tags and, in a retag, a kind only where the row has none; never content, importance, source or trust tier.
-    const requests: EngineRequest[] = list.map(p => ['mnemopi_update', { memory_id: p.id, metadata: { tags: p.tags }, ...(retag && p.kind !== undefined && kindIsOpen(current.get(p.id)!) ? { memory_type: p.kind } : {}) }])
+    // T1: a proposal never writes more tags than a memory may keep.
+    const tagMax = (await settingsFor($, options)).tags.maxPerMemory
+    const requests: EngineRequest[] = list.map(p => ['mnemopi_update', { memory_id: p.id, metadata: { tags: p.tags.slice(0, tagMax) }, ...(retag && p.kind !== undefined && kindIsOpen(current.get(p.id)!) ? { memory_type: p.kind } : {}) }])
     const answers = await runAll($, options, requests, id, APPLY_TIMEOUT_MS).catch(err => requests.map(() => err as Error))
     const done = list.filter((_, i) => {
       const answer = answers[i]
@@ -1275,14 +1323,17 @@ export const register: Register = (on, options) => {
   const isPerProject = options.scope === 'per-project'
   // Per session, the tail of its extraction chain (one at a time).
   const extractions = new Map<string, Promise<unknown>>()
+  // Per session, the tools registered at its start (M1). A tool switched on in config.json later is not registered until the next
+  // session, so the remember trigger and the rules block follow this set, never the file alone: Claude is never told to call a missing tool.
+  const registered = new Map<string, Set<ToolName>>()
 
-  const engineArgs = (tool: string, input: Record<string, unknown>, rules: TagRules) => {
+  const engineArgs = (tool: string, input: Record<string, unknown>, rules: TagRules, settings: ResolvedSettings) => {
     switch (tool) {
       case 'memory_remember': {
         const isGlobal = !isPerProject || input.global === true
         // Tags are cleaned as the engine stores them (hooks/tags.ts); none left, no metadata.
         const tags = Array.isArray(input.tags) ? cleanTags(input.tags, rules) : []
-        const validUntil = validUntilFor(input.kind, input.expires_in_days)
+        const validUntil = validUntilFor(input.kind, input.expires_in_days, Date.now(), settings.expiry.contextDays)
         return [
           'mnemopi_remember',
           {
@@ -1300,14 +1351,15 @@ export const register: Register = (on, options) => {
             author_type: 'agent',
             // The kind goes to the engine as memory_type; none given, the engine stores 'unknown'.
             ...(typeof input.kind === 'string' ? { memory_type: input.kind } : {}),
-            // A context note fades after 14 days unless the call gives expires_in_days.
+            // A context note fades after the context days (setting E1, 14 by default) unless the call gives expires_in_days.
             ...(validUntil === undefined ? {} : { valid_until: validUntil }),
             ...(tags.length > 0 ? { metadata: { tags } } : {}),
           },
         ] as const
       }
       case 'memory_recall':
-        return ['mnemopi_recall', { query: input.query, limit: clamp(input.limit, 1, 50, RECALL_LIMIT) }] as const
+        // R2: the limit defaults to and is capped by the settings (5 and 50 by default); R5: the ranking weights go on every call.
+        return ['mnemopi_recall', { query: input.query, limit: clamp(input.limit, 1, settings.recall.maxLimit, settings.recall.defaultLimit), ...weightArgs(settings) }] as const
       case 'memory_forget':
         return ['mnemopi_forget', { memory_id: input.memory_id }] as const
       case 'memory_update': {
@@ -1342,7 +1394,12 @@ export const register: Register = (on, options) => {
       name: 'mnemosyne-embed',
       description: 'Fill embeddings for memories saved before embeddings were on: a dry run counts them; "apply" fills them; "rebuild" also allows a model change',
     })
-    for (const tool of TOOLS) await $.tool.register({ ...tool, isDeferred: false })
+    // M1: a tool switched off is not registered, so Claude never sees it; the registered set is kept for this session (see `registered`).
+    const settings = await settingsFor($, options)
+    const enabled = new Set<ToolName>(TOOL_NAMES.filter(name => settings.tools[name]))
+    const session = await $.session.id().catch(() => undefined)
+    if (session !== undefined) registered.set(session, enabled)
+    for (const tool of toolsFor(settings)) if (enabled.has(tool.name)) await $.tool.register({ ...tool, isDeferred: false })
     if (!(await isInstalled($, options))) $.ui.toast('Mnemosyne Memory engine not installed. Run /mnemosyne-setup.')
     else {
       // A stale engine keeps recall, forget and stats working; memory_remember and memory_update refuse (an old engine's 24 h trim would delete the new saves).
@@ -1509,13 +1566,16 @@ export const register: Register = (on, options) => {
     // GUARD.2: the text of a save is checked before anything else. A block never starts an
     // engine process and never consumes the remember trigger, so the retry is still the human's.
     const saves = tool === 'memory_remember' || (tool === 'memory_update' && typeof input.content === 'string')
+    // The settings are read per call (G2-G7 and the rest), so a change in the dashboard applies to the next save.
+    const settings = await settingsFor($, options)
     const guard: GuardResult | undefined = saves
-      ? admit({ content: input.content as string, kind: typeof input.kind === 'string' ? input.kind : undefined, origin: 'tool' })
+      ? admit({ content: input.content as string, kind: typeof input.kind === 'string' ? input.kind : undefined, origin: 'tool' }, guardConfigOf(settings))
       : undefined
     const guardIds = guard === undefined ? [] : [...new Set(guard.hits.map(hit => hit.rule))]
     const warnIds = guard?.verdict === 'warn' ? guardIds : []
     // Strict mode: a warned save is refused until the call says confirm: true. A block has no override.
-    const needsConfirm = guard?.verdict === 'warn' && guardModeOf(options) === 'strict' && input.confirm !== true
+    // The chatter check set to strict (G6) asks for the confirm whatever the guard mode.
+    const needsConfirm = guard?.verdict === 'warn' && (guardModeOf(options) === 'strict' || guard.mustConfirm === true) && input.confirm !== true
     const refusedByGuard = guard?.verdict === 'block' || needsConfirm
     // A remember with no kind is refused before anything runs, and like a guard refusal it leaves the remember trigger for the retry.
     const missingKind = tool === 'memory_remember' && (input.kind === undefined || input.kind === null)
@@ -1525,7 +1585,7 @@ export const register: Register = (on, options) => {
     const replacesId = tool === 'memory_remember' && typeof input.replaces === 'string' && REPLACES_ID.test(input.replaces) ? input.replaces : undefined
     const replacesOwner = replacesId !== undefined && typeof input.owner === 'string' && REPLACES_ID.test(input.owner) ? input.owner : undefined
     // The memory named in replaces is meant to be superseded, so it is not a near-duplicate to warn about.
-    const near = tool === 'memory_remember' && !refusedByGuard && !staleSave && !missingKind ? (await nearDuplicates($, options, input.content as string)).filter(match => match.id !== replacesId) : []
+    const near = tool === 'memory_remember' && !refusedByGuard && !staleSave && !missingKind ? (await nearDuplicates($, options, input.content as string, settings)).filter(match => match.id !== replacesId) : []
     const nearRefused = near.length > 0 && guardModeOf(options) === 'strict' && input.confirm !== true
     const refused = refusedByGuard || nearRefused || missingKind
     // KNOWX.1: only the main thread's first save after a remember phrase is the
@@ -1546,7 +1606,7 @@ export const register: Register = (on, options) => {
       }
     }
     // C6: tags are cleaned with the vocabulary's aliases and without the owner's project name (the row's owner on an update).
-    const rules = Array.isArray(input.tags) && (tool === 'memory_remember' || tool === 'memory_update') ? await tagRulesFor($, options, as) : {}
+    const rules = Array.isArray(input.tags) && (tool === 'memory_remember' || tool === 'memory_update') ? await tagRulesFor($, options, settings, as) : {}
     let retired: Retired | undefined
     const answer = await (async (): Promise<{ result: string; reply: string } | { deny: string }> => {
       try {
@@ -1578,7 +1638,7 @@ export const register: Register = (on, options) => {
           return { deny: NOT_INSTALLED }
         }
         if ((tool === 'memory_update' || tool === 'memory_remember') && !(await isCurrent($, options))) return { deny: NOT_CURRENT }
-        const [name, args] = engineArgs(tool, input, rules)
+        const [name, args] = engineArgs(tool, input, rules, settings)
         // The trigger save is the person's: human, with veracity 'stated'.
         // C4: source 'user' and trust tier STATED besides the human author and veracity 'stated'.
         const withProvenance = provenance === undefined ? args : { ...args, ...provenance, source: 'user', trust_tier: 'STATED' }
@@ -1654,10 +1714,13 @@ export const register: Register = (on, options) => {
   const recallTerms = terms(options.recallTerms)
 
   // Fixed text, appended last on the session side, so the prompt cache holds.
-  on('prompt.compose', async (_$, e, next) => {
+  on('prompt.compose', async ($, e, next) => {
     const composed = await next(e)
     if (e.traits.includes('bare') || !e.tools.includes('mcp__mnemosyne__memory_remember')) return composed
-    return { ...composed, sections: [...composed.sections, RULES_SECTION] }
+    // M1 and C6: no block while memory_remember is off or was not registered this session; its numbers follow the settings.
+    const settings = await settingsFor($, options)
+    if (!(await rememberRegistered($, registered, settings))) return composed
+    return { ...composed, sections: [...composed.sections, rulesSection(settings)] }
   }).catch((_$, e, next) => next(e))
 
   // A main-conversation compaction summarises the recalled memories away: let the next prompt recall again.
@@ -1690,11 +1753,19 @@ export const register: Register = (on, options) => {
   on('prompt.submit', async ($, e, next) => {
     if (e.command || e.isMeta) return next(e)
     const isPerson = PERSON_ORIGINS.has(e.origin?.kind ?? 'composer')
-    const remember = isPerson ? afterTerm(e.text, rememberTerms) : undefined
+    const settings = await settingsFor($, options)
+    // M1: with memory_remember off (or not registered this session) a remember term triggers nothing, so Claude is never asked to call a missing tool.
+    const remember = isPerson && (await rememberRegistered($, registered, settings)) ? afterTerm(e.text, rememberTerms) : undefined
     const asked = isPerson && remember === undefined ? afterTerm(e.text, recallTerms) : undefined
     const session = await $.session.id()
     const isFirst = !(await read($, recalled))[session]
-    if (!isFirst && !remember && asked === undefined) return next(e)
+    // R3: with the first-prompt recall off there is no automatic recall; a recall term still recalls.
+    const autoRecall = isFirst && settings.recall.firstPrompt
+    if (!autoRecall && !remember && asked === undefined) {
+      // The first prompt has passed without a recall: marked, so switching the setting on later waits for the next session instead of recalling on some later prompt.
+      if (isFirst) await update($, recalled, seen => ({ ...seen, [session]: true as const }))
+      return next(e)
+    }
     if (!(await isInstalled($, options))) return next(e)
     if (isFirst) await update($, recalled, seen => ({ ...seen, [session]: true as const }))
 
@@ -1721,11 +1792,12 @@ export const register: Register = (on, options) => {
       // A recall term's query is the first sentence after it: "recall: heron? and then…" asks for heron.
       const topic = asked ? sentences(asked)[0]?.replace(/[?.!]+$/, '') : undefined
       // Each query as the engine gets it: at most 300 characters.
-      queries = [...new Set([...(topic ? [topic] : []), ...(isFirst ? sentences(e.text).slice(0, 4) : [])])].map(query => query.slice(0, 300))
-      const answers = queries.length === 0 ? [] : await runAll($, options, queries.map(query => ['mnemopi_recall', { query, limit: RECALL_LIMIT }] as const))
+      queries = [...new Set([...(topic ? [topic] : []), ...(autoRecall ? sentences(e.text).slice(0, settings.recall.firstPromptSentences) : [])])].map(query => query.slice(0, 300))
+      const count = settings.recall.firstPromptCount
+      const answers = queries.length === 0 ? [] : await runAll($, options, queries.map(query => ['mnemopi_recall', { query, limit: count, ...weightArgs(settings) }] as const))
       const byId = new Map<string, { id: string; owner: string; content: string }>()
       for (const answer of answers) if (typeof answer === 'string') for (const row of compact(answer)) byId.set(row.id, row)
-      const found = [...byId.values()].slice(0, RECALL_LIMIT)
+      const found = [...byId.values()].slice(0, count)
       const n = found.length
       const noun = n === 1 ? 'memory' : 'memories'
       const where = asked !== undefined ? `"${topic ?? asked}"` : 'this prompt'
@@ -1737,7 +1809,7 @@ export const register: Register = (on, options) => {
       }
       if (failed) activity($, options, 'recall failed')
       else if (asked !== undefined) activity($, options, n > 0 ? `recalled ${n} ${noun} for ${where}` : `found nothing for ${where}`, n > 0 ? `recalled ${n}` : 'found nothing')
-      else if (isFirst) activity($, options, n > 0 ? `recalled ${n} ${noun} for ${where}` : `recall found nothing for ${where}`, n > 0 ? `recalled ${n}` : 'found nothing')
+      else if (autoRecall) activity($, options, n > 0 ? `recalled ${n} ${noun} for ${where}` : `recall found nothing for ${where}`, n > 0 ? `recalled ${n}` : 'found nothing')
       if (found.length > 0) {
         const lines = found.map(r => `- [${r.id} owner=${r.owner}] ${r.content}`)
         context.push(`Long-term memories that may be relevant (Mnemosyne; mcp__mnemosyne__memory_update and _forget take the id and owner):\n${lines.join('\n')}`)

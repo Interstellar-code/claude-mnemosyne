@@ -1,5 +1,7 @@
 import { expect, test } from 'claude-code/testing'
-import { admit, MAX_LENGTH, MIN_LENGTH, WARN_LENGTH } from '../hooks/guard'
+import { admit, guardConfigOf, MAX_LENGTH, MIN_LENGTH, NEAR_DUPLICATE_SCORE, nearMatchesOf, WARN_LENGTH } from '../hooks/guard'
+import type { GuardConfig } from '../hooks/guard'
+import { defaults, resolve } from '../hooks/settings'
 
 const check = (content: string, kind?: string) => admit({ content, kind, origin: 'test' })
 
@@ -175,4 +177,101 @@ test('G4 stays quiet for a rule, preference, decision or session summary that qu
   for (const kind of ['instruction', 'preference', 'decision', 'event']) expect([kind, check(rule, kind).verdict]).toEqual([kind, 'allow'])
   // a dated progress note saved as a fact, a bug note or a reference, or with no kind, still warns
   for (const kind of ['fact', 'error', 'artifact', undefined]) expect([kind, check(rule, kind).hits.map((hit) => hit.rule)]).toEqual([kind, ['G4']])
+})
+
+// ---- WIRE.1: the limits and the extra words come from the settings (C3, C4, C6) ----
+
+const checkWith = (content: string, config: GuardConfig, kind?: string) => admit({ content, kind, origin: 'test' }, config)
+const sentence = (length: number) => `${'a fact about the build '.repeat(Math.ceil(length / 23))}`.slice(0, length)
+
+test('WIRE.1.a1: the settings defaults give the same verdict and messages as no config (C3)', () => {
+  const config = guardConfigOf(defaults())
+  const samples = ['The dashboard server listens on a random free port.', sentence(1600), sentence(4100), 'too short', '', 'Today the proxy was rewired to the guard module', `the CI token is ${GITHUB}`]
+  for (const text of samples) expect([text.length, checkWith(text, config)]).toEqual([text.length, check(text)])
+  expect(guardConfigOf(defaults())).toMatchObject({ warnLength: WARN_LENGTH, maxLength: MAX_LENGTH, minLength: MIN_LENGTH })
+})
+
+test('WIRE.1.a2: a raised max length lets longer text in, a lowered warn length warns sooner', () => {
+  const long = sentence(5000)
+  expect(check(long).verdict).toBe('block')
+  expect(checkWith(long, { maxLength: 8000, warnLength: 7000 }).verdict).toBe('allow')
+  expect(checkWith(long, { maxLength: 8000, warnLength: 4500 }).hits[0]?.message).toContain('over 4500 characters')
+  expect(check(sentence(300)).verdict).toBe('allow')
+  const warned = checkWith(sentence(300), { warnLength: 200 })
+  expect([warned.verdict, warned.hits[0]?.rule, warned.hits[0]?.message]).toEqual(['warn', 'G2', 'G2 size: text is over 200 characters; one fact per call is easier to find again'])
+  expect(checkWith(sentence(5000), { maxLength: 6000 }).verdict).toBe('warn')
+})
+
+test('WIRE.1.a2: the min length follows the settings and the message quotes it', () => {
+  expect(check(sentence(30)).verdict).toBe('allow')
+  const refused = checkWith(sentence(30), { minLength: 40 })
+  expect([refused.verdict, refused.hits[0]?.message]).toEqual(['block', 'G2 size: text is under 40 characters; say what the fact is in a full sentence'])
+})
+
+test('WIRE.1.a2: the chatter check can be off, warn (default) or strict', () => {
+  const dated = '2026-10-24 released 0.7.6 with the dashboard polish'
+  expect(checkWith(dated, { chatter: 'off' })).toEqual({ verdict: 'allow', hits: [] })
+  const warned = checkWith(dated, { chatter: 'warn' })
+  expect(warned).toEqual(check(dated))
+  expect(warned.mustConfirm).toBeUndefined()
+  const strict = checkWith(dated, { chatter: 'strict' })
+  expect([strict.verdict, strict.mustConfirm, strict.hits.map(hit => hit.rule)]).toEqual(['warn', true, ['G4']])
+  // strict asks for a confirm only for a chatter hit, not for a length warning
+  expect(checkWith(sentence(1600), { chatter: 'strict' }).mustConfirm).toBeUndefined()
+})
+
+test('WIRE.1.a5: the chatter message quotes the context-note days from the settings', () => {
+  const dated = '2026-10-24 released 0.7.6 with the dashboard polish'
+  expect(check(dated).hits[0]?.message).toContain('about 14 days')
+  expect(checkWith(dated, { contextDays: 30 }).hits[0]?.message).toContain('about 30 days')
+})
+
+test('WIRE.1.a2: a never-save word blocks like a secret and the message never holds the word', () => {
+  const word = 'Project Falcon'
+  const config = { neverSave: [word] }
+  const text = 'The roadmap for project falcon ships in the spring with the new dashboard.'
+  expect(check(text).verdict).toBe('allow')
+  const blocked = checkWith(text, config)
+  expect([blocked.verdict, blocked.hits.map(hit => hit.rule)]).toEqual(['block', ['G7']])
+  expect(blocked.hits[0]?.message).toContain('G7')
+  for (const piece of ['falcon', 'Falcon', 'Project']) expect(blocked.hits.map(hit => hit.message).join('\n').includes(piece)).toBe(false)
+  // a full-width spelling is the same word, a word that is not there does not block, a list that is empty changes nothing
+  expect(checkWith('The ＰＲＯＪＥＣＴ ＦＡＬＣＯＮ plan is written down in the shared notes page.', config).verdict).toBe('block')
+  expect(checkWith('The roadmap for the new dashboard ships in the spring with polish.', config).verdict).toBe('allow')
+  expect(checkWith(text, { neverSave: [] })).toEqual(check(text))
+})
+
+test('WIRE.1.a2: a never-save word is plain text, never a pattern', () => {
+  const text = 'The build prints a line with a.b and then a-b on the next one for the log.'
+  expect(checkWith(text, { neverSave: ['a.*b'] }).verdict).toBe('allow')
+  expect(checkWith(text, { neverSave: ['a.b'] }).verdict).toBe('block')
+  expect(checkWith(text, { neverSave: ['(((((((((('] }).verdict).toBe('allow')
+})
+
+test('WIRE.1.a3: the built-in secret rules and the empty-text block hold under every extreme config', () => {
+  const secrets = [`deploy uses ${AWS} for the bucket`, `the CI token is ${GITHUB} for pushes`, `the OpenAI key is ${SK} here`, `slack bot uses ${SLACK} to post`, `the session cookie holds ${JWT} in prod`, `paste of the key ${PEM} then lines`, 'the db password = hunter2hunter2hunter2 on staging', 'clone from https://deploy:s3cr3tpass@git.example.com/repo.git daily']
+  const extremes: GuardConfig[] = [
+    {},
+    { minLength: 5, warnLength: 200, maxLength: 8000, chatter: 'off', neverSave: [] },
+    { minLength: 100, warnLength: 7999, maxLength: 8000, chatter: 'strict', neverSave: ['zzz'] },
+    guardConfigOf(resolve({ guard: { warnLength: 7000, maxLength: 8000, minLength: 5, chatter: 'off' } })),
+    guardConfigOf(resolve({ guard: { neverSave: ['anything'], maxLength: 'nonsense', minLength: -4 } })),
+    { minLength: Number.NaN, warnLength: Number.POSITIVE_INFINITY, maxLength: Number.NEGATIVE_INFINITY },
+  ]
+  for (const [i, config] of extremes.entries()) {
+    for (const secret of secrets) {
+      const result = checkWith(secret, config)
+      expect([i, secret.slice(0, 20), result.verdict, result.hits.some(hit => hit.rule === 'G1')]).toEqual([i, secret.slice(0, 20), 'block', true])
+    }
+    for (const empty of ['', '   ', '\n\t']) expect([i, checkWith(empty, config).verdict]).toEqual([i, 'block'])
+  }
+})
+
+test('WIRE.1.a2: the near-duplicate threshold moves what counts as a close memory', () => {
+  const close = (score: number) => [{ id: 'm1', owner: 'global', score, preview: 'a different memory entirely' }]
+  expect(nearMatchesOf(close(0.9), 'x')).toHaveLength(1)
+  expect(nearMatchesOf(close(0.9), 'x', undefined, 0.92)).toHaveLength(0)
+  expect(nearMatchesOf(close(0.93), 'x', undefined, 0.92)).toHaveLength(1)
+  expect(nearMatchesOf(close(0.85), 'x', undefined, 0.8)).toHaveLength(1)
+  expect(nearMatchesOf(close(NEAR_DUPLICATE_SCORE), 'x')).toHaveLength(1)
 })

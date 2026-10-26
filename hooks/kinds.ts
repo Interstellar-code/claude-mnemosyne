@@ -53,9 +53,9 @@ export function expiresInDaysProblem(value: unknown): string | undefined {
 
 /**
  * The `valid_until` a save gets: `expires_in_days` from now when the call gives it, else 14 days for kind
- * 'context', else none (undefined). Assumes expiresInDaysProblem found nothing wrong.
+ * 'context' (`contextDays`, setting E1), else none (undefined). Assumes expiresInDaysProblem found nothing wrong.
  */
-export function validUntilFor(kind: unknown, expiresInDays: unknown, now: number = Date.now()): string | undefined {
-  const days = typeof expiresInDays === 'number' ? expiresInDays : kind === 'context' ? CONTEXT_EXPIRY_DAYS : undefined
+export function validUntilFor(kind: unknown, expiresInDays: unknown, now: number = Date.now(), contextDays: number = CONTEXT_EXPIRY_DAYS): string | undefined {
+  const days = typeof expiresInDays === 'number' ? expiresInDays : kind === 'context' ? contextDays : undefined
   return days === undefined ? undefined : new Date(now + days * 86_400_000).toISOString()
 }

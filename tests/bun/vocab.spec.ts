@@ -436,6 +436,39 @@ describe('VOCAB.3: candidates', () => {
     }
   })
 
+  test('WIRE.2.a4: a candidate is admitted at the count of setting T2 (config.json in the root), 3 with no file (C3)', async () => {
+    const local = tempDir('vocab-candidates-t2')
+    try {
+      writeVocabulary(local.dir, { version: 1, tags: {}, candidates: { 'x-y': { count: 1, firstSeen: '2026-10-24T00:00:00.000Z' } } })
+      // no config.json: the second memory does not admit, as before
+      expect(recordCandidates(local.dir, ['x-y'])).toEqual({ recorded: 1, admitted: [], ignored: 0 })
+      writeFileSync(join(local.dir, 'config.json'), JSON.stringify({ version: 1, tags: { autoAdmitCount: 2 } }))
+      // T2 = 2: the third memory is past the line, and so is a tag already at 2
+      expect(recordCandidates(local.dir, ['x-y']).admitted).toEqual(['x-y'])
+      writeVocabulary(local.dir, { version: 1, tags: {}, candidates: { 'a-b': { count: 1, firstSeen: '2026-10-24T00:00:00.000Z' } } })
+      expect(recordCandidates(local.dir, ['a-b']).admitted).toEqual(['a-b'])
+      expect(readVocabulary(local.dir).tags['a-b']).toMatchObject({ admitted: 'auto', count: 2 })
+      // T2 = 5: three memories do not admit
+      writeFileSync(join(local.dir, 'config.json'), JSON.stringify({ version: 1, tags: { autoAdmitCount: 5 } }))
+      writeVocabulary(local.dir, { version: 1, tags: {}, candidates: { 'c-d': { count: 2, firstSeen: '2026-10-24T00:00:00.000Z' } } })
+      expect(recordCandidates(local.dir, ['c-d']).admitted).toEqual([])
+      // a broken file or a value out of range means the default 3
+      for (const text of ['{ not json', JSON.stringify({ version: 1, tags: { autoAdmitCount: 0 } })]) {
+        writeFileSync(join(local.dir, 'config.json'), text)
+        writeVocabulary(local.dir, { version: 1, tags: {}, candidates: { 'e-f': { count: 2, firstSeen: '2026-10-24T00:00:00.000Z' } } })
+        expect([text.slice(0, 12), recordCandidates(local.dir, ['e-f']).admitted]).toEqual([text.slice(0, 12), ['e-f']])
+      }
+      // the command line reads it the same way
+      writeFileSync(join(local.dir, 'config.json'), JSON.stringify({ version: 1, tags: { autoAdmitCount: 4 } }))
+      writeVocabulary(local.dir, { version: 1, tags: {}, candidates: { 'g-h': { count: 2, firstSeen: '2026-10-24T00:00:00.000Z' } } })
+      const ran = await candidates(JSON.stringify({ tags: ['g-h'] }), local.dir)
+      expect(ran.exitCode).toBe(0)
+      expect(JSON.parse(ran.stdout).admitted).toEqual([])
+    } finally {
+      local.dispose()
+    }
+  })
+
   test('VOCAB.3: the proposals file keeps a proposal\'s kind and its one new tag, and never any text', () => {
     const sha = 'b'.repeat(64)
     const text = proposalsText(JSON.stringify({ proposals: [

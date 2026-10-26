@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
-import { readFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 // Plugin tests (tests/*.test.ts) cannot read files, so the C1 "imports nothing" rule is checked here.
@@ -103,5 +103,68 @@ describe('the guard audit of a temp store', () => {
     expect(out.exitCode).toBe(0)
     expect(out.stdout).toContain('verdict allow: 2')
     expect(out.stdout).toContain('G4: allow 0, warn 2, block 0')
+  })
+})
+
+// WIRE.1: the audit judges the stored memories by the guard as it is set today (config.json in the store's parent folder).
+describe('the guard audit follows config.json', () => {
+  const temp = tempDir('guard-audit-config')
+  const store = join(temp.dir, 'store')
+  const file = join(store, 'mnemopi.db')
+  const configFile = join(temp.dir, 'config.json')
+
+  beforeAll(() => {
+    mkdirSync(store, { recursive: true })
+    const db = new Database(file)
+    db.run('CREATE TABLE working_memory (id TEXT PRIMARY KEY, session_id TEXT, content TEXT, metadata_json TEXT, timestamp TEXT)')
+    for (const [id, content] of [
+      ['a1', 'The plugin keeps its memories in one local SQLite file.'],
+      ['a2', 'The roadmap for project falcon ships in the spring with the new dashboard.'],
+      ['l1', `${'a long fact '.repeat(150)}`], // 1800 characters
+    ] as [string, string][]) db.run('INSERT INTO working_memory VALUES (?, ?, ?, NULL, ?)', [id, 'global', content, '2026-10-24'])
+    db.close()
+  })
+  afterAll(() => temp.dispose())
+
+  test('with no config.json the report is the 0.8.4 one: three rule lines, 1500 and 4000 limits (C3)', async () => {
+    const out = await audit('--store', store)
+    expect(out.exitCode).toBe(0)
+    expect(out.stdout.trim().split('\n')).toEqual([
+      'Guard audit (read only)',
+      'rows: 3',
+      'verdict allow: 2',
+      'verdict warn: 1',
+      'verdict block: 0',
+      "rows hit by rule, by the row's verdict:",
+      'G1: allow 0, warn 0, block 0',
+      'G2: allow 0, warn 1, block 0',
+      'G4: allow 0, warn 0, block 0',
+    ])
+  })
+
+  test('a raised warn length and a never-save word change the verdicts, and the G7 line appears; no word or text is printed', async () => {
+    writeFileSync(configFile, JSON.stringify({ version: 1, guard: { warnLength: 2000, maxLength: 8000, neverSave: ['Project Falcon'] } }))
+    const out = await audit('--store', store)
+    expect(out.exitCode).toBe(0)
+    expect(out.stdout.trim().split('\n')).toEqual([
+      'Guard audit (read only)',
+      'rows: 3',
+      'verdict allow: 2',
+      'verdict warn: 0',
+      'verdict block: 1',
+      "rows hit by rule, by the row's verdict:",
+      'G1: allow 0, warn 0, block 0',
+      'G2: allow 0, warn 0, block 0',
+      'G4: allow 0, warn 0, block 0',
+      'G7: allow 0, warn 0, block 1',
+    ])
+    expect(out.stdout.toLowerCase().includes('falcon')).toBe(false)
+  })
+
+  test('a broken config.json is the defaults, never a failure', async () => {
+    writeFileSync(configFile, '{ not json')
+    const out = await audit('--store', store)
+    expect(out.exitCode).toBe(0)
+    expect(out.stdout).toContain('verdict warn: 1')
   })
 })

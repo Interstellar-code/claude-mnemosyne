@@ -85,3 +85,13 @@ test('VOCAB.2: normalizeTag is the cleaner of one tag', () => {
   expect(normalizeTag('???')).toBeUndefined()
   expect(normalizeTag(3)).toBeUndefined()
 })
+
+test('WIRE.2.a1: the most tags kept follows the max rule (setting T1); none given keeps the 5 of 0.8.4', () => {
+  const many = ['a1', 'b2', 'c3', 'd4', 'e5', 'f6', 'g7']
+  expect(cleanTags(many)).toEqual(['a1', 'b2', 'c3', 'd4', 'e5'])
+  expect(cleanTags(many, { max: 3 })).toEqual(['a1', 'b2', 'c3'])
+  expect(cleanTags(many, { max: 1 })).toEqual(['a1'])
+  expect(cleanTags(many, { max: 10 })).toEqual(many)
+  // dropped tags do not use up a place
+  expect(cleanTags(['my-repo', 'a1', 'b2', 'c3'], { max: 2, drop: new Set(['my-repo']) })).toEqual(['a1', 'b2'])
+})

@@ -386,3 +386,59 @@ describe('activity daily tally (MAPX.3)', () => {
     expect((st.mode & 0o777).toString(8)).toBe('700')
   })
 })
+
+// WIRE.4: the log rolls at setting S4 (config.json in the log's folder), 1 MiB with none.
+describe('the log size follows config.json (S4)', () => {
+  const setConfig = (path: string, config: object | string) => writeFileSync(join(dirname(path), 'config.json'), typeof config === 'string' ? config : JSON.stringify(config))
+
+  test('with no config.json the log rolls at 1 MiB, as before (C3)', () => {
+    const path = fresh()
+    bigFile(path, 300 * 1024)
+    appendActivity(path, [entry(1)])
+    expect(existsSync(`${path}.1`)).toBe(false)
+    const over = fresh()
+    bigFile(over, MAX_BYTES)
+    appendActivity(over, [entry(1)])
+    expect(existsSync(`${over}.1`)).toBe(true)
+  })
+
+  test('a lower S4 rolls a smaller log; a higher S4 lets a 1 MiB log grow', () => {
+    const small = fresh()
+    const old = bigFile(small, 300 * 1024)
+    setConfig(small, { version: 1, storage: { activityLogMaxBytes: 256 * 1024 } })
+    appendActivity(small, [entry(1)])
+    expect(readFileSync(`${small}.1`, 'utf8')).toBe(old)
+    expect(readLines(small)).toEqual([entry(1)])
+
+    const big = fresh()
+    bigFile(big, MAX_BYTES + 1024)
+    setConfig(big, { version: 1, storage: { activityLogMaxBytes: 2 * 1024 * 1024 } })
+    appendActivity(big, [entry(1)])
+    expect(existsSync(`${big}.1`)).toBe(false)
+    expect(readLines(big).at(-1)).toBe(entry(1))
+  })
+
+  test('the script the hooks run reads it too', async () => {
+    const path = fresh()
+    bigFile(path, 300 * 1024)
+    setConfig(path, { version: 1, storage: { activityLogMaxBytes: 256 * 1024 } })
+    const ran = await script(path, `${entry(1)}\n`)
+    expect(ran.exitCode).toBe(0)
+    expect(existsSync(`${path}.1`)).toBe(true)
+  })
+
+  test('an out-of-range value, a wrong type and a broken file all mean 1 MiB; an explicit limit still wins', () => {
+    for (const config of [{ version: 1, storage: { activityLogMaxBytes: 1000 } }, { version: 1, storage: { activityLogMaxBytes: 'big' } }, '{ not json']) {
+      const path = fresh()
+      bigFile(path, 300 * 1024)
+      setConfig(path, config)
+      appendActivity(path, [entry(1)])
+      expect([JSON.stringify(config), existsSync(`${path}.1`)]).toEqual([JSON.stringify(config), false])
+    }
+    const path = fresh()
+    bigFile(path, 300 * 1024)
+    setConfig(path, { version: 1, storage: { activityLogMaxBytes: 2 * 1024 * 1024 } })
+    appendActivity(path, [entry(1)], { maxBytes: 100 * 1024 })
+    expect(existsSync(`${path}.1`)).toBe(true)
+  })
+})

@@ -7,20 +7,33 @@
 // rows it hit, split by the row's verdict. Never a memory's text, id or owner.
 // Exits 0 whatever the counts (a block on a real row is a false positive to
 // read, not a failure of the audit), 1 when the store cannot be read.
-import { admit } from '../hooks/guard'
-import type { GuardRule, GuardVerdict } from '../hooks/guard'
+import { dirname, resolve } from 'node:path'
+import { admit, guardConfigOf } from '../hooks/guard'
+import type { GuardConfig, GuardRule, GuardVerdict } from '../hooks/guard'
 import { openReadOnly } from './memories'
+import { readConfig } from './settings'
 
 const RULES: readonly GuardRule[] = ['G1', 'G2', 'G4']
+// G7 (the never-save words) has a line only when the config holds words, so the report is the 0.8.4 one with none.
 const VERDICTS: readonly GuardVerdict[] = ['allow', 'warn', 'block']
 
+/** The guard as it is set today: the config.json in the store's parent folder (the data root), the defaults when there is none. */
+function configFor(store: string): GuardConfig {
+  try {
+    return guardConfigOf(readConfig(dirname(resolve(store))))
+  } catch {
+    return {}
+  }
+}
+
 /** The audit's report for the store at `store`, or null while the engine has not made its database. */
-export function auditReport(store: string): string | null {
+export function auditReport(store: string, config: GuardConfig = configFor(store)): string | null {
   const db = openReadOnly(store)
   if (db === null) return null
   try {
+    const rules: readonly GuardRule[] = (config.neverSave?.length ?? 0) > 0 ? [...RULES, 'G7'] : RULES
     const verdicts: Record<GuardVerdict, number> = { allow: 0, warn: 0, block: 0 }
-    const hits = Object.fromEntries(RULES.map(rule => [rule, { allow: 0, warn: 0, block: 0 }])) as Record<GuardRule, Record<GuardVerdict, number>>
+    const hits = Object.fromEntries(rules.map(rule => [rule, { allow: 0, warn: 0, block: 0 }])) as Record<GuardRule, Record<GuardVerdict, number>>
     let rows = 0
     // The kind decides G4, as on a save; a store without the memory_type column (an older engine) has none.
     const hasKind = (db.query("SELECT 1 FROM pragma_table_info('working_memory') WHERE name = 'memory_type'").get() ?? null) !== null
@@ -28,7 +41,7 @@ export function auditReport(store: string): string | null {
     // One row at a time: the text lives only in this loop and is never kept or printed.
     for (const row of db.query(sql).iterate() as Iterable<{ content: string | null; memory_type: string | null }>) {
       const kind = row.memory_type === null || row.memory_type === 'unknown' ? undefined : row.memory_type
-      const { verdict, hits: found } = admit({ content: row.content ?? '', kind, origin: 'audit' })
+      const { verdict, hits: found } = admit({ content: row.content ?? '', kind, origin: 'audit' }, config)
       rows += 1
       verdicts[verdict] += 1
       for (const rule of new Set(found.map(hit => hit.rule))) hits[rule][verdict] += 1
@@ -38,7 +51,7 @@ export function auditReport(store: string): string | null {
       `rows: ${rows}`,
       ...VERDICTS.map(verdict => `verdict ${verdict}: ${verdicts[verdict]}`),
       'rows hit by rule, by the row\'s verdict:',
-      ...RULES.map(rule => `${rule}: allow ${hits[rule].allow}, warn ${hits[rule].warn}, block ${hits[rule].block}`),
+      ...rules.map(rule => `${rule}: allow ${hits[rule].allow}, warn ${hits[rule].warn}, block ${hits[rule].block}`),
     ].join('\n')
   } finally {
     db.close()
