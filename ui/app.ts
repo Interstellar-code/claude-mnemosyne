@@ -19,7 +19,9 @@ import { fragmentAfterToken } from './map-state'
 import { createSolarScene } from './solar'
 import { extractionState, hasStatus, itemHead, NO_FILTER, neverUsedText, ownersOf, summaryLine, kindTabs, notice as knowledgeNotice, dotClass, ownerColour, ownerColours, parseKnowledge, tableRows, total as knowledgeTotal, type KnowledgeData, type KnowledgeFilter, type KnowledgeSort, type KnowledgeHost, type KnowledgeKind } from './knowledge'
 import { chartBars, chartText, coverageRows, dayBars, kpiTiles as healthKpiTiles, parseHealth, projectRows as healthProjectRows, storageList, storageSummary, tableFilterButtons, type HealthData, type HealthHost, type TableFilter } from './health'
-import { filterButtons, parseReview, reviewCounts, reviewList, reviewRow, reviewText, type ReviewData, type ReviewFilter, type ReviewHost } from './review'
+import { candidateRow, filterButtons, liveRows, nearPartner, notLiveRow, parseQueue, parseReview, queueText, reviewCounts, reviewList, reviewRow, reviewText, type Queue, type ReviewData, type ReviewFilter, type ReviewHost, type RowFilter } from './review'
+import { buildForm, type FormMemory } from './form'
+import { candidateList, parseVocabulary, tagGroups, vocabularyText, type VocabData } from './vocabulary'
 import { isClaudeRecall } from './recalls'
 import { startTheme, type ThemeMode } from './theme'
 import { drawGroups, drawTop, newView, parseSettings, type BrowserPrefs, type SettingsData, type SettingsHost } from './settings'
@@ -29,9 +31,9 @@ import { createWatch, type ProbeResult } from './connection'
 import { createStream, type StreamApi, type StreamHandle, type StreamListener, type StreamStatus } from './stream'
 
 const TOKEN_KEY = 'mnemosyne.token'
-const VIEWS = ['map', 'memories', 'activity', 'search', 'knowledge', 'review', 'health', 'settings'] as const
+const VIEWS = ['map', 'memories', 'activity', 'search', 'knowledge', 'review', 'health', 'vocabulary', 'settings'] as const
 type View = (typeof VIEWS)[number]
-const VIEW_NAMES: Record<View, string> = { map: 'Map', memories: 'Memories', activity: 'Activity', search: 'Search', knowledge: 'Knowledge', review: 'Review', health: 'Health', settings: 'Settings' }
+const VIEW_NAMES: Record<View, string> = { map: 'Map', memories: 'Memories', activity: 'Activity', search: 'Search', knowledge: 'Knowledge', review: 'Review', health: 'Health', vocabulary: 'Vocabulary', settings: 'Settings' }
 const FEED_KEEP = 1000
 const FEED_SHOW = 300
 const CONNECTED = 'Connected to the local Mnemosyne server.'
@@ -71,6 +73,11 @@ export type Memory = {
   metadata: Record<string, unknown> | null
   // The server sends the cleaned tags beside metadata; older replies have only metadata.
   tags?: string[]
+  /** live, retired, expired or lapsed; an older server sends none, which reads as live. */
+  state?: string
+  /** The kind (the engine's memory_type) and the expiry date, on the single-memory reply. */
+  memory_type?: string | null
+  valid_until?: string | null
 }
 
 // `matched` is absent from servers before the match modes.
@@ -232,6 +239,14 @@ export function resultLabel(line: ActivityLine): string {
       return 'updated'
     case 'forget':
       return 'deleted'
+    case 'retire':
+      return 'retired'
+    case 'restore':
+      return 'restored'
+    case 'import':
+      return `${line.count ?? 0} saved`
+    case 'expire':
+      return `${line.count ?? 0} expired`
     case 'stats':
       return 'stats'
     default:
@@ -298,14 +313,20 @@ function chips(tags: readonly string[], pick?: (tag: string) => void) {
   return span
 }
 
+/** True for a memory that is retired, expired or lapsed; an older server sends no state, which is live. */
+export const isGone = (memory: Pick<Memory, 'state'>) => memory.state !== undefined && memory.state !== 'live'
+
 /** One row of the Memories table. */
 export function memoryRow(memory: Memory, open: (id: string) => void, pickTag?: (tag: string) => void) {
-  const row = el('tr', undefined, 'row')
+  const gone = isGone(memory)
+  const row = el('tr', undefined, gone ? 'row is-dim' : 'row')
   row.tabIndex = 0
   row.dataset.id = memory.id
   const text = el('td')
   // Two lines at most (the CSS clamps it); the id and the full text are in the sheet. A cut-short preview ends in an ellipsis.
   const shown = memory.preview ?? memory.content ?? ''
+  // A memory that is not live (retired, expired or lapsed) says so, in words, in front of its text.
+  if (gone) text.append(el('span', `${memory.state} `, 'state-mark'))
   text.append(el('span', memory.truncated === true && !shown.endsWith('…') ? `${shown}…` : shown, 'row-text'))
   const owner = el('td', undefined, 'nowrap')
   owner.append(project(memory.owner))
@@ -327,7 +348,7 @@ export function memoryRow(memory: Memory, open: (id: string) => void, pickTag?: 
 }
 
 /** The sheet's content for one memory (see openMemory); `forget` runs after the confirm. */
-export function memoryDetail(memory: Memory, forget: (memory: Memory, done: (error?: string) => void) => void, pickTag?: (tag: string) => void) {
+export function memoryDetail(memory: Memory, forget: (memory: Memory, done: (error?: string) => void) => void, pickTag?: (tag: string) => void, edit?: (memory: Memory) => void) {
   const panel = el('div', undefined, 'detail-body')
   const head = el('div', undefined, 'detail-head')
   head.append(project(memory.owner, 'project muted'), el('span', memory.id, 'mono muted push-right'))
@@ -344,6 +365,7 @@ export function memoryDetail(memory: Memory, forget: (memory: Memory, done: (err
   fact('Source', memory.source ?? 'unknown')
   fact('Importance', memory.importance === null || memory.importance === undefined ? 'unknown' : memory.importance.toFixed(2))
   fact('Scope', memory.scope ?? 'unknown')
+  if (isGone(memory)) fact('State', memory.state ?? '')
   const tagBox = el('div', undefined, 'detail-tags')
   const tags = tagsOfMemory(memory)
   tagBox.append(el('span', 'Tags', 'muted small'), tags.length > 0 ? chips(tags, pickTag) : el('span', 'No tags yet.', 'muted small'))
@@ -391,11 +413,20 @@ export function memoryDetail(memory: Memory, forget: (memory: Memory, done: (err
   })
   danger.append(ask, confirm)
 
+  // Edit opens the form in this sheet; Forget stays here and nowhere else.
+  const editor = el('div', undefined, 'detail-edit')
+  if (edit !== undefined) {
+    const change = el('button', 'Edit', 'btn')
+    change.type = 'button'
+    change.addEventListener('click', () => edit(memory))
+    editor.append(change)
+  }
+
   // Two columns on a wide screen: the memory itself on the left, what is known about it on the right.
   const main = el('div', undefined, 'detail-main')
   main.append(head, el('p', content, 'detail-text'))
   const side = el('div', undefined, 'detail-side')
-  side.append(facts, tagBox, danger)
+  side.append(facts, tagBox, editor, danger)
   panel.append(main, side)
   return panel
 }
@@ -412,8 +443,10 @@ export const ORIGIN_HELP: Record<string, string> = {
   tool: 'tool: Claude called a memory tool in Claude Code',
   trigger: 'trigger: you typed a trigger phrase, such as “remember that”',
   external: 'external: another MCP client, through mnemosyne-mcp',
-  ui: 'ui: this dashboard (search or forget)',
+  ui: 'ui: this dashboard (search, forget, save, retire or restore)',
   backfill: 'backfill: the one-time tagging run, /mnemosyne-tags',
+  import: 'import: a document or a session log brought in through the save guard',
+  session: 'session: the session summary or the expiry of unused memories, run by the plugin',
 }
 
 /**
@@ -437,6 +470,17 @@ export function sentenceOf(line: ActivityLine, preview = ''): string {
     }
     case 'forget':
       return failed ? `Could not forget ${ids.map(shortSession).join(', ')}`.trim() : `Forgot ${ids.map(shortSession).join(', ') || 'a memory'}`
+    case 'retire':
+      return failed ? `Could not retire ${ids.map(shortSession).join(', ')}`.trim() : `Retired ${ids.map(shortSession).join(', ') || 'a memory'}`
+    case 'restore':
+      if (failed) return `Could not restore ${ids.map(shortSession).join(', ')}`.trim()
+      return count === 0 ? `${ids.map(shortSession).join(', ') || 'The memory'} was already live; nothing to restore` : `Restored ${ids.map(shortSession).join(', ') || 'a memory'}`
+    case 'import':
+      if (failed) return text ? `Import had failures: ${text}` : 'Import had failures'
+      return text || `Imported ${count} ${count === 1 ? 'memory' : 'memories'}`
+    case 'expire':
+      if (failed) return 'Could not expire unused memories'
+      return count === 0 ? 'Checked for unused memories; none expired' : `Expired ${count} unused ${count === 1 ? 'memory' : 'memories'}`
     case 'rearm':
       return 'Re-armed: will recall on the next prompt'
     case 'stats':
@@ -674,6 +718,16 @@ async function readJson<T>(response: Response): Promise<T> {
   }
 }
 
+/** A POST with the token: the status and the JSON body. Status 0 means the request never got an answer (the body then holds `error`). */
+async function postJson(path: string, body: unknown): Promise<{ status: number; body: unknown }> {
+  try {
+    const response = await api(path, { method: 'POST', body })
+    return { status: response.status, body: await readJson<unknown>(response) }
+  } catch (err) {
+    return { status: 0, body: { error: err instanceof Expired ? 'This link no longer works. Run /mnemosyne-ui again.' : `Could not reach the server: ${failure(err)}` } }
+  }
+}
+
 // ---- The server going away ----
 
 // The server stops with the Claude session that opened it. The watch asks /api/health when a request failed (and while the stream is
@@ -716,6 +770,7 @@ const watch = createWatch({
       if (current === 'memories') void loadMemories()
       if (current === 'knowledge') void loadKnowledge()
       if (current === 'review') void loadReview()
+      if (current === 'vocabulary') void loadVocabulary()
       if (current === 'health') void loadHealthReport()
       if (current === 'settings') void loadSettings()
     }
@@ -762,9 +817,10 @@ export function show(view: View) {
     feedDirty = false
     drawFeed()
   }
-  // Knowledge, Review and Health read fresh numbers every time they are opened.
+  // Knowledge, Review, Vocabulary and Health read fresh numbers every time they are opened.
   if (view === 'knowledge') void loadKnowledge()
   if (view === 'review') void loadReview()
+  if (view === 'vocabulary') void loadVocabulary()
   if (view === 'health') void loadHealthReport()
   // Settings reads fresh values every time it opens, so a change made elsewhere shows.
   if (view === 'settings') void loadSettings()
@@ -814,7 +870,7 @@ function showOnMap(id: string) {
 const knowledgeView = { kind: 'fact' as KnowledgeKind, data: null as KnowledgeData | null, filter: { ...NO_FILTER } as KnowledgeFilter }
 
 /** A tab's own status line (Knowledge, Review and Health): the text, as an error or not, and its Try again button. */
-function tabStatus(name: 'know' | 'review' | 'health' | 'settings', text: string, error = false) {
+function tabStatus(name: 'know' | 'review' | 'vocab' | 'health' | 'settings', text: string, error = false) {
   const line = byId(`${name}-status`)
   line.textContent = text
   line.className = error ? 'notice-line small is-error' : 'notice-line small muted'
@@ -999,14 +1055,7 @@ function browserPrefs(): BrowserPrefs {
 }
 
 const settingsHost: SettingsHost = {
-  post: async (path, body) => {
-    try {
-      const response = await api(path, { method: 'POST', body })
-      return { status: response.status, body: await readJson<unknown>(response) }
-    } catch (err) {
-      return { status: 0, body: { error: err instanceof Expired ? 'This link no longer works. Run /mnemosyne-ui again.' : `Could not reach the server: ${failure(err)}` } }
-    }
-  },
+  post: postJson,
   copy: async text => {
     try {
       await navigator.clipboard.writeText(text)
@@ -1054,34 +1103,134 @@ export async function loadSettings() {
 
 // ---- Review ----
 
-// After a forget, the row index whose successor gets the focus once the list is redrawn.
-const reviewView = { data: null as ReviewData | null, filter: 'never' as ReviewFilter, refocus: null as number | null }
-const reviewHost: ReviewHost = { project: owner => project(owner, 'project'), open: id => openInMemories(id), forget: forgetById, now: () => Date.now() }
+// After a retire, the row index whose successor gets the focus once the list is redrawn.
+// `data` is the newest memories (GET /api/memories); `queue` is GET /api/review, read once each time the tab opens (it compares every pair of vectors on the server, so a filter change never asks again).
+const reviewView = { data: null as ReviewData | null, queue: null as Queue | null, queueError: '', filter: 'never' as ReviewFilter, refocus: null as number | null }
+const reviewHost: ReviewHost = {
+  project: owner => project(owner, 'project'),
+  open: id => openInMemories(id),
+  retire: (id, replacedBy, done) => retireById(id, replacedBy, done),
+  restore: (id, done) => restoreById(id, done),
+  lastUsed: id => {
+    const row = reviewView.data?.rows.find(item => item.id === id)
+    return row === undefined ? null : (row.lastRecalled ?? row.created)
+  },
+  now: () => Date.now(),
+}
+
+/** The sentence under the filters when the review queue is not there (yet): still loading, or why it failed. */
+const queueMissing = () => (reviewView.queueError !== '' ? reviewView.queueError : 'Loading the review queue…')
+
+/** Takes a row out of the live lists after the server retired it: the candidates (and the near-duplicate reasons that named it), and it joins the Not live list. */
+function applyRetired(id: string) {
+  const now = new Date().toISOString()
+  const row = reviewView.data?.rows.find(item => item.id === id)
+  if (row !== undefined) row.state = 'retired'
+  const memory = memories.rows.find(item => item.id === id)
+  if (memory !== undefined) memory.state = 'retired'
+  const queue = reviewView.queue
+  if (queue === null) return
+  const found = queue.candidates.find(item => item.id === id)
+  queue.candidates = queue.candidates.filter(item => item.id !== id)
+  if (found !== undefined) queue.candidateTotal = Math.max(0, queue.candidateTotal - 1)
+  // The other half of a near-duplicate pair is no longer one of two: its reason goes, and a row with no reason left goes too.
+  for (const other of queue.candidates) other.reasons = other.reasons.filter(reason => nearPartner(reason) !== id)
+  const before = queue.candidates.length
+  queue.candidates = queue.candidates.filter(item => item.reasons.length > 0)
+  queue.candidateTotal = Math.max(0, queue.candidateTotal - (before - queue.candidates.length))
+  queue.notLive = [{ id, owner: found?.owner ?? row?.owner ?? memory?.owner ?? '', text: found?.text ?? row?.text ?? firstLine(memory?.preview ?? '', 200), state: 'retired', since: now, history: [{ action: 'retire', validator: 'dashboard', at: now }] }, ...queue.notLive.filter(item => item.id !== id)]
+  queue.notLiveTotal += 1
+}
+
+/** Puts a restored row back among the live ones in the page's lists. */
+function applyRestored(id: string) {
+  const row = reviewView.data?.rows.find(item => item.id === id)
+  if (row !== undefined) row.state = 'live'
+  const memory = memories.rows.find(item => item.id === id)
+  if (memory !== undefined) memory.state = 'live'
+  const queue = reviewView.queue
+  if (queue === null) return
+  const before = queue.notLive.length
+  queue.notLive = queue.notLive.filter(item => item.id !== id)
+  queue.notLiveTotal = Math.max(0, queue.notLiveTotal - (before - queue.notLive.length))
+}
+
+/**
+ * The one retire call of the page (POST /api/memory/retire), for one memory the person confirmed. The lists change
+ * only after the server answers 200; `done()` then, `done(error)` on a refusal or failure.
+ */
+export function retireById(id: string, replacedBy: string | undefined, done: (error?: string) => void) {
+  void (async () => {
+    const reply = await postJson('/api/memory/retire', { memory_id: id, ...(replacedBy === undefined ? {} : { replaced_by: replacedBy }) })
+    const body = (reply.body ?? {}) as { status?: string; error?: string }
+    if (reply.status !== 200 || body.status !== 'retired') {
+      done(`Retire failed: ${body.error ?? `the server answered ${reply.status}`}`)
+      return
+    }
+    applyRetired(id)
+    drawRows()
+    setStatus(`Retired memory ${id}. Restore brings it back.`, 'ok')
+    done()
+  })()
+}
+
+/** The one restore call of the page (POST /api/memory/restore): `done()` once the server confirmed, `done(error)` otherwise. */
+export function restoreById(id: string, done: (error?: string) => void) {
+  void (async () => {
+    const reply = await postJson('/api/memory/restore', { memory_id: id })
+    const body = (reply.body ?? {}) as { status?: string; error?: string }
+    if (reply.status !== 200 || (body.status !== 'restored' && body.status !== 'unchanged')) {
+      done(`Restore failed: ${body.error ?? `the server answered ${reply.status}`}`)
+      return
+    }
+    applyRestored(id)
+    drawRows()
+    setStatus(`Restored memory ${id}.`, 'ok')
+    done()
+  })()
+}
 
 export function drawReview() {
   const data = reviewView.data
   if (data === null) return
   const now = Date.now()
+  const queue = reviewView.queue
+  const live = liveRows(data.rows)
+  const filter = reviewView.filter
   byId('review-filters').replaceChildren(
-    ...filterButtons(reviewCounts(data.rows, now), reviewView.filter, filter => {
-      reviewView.filter = filter
+    ...filterButtons(reviewCounts(live, now, { retire: queue?.candidates.length ?? 0, notlive: queue?.notLive.length ?? 0 }), filter, pick => {
+      reviewView.filter = pick
       drawReview()
     }),
   )
-  const list = reviewList(data.rows, reviewView.filter, now)
-  byId('review-text').textContent = reviewText(reviewView.filter, list.length, data.rows.length, data.total)
-  const rows = list.map((memory, index) =>
-    reviewRow(memory, reviewHost, () => {
-      reviewView.refocus = index
-      void loadReview()
-    }),
-  )
-  byId('review-rows').replaceChildren(...rows)
-  byId('review-box').hidden = list.length === 0
+  const again = (index: number) => () => {
+    reviewView.refocus = index
+    drawReview()
+  }
+  let rows: HTMLElement[] = []
+  if (filter === 'retire') {
+    const list = queue?.candidates ?? []
+    byId('review-text').textContent = queue === null ? queueMissing() : queueText('retire', list.length, queue.candidateTotal)
+    rows = list.map((candidate, index) => candidateRow(candidate, reviewHost, again(index)))
+    byId('review-candidate-rows').replaceChildren(...rows)
+  } else if (filter === 'notlive') {
+    const list = queue?.notLive ?? []
+    byId('review-text').textContent = queue === null ? queueMissing() : queueText('notlive', list.length, queue.notLiveTotal)
+    rows = list.map((row, index) => notLiveRow(row, reviewHost, again(index)))
+    byId('review-notlive-rows').replaceChildren(...rows)
+  } else {
+    const list = reviewList(live, filter as RowFilter, now)
+    byId('review-text').textContent = reviewText(filter as RowFilter, list.length, data.rows.length, data.total)
+    rows = list.map((memory, index) => reviewRow(memory, reviewHost, again(index)))
+    byId('review-rows').replaceChildren(...rows)
+  }
+  byId('review-box').hidden = filter === 'retire' || filter === 'notlive' || rows.length === 0
+  byId('review-candidates-box').hidden = filter !== 'retire' || rows.length === 0
+  byId('review-notlive-box').hidden = filter !== 'notlive' || rows.length === 0
   tabStatus('review', '')
   byId('review-body').hidden = false
   // The redrawn list lost the focused button: the next row's Open (the new last row's when the
-  // last was forgotten), else the tab's heading when the list is now empty.
+  // last was retired or restored), else the tab's heading when the list is now empty.
   if (reviewView.refocus !== null) {
     const row = rows[Math.min(reviewView.refocus, rows.length - 1)]
     reviewView.refocus = null
@@ -1089,10 +1238,25 @@ export function drawReview() {
   }
 }
 
+/** GET /api/review: the queue. It never throws; a failure is a sentence the queue lists show. */
+async function loadQueue() {
+  try {
+    const response = await api('/api/review')
+    if (!response.ok) throw new Error(`the server answered ${response.status}`)
+    const queue = parseQueue(await readJson<unknown>(response))
+    if (queue === null) throw new Error('the reply was not a review queue')
+    reviewView.queue = queue
+    reviewView.queueError = ''
+  } catch (err) {
+    if (err instanceof Expired) return
+    reviewView.queueError = `Could not load the review queue: ${failure(err)}`
+  }
+}
+
 export async function loadReview() {
   if (reviewView.data === null) tabStatus('review', 'Loading…')
   try {
-    // The newest memories (the server's list limit); the filters work on them here, since one request cannot ask for all four.
+    // The newest memories (the server's list limit); the four filters work on them here, since one request cannot ask for all four.
     const response = await api('/api/memories?sort=newest')
     if (!response.ok) throw new Error(`the server answered ${response.status}`)
     const data = parseReview(await readJson<unknown>(response))
@@ -1106,12 +1270,59 @@ export async function loadReview() {
       reviewView.refocus = null
       byId('review-retry').focus()
     }
+    return
+  }
+  // The queue once per tab open (the memory list above is cheap; this one is not on a big store).
+  await loadQueue()
+  drawReview()
+}
+
+// ---- Vocabulary ----
+
+const vocabView = { data: null as VocabData | null }
+const vocabHost = { post: postJson, reload: (message: string) => void loadVocabulary(message) }
+
+/** GET /api/vocabulary, or null when it cannot be read (the form then offers no tags, and says so). */
+async function fetchVocabulary(): Promise<VocabData | null> {
+  try {
+    const response = await api('/api/vocabulary')
+    return response.ok ? parseVocabulary(await readJson<unknown>(response)) : null
+  } catch {
+    return null
+  }
+}
+
+export function drawVocabulary() {
+  const data = vocabView.data
+  if (data === null) return
+  byId('vocab-text').textContent = vocabularyText(data)
+  byId('vocab-tags').replaceChildren(...tagGroups(data))
+  byId('vocab-candidates').replaceChildren(...candidateList(data, vocabHost))
+  byId('vocab-body').hidden = false
+}
+
+/** Reads the vocabulary from the server and draws it; `message` (the reply of a change the server confirmed) shows once the fresh lists are in. */
+export async function loadVocabulary(message = '') {
+  if (vocabView.data === null) tabStatus('vocab', 'Loading…')
+  try {
+    const response = await api('/api/vocabulary')
+    const body = await readJson<unknown>(response)
+    if (!response.ok) throw new Error((body as { error?: string } | null)?.error ?? `the server answered ${response.status}`)
+    const data = parseVocabulary(body)
+    if (data === null) throw new Error('the reply was not a vocabulary')
+    vocabView.data = data
+    drawVocabulary()
+    tabStatus('vocab', message)
+  } catch (err) {
+    if (err instanceof Expired) return
+    tabStatus('vocab', `Could not load the vocabulary: ${failure(err)}`, true)
   }
 }
 
 /** The Try again buttons of the Knowledge, Review and Health status lines. */
 export function wireKnowledgeHealth() {
   byId('review-retry').addEventListener('click', () => void loadReview())
+  byId('vocab-retry').addEventListener('click', () => void loadVocabulary())
   byId('know-retry').addEventListener('click', () => void loadKnowledge())
   byId('know-owner').addEventListener('change', () => {
     knowledgeView.filter.owner = byId<HTMLSelectElement>('know-owner').value
@@ -1197,7 +1408,24 @@ function watchDev() {
 
 // ---- Memories ----
 
-const memories = { selected: '' as string, rows: [] as Memory[], timer: 0 as ReturnType<typeof setTimeout> | 0, tag: '' }
+const memories = { selected: '' as string, rows: [] as Memory[], total: 0, timer: 0 as ReturnType<typeof setTimeout> | 0, tag: '', showRetired: false }
+
+// "Show retired" is a per-viewer setting: this browser's own storage, and the page works without it.
+const RETIRED_KEY = 'mnemosyne.memories.showRetired'
+function readShowRetired(): boolean {
+  try {
+    return prefStorage()?.getItem(RETIRED_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+function saveShowRetired(on: boolean) {
+  try {
+    prefStorage()?.setItem(RETIRED_KEY, on ? '1' : '0')
+  } catch {
+    // storage is a convenience only
+  }
+}
 
 /** Filters the table to one tag ('' clears it), and shows which. */
 function setTagFilter(tag: string) {
@@ -1210,7 +1438,7 @@ function setTagFilter(tag: string) {
   void loadMemories()
 }
 
-async function loadMemories() {
+export async function loadMemories() {
   const params = new URLSearchParams()
   const owner = byId<HTMLSelectElement>('mem-owner').value
   const sort = byId<HTMLSelectElement>('mem-sort').value
@@ -1224,17 +1452,25 @@ async function loadMemories() {
     const body = await readJson<{ total?: number; count?: number; memories?: Memory[]; error?: string }>(response)
     if (!response.ok) throw new Error(body.error ?? `the server answered ${response.status}`)
     memories.rows = body.memories ?? []
+    memories.total = body.total ?? memories.rows.length
     drawRows()
-    const total = body.total ?? memories.rows.length
-    byId('mem-count').textContent = memories.rows.length === 0 ? 'No memories match.' : `Showing ${memories.rows.length} of ${total}`
   } catch (err) {
     if (!(err instanceof Expired)) setStatus(`Could not load memories: ${failure(err)}`, 'error')
   }
 }
 
-function drawRows() {
+/** The rows the table shows: the live ones, and the retired, expired and lapsed ones too while "Show retired" is on. */
+function visibleRows() {
+  return memories.showRetired ? memories.rows : memories.rows.filter(memory => !isGone(memory))
+}
+
+export function drawRows() {
   const body = byId('mem-rows')
-  body.replaceChildren(...memories.rows.map(memory => memoryRow(memory, id => void openMemory(id), setTagFilter)))
+  const shown = visibleRows()
+  body.replaceChildren(...shown.map(memory => memoryRow(memory, id => void openMemory(id), setTagFilter)))
+  const hidden = memories.rows.length - shown.length
+  const note = hidden > 0 ? ` (${hidden} not live, hidden: turn on Show retired to see ${hidden === 1 ? 'it' : 'them'})` : ''
+  byId('mem-count').textContent = shown.length === 0 ? `No ${hidden > 0 ? 'live ' : ''}memories match.${note}` : `Showing ${shown.length} of ${memories.total}${note}`
   markSelected()
 }
 
@@ -1273,11 +1509,41 @@ async function openMemory(id: string, from?: HTMLElement) {
     const memory = await readJson<Memory & { error?: string }>(response)
     if (!response.ok) throw new Error(memory.error ?? `the server answered ${response.status}`)
     if (memories.selected !== id) return
-    openSheet({ ...sheet, body: memoryDetail(memory, forgetMemory, pickTagFromSheet) })
+    openSheet({ ...sheet, body: memoryDetail(memory, forgetMemory, pickTagFromSheet, picked => openForm(picked, sheet)) })
   } catch (err) {
     if (memories.selected === id) closeSheet()
     if (!(err instanceof Expired)) setStatus(`Could not open the memory: ${failure(err)}`, 'error')
   }
+}
+
+// ---- New memory and Edit ----
+
+/**
+ * Opens the form in the bottom sheet: a new memory (no `memory`) or the edit of one. The server's answer decides everything:
+ * the sheet closes, and the lists reload, only after it confirmed the save.
+ */
+function openForm(memory: Memory | undefined, sheet: { title: string; returnFocus?: HTMLElement | null | (() => HTMLElement | null); onClose?: () => void }) {
+  const built = buildForm(
+    {
+      post: postJson,
+      vocabulary: fetchVocabulary,
+      owners: () => owners.map(row => row.owner),
+      owner: () => byId<HTMLSelectElement>('mem-owner').value,
+      ownerName,
+      cancel: () => closeSheet(),
+      done: (message, id) => {
+        closeSheet()
+        setStatus(message, 'ok')
+        void loadHealth().catch(() => undefined)
+        if (opened.has('memories')) void loadMemories()
+        // The review queue is read again the next time the Review tab opens.
+        if (memory !== undefined) void openMemory(id)
+      },
+    },
+    memory as FormMemory | undefined,
+  )
+  openSheet({ ...sheet, title: memory === undefined ? 'New memory' : 'Edit memory', body: built.element })
+  built.focus()
 }
 
 /** The memory panel's Forget: the shared guarded forget. */
@@ -1289,7 +1555,21 @@ function pickTagFromSheet(tag: string) {
   setTagFilter(tag)
 }
 
+/** The Show retired toggle (a per-viewer setting) and the New memory button. */
+export function wireShowRetired() {
+  memories.showRetired = readShowRetired()
+  const toggle = byId<HTMLInputElement>('mem-retired')
+  toggle.checked = memories.showRetired
+  toggle.addEventListener('change', () => {
+    memories.showRetired = toggle.checked
+    saveShowRetired(toggle.checked)
+    drawRows()
+  })
+  byId('mem-new').addEventListener('click', () => openForm(undefined, { title: 'New memory', returnFocus: byId('mem-new') }))
+}
+
 function wireMemories() {
+  wireShowRetired()
   byId('mem-owner').addEventListener('change', () => void loadMemories())
   byId('mem-sort').addEventListener('change', () => void loadMemories())
   byId('mem-tag').addEventListener('click', () => setTagFilter(''))
