@@ -1,12 +1,14 @@
-// CRUDX.1 and CRUDX.2: the dashboard's write routes (POST /api/memory/create, /update, /retire and /restore),
+// CRUDX.1, CRUDX.2 and CRUDX.4: the dashboard's write routes (POST /api/memory/create, /update, /retire and /restore,
+// and /api/vocabulary/admit and /alias, with GET /api/vocabulary),
 // run for real on 127.0.0.1 against a temporary store made by the real engine. Every test uses a temp HOME,
 // a temp <root> and a temp store; the real ~/.claude is never named. The G3 tests use a stand-in engine that
 // answers mnemopi_similar with canned matches, because the real one needs the embedding model.
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { Database } from 'bun:sqlite'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { connect } from 'node:net'
 import { join } from 'node:path'
+import { recordCandidates } from '../../bin/vocab'
 import { writeConfig } from '../../bin/settings'
 import { MAX_BODY_BYTES, MAX_WRITE_BODY_BYTES, startServer } from '../../ui/server'
 import type { Started } from '../../ui/server'
@@ -14,7 +16,7 @@ import { body, engineCall, isolatedEnv, ROOT, tempDir, toolCall } from './helper
 
 const CLI = join(ROOT, 'engine', 'src', 'cli.ts')
 const OWNER = 'project-alpha-1a2b'
-const WRITE_ROUTES = ['/api/memory/create', '/api/memory/update', '/api/memory/retire', '/api/memory/restore']
+const WRITE_ROUTES = ['/api/memory/create', '/api/memory/update', '/api/memory/retire', '/api/memory/restore', '/api/vocabulary/admit', '/api/vocabulary/alias']
 const AWS_KEY = 'AKIAABCDEFGHIJKLMNOP'
 
 /** Runs with a temp HOME and embeddings off for the whole describe; restores both afterwards. */
@@ -148,8 +150,8 @@ describe('CRUDX.1 and CRUDX.2: write routes on a real store', () => {
       const big = 'y'.repeat(MAX_WRITE_BODY_BYTES + 1)
       expect((await send('/api/memory/create', { owner: 'global', content: big, kind: 'fact' })).status).toBe(413)
       expect((await send('/api/memory/update', { memory_id: other, content: big })).status).toBe(413)
-      // retire, restore and forget stay at 4096 bytes: a body of 5000 bytes is too large for each.
-      for (const path of ['/api/memory/retire', '/api/memory/restore', '/api/forget']) {
+      // retire, restore, forget and the vocabulary routes stay at 4096 bytes: a body of 5000 bytes is too large for each.
+      for (const path of ['/api/memory/retire', '/api/memory/restore', '/api/forget', '/api/vocabulary/admit', '/api/vocabulary/alias']) {
         expect((await send(path, { memory_id: other, pad: 'z'.repeat(5000) })).status).toBe(413)
       }
       expect(rowOf(store, other)).not.toBeNull()
@@ -618,5 +620,148 @@ for (const line of lines) {
     } finally {
       writeConfig(root, { 'guard.nearDuplicate': null })
     }
+  })
+})
+
+// CRUDX.4: the vocabulary routes. bin/vocab.ts is the one writer of <root>/vocabulary.json; the routes call its admit
+// and alias under the usual guards, and GET reads the file.
+describe('CRUDX.4: GET /api/vocabulary and POST /api/vocabulary/admit and /alias', () => {
+  const temp = tempDir('crud-vocab')
+  const store = join(temp.dir, 'store')
+  const root = join(temp.dir, 'root')
+  const home = useTempHome()
+  let started: Started
+  let url = ''
+
+  const send = (path: string, payload: unknown) =>
+    fetch(`${url}${path}`, { method: 'POST', headers: { Authorization: `Bearer ${started.token}`, 'Content-Type': 'application/json', Origin: url }, body: typeof payload === 'string' ? payload : JSON.stringify(payload) })
+  const post = async (path: string, payload: unknown) => {
+    const response = await send(path, payload)
+    return { status: response.status, json: (await response.json()) as Row }
+  }
+  const list = async () => {
+    const response = await fetch(`${url}/api/vocabulary`, { headers: { Authorization: `Bearer ${started.token}` } })
+    return { status: response.status, json: (await response.json()) as Row }
+  }
+  const tag = (reply: Row, name: string) => (reply.tags as Row[]).find(entry => entry.tag === name)
+  const fileText = () => readFileSync(join(root, 'vocabulary.json'), 'utf8')
+
+  beforeAll(async () => {
+    home.enter()
+    mkdirSync(store, { recursive: true })
+    await seed(store, OWNER, 'The alpha service keeps its settings in a TOML file', { memory_type: 'fact' })
+    started = await startServer({ root, store, cli: CLI, activityLog: '', pluginRoot: ROOT })
+    url = `http://127.0.0.1:${started.port}`
+  }, 120_000)
+
+  afterAll(() => {
+    started?.stop()
+    home.leave()
+    temp.dispose()
+  })
+
+  test('GET is token-guarded and GET only; with no vocabulary file it answers empty lists', async () => {
+    expect((await fetch(`${url}/api/vocabulary`)).status).toBe(401)
+    expect((await fetch(`${url}/api/vocabulary`, { method: 'POST', headers: { Authorization: `Bearer ${started.token}`, Origin: url, 'Content-Type': 'application/json' }, body: '{}' })).status).toBe(405)
+    expect(await list()).toEqual({ status: 200, json: { exists: false, tags: [], candidates: [] } })
+  })
+
+  test('the POSTs say there is no vocabulary yet (409) and write nothing while the file is missing', async () => {
+    expect((await post('/api/vocabulary/admit', { tag: 'rust' })).status).toBe(409)
+    expect((await post('/api/vocabulary/alias', { from: 'rs', to: 'rust' })).status).toBe(409)
+    expect(existsSync(join(root, 'vocabulary.json'))).toBe(false)
+  })
+
+  describe('with a vocabulary file', () => {
+    beforeAll(() => {
+      mkdirSync(root, { recursive: true })
+      // bin/vocab.ts writes the file: an empty vocabulary, two candidates seen once and once
+      writeFileSync(join(root, 'vocabulary.json'), '{"version":1,"tags":{},"candidates":{}}\n', { mode: 0o600 })
+      recordCandidates(root, ['spike-topic', 'agent:newbie'])
+    })
+
+    test('GET lists the tags and candidates the file holds', async () => {
+      const { status, json } = await list()
+      expect(status).toBe(200)
+      expect(json.exists).toBe(true)
+      expect(json.tags).toEqual([])
+      expect((json.candidates as Row[]).map(entry => [entry.tag, entry.count]).sort()).toEqual([['agent:newbie', 1], ['spike-topic', 1]])
+      expect(Object.keys(json.candidates[0]).sort()).toEqual(['count', 'firstSeen', 'tag'])
+      // the file's path is not part of the reply
+      expect(JSON.stringify(json)).not.toContain(root)
+    })
+
+    test('400 for a bad body, a bad format or a bad description; nothing is written', async () => {
+      const before = fileText()
+      expect((await send('/api/vocabulary/admit', '{nope')).status).toBe(400)
+      expect((await post('/api/vocabulary/admit', {})).status).toBe(400)
+      expect((await post('/api/vocabulary/admit', { tag: 7 })).status).toBe(400)
+      expect((await post('/api/vocabulary/admit', { tag: '!!!' })).json.error).toMatch(/not a usable tag/)
+      expect((await post('/api/vocabulary/admit', { tag: 'x'.repeat(201) })).status).toBe(400)
+      expect((await post('/api/vocabulary/admit', { tag: 'rust', extra: 1 })).json.error).toMatch(/unexpected field: extra/)
+      expect((await post('/api/vocabulary/admit', { tag: 'rust', description: 4 })).status).toBe(400)
+      expect((await post('/api/vocabulary/admit', { tag: 'rust', description: 'a\nb' })).status).toBe(400)
+      expect((await post('/api/vocabulary/admit', { tag: 'rust', description: 'd'.repeat(201) })).status).toBe(400)
+      expect((await send('/api/vocabulary/alias', '{nope')).status).toBe(400)
+      expect((await post('/api/vocabulary/alias', { from: 'rs' })).status).toBe(400)
+      expect((await post('/api/vocabulary/alias', { from: '???', to: 'rust' })).json.error).toMatch(/from is not a usable tag/)
+      expect((await post('/api/vocabulary/alias', { from: 'rs', to: '???' })).json.error).toMatch(/to is not a usable tag/)
+      expect(fileText()).toBe(before)
+    })
+
+    test('admit: a tag is normalised and kept with its description; a candidate leaves the candidates; admitting again changes nothing', async () => {
+      const entity = await post('/api/vocabulary/admit', { tag: 'Entity:Rohit Sharma', description: 'the person' })
+      expect(entity).toEqual({ status: 200, json: { tag: 'entity:rohit-sharma', status: 'admitted' } })
+      expect(await post('/api/vocabulary/admit', { tag: 'Spike Topic' })).toEqual({ status: 200, json: { tag: 'spike-topic', status: 'admitted' } })
+      const after = (await list()).json
+      expect(tag(after, 'entity:rohit-sharma')).toMatchObject({ ns: 'entity', description: 'the person', admitted: 'manual', aliases: [] })
+      expect(tag(after, 'spike-topic')).toMatchObject({ ns: null, admitted: 'manual' })
+      expect((after.candidates as Row[]).map(entry => entry.tag)).toEqual(['agent:newbie'])
+      const text = fileText()
+      expect(await post('/api/vocabulary/admit', { tag: 'spike-topic' })).toEqual({ status: 200, json: { tag: 'spike-topic', status: 'already admitted' } })
+      expect(fileText()).toBe(text)
+      // the file stays owner-only
+      expect(statSync(join(root, 'vocabulary.json')).mode & 0o777).toBe(0o600)
+    })
+
+    test('alias: a spelling folds into an admitted tag, and a memory saved with that spelling gets the tag', async () => {
+      expect((await post('/api/vocabulary/admit', { tag: 'kubernetes' })).status).toBe(200)
+      expect(await post('/api/vocabulary/alias', { from: 'K8s', to: 'Kubernetes' })).toEqual({ status: 200, json: { from: 'k8s', to: 'kubernetes' } })
+      expect(tag((await list()).json, 'kubernetes')!.aliases).toEqual(['k8s'])
+      const saved = await post('/api/memory/create', { owner: OWNER, content: 'The alpha cluster runs on the managed service', kind: 'fact', tags: ['K8s', 'rohit'] })
+      expect(saved.status).toBe(200)
+      const db = new Database(join(store, 'mnemopi.db'), { readonly: true })
+      try {
+        const row = db.query('SELECT metadata_json FROM working_memory WHERE id = ?').get(saved.json.memory_id) as Row
+        expect(JSON.parse(row.metadata_json).tags).toEqual(['kubernetes', 'rohit'])
+      } finally {
+        db.close()
+      }
+    })
+
+    test('409 for a change the vocabulary does not allow; the file is unchanged', async () => {
+      const text = fileText()
+      // not admitted, itself, an admitted tag as the spelling, an alias admitted as a tag
+      expect((await post('/api/vocabulary/alias', { from: 'go', to: 'golang' })).status).toBe(409)
+      expect((await post('/api/vocabulary/alias', { from: 'kubernetes', to: 'kubernetes' })).status).toBe(409)
+      expect((await post('/api/vocabulary/alias', { from: 'spike-topic', to: 'kubernetes' })).status).toBe(409)
+      const refused = await post('/api/vocabulary/admit', { tag: 'k8s' })
+      expect(refused.status).toBe(409)
+      expect(refused.json.error).toMatch(/alias of kubernetes/)
+      expect(fileText()).toBe(text)
+    })
+
+    test('a file that cannot be read is a 409 with a plain reason, not a 500', async () => {
+      const good = fileText()
+      writeFileSync(join(root, 'vocabulary.json'), '{not json')
+      try {
+        const reply = await list()
+        expect(reply.status).toBe(409)
+        expect(reply.json.error).toMatch(/cannot be read/)
+        expect((await post('/api/vocabulary/admit', { tag: 'rust' })).status).toBe(409)
+      } finally {
+        writeFileSync(join(root, 'vocabulary.json'), good, { mode: 0o600 })
+      }
+    })
   })
 })

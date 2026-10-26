@@ -307,6 +307,34 @@ function quoteName(name: string): string {
   return `"${name.replace(/"/g, '""')}"`
 }
 
+// The engine tables that stay empty by design (C10.5): only engine tools the plugin never exposes write them
+// (DESIGN.md, "Why the seven engine tables stay unused"). A fixed map of table to reason; the search indexes of the
+// episodes and facts tables are matched by prefix, as an FTS5 table brings shadow tables (fts_episodes_data, ...).
+const NOT_EXPOSED = 'the plugin does not expose the engine tool that fills it'
+export const UNUSED_BY_DESIGN: Readonly<Record<string, string>> = {
+  episodic_memory: `Filled only by the engine's sleep (consolidation) tool; ${NOT_EXPOSED}.`,
+  consolidation_log: `Filled only by the engine's sleep (consolidation) tool; ${NOT_EXPOSED}.`,
+  gists: `Filled only by the engine's sleep (consolidation) tool; ${NOT_EXPOSED}.`,
+  facts: `Filled only by the engine's sleep (consolidation) tool; ${NOT_EXPOSED}.`,
+  graph_edges: `Filled only by the engine's graph-link tool; ${NOT_EXPOSED}.`,
+  triples: `Filled only by the engine's triple tools; ${NOT_EXPOSED}. Triples carry no owner, so a forget would miss them.`,
+  scratchpad: `Filled only by the engine's scratchpad tools; ${NOT_EXPOSED}.`,
+}
+const UNUSED_INDEXES: readonly { prefix: string; reason: string }[] = [
+  { prefix: 'fts_episodes', reason: 'The search index of episodic_memory, which is unused by design.' },
+  { prefix: 'fts_facts', reason: 'The search index of facts, which is unused by design.' },
+]
+
+/** `unusedByDesign` for a store: the map's tables (and the search indexes' shadow tables) that exist in it, each with its reason. */
+export function unusedByDesign(present: ReadonlySet<string>): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const name of [...present].sort()) {
+    const reason = Object.hasOwn(UNUSED_BY_DESIGN, name) ? UNUSED_BY_DESIGN[name] : UNUSED_INDEXES.find(index => name === index.prefix || name.startsWith(`${index.prefix}_`))?.reason
+    if (reason !== undefined) out[name] = reason
+  }
+  return out
+}
+
 /**
  * GET /api/health-report: token-guarded and read-only.
  * Returns memory counts, per-project split, global count, never-recalled (newest 50),
@@ -392,6 +420,7 @@ export function healthReport(config: Config, store: Store, _engine: string | und
         daysCovered,
         sizes: { store: storeSize, log: logSize },
         tables: {},
+        unusedByDesign: {},
         coverage: {
           total: 0,
           tagged: 0,
@@ -560,6 +589,7 @@ export function healthReport(config: Config, store: Store, _engine: string | und
       daysCovered,
       sizes: { store: storeSize, log: logSize },
       tables,
+      unusedByDesign: unusedByDesign(present),
       coverage: {
         total,
         tagged,
@@ -617,6 +647,8 @@ type ListRow = {
   timestamp: string | null
   scope: string | null
   metadata_json: string | null
+  valid_until: string | null
+  superseded_by: string | null
 }
 
 /** GET /api/memories?owner=&sort=newest|recalled|never&q=&tag=&untagged=1&limit= */
@@ -656,16 +688,24 @@ export function listMemories(db: Database | null, params: URLSearchParams): Answ
   if (sort.where) where.push(sort.where)
   const clause = where.length > 0 ? `WHERE ${where.join(' AND ')}` : ''
   const total = (db.query(`SELECT COUNT(*) AS n FROM working_memory ${clause}`).get(...args) as { n: number }).n
+  // valid_until and superseded_by come with the engine's migration: a store that never ran it reads NULL, and every row is live.
+  const columns = tableColumns(db, 'working_memory')
+  const lifespan = `${columns.has('valid_until') ? 'valid_until' : 'NULL AS valid_until'}, ${columns.has('superseded_by') ? 'superseded_by' : 'NULL AS superseded_by'}`
   const rows = db
     .query(
       `SELECT id, substr(content, 1, ?) AS preview, length(content) AS length, session_id AS owner, importance,
-        recall_count, last_recalled, timestamp, scope, metadata_json
+        recall_count, last_recalled, timestamp, scope, metadata_json, ${lifespan}
        FROM working_memory ${clause} ORDER BY ${sort.order} LIMIT ?`,
     )
     .all(PREVIEW_CHARS, ...args, limit) as ListRow[]
-  const memories = rows.map(({ metadata_json, length, ...row }) => {
+  // Each row's state (live, retired, expired or lapsed): the audit trail is read only for the rows that are not live.
+  const now = new Date().toISOString()
+  const notLive = rows.filter(row => memoryState(row, [], now) !== 'live').map(row => row.id)
+  const trail = trailOf(db, notLive)
+  const memories = rows.map(({ metadata_json, length, valid_until, superseded_by, ...row }) => {
     const metadata = parseMetadata(metadata_json)
-    return { ...row, recall_count: row.recall_count ?? 0, truncated: length > PREVIEW_CHARS, metadata, tags: tagsOf(metadata) }
+    const state = memoryState({ valid_until, superseded_by }, trail.get(row.id) ?? [], now)
+    return { ...row, recall_count: row.recall_count ?? 0, truncated: length > PREVIEW_CHARS, metadata, tags: tagsOf(metadata), state }
   })
   return { status: 200, body: { total, count: memories.length, memories } }
 }
@@ -747,6 +787,174 @@ export function memoryState(
     if (entry.action === 'expire') return 'expired'
   }
   return row.superseded_by != null ? 'retired' : 'lapsed'
+}
+
+/** An audit row as the review shows it: the action, who did it and when (ISO), never any text. */
+export type TrailEntry = { action: string; validator: string; at: string | null }
+
+/**
+ * The audit rows of `ids`, newest first, in one query per 500 ids (a store without the trail: none). The state rule
+ * reads all of a row's rows; a view that shows them takes the first 3 (the trail keeps the newest 3 per memory).
+ */
+function trailOf(db: Database, ids: readonly string[]): Map<string, TrailEntry[]> {
+  const out = new Map<string, TrailEntry[]>()
+  for (let from = 0; from < ids.length; from += VECTOR_CHUNK) {
+    const chunk = ids.slice(from, from + VECTOR_CHUNK)
+    let rows: { id: string; action: string; validator: string; at: string | null }[]
+    try {
+      rows = db
+        .query(
+          `SELECT memory_id AS id, action, validator, validated_at AS at FROM memory_validations
+           WHERE memory_id IN (${chunk.map(() => '?').join(', ')}) ORDER BY validation_id DESC`,
+        )
+        .all(...chunk) as { id: string; action: string; validator: string; at: string | null }[]
+    } catch {
+      // the table is missing in a store older than the audit trail
+      return out
+    }
+    for (const row of rows) {
+      const ms = stampMs(row.at)
+      const list = out.get(row.id) ?? []
+      out.set(row.id, list)
+      list.push({ action: row.action, validator: row.validator, at: ms === null ? row.at : new Date(ms).toISOString() })
+    }
+  }
+  return out
+}
+
+// ---- The review queue (CRUDX.3): GET /api/review, read-only ----
+
+// At most this many candidates and this many not-live rows in one reply; `candidateTotal` and `notLiveTotal` say how many there are.
+export const REVIEW_LIMIT = 200
+// A memory nobody has recalled counts as stale after this many days.
+export const REVIEW_STALE_DAYS = 30
+// The near-duplicate pairs are looked for among this many of the newest live memories that have a vector.
+export const REVIEW_VECTOR_LIMIT = 1000
+// SUPERSEDED, HISTORICAL and DEPRECATED as capital words (a lowercase "historical" is ordinary prose), or 'possibly stale' in any case.
+const SUPERSEDED_CAPS = /\b(?:SUPERSEDED|HISTORICAL|DEPRECATED)\b/
+const POSSIBLY_STALE = /possibly stale/i
+
+export type ReviewCandidate = { id: string; owner: string; preview: string; reasons: string[] }
+export type ReviewNotLive = { id: string; owner: string; preview: string; state: MemoryState; since: string | null; history: TrailEntry[] }
+
+/** For each live memory with a vector, its closest other live memory at 'score' or more (cosine; vectors of the commonest model only). */
+function nearestPairs(db: Database, live: ReadonlySet<string>, score: number): Map<string, { other: string; score: number }> {
+  const best = new Map<string, { other: string; score: number }>()
+  try {
+    const index = readVectorIndex(db, REVIEW_VECTOR_LIMIT)
+    const vectors: { id: string; v: Float64Array }[] = []
+    for (const input of readVectorInputs(db, index.ids.filter(id => live.has(id)))) {
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(input.json)
+      } catch {
+        continue
+      }
+      if (!Array.isArray(parsed) || parsed.length === 0 || !parsed.every(n => typeof n === 'number' && Number.isFinite(n))) continue
+      const v = Float64Array.from(parsed as number[])
+      let norm = 0
+      for (const n of v) norm += n * n
+      if (norm === 0) continue
+      norm = Math.sqrt(norm)
+      for (let k = 0; k < v.length; k++) v[k] = v[k]! / norm
+      vectors.push({ id: input.id, v })
+    }
+    const size = vectors[0]?.v.length ?? 0
+    for (let i = 0; i < vectors.length; i++) {
+      const a = vectors[i]!
+      if (a.v.length !== size) continue
+      for (let j = i + 1; j < vectors.length; j++) {
+        const b = vectors[j]!
+        if (b.v.length !== size) continue
+        let dot = 0
+        for (let k = 0; k < size; k++) dot += a.v[k]! * b.v[k]!
+        if (dot < score) continue
+        for (const [from, to] of [[a.id, b.id], [b.id, a.id]] as const) {
+          const seen = best.get(from)
+          if (seen === undefined || dot > seen.score) best.set(from, { other: to, score: dot })
+        }
+      }
+    }
+  } catch {
+    // no vectors, or a table that cannot be read: the near-duplicate reason is simply absent
+  }
+  return best
+}
+
+/**
+ * GET /api/review: the live memories worth a second look, each with the reasons (never anything that changes a row),
+ * and the rows that are no longer live, each with its state, the date it stopped and its last audit rows. A pinned
+ * memory is never a candidate. Read-only on the read-only handle: nothing here touches recall_count.
+ */
+export function reviewReport(db: Database | null, now: string = new Date().toISOString()): Answer {
+  const empty = { candidates: [] as ReviewCandidate[], candidateTotal: 0, notLive: [] as ReviewNotLive[], notLiveTotal: 0 }
+  if (db === null) return { status: 200, body: empty }
+  const columns = tableColumns(db, 'working_memory')
+  if (!columns.has('content')) return { status: 200, body: empty }
+  const lifespan = `${columns.has('valid_until') ? 'valid_until' : 'NULL AS valid_until'}, ${columns.has('superseded_by') ? 'superseded_by' : 'NULL AS superseded_by'}`
+  const kind = columns.has('memory_type') ? 'memory_type' : 'NULL AS memory_type'
+  const rows = db
+    .query(
+      `SELECT id, session_id AS owner, substr(content, 1, 8000) AS text, recall_count, timestamp, metadata_json, ${kind}, ${lifespan}
+       FROM working_memory ORDER BY timestamp DESC, id`,
+    )
+    .all() as {
+    id: string
+    owner: string | null
+    text: string | null
+    recall_count: number | null
+    timestamp: string | null
+    metadata_json: string | null
+    memory_type: string | null
+    valid_until: string | null
+    superseded_by: string | null
+  }[]
+  const live = rows.filter(row => memoryState(row, [], now) === 'live')
+  const gone = rows.filter(row => memoryState(row, [], now) !== 'live')
+  const nearby = nearestPairs(db, new Set(live.map(row => row.id)), NEAR_DUPLICATE_SCORE)
+  const staleBefore = Date.parse(now) - REVIEW_STALE_DAYS * 86_400_000
+  const candidates: (ReviewCandidate & { created: number })[] = []
+  for (const row of live) {
+    const metadata = parseMetadata(row.metadata_json)
+    if (metadata?.pinned === true) continue
+    const text = row.text ?? ''
+    const reasons: string[] = []
+    if (SUPERSEDED_CAPS.test(text) || POSSIBLY_STALE.test(text)) reasons.push('marked superseded')
+    const near = nearby.get(row.id)
+    if (near !== undefined) reasons.push(`near-duplicate of ${near.other} (${near.score.toFixed(2)})`)
+    // G4's own test, so the review and the save guard agree on what a dated status note is (it leaves the kinds that are dated by nature alone).
+    if (admit({ content: text, kind: row.memory_type ?? undefined, origin: 'review' }, { chatter: 'warn' }).hits.some(hit => hit.rule === 'G4')) reasons.push('dated status note')
+    if (Array.isArray(metadata?.guard) && metadata.guard.length > 0) reasons.push('guard flag')
+    const created = stampMs(row.timestamp)
+    if ((row.recall_count ?? 0) === 0 && created !== null && created < staleBefore) reasons.push(`never recalled, older than ${REVIEW_STALE_DAYS} days`)
+    if (reasons.length > 0) candidates.push({ id: row.id, owner: row.owner ?? '', preview: Array.from(text).slice(0, PREVIEW_CHARS).join(''), reasons, created: created ?? 0 })
+  }
+  // The most reasons first, then the oldest.
+  candidates.sort((a, b) => b.reasons.length - a.reasons.length || a.created - b.created || (a.id < b.id ? -1 : 1))
+  const trail = trailOf(db, gone.map(row => row.id))
+  const notLive: (ReviewNotLive & { stopped: number })[] = gone.map(row => {
+    const history = trail.get(row.id) ?? []
+    const stopped = stampMs(row.valid_until) ?? stampMs(history[0]?.at) ?? 0
+    return {
+      id: row.id,
+      owner: row.owner ?? '',
+      preview: Array.from(row.text ?? '').slice(0, PREVIEW_CHARS).join(''),
+      state: memoryState(row, history, now),
+      since: stopped > 0 ? new Date(stopped).toISOString() : null,
+      history: history.slice(0, 3),
+      stopped,
+    }
+  })
+  notLive.sort((a, b) => b.stopped - a.stopped || (a.id < b.id ? -1 : 1))
+  return {
+    status: 200,
+    body: {
+      candidates: candidates.slice(0, REVIEW_LIMIT).map(({ created: _created, ...candidate }) => candidate),
+      candidateTotal: candidates.length,
+      notLive: notLive.slice(0, REVIEW_LIMIT).map(({ stopped: _stopped, ...row }) => row),
+      notLiveTotal: notLive.length,
+    },
+  }
 }
 
 // ---- Labels shared by the galaxy and the stats ----
@@ -2358,6 +2566,76 @@ async function restoreMemory(views: Views, text: string): Promise<Answer> {
   return { status: 502, body: { error: `${ENGINE_FAILED} Nothing was restored.` } }
 }
 
+// ---- The vocabulary (CRUDX.4): bin/vocab.ts is the one writer of <root>/vocabulary.json ----
+
+const NO_VOCABULARY = { status: 409, body: { error: 'There is no tag vocabulary yet. Run /mnemosyne-tags first to make one.' } }
+const vocabularyFileOf = (root: string) => join(root, VOCAB_FILE)
+// A description is a short plain line.
+export const VOCAB_DESCRIPTION_MAX = 200
+// The longest text a tag, a spelling or a description may be given before it is refused unread.
+const VOCAB_INPUT_MAX = 200
+// biome-ignore lint/suspicious/noControlCharactersInRegex: control characters are what it refuses
+const HAS_CONTROL = /[\u0000-\u001f\u007f-\u009f]/
+
+/** GET /api/vocabulary: the admitted tags and the candidates the file holds; empty (exists: false) while there is no file. */
+export function vocabularyList(root: string): Answer {
+  if (!existsSync(vocabularyFileOf(root))) return { status: 200, body: { exists: false, tags: [], candidates: [] } }
+  try {
+    const { tags, candidates } = listVocabulary(root)
+    return { status: 200, body: { exists: true, tags, candidates } }
+  } catch (err) {
+    return { status: 409, body: { error: `The tag vocabulary cannot be read: ${preview((err as Error).message)}` } }
+  }
+}
+
+// A tag or spelling out of a body field: its C6 form, or why it cannot be used.
+function vocabularyTag(value: unknown, field: string): { tag: string } | { problem: string } {
+  if (typeof value !== 'string' || value.length > VOCAB_INPUT_MAX) return { problem: `${field} must be a text of at most ${VOCAB_INPUT_MAX} characters` }
+  const tag = normalizeTag(value)
+  if (tag === undefined) return { problem: `${field} is not a usable tag: it needs a letter or digit (a tag is lowercase kebab-case, optionally entity:, agent: or asset:)` }
+  return { tag }
+}
+
+/** POST /api/vocabulary/admit {tag, description?}: bin/vocab.ts admit. A candidate becomes a tag; admitting a tag again changes nothing. */
+async function vocabularyAdmit(views: Views, text: string): Promise<Answer> {
+  const body = plainBody(text, ['tag', 'description'])
+  if (typeof body === 'string') return { status: 400, body: { error: body } }
+  const asked = vocabularyTag(body.tag, 'tag')
+  if ('problem' in asked) return { status: 400, body: { error: asked.problem } }
+  const description = body.description ?? ''
+  if (typeof description !== 'string' || description.length > VOCAB_DESCRIPTION_MAX || HAS_CONTROL.test(description)) {
+    return { status: 400, body: { error: `description must be one line of at most ${VOCAB_DESCRIPTION_MAX} characters` } }
+  }
+  if (!existsSync(vocabularyFileOf(views.config.root))) return NO_VOCABULARY
+  // One write at a time: the file is read, changed and moved over the old one.
+  return views.writes.run(async () => {
+    try {
+      const done = admitTag(views.config.root, asked.tag, description, views.config.store)
+      return { status: 200, body: done }
+    } catch (err) {
+      return { status: 409, body: { error: preview((err as Error).message) } }
+    }
+  })
+}
+
+/** POST /api/vocabulary/alias {from, to}: bin/vocab.ts alias. `from` becomes a spelling that folds into the admitted tag `to`. */
+async function vocabularyAlias(views: Views, text: string): Promise<Answer> {
+  const body = plainBody(text, ['from', 'to'])
+  if (typeof body === 'string') return { status: 400, body: { error: body } }
+  const from = vocabularyTag(body.from, 'from')
+  if ('problem' in from) return { status: 400, body: { error: from.problem } }
+  const to = vocabularyTag(body.to, 'to')
+  if ('problem' in to) return { status: 400, body: { error: to.problem } }
+  if (!existsSync(vocabularyFileOf(views.config.root))) return NO_VOCABULARY
+  return views.writes.run(async () => {
+    try {
+      return { status: 200, body: aliasTag(views.config.root, from.tag, to.tag) }
+    } catch (err) {
+      return { status: 409, body: { error: preview((err as Error).message) } }
+    }
+  })
+}
+
 export type Started = { port: number; token: string; stop: () => void }
 
 // Starts the HTTP server; the caller writes ui.json and the ready line.
@@ -2512,6 +2790,8 @@ export async function startServer(config: Config, options: ServerOptions = {}): 
     if (path === '/api/health') return get(() => ({ status: 200, body: { ...health(config, store, engine, plugin), ...(dev ? { dev: true } : {}) } }))
     if (path === '/api/health-report') return get(() => healthReport(config, store, engine))
     if (path === '/api/knowledge') return get(() => knowledgeList((store.db ??= openStore(config.store))))
+    if (path === '/api/review') return get(() => reviewReport((store.db ??= openStore(config.store))))
+    if (path === '/api/vocabulary') return get(() => vocabularyList(config.root))
     if (path === '/api/memories') {
       return get(() => listMemories((store.db ??= openStore(config.store)), url.searchParams))
     }
@@ -2565,6 +2845,8 @@ export async function startServer(config: Config, options: ServerOptions = {}): 
     if (path === '/api/memory/update') return post(request, updateMemory, MAX_WRITE_BODY_BYTES)
     if (path === '/api/memory/retire') return post(request, retireMemory)
     if (path === '/api/memory/restore') return post(request, restoreMemory)
+    if (path === '/api/vocabulary/admit') return post(request, vocabularyAdmit)
+    if (path === '/api/vocabulary/alias') return post(request, vocabularyAlias)
     // These wait on the claude CLI (20 s) or a backup (120 s), longer than Bun's 10 s idle timeout,
     // so a cut connection would leave the write running and `busy` set.
     if (path === '/api/settings') {
