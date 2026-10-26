@@ -394,6 +394,20 @@ describe('POST /api/settings/update: plugin options go through the CLI only', ()
     expect((await world.post('/api/settings/update', { id: 'memoryDir', value: 'relative/path', confirm: 'relative/path' })).status).toBe(400)
     const inside = join(world.root, 'engine', 'x')
     expect((await world.post('/api/settings/update', { id: 'memoryDir', value: inside, confirm: inside })).status).toBe(400)
+    // Everything hooks/register.ts paths() refuses is refused here too, read against the temp HOME.
+    const refusedPaths = [
+      join(world.home, '.omp'),
+      join(world.home, '.omp', 'x'),
+      '~/.omp/x',
+      '~/.claude/mnemosyne/Engine/s',
+      '~/.claude/mnemosyne/engine.next/s',
+      join(world.root, 'ENGINE.old', 's'),
+    ]
+    for (const value of refusedPaths) {
+      const refused = await world.post('/api/settings/update', { id: 'memoryDir', value, confirm: value })
+      expect([value, refused.status]).toEqual([value, 400])
+    }
+    expect(writes(world).length).toBe(before + 1)
     const dir = join(world.dir, 'elsewhere')
     const moved = await world.post('/api/settings/update', { id: 'memoryDir', value: dir, confirm: dir })
     expect(moved.status).toBe(200)
@@ -402,10 +416,12 @@ describe('POST /api/settings/update: plugin options go through the CLI only', ()
 
   test('a CLI that refuses is reported, not hidden', async () => {
     const world = await boot({ mode: 'refuse' })
+    const seeded = readFileSync(world.settingsFile, 'utf8')
     const result = await world.post('/api/settings/update', { id: 'guardMode', value: 'warn' })
     expect(result.status).toBe(502)
     expect(result.body.error).toContain('refused')
     expect(existsSync(world.activity)).toBe(false)
+    expect(readFileSync(world.settingsFile, 'utf8')).toBe(seeded)
   })
 
   test('a write the read-back does not show is a mismatch, not a success', async () => {
@@ -428,7 +444,7 @@ describe('POST /api/settings/update: plugin options go through the CLI only', ()
       expect(call.argv.slice(0, 3)).toEqual(['plugin', 'configure', PLUGIN_ID])
       expect(call.argv.length).toBe(4)
     }
-    expect(calls.every(call => call.home !== process.env.HOME || process.env.HOME === world.home)).toBe(true)
+    expect(calls.every(call => call.argv.every(arg => !arg.includes('settings.json')))).toBe(true)
   })
 })
 

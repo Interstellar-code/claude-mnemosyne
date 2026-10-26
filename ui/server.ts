@@ -2290,10 +2290,24 @@ export async function startServer(config: Config, options: ServerOptions = {}): 
     }
     if (path === '/api/search') return post(request, search)
     if (path === '/api/forget') return post(request, forget)
-    if (path === '/api/settings') return get(() => settings.read())
-    if (path === '/api/settings/update') return post(request, (_views, text) => settings.update(text))
-    if (path === '/api/settings/reset') return post(request, (_views, text) => settings.reset(text))
-    if (path === '/api/backup') return post(request, (_views, text) => settings.backup(text))
+    // These wait on the claude CLI (20 s) or a backup (120 s), longer than Bun's 10 s idle timeout,
+    // so a cut connection would leave the write running and `busy` set.
+    if (path === '/api/settings') {
+      server.timeout(request, 0)
+      return get(() => settings.read())
+    }
+    if (path === '/api/settings/update') {
+      server.timeout(request, 0)
+      return post(request, (_views, text) => settings.update(text))
+    }
+    if (path === '/api/settings/reset') {
+      server.timeout(request, 0)
+      return post(request, (_views, text) => settings.reset(text))
+    }
+    if (path === '/api/backup') {
+      server.timeout(request, 0)
+      return post(request, (_views, text) => settings.backup(text))
+    }
     if (dev && path === '/api/dev-stamp') return get(() => ({ status: 200, body: { stamp: devStamp(startedAt) } }))
     return notFound()
   }

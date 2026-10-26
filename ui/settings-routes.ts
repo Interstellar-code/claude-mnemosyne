@@ -238,15 +238,19 @@ function written(field: OptionField, value: unknown): string {
   return String(value)
 }
 
-/** memoryDir's own rules (hooks/register.ts paths()): absolute or ~/..., no control characters, not inside the engine folders. */
-function memoryDirProblem(value: string, root: string): string | undefined {
-  if (!(value.startsWith('/') || value.startsWith('~/') || /^[A-Za-z]:[\\/]/.test(value))) return 'must be an absolute path or start with ~/'
+/** memoryDir's own rules, rule for rule as hooks/register.ts paths() (a value it refuses throws on every save and recall): absolute or ~/..., no control characters, not inside ~/.omp or the engine folders (case ignored, as the macOS and Windows file systems do). */
+function memoryDirProblem(value: string, root: string, home: string): string | undefined {
+  if (!(value.startsWith('/') || value === '~' || value.startsWith('~/') || /^[A-Za-z]:[\\/]/.test(value))) return 'must be an absolute path or start with ~/'
   if (process.platform === 'win32' && /["%]/.test(value)) return 'must not hold " or %'
-  if (value.startsWith('/') || value.startsWith('~/')) {
-    const full = resolvePath(value.startsWith('~/') ? join(process.env.HOME ?? '', value.slice(2)) : value)
-    for (const name of ['engine', 'engine.next', 'engine.old']) {
-      const folder = resolvePath(root, name)
-      if (full === folder || full.startsWith(`${folder}${sep}`)) return 'must not be inside the engine folder'
+  if (value.startsWith('/') || value === '~' || value.startsWith('~/')) {
+    const full = resolvePath(value === '~' || value.startsWith('~/') ? join(home, value.slice(2)) : value).toLowerCase()
+    const inside = (folder: string) => full === folder || full.startsWith(`${folder}${sep}`)
+    if (inside(resolvePath(home, '.omp').toLowerCase())) return 'must not be inside ~/.omp'
+    // The configured root and the default root under the home (what paths() checks) are both guarded.
+    for (const base of [root, join(home, `.${'claude'}`, 'mnemosyne')]) {
+      for (const name of ['engine', 'engine.next', 'engine.old']) {
+        if (inside(resolvePath(base, name).toLowerCase())) return 'must not be inside the engine folder'
+      }
     }
   }
   return undefined
@@ -255,7 +259,7 @@ function memoryDirProblem(value: string, root: string): string | undefined {
 type Prepared = { ok: true; value: unknown } | { ok: false; status: number; error: string }
 
 /** Checks a new value (or list change) for an option against the schema; the page's value (string, boolean, number or list). */
-function prepareOption(field: OptionField, current: unknown, body: { value?: unknown; add?: unknown; remove?: unknown }, has: { value: boolean; add: boolean; remove: boolean }, root: string): Prepared {
+function prepareOption(field: OptionField, current: unknown, body: { value?: unknown; add?: unknown; remove?: unknown }, has: { value: boolean; add: boolean; remove: boolean }, root: string, home: string): Prepared {
   const refuse = (error: string): Prepared => ({ ok: false, status: 400, error: `${field.key}: ${error}` })
   const wantsList = has.add || has.remove
   if (wantsList && !field.multiple) return refuse('is not a list; send value')
@@ -287,7 +291,7 @@ function prepareOption(field: OptionField, current: unknown, body: { value?: unk
   if (field.options !== undefined) return field.options.includes(text) ? { ok: true, value: text } : refuse(`must be one of ${field.options.join(', ')}`)
   if (Array.from(text).length > OPTION_TEXT_MAX || CONTROL.test(text)) return refuse(`must be one line of at most ${OPTION_TEXT_MAX} characters`)
   if (field.key === 'memoryDir') {
-    const problem = memoryDirProblem(text, root)
+    const problem = memoryDirProblem(text, root, home)
     if (problem !== undefined) return refuse(problem)
   }
   return { ok: true, value: text }
@@ -561,7 +565,7 @@ export function settingsRoutes(config: SettingsConfig, log: (fields: ActivityFie
     if (reset) {
       next = state.default
     } else {
-      const prepared = prepareOption(field, state.value, body, has, config.root)
+      const prepared = prepareOption(field, state.value, body, has, config.root, env.HOME ?? '')
       if (!prepared.ok) return bad(prepared.error, prepared.status)
       next = prepared.value
     }
