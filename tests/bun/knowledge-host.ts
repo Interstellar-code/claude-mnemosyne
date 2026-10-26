@@ -57,18 +57,22 @@ export type HostOptions = {
   engineBuild?: string
   /** Variables laid over the parent environment of every child process (a hostile shell). */
   parentEnv?: Record<string, string>
+  /** A second plugin instance on the same HOME, store and engine as this host (two live sessions of one user). */
+  sharedWith?: { home: string }
 }
 
 export type Host = Awaited<ReturnType<typeof makeHost>>
 
 export async function makeHost(opts: HostOptions = {}) {
-  const home = mkdtempSync(join(tmpdir(), 'mnemosyne-host-'))
+  const home = opts.sharedWith?.home ?? mkdtempSync(join(tmpdir(), 'mnemosyne-host-'))
   const root = join(home, '.claude', 'mnemosyne')
   const store = join(root, 'store')
   const pendingDir = join(root, 'knowledge-pending')
   const scope = join(root, 'engine', 'node_modules', '@oh-my-pi')
   mkdirSync(scope, { recursive: true })
-  if (opts.engineBuild === undefined) {
+  if (opts.sharedWith !== undefined) {
+    // the engine of the host that owns this HOME
+  } else if (opts.engineBuild === undefined) {
     symlinkSync(join(ROOT, 'engine'), join(scope, 'pi-mnemopi'), 'dir')
   } else {
     mkdirSync(join(scope, 'pi-mnemopi', 'src'), { recursive: true })
@@ -76,6 +80,8 @@ export async function makeHost(opts: HostOptions = {}) {
     writeFileSync(join(scope, 'pi-mnemopi', 'src', 'cli.ts'), '')
   }
 
+  // The running session's id: a spec changes it to play a /clear (the old id ends, the process goes on under a new one).
+  let sessionId = 's1'
   const runs: Ran[] = []
   const model: { request: ModelRequest; startedAt: number; endedAt?: number }[] = []
   const handlers: Handler[] = []
@@ -103,7 +109,7 @@ export async function makeHost(opts: HostOptions = {}) {
     atoms: new Map<string, unknown>(),
     plugin: { root: ROOT, name: 'mnemosyne' },
     env: { get: async (name: string) => env[name] ?? '' },
-    session: { id: async () => 's1', repo: async () => ({ root: '/work/My Repo' }), cwd: async () => '/work/My Repo' },
+    session: { id: async () => sessionId, repo: async () => ({ root: '/work/My Repo' }), cwd: async () => '/work/My Repo' },
     fs: {
       read: async (path: string) => readFileSync(path, 'utf8'),
       stat: async (path: string) => {
@@ -138,7 +144,8 @@ export async function makeHost(opts: HostOptions = {}) {
     handlers.push({ event, filter: typeof a === 'function' ? undefined : (a as Record<string, unknown>), fn })
     return { catch: () => undefined }
   }
-  registerModule.register(on, opts.options ?? {})
+  const pluginOptions = opts.options ?? {}
+  registerModule.register(on, pluginOptions)
 
   const find = (event: string, match?: (filter: Record<string, unknown> | undefined) => boolean) => {
     const found = handlers.find(h => h.event === event && (match === undefined || match(h.filter)))
@@ -155,7 +162,14 @@ export async function makeHost(opts: HostOptions = {}) {
     pendingDir,
     runs,
     model,
-    options: opts.options ?? {},
+    options: pluginOptions,
+    /**
+     * Resolves when the background work the hooks started (a save's extraction, the session summaries, the sweep) is over.
+     * A spec awaits this instead of sleeping, so it never reads the store or the files while that work is still changing them.
+     */
+    settled: async () => {
+      await (registerModule.backgroundSettled as (options: Record<string, unknown>) => Promise<void>)(pluginOptions)
+    },
     /** A memory tool call as the host delivers it. */
     tool: async (name: string, input: Record<string, unknown> = {}, extra: Record<string, unknown> = {}) => {
       const fn = find('tool.call')
@@ -169,6 +183,20 @@ export async function makeHost(opts: HostOptions = {}) {
     turn: async (extra: Record<string, unknown> = {}) => {
       const fn = find('turn.complete')
       return fn($, { answer: 'done', turnId: 't1', durationMs: 1, isAborted: false, ...extra }, passThrough())
+    },
+    /** The session id the hooks see from now on. */
+    setSession: (id: string) => {
+      sessionId = id
+    },
+    /** A session.end for `id` (a /clear is reason 'clear': the end of the old session, no start of the new one). */
+    sessionEnd: async (id: string, reason = 'other') => {
+      const fn = find('session.end')
+      return fn($, { sessionId: id, reason, resume: { id } }, passThrough())
+    },
+    /** A session.start, as the host delivers it. */
+    sessionStart: async () => {
+      const fn = find('session.start')
+      return fn($, { cwd: '/work/My Repo', surface: null, isInteractive: false }, passThrough())
     },
     /** A slash command: /mnemosyne-knowledge [apply]. */
     command: async (command: string, args = '', signal?: AbortSignal) => {

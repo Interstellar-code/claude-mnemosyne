@@ -74,6 +74,27 @@ import {
 import type { ChunkEntry, DocRead, ExistingChunk, SessionCandidate, SessionRead } from './import'
 import { expiresInDaysProblem, KIND_NAMES, kindProblem, missingKindMessage, validUntilFor } from './kinds'
 import { CONFIG_FILE, parseConfig, TOOL_NAMES } from './settings'
+import {
+  BLOCK_PINNED_MAX,
+  buildSessionBlock,
+  cwdForFolder,
+  expireSetting,
+  parseBlockRead,
+  parsePending,
+  parseSummary,
+  pendingSession,
+  SUMMARY_CALL_TIMEOUT_MS,
+  SUMMARY_MAX_PER_RUN,
+  SUMMARY_MAX_TOKENS,
+  SUMMARY_MIN_TURNS,
+  SUMMARY_VALID_DAYS,
+  sessionSummaryOn,
+  summaryPrompt,
+  summarySystemPrompt,
+  transcriptFolder,
+  transcriptPath,
+} from './session'
+import type { PendingSession } from './session'
 import type { ResolvedSettings, ToolName } from './settings'
 import { cleanTags } from './tags'
 import type { TagRules } from './tags'
@@ -872,8 +893,8 @@ async function backupFirst($: EngineInterface, options: PluginOptions, command: 
 async function memoriesCli($: EngineInterface, options: PluginOptions, args: readonly string[], stdin?: string, timeoutMs = MEMORIES_TIMEOUT_MS) {
   const { store } = await paths($, options)
   // --store goes first, before the command: the script refuses a second one, so no id can redirect the read.
-  // save and pending name their own folder (the data root) and refuse --store.
-  const ran = await $.process.run(['bun', `${slashes($.plugin.root)}/bin/memories.ts`, ...(args[0] === 'save' || args[0] === 'pending' ? [] : ['--store', store]), ...args], {
+  // save, pending, session-pending and sweep-claim name their own folder (the data root) and refuse --store.
+  const ran = await $.process.run(['bun', `${slashes($.plugin.root)}/bin/memories.ts`, ...(args[0] === 'save' || args[0] === 'pending' || args[0] === 'session-pending' || args[0] === 'sweep-claim' ? [] : ['--store', store]), ...args], {
     ...(stdin === undefined ? {} : { stdin }),
     timeoutMs,
   })
@@ -1681,6 +1702,249 @@ export async function importApply($: EngineInterface, options: PluginOptions, co
   ].join('\n')
 }
 
+// ---- SESSION: the last session's summary, the first-prompt block and the unused-expiry sweep (hooks/session.ts, bin/memories.ts) ----
+
+// A look at the store or a marker is quick; the sweep backs the store up (a VACUUM INTO copy) before it changes anything, so it gets the backup's time.
+const SESSION_CLI_TIMEOUT_MS = 20_000
+const SWEEP_TIMEOUT_MS = BACKUP_TIMEOUT_MS + 120_000
+// session.end shares one short wall-clock bound with every other hook, so the marker gets a small part of it.
+const MARKER_TIMEOUT_MS = 1_000
+// The first prompt waits for the block's store read at most this long: a stuck read costs the prompt a few seconds, never the 20 s of a slow command.
+const BLOCK_TIMEOUT_MS = 3_000
+
+// Per plugin instance: whether a sweep or a summary run is going now, so two triggers close together run one.
+const running = new WeakMap<object, { sweep: boolean; summaries: boolean }>()
+const runningOf = (options: PluginOptions) => {
+  const found = running.get(options) ?? { sweep: false, summaries: false }
+  running.set(options, found)
+  return found
+}
+
+// Per plugin instance: the work that goes on after a hook has answered (a summary run, the sweep, a save's extraction). Nothing
+// reads this while the plugin runs; a spec waits on `backgroundSettled` instead of sleeping and hoping the work is over.
+const background = new WeakMap<object, Set<Promise<unknown>>>()
+function track<T>(options: PluginOptions, work: Promise<T>): Promise<T> {
+  const set = background.get(options) ?? new Set<Promise<unknown>>()
+  background.set(options, set)
+  const settled = work.then(
+    () => undefined,
+    () => undefined,
+  )
+  set.add(settled)
+  void settled.then(() => set.delete(settled))
+  return work
+}
+
+/** For specs: resolves when the background work of this plugin instance is over, including work that started while it waited. */
+export async function backgroundSettled(options: PluginOptions): Promise<void> {
+  for (;;) {
+    const set = background.get(options)
+    if (set === undefined || set.size === 0) return
+    await Promise.all([...set])
+  }
+}
+
+/**
+ * SESSION.1: session.end leaves a marker for the session that ended: its id, its owner and where its transcript is, found as
+ * IMPORT.0 recorded (<home>/.claude/projects/<slug of the working folder>/<id>.jsonl). No text, no model call, so it is quick on
+ * exit. Only with the sessionSummary option on. Never throws.
+ */
+async function leaveSessionMarker($: EngineInterface, options: PluginOptions, sessionId: string) {
+  try {
+    if (!sessionSummaryOn(options)) return
+    const [{ root, home }, me, cwd] = await Promise.all([paths($, options), owner($, options), $.session.cwd()])
+    const entry = pendingSession(sessionId, me, transcriptPath(home, slashes(cwd), sessionId))
+    if (entry === undefined) return
+    await memoriesCli($, options, ['session-pending', 'write', root], JSON.stringify(entry), MARKER_TIMEOUT_MS)
+  } catch {
+    // a marker is best effort: the session ends either way
+  }
+}
+
+/**
+ * SESSION.2: the first-prompt block, from the store only (a read-only look through bin/memories.ts: no model, no engine
+ * process, no network): the newest live session summary, then pinned memories. The settings decide how many pins: never
+ * more than the first-prompt count (R3). Never throws; nothing to show gives undefined.
+ */
+async function firstPromptBlock($: EngineInterface, options: PluginOptions, settings: ResolvedSettings) {
+  try {
+    const pins = Math.min(BLOCK_PINNED_MAX, settings.recall.firstPromptCount)
+    const read = parseBlockRead(await memoriesCli($, options, ['first-prompt', await owner($, options), String(pins)], undefined, BLOCK_TIMEOUT_MS))
+    return buildSessionBlock(read, pins)
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * SESSION.1: finishes the pending session summaries, in the background after a session's first reply. For each marker (at most
+ * 3 a run, never the running session): a session already summarised, with no transcript or with too little said is dropped;
+ * otherwise one Haiku call (the extractionModel) turns the redacted conversation into a note of at most 600 characters, which
+ * goes through admit() and is saved as kind 'event', source 'import:session', expiring in 30 days, with metadata.session. A lost
+ * call or save leaves the marker for the next first prompt. Memory text is never logged. Never throws.
+ */
+async function finishSessionSummaries($: EngineInterface, options: PluginOptions) {
+  const mine = runningOf(options)
+  if (mine.summaries) return
+  mine.summaries = true
+  try {
+    const model = extractionModelOf(options)
+    if (!sessionSummaryOn(options) || extractionOff(model)) return
+    if (!(await isInstalled($, options)) || !(await isCurrent($, options))) return
+    const { root, home } = await paths($, options)
+    const current = await $.session.id().catch(() => undefined)
+    const pending = (JSON.parse(await memoriesCli($, options, ['session-pending', 'list', root], undefined, SESSION_CLI_TIMEOUT_MS)) as unknown[])
+      .map(item => parsePending(JSON.stringify(item)))
+      .filter((entry): entry is PendingSession => entry !== undefined && entry.sessionId !== current)
+      .slice(0, SUMMARY_MAX_PER_RUN)
+    if (pending.length === 0) return
+    const settings = await settingsFor($, options)
+    const done = new Set((JSON.parse(await memoriesCli($, options, ['summarised', ...pending.map(entry => entry.sessionId)], undefined, SESSION_CLI_TIMEOUT_MS)) as { done: string[] }).done)
+    const drop = (entry: PendingSession) => memoriesCli($, options, ['session-pending', 'remove', root, entry.sessionId], undefined, SESSION_CLI_TIMEOUT_MS).catch(() => undefined)
+    const release = (entry: PendingSession) => memoriesCli($, options, ['session-pending', 'release', root, entry.sessionId], undefined, SESSION_CLI_TIMEOUT_MS).catch(() => undefined)
+    // One rename of the marker takes it: another live session that listed the same marker gets false and leaves it to the winner.
+    const claim = (entry: PendingSession) =>
+      memoriesCli($, options, ['session-pending', 'claim', root, entry.sessionId], undefined, SESSION_CLI_TIMEOUT_MS).then(
+        out => (JSON.parse(out) as { claimed?: unknown }).claimed === true,
+        () => false,
+      )
+    const never = new AbortController().signal
+    for (const entry of pending) {
+      if (!(await claim(entry))) continue
+      // A claimed marker that is not finished goes back, so the next first prompt tries again.
+      let finished = false
+      try {
+        const folder = transcriptFolder(entry, home)
+        if (done.has(entry.sessionId) || folder === undefined) {
+          finished = true
+          await drop(entry)
+          continue
+        }
+        let read: SessionRead
+        try {
+          read = JSON.parse(await importCli($, options, ['session', '--projects', `${home}/.claude/projects`, '--cwd', cwdForFolder(folder), entry.sessionId])) as SessionRead
+        } catch (err) {
+          // No transcript is final (dropped); any other failure may pass (kept).
+          if (/^there is no transcript/.test((err as Error).message)) {
+            finished = true
+            await drop(entry)
+          }
+          continue
+        }
+        if (read.turns < SUMMARY_MIN_TURNS || read.text === '') {
+          finished = true
+          await drop(entry)
+          continue
+        }
+        const reply = await withRateLimitRetry(
+          () => $.model.complete({ model, system: summarySystemPrompt(), prompt: summaryPrompt(read.text), maxTokens: SUMMARY_MAX_TOKENS, timeoutMs: SUMMARY_CALL_TIMEOUT_MS }, { signal: never }),
+          ms => $.clock.sleep(ms, { signal: never }),
+        ).catch(() => undefined)
+        if (reply === undefined || !reply.isAnswered) continue
+        const summary = parseSummary(reply.text)
+        const guard = summary === undefined ? undefined : admit({ content: summary, kind: 'event', origin: 'import' }, guardConfigOf(settings))
+        // Nothing to say, a block, or a warning with nobody to confirm it (strict mode): the marker goes and nothing is saved.
+        if (summary === undefined || guard === undefined || guard.verdict === 'block' || (guard.verdict === 'warn' && (guardModeOf(options) === 'strict' || guard.mustConfirm === true))) {
+          finished = true
+          await drop(entry)
+          continue
+        }
+        // The model call took seconds: look again just before saving, so a summary made meanwhile is not made twice.
+        const nowDone = (JSON.parse(await memoriesCli($, options, ['summarised', entry.sessionId], undefined, SESSION_CLI_TIMEOUT_MS)) as { done: string[] }).done
+        if (nowDone.includes(entry.sessionId)) {
+          finished = true
+          await drop(entry)
+          continue
+        }
+        const flags = guard.verdict === 'warn' ? [...new Set(guard.hits.map(hit => hit.rule))] : []
+        const answers = await runAll(
+          $,
+          options,
+          [
+            [
+              'mnemopi_remember',
+              {
+                content: summary,
+                importance: 0.5,
+                ...importProvenance('session'),
+                scope: options.scope === 'per-project' ? 'channel' : 'global',
+                memory_type: 'event',
+                valid_until: new Date(Date.now() + SUMMARY_VALID_DAYS * 86_400_000).toISOString(),
+                metadata: { session: entry.sessionId, ...(flags.length > 0 ? { guard: flags } : {}) },
+              },
+            ],
+          ],
+          entry.owner,
+        ).catch((err: unknown) => [err instanceof Error ? err : new Error(String(err))])
+        const answer = answers[0]
+        const id = answer === undefined || answer instanceof Error ? undefined : savedId(answer)
+        if (id !== undefined) {
+          finished = true
+          await drop(entry)
+        }
+        await record($, options, [
+          { action: 'remember', origin: 'session', owner: entry.owner, client: 'mnemosyne-session', text: 'session summary', ids: id === undefined ? [] : [id], count: id === undefined ? 0 : 1, ok: id !== undefined, error: id === undefined ? 'the summary was not saved' : '' },
+        ])
+      } finally {
+        if (!finished) await release(entry)
+      }
+    }
+  } catch {
+    // background work: a failure leaves the markers for the next first prompt
+  } finally {
+    mine.summaries = false
+  }
+}
+
+/**
+ * Why a sweep failed, for the activity log: one of a few fixed sentences chosen by what went wrong, never the failure's own
+ * text (a message from the engine or a command could carry a memory's words, and the log keeps no memory text).
+ */
+export function sweepFailure(err: unknown): string {
+  const message = err instanceof Error ? err.message : ''
+  if (/the backup before the sweep failed/.test(message)) return 'the backup before the sweep failed; nothing was expired'
+  if (/the engine is not installed/.test(message)) return 'the engine is not installed'
+  if (/the engine refused the sweep/.test(message)) return 'the engine refused the sweep'
+  if (/the engine gave no usable answer/.test(message)) return 'the engine gave no usable answer to the sweep'
+  return 'the sweep could not run'
+}
+
+/**
+ * SESSION.4: the unused-expiry sweep. At most once a day (bin/memories.ts sweep-claim writes the 24-hour marker), for the
+ * owner's own rows, in the background; never from a test or a build against a real store (the specs use a temp HOME).
+ * `bin/memories.ts expire --apply` does the work: a dry run first, then, only when something would expire, the C9 backup
+ * (a failed backup stops the sweep before any change), then mnemopi_expire_unused with dry_run false and the validator
+ * 'expire-sweep'. Rows are only ever expired (valid_until), never deleted. The activity line holds counts and ids, never text.
+ */
+async function maybeSweep($: EngineInterface, options: PluginOptions) {
+  const mine = runningOf(options)
+  if (mine.sweep) return
+  mine.sweep = true
+  try {
+    const setting = expireSetting(options.expireUnusedDays)
+    if (setting.mode !== 'on') return
+    if (!(await isInstalled($, options)) || !(await isCurrent($, options))) return
+    const { root } = await paths($, options)
+    const me = await owner($, options)
+    const claim = JSON.parse(await memoriesCli($, options, ['sweep-claim', root], undefined, SESSION_CLI_TIMEOUT_MS)) as { due?: unknown }
+    if (claim.due !== true) return
+    let report: { count: number; rows: { id: string }[] }
+    try {
+      report = JSON.parse(await memoriesCli($, options, ['expire', '--apply', '--json', '--days', String(setting.days), '--owner', me, '--root', root], undefined, SWEEP_TIMEOUT_MS))
+    } catch (err) {
+      await record($, options, [{ action: 'expire', origin: 'session', owner: me, client: 'mnemosyne-sweep', text: 'unused-expiry sweep failed', ok: false, error: sweepFailure(err) }])
+      return
+    }
+    if (report.count > 0) {
+      await record($, options, [{ action: 'expire', origin: 'session', owner: me, client: 'mnemosyne-sweep', text: `unused-expiry sweep: ${plural(report.count, 'memory', 'memories')} expired`, ids: report.rows.map(row => row.id), count: report.count, ok: true }])
+    }
+  } catch {
+    // background work: the next trigger tries again after the marker's day
+  } finally {
+    mine.sweep = false
+  }
+}
+
 export const register: Register = (on, options) => {
   const isPerProject = options.scope === 'per-project'
   // Per session, the tail of its extraction chain (one at a time).
@@ -1688,6 +1952,8 @@ export const register: Register = (on, options) => {
   // Per session, the tools registered at its start (M1). A tool switched on in config.json later is not registered until the next
   // session, so the remember trigger and the rules block follow this set, never the file alone: Claude is never told to call a missing tool.
   const registered = new Map<string, Set<ToolName>>()
+  // Sessions whose first prompt was seen and whose first reply has not ended yet: the summaries and the sweep run after that reply (SESSION.1, SESSION.4).
+  const afterFirstReply = new Set<string>()
 
   const engineArgs = (tool: string, input: Record<string, unknown>, rules: TagRules, settings: ResolvedSettings) => {
     switch (tool) {
@@ -1774,6 +2040,10 @@ export const register: Register = (on, options) => {
       activity($, options, 'memory ready', 'ready')
     }
     void registerProject($, options) // fire and forget: no host call it makes (repo, cwd, env) delays the session start
+    // SESSION.4: a refused expireUnusedDays says so once here; a sweep that is due runs in the background (it also runs from the first prompt, so a process that only ever sees /clear still sweeps).
+    const sweepSetting = expireSetting(options.expireUnusedDays)
+    if (sweepSetting.mode === 'refused') $.ui.toast(`Mnemosyne: ${sweepSetting.reason}`)
+    void track(options, maybeSweep($, options))
 
     return next(e)
   })
@@ -1939,8 +2209,10 @@ export const register: Register = (on, options) => {
       found => ({ plugin: slashes($.plugin.root), root: found.root }),
       () => undefined,
     )
-    await stopDashboard($, e.sessionId, where).catch(() => undefined)
+    // SESSION.1: the marker for this session's summary is written beside the dashboard stop, so neither waits for the other inside the exit's short bound.
+    await Promise.all([stopDashboard($, e.sessionId, where).catch(() => undefined), leaveSessionMarker($, options, e.sessionId)])
     registered.delete(e.sessionId)
+    afterFirstReply.delete(e.sessionId)
     return next(e)
   }).catch((_$, e, next) => next(e))
 
@@ -2093,7 +2365,7 @@ export const register: Register = (on, options) => {
             })
           })
         // KNOWX.2: background by default. The await fallback (KNOWX.0) changes only this line.
-        void queued
+        void track(options, queued)
       }
     }
     return 'deny' in answer ? { deny: answer.deny } : { result: answer.result }
@@ -2131,6 +2403,10 @@ export const register: Register = (on, options) => {
       if (session !== undefined && (await read($, pendingTrigger))[session]) {
         await update($, pendingTrigger, ({ [session]: _spent, ...rest }) => rest)
       }
+      // The session's first reply is done: the summaries of earlier sessions and the sweep run now, in the background.
+      if (session !== undefined && afterFirstReply.delete(session)) {
+        void track(options, finishSessionSummaries($, options).then(() => maybeSweep($, options)))
+      }
     }
     return next(e)
   }).catch((_$, e, next) => next(e))
@@ -2148,6 +2424,8 @@ export const register: Register = (on, options) => {
     const asked = isPerson && remember === undefined ? afterTerm(e.text, recallTerms) : undefined
     const session = await $.session.id()
     const isFirst = !(await read($, recalled))[session]
+    // SESSION.1 and SESSION.4: the first prompt of a session arms the work that runs after its reply.
+    if (isFirst) afterFirstReply.add(session)
     // R3: with the first-prompt recall off there is no automatic recall; a recall term still recalls.
     const autoRecall = isFirst && settings.recall.firstPrompt
     if (!autoRecall && !remember && asked === undefined) {
@@ -2160,6 +2438,8 @@ export const register: Register = (on, options) => {
 
     const context: string[] = []
     const logged: Activity[] = []
+    // SESSION.2: the last session's summary and the pinned memories, read from the store while the recall runs; only where the first-prompt recall is on (R3), so its switch, count and sentences rule.
+    const blockPromise = autoRecall ? firstPromptBlock($, options, settings) : Promise.resolve(undefined)
     if (remember) {
       // KNOWX.1: the first main-thread save of this turn is the human's. Cleared
       // at turn end, so a turn that saves nothing leaves the next turn an agent save.
@@ -2174,6 +2454,8 @@ export const register: Register = (on, options) => {
     // A recall term is the reason for the recall, even on a first prompt.
     const origin = asked !== undefined ? 'trigger' : 'hook'
     let queries: string[] = []
+    // The block goes ahead of the recall in the context: it is inserted here, after the remember entry.
+    const blockAt = context.length
     try {
       // The engine drops a row matching under ~22% of the query's words, so a long
       // prompt recalls nothing as one query: ask per sentence, in one process.
@@ -2185,7 +2467,9 @@ export const register: Register = (on, options) => {
       const count = settings.recall.firstPromptCount
       const answers = queries.length === 0 ? [] : await runAll($, options, queries.map(query => ['mnemopi_recall', { query, limit: count, ...weightArgs(settings) }] as const))
       const byId = new Map<string, { id: string; owner: string; content: string }>()
-      for (const answer of answers) if (typeof answer === 'string') for (const row of compact(answer)) byId.set(row.id, row)
+      // A memory the block shows is not listed again by the recall (shown once).
+      const shown = new Set((await blockPromise)?.ids ?? [])
+      for (const answer of answers) if (typeof answer === 'string') for (const row of compact(answer)) if (!shown.has(row.id)) byId.set(row.id, row)
       const found = [...byId.values()].slice(0, count)
       const n = found.length
       const noun = n === 1 ? 'memory' : 'memories'
@@ -2211,6 +2495,11 @@ export const register: Register = (on, options) => {
       // recall is best effort; the prompt goes on without it
       activity($, options, 'recall failed')
       logged.push({ action: 'recall', origin, text: queries.join(' | '), ok: false, error: (err as Error)?.message })
+    }
+    const block = await blockPromise
+    if (block !== undefined) {
+      context.splice(blockAt, 0, block.text)
+      logged.push({ action: 'recall', origin: 'hook', text: 'last session summary and pinned memories', ids: block.ids, count: block.ids.length, ok: true })
     }
     await record($, options, logged)
     return context.length > 0 ? next({ ...e, context: [...(e.context ?? []), ...context] }) : next(e)

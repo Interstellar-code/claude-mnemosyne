@@ -188,7 +188,7 @@ describe('UI.1: the Settings tab draws from /api/settings only', () => {
       host.browser = [{ label: 'Theme', help: 'h', choices: [{ value: 'auto', label: 'Auto' }], get: () => 'auto', set: () => {} }]
       const cards = drawGroups(data, view, host) as FakeNode[]
       const titles = cards.map(card => card.find('h2')!.textContent)
-      expect(titles).toEqual(['Guard', 'Tags', 'Recall and embeddings', 'Expiry', 'Storage', 'Map', 'Tools', 'Setup', 'This browser'])
+      expect(titles).toEqual(['Guard', 'Tags', 'Recall and embeddings', 'Expiry', 'Storage', 'Map', 'Tools', 'Setup', 'Other plugin options', 'This browser'])
       const max = rowOf(cards, 'guard.maxLength')!
             const joined = max.all().map(node => node.textContent).join(' | ')
       expect(joined).toContain('Max length')
@@ -219,10 +219,10 @@ describe('UI.1: the Settings tab draws from /api/settings only', () => {
       }
       expect(rowOf(cards, 'guard.secretRules')!.all().map(node => node.textContent).join(' ')).toContain('GitHub token')
       expect(rowOf(cards, 'tools.engineTools')!.all().map(node => node.textContent).join(' ')).toContain('mnemopi_recall')
-      // E2 is read-only with a note until 0.9.0 adds it.
+      // E2 is a real, editable option since SESSION.4 added it to the plugin schema (no placeholder note any more).
       const e2 = rowOf(cards, 'expireUnusedDays')!
-      expect(e2.findAll('input')).toHaveLength(0)
-      expect(e2.all().map(node => node.textContent).join(' ')).toContain('arrives in 0.9.0')
+      expect(e2.findAll('input')).toHaveLength(1)
+      expect(e2.all().map(node => node.textContent).join(' ')).not.toContain('arrives in 0.9.0')
     })
   })
 

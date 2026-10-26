@@ -129,8 +129,11 @@ describe('GET /api/settings', () => {
     expect(byId('memoryDir')).toMatchObject({ confirm: true, value: '/tmp/somewhere' })
     expect(byId('scope')).toMatchObject({ confirm: true })
     expect(body.plugin).toEqual({ id: PLUGIN_ID, optionsEditable: true })
-    // expireUnusedDays is not in the schema yet.
-    expect(byId('expireUnusedDays')).toMatchObject({ home: 'read-only', note: 'arrives in 0.9.0', ref: 'E2' })
+    // SESSION.4: expireUnusedDays is in the schema now, so it is a real option row (E2) and no longer the 0.8.5 placeholder.
+    expect(byId('expireUnusedDays')).toMatchObject({ home: 'option', type: 'number', ref: 'E2', group: 'expiry', value: 90, default: 90, min: 0, max: 3650 })
+    expect(byId('expireUnusedDays').note).toBeUndefined()
+    // SESSION.1: sessionSummary is an option too, off by default (it has no ref yet, so it sits in the other options).
+    expect(byId('sessionSummary')).toMatchObject({ home: 'option', value: 'off', default: 'off', choices: ['off', 'on'] })
     // Read-only facts.
     expect(byId('guard.secretRules').value).toEqual([...SECRET_RULE_NAMES])
     expect(byId('tools.engineTools').value).toHaveLength(27)
