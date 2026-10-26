@@ -98,7 +98,7 @@ test('CFG.1.a2: a wrong-typed or out-of-range value gives its default and a warn
     'recall.importanceWeight': Number.NaN,
     'expiry.contextDays': 366,
     'tools.memory_remember': 'on',
-    'tools.externalAllow': ['memory_remember', 'engine_shell'],
+    'tools.externalAllow': 'memory_recall', // a list is wanted (a list with a bad name keeps its good names: see below)
     'storage.activityLogMaxBytes': 100,
     'storage.backupsKeep': 2,
   }
@@ -222,6 +222,22 @@ test('CFG.1: the tool list for outside agents is a set of the five tools, kept i
   expect(resolve({ tools: { externalAllow: ['memory_stats', 'memory_recall'] } }).tools.externalAllow).toEqual(['memory_recall', 'memory_stats'])
 })
 
+test('CFG.1: a typo in the outside-agents tool list drops that name and never widens the list to all five', () => {
+  const typo = resolve({ tools: { externalAllow: ['memory_recall', 'memory_stat'] } })
+  expect(typo.tools.externalAllow).toEqual(['memory_recall'])
+  expect(keysOf(typo.warnings)).toEqual(['tools.externalAllow'])
+  expect(resolve({ tools: { externalAllow: ['memory_remember', 'engine_shell', 7] } }).tools.externalAllow).toEqual(['memory_remember'])
+  expect(resolve({ tools: { externalAllow: ['nope'] } }).tools.externalAllow).toEqual([])
+  expect(resolve({ tools: { externalAllow: ['memory_recall', 'memory_stats'] } }).warnings).toEqual([])
+})
+
+test('CFG.1: parseConfig counts the size of the file in bytes, not characters', () => {
+  const text = `{"version":1,"x":"${'é'.repeat(MAX_CONFIG_BYTES / 2)}"}` // under the limit in characters, over it in bytes
+  expect(text.length).toBeLessThan(MAX_CONFIG_BYTES)
+  const r = parseConfig(text)
+  expect(r.warnings.filter(w => w.key === CONFIG_FILE && w.reason.includes('is over'))).toHaveLength(1)
+})
+
 test('CFG.1: parseConfig reads the file text and never throws: missing, unreadable, broken, oversize and non-object all give defaults and one config.json warning', () => {
   const clean = parseConfig('{"version":1,"expiry":{"contextDays":30}}')
   expect(clean.expiry.contextDays).toBe(30)
@@ -294,6 +310,10 @@ test('CFG.2.a2: keys this version does not know are kept, a damaged group is rep
   expect(fixed).toMatchObject({ ok: true, config: { version: 1 } })
   // a stored value that is already wrong does not stop a patch of another key
   expect(applyPatch({ guard: { maxLength: 99999 } }, { 'tags.maxPerMemory': 4 }).ok).toBe(true)
+  // nor does it stop a valid patch of a key that shares a rule with it (the bad value stays as it is)
+  expect(applyPatch({ guard: { maxLength: 99999 } }, { 'guard.warnLength': 2000 })).toMatchObject({ ok: true, config: { version: 1, guard: { warnLength: 2000, maxLength: 99999 } } })
+  // a patch that breaks the rule is still refused, naming the key it set
+  expect(applyPatch({ guard: { maxLength: 99999 } }, { 'guard.warnLength': 5000 })).toMatchObject({ ok: false, key: 'guard.warnLength' })
 })
 
 test('CFG.2.a2: configText is the same bytes for the same config, in a fixed key order, with one trailing newline', () => {

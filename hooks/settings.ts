@@ -300,7 +300,8 @@ export function settingValue(settings: Settings, key: string): unknown {
  * Turns raw JSON (anything: the parsed config file, a request body) into Settings. Never throws.
  * A key it does not know is ignored; a value of the wrong type or outside its range gives the
  * default and a warning naming the key. A words list keeps its good entries and drops the bad
- * ones, so one typo never switches the other words off (the list can only add protection).
+ * ones, so one typo never switches the other words off (the list can only add protection). A pick
+ * list does the same, so a typo in an allow-list never widens it to every choice.
  * Rules between keys (min < warn < max, default <= most, weights not all 0) revert the keys that
  * were set and break the rule.
  */
@@ -330,6 +331,13 @@ export function resolve(raw: unknown): ResolvedSettings {
         else dropped++
       }
       if (dropped > 0) warn(def.key, `${dropped} ${dropped === 1 ? 'entry was' : 'entries were'} ignored (each must be text of ${def.minItemLength} to ${def.maxItemLength} characters, at most ${def.maxItems} in all)`)
+      value = good
+    }
+    if (def.type === 'pick' && Array.isArray(value)) {
+      // Same for a pick list: a typo in an allow-list must never widen it, so the good names stay and the bad ones go.
+      const good = value.filter(item => typeof item === 'string' && def.choices.includes(item))
+      const dropped = value.length - good.length
+      if (dropped > 0) warn(def.key, `${dropped} ${dropped === 1 ? 'entry was' : 'entries were'} ignored (each must be one of: ${def.choices.join(', ')})`)
       value = good
     }
     const checked = checkValue(def, value)
@@ -364,7 +372,7 @@ export function parseConfig(text: string | undefined, unreadable = false): Resol
   }
   if (unreadable) return fileProblem('could not be read; every setting is at its default')
   if (text === undefined) return fileProblem('does not exist yet; every setting is at its default')
-  if (text.length > MAX_CONFIG_BYTES) return fileProblem(`is over ${MAX_CONFIG_BYTES} bytes; every setting is at its default`)
+  if (new TextEncoder().encode(text).length > MAX_CONFIG_BYTES) return fileProblem(`is over ${MAX_CONFIG_BYTES} bytes; every setting is at its default`)
   let raw: unknown
   try {
     raw = JSON.parse(text)
@@ -450,11 +458,14 @@ export function applyPatch(raw: unknown, patch: Record<string, unknown>): PatchR
     touched.push(def)
   }
   config.version = CONFIG_VERSION
-  // A rule between keys that the patch breaks refuses the patch; one broken by something already in the file does not.
+  // A problem the patch causes refuses the patch: a warning on a key it sets, or a new one on a key in a rule with such a key.
+  // One already there before the patch (a stored value out of range, a rule the file already breaks) does not.
   const after = resolve(config)
-  const related = new Set(touched.map(def => def.key))
-  for (const relation of RELATIONS) if (relation.keys.some(key => related.has(key))) for (const key of relation.keys) related.add(key)
-  const problem = after.warnings.find(warning => related.has(warning.key))
+  const touchedKeys = new Set(touched.map(def => def.key))
+  const related = new Set(touchedKeys)
+  for (const relation of RELATIONS) if (relation.keys.some(key => touchedKeys.has(key))) for (const key of relation.keys) related.add(key)
+  const already = new Set(before.warnings.map(warning => `${warning.key}\n${warning.reason}`))
+  const problem = after.warnings.find(warning => related.has(warning.key) && (touchedKeys.has(warning.key) || !already.has(`${warning.key}\n${warning.reason}`)))
   if (problem !== undefined) return { ok: false, key: problem.key, reason: problem.reason.replace(/; the default is used$/, '') }
   const changes: SettingChange[] = []
   for (const def of touched) {

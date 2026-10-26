@@ -115,8 +115,9 @@ export function writeConfig(root: string, patch: Record<string, unknown>): Write
   return store(root, applyPatch(raw, patch), { text: readText(root).text, broken })
 }
 
-/** Resets every setting: the old file is kept as config.json.bak and the file becomes `{ "version": 1 }`. */
+/** Resets every setting: the old file is kept as config.json.bak and the file becomes `{ "version": 1 }`. A file that already is that is left alone, so a second reset keeps the backup of the first. */
 export function resetAll(root: string): WriteResult {
+  if (readText(root).text === configText(emptyConfig())) return { ok: true, changes: [], file: configFile(root) }
   const before = resolveSettings(readRaw(root).raw)
   const differs = SETTING_KEYS.some(key => JSON.stringify(settingValue(before, key)) !== JSON.stringify(findSetting(key)!.default))
   secureRoot(root)

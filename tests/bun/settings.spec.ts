@@ -162,8 +162,10 @@ describe('writeConfig', () => {
     if (isPosix) expect(mode(configFile(root))).toBe('600')
     expect(readConfig(root).warnings).toEqual([])
     expect(readConfig(root).tools.memory_forget).toBe(true)
-    // resetting again changes nothing, and the backup is now the empty file
-    expect(resetAll(root)).toMatchObject({ ok: true, changes: [] })
+    // resetting again changes nothing, and the backup still holds the settings from before the first reset
+    expect(resetAll(root)).toEqual({ ok: true, file: configFile(root), changes: [] })
+    expect(readFileSync(backupFile(root), 'utf8')).toBe(old)
+    expect(text(root)).toBe('{\n  "version": 1\n}\n')
   })
 
   test('CFG.2: keys a newer version wrote are kept through a write', () => {
