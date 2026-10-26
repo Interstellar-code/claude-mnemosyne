@@ -186,6 +186,8 @@ test('the first call starts one server, reads the ready line in pieces and the t
     MNEMOSYNE_EXTRACTION: 'haiku',
     // EMB.3.a2: this host is not macOS arm64, so the dashboard starts with embeddings off.
     MNEMOSYNE_EMBEDDINGS: 'off',
+    // SRV: the settings page asks `claude plugin configure` about the plugin's options by this id.
+    MNEMOSYNE_PLUGIN_ID: 'mnemosyne@mnemosyne',
   })
   expect(`${child.env?.MNEMOSYNE_PLUGIN_ROOT}/ui/server.ts`).toBe(child.argv[1]!)
   // No ui.json at first: nothing to ping.

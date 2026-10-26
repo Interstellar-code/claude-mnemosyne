@@ -62,6 +62,8 @@ import type { ActivityFields } from '../hooks/activity-log'
 import { buildRequests, engineEnv, parseReplies } from '../hooks/engine'
 import type { EngineRequest } from '../hooks/engine'
 import { CORE_SPREAD } from './map-layout'
+import { settingsRoutes } from './settings-routes'
+import type { SettingsDeps } from './settings-routes'
 import { countByDay, isClaudeRecall, isOtherAppsRecall } from './recalls'
 import type { MeaningPair, MeaningReply as MeaningWorkerReply, MeaningStarted } from './semantic-worker'
 
@@ -123,6 +125,9 @@ export type Config = {
   cli: string
   activityLog: string
   pluginRoot: string
+  // The settings routes: the installed plugin's id (absent for a --plugin-dir install) and the claude CLI to run.
+  pluginId?: string
+  claudeCli?: string
 }
 
 export type State = { port: number; token: string; pid: number }
@@ -137,6 +142,8 @@ export function configFromEnv(env: Record<string, string | undefined>): Config {
     cli: env.MNEMOSYNE_CLI ?? '',
     activityLog: env.MNEMOSYNE_ACTIVITY_LOG ?? '',
     pluginRoot: env.MNEMOSYNE_PLUGIN_ROOT ?? join(UI_DIR, '..'),
+    pluginId: env.MNEMOSYNE_PLUGIN_ID || undefined,
+    claudeCli: env.MNEMOSYNE_CLAUDE_CLI || undefined,
   }
 }
 
@@ -2085,6 +2092,8 @@ export type Started = { port: number; token: string; stop: () => void }
 // Starts the HTTP server; the caller writes ui.json and the ready line.
 // Limits a test can lower; the defaults are the exported constants.
 export type ServerOptions = {
+  // Test hooks for the settings routes (ui/settings-routes.ts): the environment spawned processes get, and the backup runner.
+  settings?: SettingsDeps
   vendorDir?: string
   maxEngines?: number
   maxStreams?: number
@@ -2152,6 +2161,7 @@ export async function startServer(config: Config, options: ServerOptions = {}): 
     searching: false,
     forgets: limiter(1),
   }
+  const settings = settingsRoutes(config, fields => log(fields, { client: 'dashboard' }), options.settings)
   const streams = new Set<() => void>()
   // SEMX.1: the meaning layout's one Worker, started on the first galaxy request that needs it.
   const meaning = options.meaningRunner ?? new MeaningRunner()
@@ -2280,6 +2290,10 @@ export async function startServer(config: Config, options: ServerOptions = {}): 
     }
     if (path === '/api/search') return post(request, search)
     if (path === '/api/forget') return post(request, forget)
+    if (path === '/api/settings') return get(() => settings.read())
+    if (path === '/api/settings/update') return post(request, (_views, text) => settings.update(text))
+    if (path === '/api/settings/reset') return post(request, (_views, text) => settings.reset(text))
+    if (path === '/api/backup') return post(request, (_views, text) => settings.backup(text))
     if (dev && path === '/api/dev-stamp') return get(() => ({ status: 200, body: { stamp: devStamp(startedAt) } }))
     return notFound()
   }
