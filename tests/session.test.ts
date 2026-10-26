@@ -239,7 +239,7 @@ function rig(on: On, options: RigOptions = {}) {
     if (script.endsWith('/bin/memories.ts')) {
       const command = SESSION_COMMANDS.find(name => e.argv.includes(name))
       state.memories.push({ ...e })
-      return reply(options.memories?.(e.argv, e.init?.stdin ?? ''), command === undefined ? '' : QUIET[command]!)
+      return reply(options.memories?.(e.argv, e.init?.stdin ?? ''), command === undefined ? '' : command === 'session-pending' && e.argv.includes('claim') ? '{"claimed":true}\n' : QUIET[command]!)
     }
     if (script.endsWith('/bin/import.ts')) {
       state.imports.push({ ...e })
@@ -477,6 +477,44 @@ test('SESSION.1.a3: in strict mode (the default) a warned summary is dropped, no
   expect(removed(state)).toEqual(['w1'])
 })
 
+const claimsOf = (state: ReturnType<typeof rig>) => sessionRuns(state, 'session-pending').filter(run => run.argv.includes('claim')).map(run => run.argv.at(-1))
+const releasesOf = (state: ReturnType<typeof rig>) => sessionRuns(state, 'session-pending').filter(run => run.argv.includes('release')).map(run => run.argv.at(-1))
+
+test('SESSION.1.a4: every marker is claimed before its transcript is read; a marker another session claimed is left alone', { options: { sessionSummary: 'on' } }, async ($, on) => {
+  const state = rig(on, withPending(['taken', 'mine'], { memories: argv => (argv.includes('claim') && argv.at(-1) === 'taken' ? { stdout: '{"claimed":false}\n' } : undefined) }))
+  await firstReply($)
+  expect(claimsOf(state)).toEqual(['taken', 'mine'])
+  // only the claimed one is read, called on, saved and removed
+  expect(state.imports).toHaveLength(1)
+  expect(state.models).toHaveLength(1)
+  expect(saves(state).map(call => call.arguments.metadata.session)).toEqual(['mine'])
+  expect(removed(state)).toEqual(['mine'])
+  expect(releasesOf(state)).toEqual([])
+})
+
+test('SESSION.1.a4: a claim that is not finished (a lost call, a read that failed) is released for the next first prompt; a finished one is not', { options: { sessionSummary: 'on' } }, async ($, on) => {
+  const state = rig(on, {
+    ...withPending(['lost', 'broken', 'done']),
+    importer: argv => (argv.at(-1) === 'broken' ? { exitCode: 1, stderr: 'mnemosyne import: out of memory\n' } : readOf()),
+    model: (_prompt, n) => (n === 0 ? { isAnswered: false, reason: 'api-error', status: 500, error: 'server error' } : { isAnswered: true, text: 'We settled the retry rule for the rate limit and moved on.' }),
+  })
+  await firstReply($)
+  expect(releasesOf(state)).toEqual(['lost', 'broken'])
+  expect(removed(state)).toEqual(['done'])
+})
+
+test('SESSION.1.a4: the check for an existing summary is made again just before the save, so a summary made meanwhile is not saved twice', { options: { sessionSummary: 'on' } }, async ($, on) => {
+  let checks = 0
+  const state = rig(on, withPending(['x1'], { memories: argv => (argv.includes('summarised') ? { stdout: `${JSON.stringify({ done: ++checks >= 2 ? ['x1'] : [] })}\n` } : undefined) }))
+  await firstReply($)
+  expect(checks).toBe(2)
+  // the model was asked (the first check said no), but nothing is saved and the marker goes
+  expect(state.models).toHaveLength(1)
+  expect(saves(state)).toHaveLength(0)
+  expect(removed(state)).toEqual(['x1'])
+  expect(releasesOf(state)).toEqual([])
+})
+
 test('SESSION.1: extractionModel off means no summary and the markers stay', { options: { sessionSummary: 'on', extractionModel: 'off' } }, async ($, on) => {
   const state = rig(on, withPending(['x1']))
   await firstReply($)
@@ -672,6 +710,23 @@ test('SESSION.4.a5: a failed sweep (a failed backup stops it) is a failed activi
   const line = activityLines(state).find(entry => entry.action === 'expire')!
   expect(line).toMatchObject({ origin: 'session', ok: false, count: 0 })
   expect(line.error).toContain('the backup before the sweep failed')
+})
+
+test('SESSION.4.a5: no memory text can reach the failed line: the line is one fixed sentence, whatever the command printed', async ($, on) => {
+  const words = 'The staging cluster is rebuilt every Friday evening by the platform team.'
+  const state = rig(
+    on,
+    dueClaim({
+      memories: argv => (argv.includes('sweep-claim') ? { stdout: '{"due":true}\n' } : argv.includes('expire') ? { exitCode: 1, stderr: `mnemosyne memories: the engine refused the sweep: ${words}\n`, stdout: `${words}\n` } : undefined),
+    }),
+  )
+  await $.session.start(START)
+  await ticks()
+  const line = activityLines(state).find(entry => entry.action === 'expire')!
+  expect(line).toMatchObject({ origin: 'session', ok: false })
+  expect(line.error).toBe('the engine refused the sweep')
+  expect(JSON.stringify(activityLines(state))).not.toContain('staging cluster')
+  expect(JSON.stringify(activityLines(state))).not.toContain('Friday')
 })
 
 test('SESSION.4: an engine that is not installed, or out of date, does no sweep', async ($, on) => {

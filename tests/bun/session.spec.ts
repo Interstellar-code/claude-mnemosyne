@@ -4,10 +4,10 @@
 // under the temp HOME, `--store` and `--root` always name it, and the model is a stand-in.
 import { Database } from 'bun:sqlite'
 import { afterEach, describe, expect, setDefaultTimeout, test } from 'bun:test'
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { engineCall, isolatedEnv, ROOT, toolCall } from './helpers'
-import { makeHost, until } from './knowledge-host'
+import { hooks, makeHost, until } from './knowledge-host'
 import type { Host, ModelAnswer } from './knowledge-host'
 
 setDefaultTimeout(90_000)
@@ -38,6 +38,11 @@ async function memories(args: readonly string[], stdin?: string): Promise<Done> 
   const [stdout, stderr, exitCode] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
   return { exitCode, stdout, stderr }
 }
+/** Fails with the command's own exit code and error text when it did not exit 0, so a failure shows its real cause. */
+function ok(done: Done) {
+  if (done.exitCode !== 0) throw new Error(`bin/memories.ts exited ${done.exitCode}: ${done.stderr.trim() || '(no error text)'}`)
+  return done
+}
 /** `--store <host store>` first, then the command. */
 const onStore = (host: Host, ...args: string[]) => memories(['--store', host.store, ...args])
 
@@ -59,6 +64,8 @@ const trailOf = (host: Host, id: string) => db(host, handle => handle.query('SEL
 async function save(host: Host, content: string, kind: string, extra: Record<string, unknown> = {}) {
   const saved = await host.tool('memory_remember', { content, kind, ...extra })
   expect(saved.deny).toBeUndefined()
+  // a save starts an extraction in the background; it is over before the next step reads or changes the store
+  await host.settled()
   return JSON.parse(saved.result!).memory_id as string
 }
 /** A row for another owner, saved straight through the engine. */
@@ -91,6 +98,7 @@ async function seedSweep(host: Host) {
     expiring: await save(host, 'The sprint board is reset at the start of every second Tuesday.', 'context'),
   }
   await host.tool('memory_update', { memory_id: ids.pinned, pinned: true })
+  await host.settled()
   const oldIds = [ids.context, ids.error, ids.event, ids.artifact, ids.pinned, ids.fact, ids.preference, ids.instruction, ids.decision, ids.retired, ids.expiring]
   age(host, oldIds, 120)
   // a retired row (it has a replacement) and one with an expiry of its own, both old
@@ -108,7 +116,7 @@ describe('SESSION.4: bin/memories.ts expire is a dry run Rohit can read', () => 
     const ids = await seedSweep(host)
     const before = countRows(host)
     const done = await memories(expireArgs(host, '--days', '90', '--owner', 'global'))
-    expect(done.exitCode).toBe(0)
+    ok(done)
     expect(done.stdout).toContain('Dry run: nothing was changed.')
     for (const kind of SWEPT) expect(done.stdout).toContain(ids[kind])
     for (const kept of ['pinned', 'fact', 'preference', 'instruction', 'decision', 'fresh', 'retired', 'expiring'] as const) expect(done.stdout).not.toContain(ids[kept])
@@ -190,7 +198,7 @@ describe('SESSION.4: bin/memories.ts expire is a dry run Rohit can read', () => 
   test('no store yet is a clean "nothing to expire"', async () => {
     const host = await open()
     const done = await memories(['--store', join(host.home, 'empty-store'), 'expire', '--root', host.root, '--json'])
-    expect(done.exitCode).toBe(0)
+    ok(done)
     expect(JSON.parse(done.stdout)).toMatchObject({ count: 0, rows: [] })
   })
 })
@@ -202,7 +210,7 @@ describe('SESSION.4: bin/memories.ts expire --apply only ever expires, after a b
     const before = countRows(host)
     const snapshot = Object.fromEntries(Object.entries(ids).map(([name, id]) => [name, rowOf(host, id)]))
     const done = await memories(expireArgs(host, '--days', '90', '--owner', 'global', '--apply'))
-    expect(done.exitCode).toBe(0)
+    ok(done)
     expect(done.stdout).toContain(`Expired 4 memories of owner global`)
     expect(backups(host)).toHaveLength(1)
     expect(done.stdout).toContain(join(host.root, 'backups'))
@@ -234,7 +242,7 @@ describe('SESSION.4: bin/memories.ts expire --apply only ever expires, after a b
   test('an expired row comes back with update restore', async () => {
     const host = await open()
     const ids = await seedSweep(host)
-    await memories(expireArgs(host, '--owner', 'global', '--apply'))
+    ok(await memories(expireArgs(host, '--owner', 'global', '--apply')))
     expect(rowOf(host, ids.context).valid_until).not.toBeNull()
     const restored = await engineCall(cliOf(host), host.store, 'global', [toolCall(1, 'mnemopi_update', { memory_id: ids.context, restore: true, validator: 'dashboard' })])
     expect(JSON.parse(restored.get(1).result.content[0].text).status).toBe('restored')
@@ -244,10 +252,10 @@ describe('SESSION.4: bin/memories.ts expire --apply only ever expires, after a b
   test('a second run finds nothing left and makes no second backup', async () => {
     const host = await open()
     await seedSweep(host)
-    await memories(expireArgs(host, '--owner', 'global', '--apply'))
+    ok(await memories(expireArgs(host, '--owner', 'global', '--apply')))
     expect(backups(host)).toHaveLength(1)
     const again = await memories(expireArgs(host, '--owner', 'global', '--apply'))
-    expect(again.exitCode).toBe(0)
+    ok(again)
     expect(again.stdout).toContain('Nothing to expire')
     expect(backups(host)).toHaveLength(1)
   })
@@ -256,7 +264,7 @@ describe('SESSION.4: bin/memories.ts expire --apply only ever expires, after a b
     const host = await open()
     await save(host, 'The release branch is cut from main on the first Monday of the month.', 'fact')
     const done = await memories(expireArgs(host, '--owner', 'global', '--apply'))
-    expect(done.exitCode).toBe(0)
+    ok(done)
     expect(backups(host)).toEqual([])
   })
 
@@ -278,7 +286,7 @@ describe('SESSION.4: bin/memories.ts expire --apply only ever expires, after a b
   test('pinned means never: even at the lowest days a pinned context note is not touched', async () => {
     const host = await open()
     const ids = await seedSweep(host)
-    await memories(expireArgs(host, '--days', '30', '--owner', 'global', '--apply'))
+    ok(await memories(expireArgs(host, '--days', '30', '--owner', 'global', '--apply')))
     expect(rowOf(host, ids.pinned).valid_until).toBeNull()
     expect(JSON.parse(rowOf(host, ids.pinned).metadata_json!).pinned).toBe(true)
   })
@@ -303,6 +311,39 @@ describe('SESSION.4: the daily marker', () => {
     expect(JSON.parse((await memories(['sweep-claim', host.root])).stdout)).toEqual({ due: true })
   })
 
+  test('twelve sessions claiming at once: exactly one is due, the lock is gone afterwards, and the marker is written once', async () => {
+    const host = await open()
+    // five rounds on fresh folders: the old read-then-write claim let two through in about one burst of three
+    for (let round = 0; round < 5; round++) {
+      const root = join(host.home, `claim-round-${round}`)
+      mkdirSync(root, { recursive: true })
+      const results = await Promise.all(Array.from({ length: 12 }, () => memories(['sweep-claim', root])))
+      const due = results.map(done => (JSON.parse(ok(done).stdout) as { due: boolean }).due)
+      expect(due.filter(Boolean)).toHaveLength(1)
+      expect(existsSync(join(root, 'expire-sweep.lock'))).toBe(false)
+      expect((statSync(join(root, 'expire-sweep.json')).mode & 0o777).toString(8)).toBe('600')
+      // and the day is claimed: a later caller is not due
+      expect(JSON.parse(ok(await memories(['sweep-claim', root])).stdout)).toEqual({ due: false })
+    }
+  })
+
+  test('a lock held by a claimant that is checking now means not due; a lock left long ago by a dead one is taken over', async () => {
+    const host = await open()
+    mkdirSync(host.root, { recursive: true })
+    const lock = join(host.root, 'expire-sweep.lock')
+    const marker = join(host.root, 'expire-sweep.json')
+    writeFileSync(lock, '')
+    expect(JSON.parse(ok(await memories(['sweep-claim', host.root])).stdout)).toEqual({ due: false })
+    // the live claimant's lock and the marker are as they were: this caller touched neither
+    expect(existsSync(lock)).toBe(true)
+    expect(existsSync(marker)).toBe(false)
+    const long = new Date(Date.now() - 10 * 60_000)
+    utimesSync(lock, long, long)
+    expect(JSON.parse(ok(await memories(['sweep-claim', host.root])).stdout)).toEqual({ due: true })
+    expect(existsSync(lock)).toBe(false)
+    expect(existsSync(marker)).toBe(true)
+  })
+
   test('sweep-claim refuses --store and a bad folder argument', async () => {
     const host = await open()
     expect((await memories(['--store', host.store, 'sweep-claim', host.root])).exitCode).not.toBe(0)
@@ -322,7 +363,8 @@ describe('SESSION.4: the hook sweeps once a day, from session start and from a f
   test('session start sweeps in the background: backup, expiry of the four, one activity line of ids and counts', async () => {
     const { host, ids } = await sweptHost()
     await host.sessionStart()
-    await until('the sweep', () => expired(host, ids).length === 4 && host.activity().some(line => line.action === 'expire'), SLOW)
+    await host.settled()
+    expect(expired(host, ids)).toHaveLength(4)
     expect(backups(host)).toHaveLength(1)
     const line = host.activity().find(entry => entry.action === 'expire')!
     expect(line).toMatchObject({ origin: 'session', owner: 'global', ok: true, count: 4 })
@@ -339,8 +381,9 @@ describe('SESSION.4: the hook sweeps once a day, from session start and from a f
   test('a second trigger inside 24 hours runs nothing', async () => {
     const { host, ids } = await sweptHost()
     await host.sessionStart()
-    await until('the sweep', () => expired(host, ids).length === 4, SLOW)
-    await until('the marker', () => existsSync(join(host.root, 'expire-sweep.json')), SLOW)
+    await host.settled()
+    expect(expired(host, ids)).toHaveLength(4)
+    expect(existsSync(join(host.root, 'expire-sweep.json'))).toBe(true)
     const runs = host.memoriesRuns().filter(run => run.argv.includes('expire')).length
     expect(runs).toBe(1)
     // new old rows appear; a new first prompt and its reply, and another session start, do not sweep them
@@ -350,7 +393,7 @@ describe('SESSION.4: the hook sweeps once a day, from session start and from a f
     host.setSession('later')
     await host.prompt('Please plan a trip to Lisbon. Is it sunny there?')
     await host.turn()
-    await Bun.sleep(1500)
+    await host.settled()
     expect(host.memoriesRuns().filter(run => run.argv.includes('expire'))).toHaveLength(1)
     expect(rowOf(host, extra).valid_until).toBeNull()
     expect(backups(host)).toHaveLength(1)
@@ -359,7 +402,8 @@ describe('SESSION.4: the hook sweeps once a day, from session start and from a f
     host.setSession('later2')
     await host.prompt('Please plan a trip to Porto. Is it sunny there?')
     await host.turn()
-    await until('the next sweep', () => rowOf(host, extra).valid_until !== null, SLOW)
+    await host.settled()
+    expect(rowOf(host, extra).valid_until).not.toBeNull()
     expect(backups(host)).toHaveLength(2)
   })
 
@@ -367,10 +411,12 @@ describe('SESSION.4: the hook sweeps once a day, from session start and from a f
     const { host, ids } = await sweptHost()
     host.setSession('after-clear')
     await host.prompt('What was I doing? Please recall the context.')
-    await Bun.sleep(300)
+    // nothing is started by the prompt itself: there is no background work to wait for, and nothing has expired
+    await host.settled()
     expect(expired(host, ids)).toEqual([])
     await host.turn()
-    await until('the sweep', () => expired(host, ids).length === 4, SLOW)
+    await host.settled()
+    expect(expired(host, ids)).toHaveLength(4)
     expect(backups(host)).toHaveLength(1)
   })
 
@@ -380,7 +426,7 @@ describe('SESSION.4: the hook sweeps once a day, from session start and from a f
     host.setSession('later')
     await host.prompt('Another first prompt. Nothing to sweep, please.')
     await host.turn()
-    await Bun.sleep(1500)
+    await host.settled()
     expect(expired(host, ids)).toEqual([])
     expect(host.memoriesRuns().filter(run => run.argv.includes('expire') || run.argv.includes('sweep-claim'))).toHaveLength(0)
     expect(existsSync(join(host.root, 'expire-sweep.json'))).toBe(false)
@@ -389,7 +435,7 @@ describe('SESSION.4: the hook sweeps once a day, from session start and from a f
   test('a refused value (1-29) runs no sweep', async () => {
     const { host, ids } = await sweptHost({ expireUnusedDays: 10 })
     await host.sessionStart()
-    await Bun.sleep(1500)
+    await host.settled()
     expect(expired(host, ids)).toEqual([])
     expect(host.memoriesRuns().filter(run => run.argv.includes('expire'))).toHaveLength(0)
     expect(backups(host)).toEqual([])
@@ -398,8 +444,8 @@ describe('SESSION.4: the hook sweeps once a day, from session start and from a f
   test('the days of the option are the line: 150 days leaves 120-day-old rows alone', async () => {
     const { host, ids } = await sweptHost({ expireUnusedDays: 150 })
     await host.sessionStart()
-    await until('the claim', () => host.memoriesRuns().some(run => run.argv.includes('expire')))
-    await Bun.sleep(500)
+    await host.settled()
+    expect(host.memoriesRuns().some(run => run.argv.includes('expire'))).toBe(true)
     expect(expired(host, ids)).toEqual([])
     expect(backups(host)).toEqual([])
   })
@@ -408,7 +454,7 @@ describe('SESSION.4: the hook sweeps once a day, from session start and from a f
     const { host, ids } = await sweptHost()
     writeFileSync(join(host.root, 'backups'), 'not a folder')
     await host.sessionStart()
-    await until('the failed line', () => host.activity().some(line => line.action === 'expire'), SLOW)
+    await host.settled()
     const line = host.activity().find(entry => entry.action === 'expire')!
     expect(line).toMatchObject({ origin: 'session', ok: false })
     expect(line.error).toContain('the backup before the sweep failed')
@@ -418,7 +464,7 @@ describe('SESSION.4: the hook sweeps once a day, from session start and from a f
   test('an engine that is not installed sweeps nothing and starts nothing', async () => {
     const host = await open({ engineBuild: '0.0.1' })
     await host.sessionStart()
-    await Bun.sleep(500)
+    await host.settled()
     expect(host.memoriesRuns().filter(run => run.argv.includes('expire') || run.argv.includes('sweep-claim'))).toHaveLength(0)
   })
 })
@@ -430,8 +476,10 @@ describe('SESSION.1: session-pending markers', () => {
     const host = await open()
     mkdirSync(host.root, { recursive: true })
     for (const id of ['first', 'second', 'third']) {
-      expect((await memories(['session-pending', 'write', host.root], JSON.stringify(entry(id)))).exitCode).toBe(0)
-      await Bun.sleep(15)
+      ok(await memories(['session-pending', 'write', host.root], JSON.stringify(entry(id))))
+      // the order is by modification time: set it, so no clock tick or load can tie two files
+      const when = new Date(Date.now() - (3 - ['first', 'second', 'third'].indexOf(id)) * 60_000)
+      utimesSync(join(host.root, 'session-pending', `${id}.json`), when, when)
     }
     const folder = join(host.root, 'session-pending')
     expect((statSync(folder).mode & 0o777).toString(8)).toBe('700')
@@ -440,7 +488,7 @@ describe('SESSION.1: session-pending markers', () => {
     expect(listed.map(item => item.sessionId)).toEqual(['third', 'second', 'first'])
     // the file holds the three fields and nothing else
     expect(Object.keys(JSON.parse(readFileSync(join(folder, 'first.json'), 'utf8'))).sort()).toEqual(['owner', 'sessionId', 'transcript'])
-    expect((await memories(['session-pending', 'remove', host.root, 'second'])).exitCode).toBe(0)
+    ok(await memories(['session-pending', 'remove', host.root, 'second']))
     expect(readdirSync(folder).sort()).toEqual(['first.json', 'third.json'])
   })
 
@@ -460,6 +508,68 @@ describe('SESSION.1: session-pending markers', () => {
   })
 })
 
+describe('SESSION.1: a session-pending marker is claimed by one session before it is summarised', () => {
+  const entry = (id: string) => ({ sessionId: id, owner: 'global', transcript: `/home/u/.claude/projects/-work/${id}.jsonl` })
+  const folderOf = (host: Host) => join(host.root, 'session-pending')
+  const listed = async (host: Host) => (JSON.parse(ok(await memories(['session-pending', 'list', host.root])).stdout) as { sessionId: string }[]).map(item => item.sessionId)
+  const write = async (host: Host, id: string) => ok(await memories(['session-pending', 'write', host.root], JSON.stringify(entry(id))))
+  const claim = async (host: Host, id: string) => (JSON.parse(ok(await memories(['session-pending', 'claim', host.root, id])).stdout) as { claimed: boolean }).claimed
+
+  test('claim gives the marker to the first caller only; a claimed marker is not listed; release puts it back; remove clears marker and claim', async () => {
+    const host = await open()
+    mkdirSync(host.root, { recursive: true })
+    await write(host, 'one')
+    expect(await claim(host, 'one')).toBe(true)
+    expect(await claim(host, 'one')).toBe(false)
+    expect(readdirSync(folderOf(host)).sort()).toEqual(['one.claim'])
+    expect((statSync(join(folderOf(host), 'one.claim')).mode & 0o777).toString(8)).toBe('600')
+    expect(await listed(host)).toEqual([])
+    ok(await memories(['session-pending', 'release', host.root, 'one']))
+    expect(readdirSync(folderOf(host)).sort()).toEqual(['one.json'])
+    expect(await listed(host)).toEqual(['one'])
+    // nothing claimed: release is nothing; no marker: claim is false
+    ok(await memories(['session-pending', 'release', host.root, 'one']))
+    expect(await claim(host, 'ghost')).toBe(false)
+    expect(await claim(host, 'one')).toBe(true)
+    ok(await memories(['session-pending', 'remove', host.root, 'one']))
+    expect(readdirSync(folderOf(host))).toEqual([])
+    // an unsafe id is refused
+    expect((await memories(['session-pending', 'claim', host.root, '../x'])).exitCode).not.toBe(0)
+    expect((await memories(['session-pending', 'release', host.root, '../x'])).exitCode).not.toBe(0)
+    expect((await memories(['session-pending', 'claim', host.root])).exitCode).not.toBe(0)
+  })
+
+  test('eight sessions claiming one marker at once: exactly one gets it', async () => {
+    const host = await open()
+    mkdirSync(host.root, { recursive: true })
+    for (let round = 0; round < 3; round++) {
+      await write(host, `race-${round}`)
+      const results = await Promise.all(Array.from({ length: 8 }, () => memories(['session-pending', 'claim', host.root, `race-${round}`])))
+      const claimed = results.map(done => (JSON.parse(ok(done).stdout) as { claimed: boolean }).claimed)
+      expect(claimed.filter(Boolean)).toHaveLength(1)
+    }
+  })
+
+  test('a claim left by a session that died comes back as a marker once it is old; a fresh claim stays claimed', async () => {
+    const host = await open()
+    mkdirSync(host.root, { recursive: true })
+    await write(host, 'fresh')
+    await write(host, 'dead')
+    expect(await claim(host, 'fresh')).toBe(true)
+    expect(await claim(host, 'dead')).toBe(true)
+    const long = new Date(Date.now() - 30 * 60_000)
+    utimesSync(join(folderOf(host), 'dead.claim'), long, long)
+    expect(await listed(host)).toEqual(['dead'])
+    expect(readdirSync(folderOf(host)).sort()).toEqual(['dead.json', 'fresh.claim'])
+    // an old marker is claimed as fresh: the claim is dated when it is made
+    const old = new Date(Date.now() - 3 * 86_400_000)
+    utimesSync(join(folderOf(host), 'dead.json'), old, old)
+    expect(await claim(host, 'dead')).toBe(true)
+    expect(await listed(host)).toEqual([])
+    expect(readdirSync(folderOf(host)).sort()).toEqual(['dead.claim', 'fresh.claim'])
+  })
+})
+
 describe('SESSION.2: bin/memories.ts first-prompt and summarised read the store and write nothing', () => {
   // A summary row exactly as the summary run saves it.
   const summary = (host: Host, owner: string, text: string, session: string, fields: Record<string, unknown> = {}) =>
@@ -467,16 +577,17 @@ describe('SESSION.2: bin/memories.ts first-prompt and summarised read the store 
 
   test('the newest live summary of the owner, then the pinned rows the owner can see, most important first', async () => {
     const host = await open()
-    await summary(host, 'global', 'The older session reworked the importer and left the docs open.', 'old-a')
-    await Bun.sleep(15)
+    const older = await summary(host, 'global', 'The older session reworked the importer and left the docs open.', 'old-a')
     const newest = await summary(host, 'global', 'The latest session fixed the sweep and left the Windows path open.', 'old-b')
+    // newest is by the row's timestamp: set it, so two saves in one millisecond cannot tie
+    db(host, handle => handle.run('UPDATE working_memory SET timestamp = ? WHERE id = ?', [new Date(Date.now() - DAY).toISOString(), older]), false)
     const low = await save(host, 'The low importance pin about the staging cluster rebuild schedule.', 'fact', { importance: 0.3 })
     const high = await save(host, 'The high importance pin about never pushing to the main branch.', 'instruction', { importance: 0.9 })
     const plain = await save(host, 'An ordinary memory that nobody pinned, about the release cadence.', 'fact')
     await host.tool('memory_update', { memory_id: low, pinned: true })
     await host.tool('memory_update', { memory_id: high, pinned: true })
     const done = await onStore(host, 'first-prompt', 'global', '5')
-    expect(done.exitCode).toBe(0)
+    ok(done)
     const read = JSON.parse(done.stdout) as { summary: { id: string; owner: string; content: string } | null; pinned: { id: string; owner: string }[] }
     expect(read.summary).toMatchObject({ id: newest, owner: 'global', content: 'The latest session fixed the sweep and left the Windows path open.' })
     expect(read.pinned.map(row => row.id)).toEqual([high, low])
@@ -583,7 +694,9 @@ describe('SESSION.1 and SESSION.2: the summary of the last session and the first
     expect((first as { context?: string[] }).context?.some(text => text.includes('Last session')) ?? false).toBe(false)
     expect(host.model).toHaveLength(0)
     await host.turn()
-    await until('the summary', () => summaryRows(host).length === 1 && !existsSync(marker), SLOW)
+    await host.settled()
+    expect(summaryRows(host)).toHaveLength(1)
+    expect(existsSync(marker)).toBe(false)
     const [saved] = summaryRows(host)
     expect(saved).toMatchObject({ content: SUMMARY, memory_type: 'event', source: 'import:session', trust_tier: 'IMPORTED', scope: 'global', session_id: 'global' })
     expect(JSON.parse(saved!.metadata_json!)).toEqual({ session: 'old-1' })
@@ -597,7 +710,7 @@ describe('SESSION.1 and SESSION.2: the summary of the last session and the first
     expect(host.model[0]!.request.prompt).not.toContain(TRANSCRIPT_SECRET)
     expect(host.model[0]!.request.prompt).not.toContain('tool_use')
     // the activity line: ids and counts, no text
-    const line = await until('the activity line', () => host.activity().find(entry => entry.action === 'remember' && entry.origin === 'session'), SLOW)
+    const line = host.activity().find(entry => entry.action === 'remember' && entry.origin === 'session')
     expect(line).toMatchObject({ ids: [saved!.id], count: 1, ok: true })
     expect(JSON.stringify(line)).not.toContain('Windows path')
 
@@ -615,13 +728,17 @@ describe('SESSION.1 and SESSION.2: the summary of the last session and the first
     host.setSession('new-2')
     await host.prompt('First prompt of the second session, please help.')
     await host.turn()
-    await until('the summary', () => summaryRows(host).length === 1, SLOW)
+    // the whole run is over (the row saved, the marker dropped, the activity line written) before the same session ends again
+    await host.settled()
+    expect(summaryRows(host)).toHaveLength(1)
+    expect(existsSync(join(host.root, 'session-pending', 'old-1.json'))).toBe(false)
     await host.sessionEnd('old-1')
     expect(existsSync(join(host.root, 'session-pending', 'old-1.json'))).toBe(true)
     host.setSession('new-4')
     await host.prompt('First prompt of the fourth session, please help.')
     await host.turn()
-    await until('the marker to go', () => !existsSync(join(host.root, 'session-pending', 'old-1.json')), SLOW)
+    await host.settled()
+    expect(existsSync(join(host.root, 'session-pending', 'old-1.json'))).toBe(false)
     expect(host.model).toHaveLength(1)
     expect(summaryRows(host)).toHaveLength(1)
   })
@@ -637,15 +754,16 @@ describe('SESSION.1 and SESSION.2: the summary of the last session and the first
     host.setSession('new-2')
     await host.prompt('First prompt of the second session, please help.')
     await host.turn()
-    await until('the first call', () => host.model.length === 1, SLOW)
-    await Bun.sleep(500)
+    await host.settled()
+    expect(host.model).toHaveLength(1)
     expect(summaryRows(host)).toHaveLength(0)
     expect(existsSync(join(host.root, 'session-pending', 'old-1.json'))).toBe(true)
     host.setSession('new-3')
     await host.prompt('First prompt of the third session, please help.')
     await host.turn()
-    await until('the summary', () => summaryRows(host).length === 1, SLOW)
-    await until('the marker to go', () => !existsSync(join(host.root, 'session-pending', 'old-1.json')), SLOW)
+    await host.settled()
+    expect(summaryRows(host)).toHaveLength(1)
+    expect(existsSync(join(host.root, 'session-pending', 'old-1.json'))).toBe(false)
   })
 
   test('a session with no transcript is dropped without a model call', async () => {
@@ -654,7 +772,8 @@ describe('SESSION.1 and SESSION.2: the summary of the last session and the first
     host.setSession('new-2')
     await host.prompt('First prompt of the second session, please help.')
     await host.turn()
-    await until('the marker to go', () => !existsSync(join(host.root, 'session-pending', 'ghost-1.json')), SLOW)
+    await host.settled()
+    expect(existsSync(join(host.root, 'session-pending', 'ghost-1.json'))).toBe(false)
     expect(host.model).toHaveLength(0)
   })
 
@@ -666,7 +785,7 @@ describe('SESSION.1 and SESSION.2: the summary of the last session and the first
     host.setSession('new-2')
     await host.prompt('First prompt of the second session, please help.')
     await host.turn()
-    await Bun.sleep(500)
+    await host.settled()
     expect(host.model).toHaveLength(0)
     expect(summaryRows(host)).toHaveLength(0)
   })
@@ -713,13 +832,90 @@ describe('SESSION.1 and SESSION.2: the summary of the last session and the first
     writeTranscript(host, 'old-1')
     await host.sessionEnd('old-1', 'clear')
     host.setSession('new-2')
-    const started = Date.now()
+    // the model is held shut: a prompt that waited for it would never return, so returning at all is the proof, on any machine
     await host.prompt('First prompt while a summary is still owed, please help.')
-    expect(Date.now() - started).toBeLessThan(8_000)
     expect(host.model).toHaveLength(0)
     await host.turn()
     await until('the model call to start', () => host.model.length === 1, SLOW)
     gate()
-    await until('the summary', () => summaryRows(host).length === 1, SLOW)
+    await host.settled()
+    expect(summaryRows(host)).toHaveLength(1)
+  })
+
+  test('two live sessions whose first prompts list the same marker: one claims it, one model call is made and one summary is saved', async () => {
+    let gate: () => void = () => undefined
+    const held = new Promise<void>(resolve => (gate = resolve))
+    const model = async (_request: unknown, n: number) => (await held, answer(`${SUMMARY} (call ${n})`))
+    const first = await open({ options: { sessionSummary: 'on' }, model })
+    const second = await open({ options: { sessionSummary: 'on' }, model, sharedWith: first })
+    writeTranscript(first, 'old-1')
+    await first.sessionEnd('old-1')
+    first.setSession('new-a')
+    second.setSession('new-b')
+    await Promise.all([first.prompt('First prompt of the first live session, please help.'), second.prompt('First prompt of the second live session, please help.')])
+    await Promise.all([first.turn(), second.turn()])
+    // both runs have read the list of markers; the model is held, so the one that took the marker is still inside its call
+    await until('both runs to list the markers', () => [first, second].every(host => host.memoriesRuns().some(run => run.argv.includes('session-pending') && run.argv.includes('list') && run.endedAt !== undefined)), SLOW)
+    await until('the one model call', () => first.model.length + second.model.length === 1, SLOW)
+    gate()
+    await Promise.all([first.settled(), second.settled()])
+    expect(first.model.length + second.model.length).toBe(1)
+    expect(summaryRows(first)).toHaveLength(1)
+    expect(existsSync(join(first.root, 'session-pending', 'old-1.json'))).toBe(false)
+    expect(existsSync(join(first.root, 'session-pending', 'old-1.claim'))).toBe(false)
+  })
+
+  test('a summary another session saved while the model call was out is not saved twice', async () => {
+    let gate: () => void = () => undefined
+    const held = new Promise<void>(resolve => (gate = resolve))
+    const host = await open({ options: { sessionSummary: 'on' }, model: async () => (await held, answer(SUMMARY)) })
+    writeTranscript(host, 'old-1')
+    await host.sessionEnd('old-1')
+    host.setSession('new-2')
+    await host.prompt('First prompt of the second session, please help.')
+    await host.turn()
+    await until('the model call to start', () => host.model.length === 1, SLOW)
+    const other = 'Another session already made the summary of this one and saved it.'
+    await saveAs(host, 'global', other, { memory_type: 'event', source: 'import:session', metadata: { session: 'old-1' }, valid_until: new Date(Date.now() + 30 * DAY).toISOString() })
+    gate()
+    await host.settled()
+    expect(summaryRows(host).map(row => row.content)).toEqual([other])
+    expect(existsSync(join(host.root, 'session-pending', 'old-1.json'))).toBe(false)
+    expect(existsSync(join(host.root, 'session-pending', 'old-1.claim'))).toBe(false)
+  })
+
+  test('a lost call puts the claim back as the marker, so the next first prompt finds it', async () => {
+    const host = await open({ options: { sessionSummary: 'on' }, model: () => ({ isAnswered: false, reason: 'api-error', status: 500, error: 'server error' }) })
+    writeTranscript(host, 'old-1')
+    await host.sessionEnd('old-1')
+    host.setSession('new-2')
+    await host.prompt('First prompt of the second session, please help.')
+    await host.turn()
+    await host.settled()
+    expect(readdirSync(join(host.root, 'session-pending'))).toEqual(['old-1.json'])
+  })
+})
+
+describe('SESSION.4: the failure line of the sweep holds no memory text', () => {
+  const sweepFailure = hooks.sweepFailure as (err: unknown) => string
+  const WORDS = 'The staging cluster is rebuilt every Friday evening by the platform team.'
+
+  test('whatever the failure carries, the line is one of a few fixed sentences', () => {
+    const carried = [
+      `bin/memories.ts expire failed: mnemosyne memories: the engine refused the sweep: ${WORDS}`,
+      `bin/memories.ts expire failed: mnemosyne memories: the backup before the sweep failed (${WORDS}); nothing was expired`,
+      `bin/memories.ts expire failed: ${WORDS}`,
+      WORDS,
+    ]
+    const lines = carried.map(message => sweepFailure(new Error(message)))
+    for (const line of lines) {
+      expect(line).not.toContain('staging')
+      expect(line).not.toContain('Friday')
+      expect(line.length).toBeLessThanOrEqual(80)
+    }
+    expect(lines[0]).toBe('the engine refused the sweep')
+    expect(lines[1]).toBe('the backup before the sweep failed; nothing was expired')
+    expect(lines[2]).toBe('the sweep could not run')
+    expect(sweepFailure('not an error')).toBe('the sweep could not run')
   })
 })

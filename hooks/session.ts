@@ -37,6 +37,10 @@ export const SWEEP_VALIDATOR = 'expire-sweep'
 export const SWEEP_INTERVAL_MS = 86_400_000
 /** <root>/expire-sweep.json, mode 0600: when the sweep last ran. */
 export const SWEEP_MARKER = 'expire-sweep.json'
+/** <root>/expire-sweep.lock: made exclusively by the one claimant that is checking and writing the marker. */
+export const SWEEP_LOCK = 'expire-sweep.lock'
+/** A lock older than this was left by a claimant that died; the claim takes it over. The check and write take milliseconds. */
+export const SWEEP_LOCK_STALE_MS = 60_000
 
 export type ExpireSetting = { mode: 'on'; days: number } | { mode: 'off' } | { mode: 'refused'; reason: string }
 
@@ -105,6 +109,10 @@ export function sweepDue(markerText: string | undefined, now: number): boolean {
 
 /** <root>/session-pending/<session id>.json, mode 0600, one per ended session whose summary is not made yet. */
 export const SESSION_PENDING_DIR = 'session-pending'
+/** A marker being summarised is renamed to <session id>.claim: only one rename of the same file succeeds, so one session summarises it. */
+export const SESSION_CLAIM_SUFFIX = '.claim'
+/** A claim older than this was left by a session that died; listing puts the marker back. A summary run is bounded far below it. */
+export const SESSION_CLAIM_STALE_MS = 600_000
 export const SESSION_ID = /^[A-Za-z0-9_-]{1,100}$/
 const OWNER_ID = /^[A-Za-z0-9_-]{1,100}$/
 

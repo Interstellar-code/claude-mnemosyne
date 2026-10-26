@@ -8,7 +8,7 @@
 // and, for the session work (plan phase SESSION):
 //   bun bin/memories.ts --store <dir> first-prompt <owner> [<pins>]   the newest session summary and the pinned memories, as JSON (read-only)
 //   bun bin/memories.ts --store <dir> summarised <session id>...      which of those sessions already have a summary, as JSON (read-only)
-//   bun bin/memories.ts session-pending write|list|remove <root> ...  the markers session.end leaves (an id, an owner and a path; never text)
+//   bun bin/memories.ts session-pending write|list|claim|release|remove <root> ...  the markers session.end leaves (an id, an owner and a path; never text); claim takes one for a summary, release puts it back
 //   bun bin/memories.ts sweep-claim <root>                           whether the daily unused-expiry sweep is due; if so, marks it taken
 //   bun bin/memories.ts --store <dir> expire [--apply] [--days N] [--owner O] [--root R] [--limit N] [--json]
 //                                                                     the unused-expiry sweep: a dry run unless --apply, which backs the store up first
@@ -25,12 +25,12 @@
 // count (the dashboard's untagged filter uses the same SQL).
 import { Database } from 'bun:sqlite'
 import { createHash } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statfsSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statfsSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import { BACKFILL_TEXT_LIMIT, isProposalId } from '../hooks/backfill'
 import { isKind } from '../hooks/kinds'
 import { buildRequests, engineEnv, parseReplies } from '../hooks/engine'
-import { BLOCK_PINNED_MAX, EXPIRE_DEFAULT_DAYS, expireRequest, expireSetting, parseExpireReply, parsePending, SESSION_ID, SESSION_PENDING_DIR, SWEEP_LIMIT, SWEEP_MARKER, sweepDue, sweepMarkerText } from '../hooks/session'
+import { BLOCK_PINNED_MAX, EXPIRE_DEFAULT_DAYS, expireRequest, expireSetting, parseExpireReply, parsePending, SESSION_CLAIM_STALE_MS, SESSION_CLAIM_SUFFIX, SESSION_ID, SESSION_PENDING_DIR, SWEEP_LIMIT, SWEEP_LOCK, SWEEP_LOCK_STALE_MS, SWEEP_MARKER, sweepDue, sweepMarkerText } from '../hooks/session'
 import type { BlockRead, ExpiredRow, PendingSession } from '../hooks/session'
 import { cleanTags, MAX_TAGS, normalizeTag } from '../hooks/tags'
 import { readConfig } from './settings'
@@ -76,6 +76,8 @@ export function openReadOnly(store: string): Database | null {
   if (!existsSync(file)) return null
   const db = new Database(file, { readonly: true })
   db.exec('PRAGMA query_only = ON')
+  // A writer (the engine) may hold the file for a moment: wait for it rather than fail the read.
+  db.exec('PRAGMA busy_timeout = 5000')
   return db
 }
 
@@ -339,6 +341,8 @@ export function backupStore(store: string, root: string, options: BackupOptions 
     try {
       const db = new Database(source, { readonly: true })
       try {
+        // A writer (the engine) may hold the file for a moment: wait for it rather than fail the backup.
+        db.exec('PRAGMA busy_timeout = 10000')
         db.query('VACUUM INTO ?').run(file)
       } finally {
         db.close()
@@ -435,15 +439,57 @@ export function writeSessionPending(root: string, entry: PendingSession) {
   renameSync(temp, file)
 }
 
+const claimFileOf = (root: string, sessionId: string) => join(sessionPendingDir(root), `${sessionId}${SESSION_CLAIM_SUFFIX}`)
+
+/** The marker and any claim on it are gone: the summary is saved, or the session needs none. */
 export function removeSessionPending(root: string, sessionId: string) {
   if (!SESSION_ID.test(sessionId)) throw new Error('a session marker needs a plain session id')
   rmSync(join(sessionPendingDir(root), `${sessionId}.json`), { force: true })
+  rmSync(claimFileOf(root, sessionId), { force: true })
+}
+
+/**
+ * SESSION.1: takes the marker for the one session that will summarise it, by renaming <id>.json to <id>.claim. Two sessions
+ * starting together both list the marker, but only one rename of the same file succeeds, so true goes to one caller and false
+ * to the rest (and to a marker that is already gone). The marker is stamped with the time first, so a claim looks fresh to
+ * listSessionPending from the moment it exists.
+ */
+export function claimSessionPending(root: string, sessionId: string, now: number = Date.now()): boolean {
+  if (!SESSION_ID.test(sessionId)) throw new Error('a session marker needs a plain session id')
+  const marker = join(sessionPendingDir(root), `${sessionId}.json`)
+  try {
+    utimesSync(marker, now / 1000, now / 1000)
+    renameSync(marker, claimFileOf(root, sessionId))
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** Puts a claimed marker back for the next first prompt (a lost call, a failed save). Nothing claimed is nothing to do. */
+export function releaseSessionPending(root: string, sessionId: string) {
+  if (!SESSION_ID.test(sessionId)) throw new Error('a session marker needs a plain session id')
+  try {
+    renameSync(claimFileOf(root, sessionId), join(sessionPendingDir(root), `${sessionId}.json`))
+  } catch {
+    // no claim: nothing to put back
+  }
 }
 
 /** Every session marker, newest file first (the latest sessions are summarised first); a torn or foreign file is skipped. */
-export function listSessionPending(root: string): PendingSession[] {
+export function listSessionPending(root: string, now: number = Date.now()): PendingSession[] {
   const folder = sessionPendingDir(root)
   if (!existsSync(folder)) return []
+  // A claim left by a session that died is put back as a marker, so its summary is not lost.
+  for (const name of readdirSync(folder)) {
+    if (!name.endsWith(SESSION_CLAIM_SUFFIX)) continue
+    const id = name.slice(0, -SESSION_CLAIM_SUFFIX.length)
+    try {
+      if (SESSION_ID.test(id) && now - statSync(join(folder, name)).mtimeMs >= SESSION_CLAIM_STALE_MS) renameSync(join(folder, name), join(folder, `${id}.json`))
+    } catch {
+      // gone or taken in the meantime
+    }
+  }
   const files = readdirSync(folder)
     .filter(name => name.endsWith('.json'))
     .map(name => ({ name, mtime: statSync(join(folder, name)).mtimeMs }))
@@ -460,23 +506,66 @@ export function listSessionPending(root: string): PendingSession[] {
   return out
 }
 
-/** SESSION.4: true (and the 24-hour marker written, 0600) when the sweep is due; false while the last one is under 24 hours old. */
+/** Makes the lock with an exclusive create, so one caller gets it; a lock left by a claimant that died is taken over. */
+function takeSweepLock(lock: string): boolean {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      closeSync(openSync(lock, 'wx', 0o600))
+      return true
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err
+    }
+    let age: number
+    try {
+      age = Date.now() - statSync(lock).mtimeMs
+    } catch {
+      continue // it went in the meantime: try the create again
+    }
+    if (age < SWEEP_LOCK_STALE_MS) return false // a live claimant is checking the marker right now
+    // Stale: moved aside by a rename (one caller's rename wins), and only a lock that is still old is thrown away.
+    const aside = `${lock}.${process.pid}.stale`
+    try {
+      renameSync(lock, aside)
+    } catch {
+      continue
+    }
+    const fresh = Date.now() - statSync(aside).mtimeMs < SWEEP_LOCK_STALE_MS
+    rmSync(aside, { force: true })
+    if (fresh) return false // that was a live claimant's new lock
+  }
+  return false
+}
+
+/**
+ * SESSION.4: true (and the 24-hour marker written, 0600) when the sweep is due; false while the last one is under 24 hours old.
+ * Two sessions starting together must not both sweep, so the marker is checked and written under a lock made with an exclusive
+ * create: one caller gets it, reads the marker again (another claimant may have written it since the first look) and writes it.
+ * Every other caller finds the lock taken, or the marker fresh, and gets false.
+ */
 export function claimSweep(root: string, now: number = Date.now()): boolean {
   const file = join(root, SWEEP_MARKER)
-  let text: string | undefined
-  try {
-    text = readFileSync(file, 'utf8')
-  } catch {
-    text = undefined
+  const read = () => {
+    try {
+      return readFileSync(file, 'utf8')
+    } catch {
+      return undefined
+    }
   }
-  if (!sweepDue(text, now)) return false
+  if (!sweepDue(read(), now)) return false
   mkdirSync(root, { recursive: true, mode: 0o700 })
-  const temp = `${file}.${process.pid}.tmp`
-  rmSync(temp, { force: true })
-  writeFileSync(temp, sweepMarkerText(now), { mode: 0o600, flag: 'wx' })
-  if (!IS_WINDOWS) chmodSync(temp, 0o600)
-  renameSync(temp, file)
-  return true
+  const lock = join(root, SWEEP_LOCK)
+  if (!takeSweepLock(lock)) return false
+  try {
+    if (!sweepDue(read(), now)) return false
+    const temp = `${file}.${process.pid}.tmp`
+    rmSync(temp, { force: true })
+    writeFileSync(temp, sweepMarkerText(now), { mode: 0o600, flag: 'wx' })
+    if (!IS_WINDOWS) chmodSync(temp, 0o600)
+    renameSync(temp, file)
+    return true
+  } finally {
+    rmSync(lock, { force: true })
+  }
 }
 
 const ENGINE_TIMEOUT_MS = 120_000
@@ -658,7 +747,7 @@ async function main(argv: readonly string[]) {
   } else if (command === 'session-pending') {
     if (store) throw new Error('session-pending does not take --store')
     const [action, root = '', ...more] = rest
-    if (!root || root.startsWith('-')) throw new Error('usage: session-pending write|list|remove <root> ...')
+    if (!root || root.startsWith('-')) throw new Error('usage: session-pending write|list|claim|release|remove <root> ...')
     if (action === 'write') {
       const entry = parsePending(await Bun.stdin.text())
       if (entry === undefined || more.length > 0) throw new Error('session-pending write needs { sessionId, owner, transcript } on stdin')
@@ -668,8 +757,14 @@ async function main(argv: readonly string[]) {
     } else if (action === 'remove') {
       if (more.length !== 1) throw new Error('usage: session-pending remove <root> <session id>')
       removeSessionPending(root, more[0]!)
+    } else if (action === 'claim') {
+      if (more.length !== 1) throw new Error('usage: session-pending claim <root> <session id>')
+      process.stdout.write(`${JSON.stringify({ claimed: claimSessionPending(root, more[0]!) })}\n`)
+    } else if (action === 'release') {
+      if (more.length !== 1) throw new Error('usage: session-pending release <root> <session id>')
+      releaseSessionPending(root, more[0]!)
     } else {
-      throw new Error('usage: session-pending write|list|remove <root> ...')
+      throw new Error('usage: session-pending write|list|claim|release|remove <root> ...')
     }
   } else if (command === 'sweep-claim') {
     if (store || rest.length !== 1 || !rest[0] || rest[0].startsWith('-')) throw new Error('usage: sweep-claim <root>')

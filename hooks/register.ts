@@ -1720,6 +1720,30 @@ const runningOf = (options: PluginOptions) => {
   return found
 }
 
+// Per plugin instance: the work that goes on after a hook has answered (a summary run, the sweep, a save's extraction). Nothing
+// reads this while the plugin runs; a spec waits on `backgroundSettled` instead of sleeping and hoping the work is over.
+const background = new WeakMap<object, Set<Promise<unknown>>>()
+function track<T>(options: PluginOptions, work: Promise<T>): Promise<T> {
+  const set = background.get(options) ?? new Set<Promise<unknown>>()
+  background.set(options, set)
+  const settled = work.then(
+    () => undefined,
+    () => undefined,
+  )
+  set.add(settled)
+  void settled.then(() => set.delete(settled))
+  return work
+}
+
+/** For specs: resolves when the background work of this plugin instance is over, including work that started while it waited. */
+export async function backgroundSettled(options: PluginOptions): Promise<void> {
+  for (;;) {
+    const set = background.get(options)
+    if (set === undefined || set.size === 0) return
+    await Promise.all([...set])
+  }
+}
+
 /**
  * SESSION.1: session.end leaves a marker for the session that ended: its id, its owner and where its transcript is, found as
  * IMPORT.0 recorded (<home>/.claude/projects/<slug of the working folder>/<id>.jsonl). No text, no model call, so it is quick on
@@ -1777,69 +1801,112 @@ async function finishSessionSummaries($: EngineInterface, options: PluginOptions
     const settings = await settingsFor($, options)
     const done = new Set((JSON.parse(await memoriesCli($, options, ['summarised', ...pending.map(entry => entry.sessionId)], undefined, SESSION_CLI_TIMEOUT_MS)) as { done: string[] }).done)
     const drop = (entry: PendingSession) => memoriesCli($, options, ['session-pending', 'remove', root, entry.sessionId], undefined, SESSION_CLI_TIMEOUT_MS).catch(() => undefined)
+    const release = (entry: PendingSession) => memoriesCli($, options, ['session-pending', 'release', root, entry.sessionId], undefined, SESSION_CLI_TIMEOUT_MS).catch(() => undefined)
+    // One rename of the marker takes it: another live session that listed the same marker gets false and leaves it to the winner.
+    const claim = (entry: PendingSession) =>
+      memoriesCli($, options, ['session-pending', 'claim', root, entry.sessionId], undefined, SESSION_CLI_TIMEOUT_MS).then(
+        out => (JSON.parse(out) as { claimed?: unknown }).claimed === true,
+        () => false,
+      )
     const never = new AbortController().signal
     for (const entry of pending) {
-      const folder = transcriptFolder(entry, home)
-      if (done.has(entry.sessionId) || folder === undefined) {
-        await drop(entry)
-        continue
-      }
-      let read: SessionRead
+      if (!(await claim(entry))) continue
+      // A claimed marker that is not finished goes back, so the next first prompt tries again.
+      let finished = false
       try {
-        read = JSON.parse(await importCli($, options, ['session', '--projects', `${home}/.claude/projects`, '--cwd', cwdForFolder(folder), entry.sessionId])) as SessionRead
-      } catch (err) {
-        // No transcript is final (dropped); any other failure may pass (kept).
-        if (/^there is no transcript/.test((err as Error).message)) await drop(entry)
-        continue
-      }
-      if (read.turns < SUMMARY_MIN_TURNS || read.text === '') {
-        await drop(entry)
-        continue
-      }
-      const reply = await withRateLimitRetry(
-        () => $.model.complete({ model, system: summarySystemPrompt(), prompt: summaryPrompt(read.text), maxTokens: SUMMARY_MAX_TOKENS, timeoutMs: SUMMARY_CALL_TIMEOUT_MS }, { signal: never }),
-        ms => $.clock.sleep(ms, { signal: never }),
-      ).catch(() => undefined)
-      if (reply === undefined || !reply.isAnswered) continue
-      const summary = parseSummary(reply.text)
-      const guard = summary === undefined ? undefined : admit({ content: summary, kind: 'event', origin: 'import' }, guardConfigOf(settings))
-      // Nothing to say, a block, or a warning with nobody to confirm it (strict mode): the marker goes and nothing is saved.
-      if (summary === undefined || guard === undefined || guard.verdict === 'block' || (guard.verdict === 'warn' && (guardModeOf(options) === 'strict' || guard.mustConfirm === true))) {
-        await drop(entry)
-        continue
-      }
-      const flags = guard.verdict === 'warn' ? [...new Set(guard.hits.map(hit => hit.rule))] : []
-      const answers = await runAll(
-        $,
-        options,
-        [
+        const folder = transcriptFolder(entry, home)
+        if (done.has(entry.sessionId) || folder === undefined) {
+          finished = true
+          await drop(entry)
+          continue
+        }
+        let read: SessionRead
+        try {
+          read = JSON.parse(await importCli($, options, ['session', '--projects', `${home}/.claude/projects`, '--cwd', cwdForFolder(folder), entry.sessionId])) as SessionRead
+        } catch (err) {
+          // No transcript is final (dropped); any other failure may pass (kept).
+          if (/^there is no transcript/.test((err as Error).message)) {
+            finished = true
+            await drop(entry)
+          }
+          continue
+        }
+        if (read.turns < SUMMARY_MIN_TURNS || read.text === '') {
+          finished = true
+          await drop(entry)
+          continue
+        }
+        const reply = await withRateLimitRetry(
+          () => $.model.complete({ model, system: summarySystemPrompt(), prompt: summaryPrompt(read.text), maxTokens: SUMMARY_MAX_TOKENS, timeoutMs: SUMMARY_CALL_TIMEOUT_MS }, { signal: never }),
+          ms => $.clock.sleep(ms, { signal: never }),
+        ).catch(() => undefined)
+        if (reply === undefined || !reply.isAnswered) continue
+        const summary = parseSummary(reply.text)
+        const guard = summary === undefined ? undefined : admit({ content: summary, kind: 'event', origin: 'import' }, guardConfigOf(settings))
+        // Nothing to say, a block, or a warning with nobody to confirm it (strict mode): the marker goes and nothing is saved.
+        if (summary === undefined || guard === undefined || guard.verdict === 'block' || (guard.verdict === 'warn' && (guardModeOf(options) === 'strict' || guard.mustConfirm === true))) {
+          finished = true
+          await drop(entry)
+          continue
+        }
+        // The model call took seconds: look again just before saving, so a summary made meanwhile is not made twice.
+        const nowDone = (JSON.parse(await memoriesCli($, options, ['summarised', entry.sessionId], undefined, SESSION_CLI_TIMEOUT_MS)) as { done: string[] }).done
+        if (nowDone.includes(entry.sessionId)) {
+          finished = true
+          await drop(entry)
+          continue
+        }
+        const flags = guard.verdict === 'warn' ? [...new Set(guard.hits.map(hit => hit.rule))] : []
+        const answers = await runAll(
+          $,
+          options,
           [
-            'mnemopi_remember',
-            {
-              content: summary,
-              importance: 0.5,
-              ...importProvenance('session'),
-              scope: options.scope === 'per-project' ? 'channel' : 'global',
-              memory_type: 'event',
-              valid_until: new Date(Date.now() + SUMMARY_VALID_DAYS * 86_400_000).toISOString(),
-              metadata: { session: entry.sessionId, ...(flags.length > 0 ? { guard: flags } : {}) },
-            },
+            [
+              'mnemopi_remember',
+              {
+                content: summary,
+                importance: 0.5,
+                ...importProvenance('session'),
+                scope: options.scope === 'per-project' ? 'channel' : 'global',
+                memory_type: 'event',
+                valid_until: new Date(Date.now() + SUMMARY_VALID_DAYS * 86_400_000).toISOString(),
+                metadata: { session: entry.sessionId, ...(flags.length > 0 ? { guard: flags } : {}) },
+              },
+            ],
           ],
-        ],
-        entry.owner,
-      ).catch((err: unknown) => [err instanceof Error ? err : new Error(String(err))])
-      const answer = answers[0]
-      const id = answer === undefined || answer instanceof Error ? undefined : savedId(answer)
-      if (id !== undefined) await drop(entry)
-      await record($, options, [
-        { action: 'remember', origin: 'session', owner: entry.owner, client: 'mnemosyne-session', text: 'session summary', ids: id === undefined ? [] : [id], count: id === undefined ? 0 : 1, ok: id !== undefined, error: id === undefined ? 'the summary was not saved' : '' },
-      ])
+          entry.owner,
+        ).catch((err: unknown) => [err instanceof Error ? err : new Error(String(err))])
+        const answer = answers[0]
+        const id = answer === undefined || answer instanceof Error ? undefined : savedId(answer)
+        if (id !== undefined) {
+          finished = true
+          await drop(entry)
+        }
+        await record($, options, [
+          { action: 'remember', origin: 'session', owner: entry.owner, client: 'mnemosyne-session', text: 'session summary', ids: id === undefined ? [] : [id], count: id === undefined ? 0 : 1, ok: id !== undefined, error: id === undefined ? 'the summary was not saved' : '' },
+        ])
+      } finally {
+        if (!finished) await release(entry)
+      }
     }
   } catch {
     // background work: a failure leaves the markers for the next first prompt
   } finally {
     mine.summaries = false
   }
+}
+
+/**
+ * Why a sweep failed, for the activity log: one of a few fixed sentences chosen by what went wrong, never the failure's own
+ * text (a message from the engine or a command could carry a memory's words, and the log keeps no memory text).
+ */
+export function sweepFailure(err: unknown): string {
+  const message = err instanceof Error ? err.message : ''
+  if (/the backup before the sweep failed/.test(message)) return 'the backup before the sweep failed; nothing was expired'
+  if (/the engine is not installed/.test(message)) return 'the engine is not installed'
+  if (/the engine refused the sweep/.test(message)) return 'the engine refused the sweep'
+  if (/the engine gave no usable answer/.test(message)) return 'the engine gave no usable answer to the sweep'
+  return 'the sweep could not run'
 }
 
 /**
@@ -1865,7 +1932,7 @@ async function maybeSweep($: EngineInterface, options: PluginOptions) {
     try {
       report = JSON.parse(await memoriesCli($, options, ['expire', '--apply', '--json', '--days', String(setting.days), '--owner', me, '--root', root], undefined, SWEEP_TIMEOUT_MS))
     } catch (err) {
-      await record($, options, [{ action: 'expire', origin: 'session', owner: me, client: 'mnemosyne-sweep', text: 'unused-expiry sweep failed', ok: false, error: (err as Error).message }])
+      await record($, options, [{ action: 'expire', origin: 'session', owner: me, client: 'mnemosyne-sweep', text: 'unused-expiry sweep failed', ok: false, error: sweepFailure(err) }])
       return
     }
     if (report.count > 0) {
@@ -1976,7 +2043,7 @@ export const register: Register = (on, options) => {
     // SESSION.4: a refused expireUnusedDays says so once here; a sweep that is due runs in the background (it also runs from the first prompt, so a process that only ever sees /clear still sweeps).
     const sweepSetting = expireSetting(options.expireUnusedDays)
     if (sweepSetting.mode === 'refused') $.ui.toast(`Mnemosyne: ${sweepSetting.reason}`)
-    void maybeSweep($, options)
+    void track(options, maybeSweep($, options))
 
     return next(e)
   })
@@ -2298,7 +2365,7 @@ export const register: Register = (on, options) => {
             })
           })
         // KNOWX.2: background by default. The await fallback (KNOWX.0) changes only this line.
-        void queued
+        void track(options, queued)
       }
     }
     return 'deny' in answer ? { deny: answer.deny } : { result: answer.result }
@@ -2338,7 +2405,7 @@ export const register: Register = (on, options) => {
       }
       // The session's first reply is done: the summaries of earlier sessions and the sweep run now, in the background.
       if (session !== undefined && afterFirstReply.delete(session)) {
-        void finishSessionSummaries($, options).then(() => maybeSweep($, options))
+        void track(options, finishSessionSummaries($, options).then(() => maybeSweep($, options)))
       }
     }
     return next(e)

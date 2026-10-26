@@ -107,7 +107,7 @@ function world(on: On, reply: string, isInstalled = true, exitCode = 0, build: s
     if ((e.argv[1] ?? '').endsWith('/bin/memories.ts') && command !== undefined) {
       runs.session.push(e)
       const given = extra.memories?.(e.argv, e.init?.stdin ?? '')
-      return { value: { exitCode: given?.exitCode ?? 0, stdout: given?.stdout ?? QUIET_REPLIES[command], stderr: given?.stderr ?? '' } } as never
+      return { value: { exitCode: given?.exitCode ?? 0, stdout: given?.stdout ?? (command === 'session-pending' && e.argv.includes('claim') ? '{"claimed":true}\n' : QUIET_REPLIES[command]), stderr: given?.stderr ?? '' } } as never
     }
     runs.push(e)
     const sent = (e.init?.stdin ?? '').split('\n').filter(Boolean).map(line => JSON.parse(line))

@@ -57,18 +57,22 @@ export type HostOptions = {
   engineBuild?: string
   /** Variables laid over the parent environment of every child process (a hostile shell). */
   parentEnv?: Record<string, string>
+  /** A second plugin instance on the same HOME, store and engine as this host (two live sessions of one user). */
+  sharedWith?: { home: string }
 }
 
 export type Host = Awaited<ReturnType<typeof makeHost>>
 
 export async function makeHost(opts: HostOptions = {}) {
-  const home = mkdtempSync(join(tmpdir(), 'mnemosyne-host-'))
+  const home = opts.sharedWith?.home ?? mkdtempSync(join(tmpdir(), 'mnemosyne-host-'))
   const root = join(home, '.claude', 'mnemosyne')
   const store = join(root, 'store')
   const pendingDir = join(root, 'knowledge-pending')
   const scope = join(root, 'engine', 'node_modules', '@oh-my-pi')
   mkdirSync(scope, { recursive: true })
-  if (opts.engineBuild === undefined) {
+  if (opts.sharedWith !== undefined) {
+    // the engine of the host that owns this HOME
+  } else if (opts.engineBuild === undefined) {
     symlinkSync(join(ROOT, 'engine'), join(scope, 'pi-mnemopi'), 'dir')
   } else {
     mkdirSync(join(scope, 'pi-mnemopi', 'src'), { recursive: true })
@@ -140,7 +144,8 @@ export async function makeHost(opts: HostOptions = {}) {
     handlers.push({ event, filter: typeof a === 'function' ? undefined : (a as Record<string, unknown>), fn })
     return { catch: () => undefined }
   }
-  registerModule.register(on, opts.options ?? {})
+  const pluginOptions = opts.options ?? {}
+  registerModule.register(on, pluginOptions)
 
   const find = (event: string, match?: (filter: Record<string, unknown> | undefined) => boolean) => {
     const found = handlers.find(h => h.event === event && (match === undefined || match(h.filter)))
@@ -157,7 +162,14 @@ export async function makeHost(opts: HostOptions = {}) {
     pendingDir,
     runs,
     model,
-    options: opts.options ?? {},
+    options: pluginOptions,
+    /**
+     * Resolves when the background work the hooks started (a save's extraction, the session summaries, the sweep) is over.
+     * A spec awaits this instead of sleeping, so it never reads the store or the files while that work is still changing them.
+     */
+    settled: async () => {
+      await (registerModule.backgroundSettled as (options: Record<string, unknown>) => Promise<void>)(pluginOptions)
+    },
     /** A memory tool call as the host delivers it. */
     tool: async (name: string, input: Record<string, unknown> = {}, extra: Record<string, unknown> = {}) => {
       const fn = find('tool.call')
