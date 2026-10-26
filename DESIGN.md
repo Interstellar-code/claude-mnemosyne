@@ -387,17 +387,36 @@ and a temporary WAL store made by the real engine.
   start (or after its `input`), so the server cannot be spawned directly with
   stdin as a pipe. The hook spawns `bun ui/server.ts --hold` instead: a small
   holder that starts the server with stdin as a pipe it keeps open and passes
-  the server's output through. The spawn loop is the holder's life: the hook's
-  `session.end` handler ends the loop of the session that started the server
-  (any reason, `/clear` included), which kills the holder and so closes the
-  server's stdin. Then, in case the host has not killed the holder, it also
-  runs `kill <pid>` on the server (the ready line's pid; the holder exits with
-  it). Waiting for the loop takes at most 0.6 s and the kill at most 0.5 s,
-  inside the 1.5 s bound. Another session's
-  end leaves it running; that session runs `/mnemosyne-ui` again after the
-  starter ends to get a fresh one. Backstops, each with a Bun test: the server
-  exits when its stdin closes, and both the holder and the server exit when
-  their parent is gone (checked every 10 s; `MNEMOSYNE_UI_PARENT_CHECK_MS`
+  the server's output through. The spawn loop is the holder's life.
+- Shared use (`<root>/ui-users.json`, `bin/ui-users.ts`). Every session that
+  opens or reuses the server is listed with its Claude process id (the hook
+  walks up the process tree to the nearest `claude`, `hooks/ui-pid.ts`; hook
+  code runs inside that process), that process's start time (`ps -o lstart=`)
+  and the time; a reuse lists it again with a fresh time, keeping the pid and
+  start time already listed when this lookup fails. Each change is one read-modify-write under `ui-users.json.lock`
+  (linked into place, so it never exists without its holder's pid; a lock
+  whose holder is gone or older than 5 s is broken), so concurrent adds all
+  land; there is no reset, so a session that reused a just-started server
+  before its starter listed itself stays listed. A user is live while its
+  process runs with the recorded start time (a pid reused after a crash does
+  not count; with no start time readable, the pid alone counts); one with no
+  pid counts for 2 h from its last listing. The
+  hook gives each `add` 3 s and one retry, and says in the reply when the
+  session could not be listed. `session.end` (any reason, `/clear` included)
+  finds the session in `ui-users.json` (so a reloaded hooks module, whose
+  memory is empty, still finds it) and runs one `bin/ui-users.ts leave`
+  (at most 1 s; about 30 ms warm, 150-200 ms cold, measured): it takes the
+  session off and, when no live user is left, sends SIGTERM to the servers
+  this session started and the one `ui.json` names, each only while its
+  command line is `ui/server.ts`'s, all under the lock, so a concurrent `add`
+  lands only after the server is signalled. Beside it the session's own spawn loops
+  end (at most 0.6 s), which kills their holders and closes those servers'
+  stdin. Both fit the 1.5 s bound with no ping on this path. When `leave`
+  gives no answer, nothing is killed: the server decides from the list.
+  Backstops, each with a Bun test: when its stdin closes, its parent is gone
+  or it gets SIGHUP, the server exits unless the list names a live session,
+  and then polls the list and exits once none is; the holder exits when its
+  parent is gone (checked every 10 s; `MNEMOSYNE_UI_PARENT_CHECK_MS`
   sets it for tests, held to 100 ms - 10 s). On exit the server removes `ui.json` only while it
   still names its own pid. There is no stop command and no stop route.
 - Before it starts anything the command checks Bun, an installed engine and a

@@ -5,7 +5,16 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On, ProcessRunInit } from 'claude-code'
 import { ENGINE_BUILD } from '../hooks/register'
-import { KILL_TIMEOUT_MS, PING_TIMEOUT_MS, STOP_WAIT_MS } from '../hooks/ui-launch'
+import {
+  KILL_TIMEOUT_MS,
+  LEAVE_TIMEOUT_MS,
+  PING_TIMEOUT_MS,
+  SESSION_END_BUDGET_MS,
+  STOP_WAIT_MS,
+  USERS_TIMEOUT_MS,
+  USERS_TRIES,
+} from '../hooks/ui-launch'
+import { CLAUDE_PID_SCRIPT } from '../hooks/ui-pid'
 
 const ROOT = '/home/u/.claude/mnemosyne'
 const UI_JSON = `${ROOT}/ui.json`
@@ -29,6 +38,11 @@ type Options = {
   ping?: number
   // What the spawned holder does: print a ready line (in two pieces) and run, or fail first.
   server?: 'ready' | 'fails' | 'garbage'
+  // The Claude pid the hook reads for its session (default 4242; 0: no claude above the hook's shell).
+  claudePid?: number
+  // How bin/ui-users.ts runs fail, per action: 'timeout' rejects as a timed-out run does, 'exit' exits 1;
+  // a number fails that many runs of it and then succeeds.
+  usersFail?: Partial<Record<'add' | 'leave', 'timeout' | 'exit' | number>>
   // What ui.json holds once a server of the test started (default: that server's own state).
   afterStart?: (pid: number) => { port: number; token: string; pid: number }
 }
@@ -57,7 +71,17 @@ function world(on: On, o: Options = {}) {
     toasts: [] as string[],
     logs: [] as string[],
     registered: [] as string[],
+    // ui-users.json as bin/ui-users.ts keeps it: session -> the Claude pid it was listed with ('-' when unknown).
+    users: new Map<string, string>(),
+    userCalls: [] as string[][],
+    // The server pids `leave` sent SIGTERM to (it does so itself, when no live user is left).
+    signalled: [] as number[],
+    // Whether fs.read can read ui-users.json.
+    usersReadable: true,
+    // Whether the walk up the process tree times out this time.
+    walkTimesOut: false,
   }
+  const failures = new Map<string, number>()
   on('env.get', () => ({ value: '/home/u' }))
   on('session.id', () => ({ value: seen.session }))
   on('session.repo', () => ({ value: { root: '/w' } }) as never)
@@ -70,6 +94,10 @@ function world(on: On, o: Options = {}) {
     if (e.path === INSTALLED_PACKAGE && o.installed !== false) return { value: JSON.stringify({ version: o.build ?? ENGINE_BUILD }) } as never
     if (e.path === UI_JSON && seen.state) return { value: JSON.stringify(seen.state) } as never
     if (e.path === `${ROOT}/ui-extraction.json` && seen.startedWith !== undefined) return { value: seen.startedWith } as never
+    if (e.path === `${ROOT}/ui-users.json` && seen.usersReadable && seen.users.size > 0) {
+      const users = [...seen.users].map(([session, pid]) => ({ session, pid: pid === '-' ? null : Number(pid), at: 1 }))
+      return { value: JSON.stringify({ users }) } as never
+    }
     return { deny: 'ENOENT' } as never
   })
   on('process.run', (_$, e) => {
@@ -82,6 +110,33 @@ function world(on: On, o: Options = {}) {
       seen.startedWithScript = e.argv[2]
       seen.startedWith = e.argv[4]
       return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
+    }
+    if (e.argv[0] === 'sh' && e.argv[2] === CLAUDE_PID_SCRIPT) {
+      if (seen.walkTimesOut) throw new Error('process.run: timed out')
+      // The walk as the real tree prints it: the hook host (Claude, comm a full path), then its shell.
+      const pid = o.claudePid ?? 4242
+      const chain = pid === 0 ? '700 1 /sbin/launchd\tlaunchd\n' : `${pid} 600 /Users/u/.local/bin/claude\tclaude --resume\n`
+      return { value: { exitCode: 0, stdout: chain, stderr: '' } } as never
+    }
+    if (e.argv[0] === 'bun' && e.argv[1]?.endsWith('/bin/ui-users.ts')) {
+      const [action, file, session, ...rest] = e.argv.slice(2) as [string, string, string, ...string[]]
+      seen.userCalls.push([action, file, session, ...rest])
+      const fail = o.usersFail?.[action as 'add' | 'leave']
+      const failed = failures.get(action) ?? 0
+      if (fail === 'timeout' || (typeof fail === 'number' && failed < fail)) {
+        failures.set(action, failed + 1)
+        throw new Error('process.run: timed out')
+      }
+      if (fail === 'exit') return { value: { exitCode: 1, stdout: '', stderr: 'ui-users: locked\n' } } as never
+      if (action === 'add') {
+        seen.users.set(session, rest[0]!)
+        return { value: { exitCode: 0, stdout: `${JSON.stringify({ live: seen.users.size })}\n`, stderr: '' } } as never
+      }
+      const listed = seen.users.delete(session)
+      const stopped: number[] = []
+      if (seen.users.size === 0) for (const pid of new Set([...rest.map(Number), ...(seen.state ? [seen.state.pid] : [])])) stopped.push(pid)
+      seen.signalled.push(...stopped)
+      return { value: { exitCode: 0, stdout: `${JSON.stringify({ live: seen.users.size, listed, stopped })}\n`, stderr: '' } } as never
     }
     if (isPing(e.argv)) return { value: { exitCode: seen.ping, stdout: '', stderr: '' } } as never
     if (e.argv[0] === 'kill' && e.argv[1] === '-0') return { value: { exitCode: seen.alive ? 0 : 1, stdout: '', stderr: '' } } as never
@@ -302,14 +357,14 @@ for (const reason of ['clear', 'other', 'prompt_input_exit', 'logout', 'resume']
     expect(kills(seen)).toEqual([])
 
     // The starter ends: the loop ends with the clock standing still, well inside the 1.5 s bound,
-    // and the server (the ready line's pid) also gets a kill (review r1 finding 8).
+    // and the server (the ready line's pid) also gets a SIGTERM from `leave` (review r1 finding 8).
     const ending = $.session.end(end('s1', reason))
     await clock.settle()
     expect(child.ended).toBe(true)
     await ending
-    expect(kills(seen)).toEqual(['kill 901'])
-    expect(seen.runs.find(r => isKill(r.argv))?.init?.timeoutMs).toBe(KILL_TIMEOUT_MS)
-    expect(STOP_WAIT_MS + KILL_TIMEOUT_MS).toBeLessThan(1_500)
+    expect(kills(seen)).toEqual([])
+    expect(seen.signalled).toEqual([901])
+    expect(seen.userCalls.at(-1)).toEqual(['leave', `${ROOT}/ui-users.json`, 's1', '901'])
   })
 }
 
@@ -452,3 +507,216 @@ for (const [why, startedWith] of [
     expect(textOf(await openUi($))).toContain('restart')
   })
 }
+
+// ---- The server stays up until every session that opened or reused it has ended ----
+
+// The process runs made since `from` (fs.read is not a process run).
+const runsSince = (seen: ReturnType<typeof world>, from: number) => seen.runs.slice(from).map(r => r.argv)
+const USERS = `${ROOT}/ui-users.json`
+
+test('the starter lists itself with a plain add (never a reset) and its Claude pid; a reusing session is listed too, again on each reuse', async ($, on) => {
+  const seen = world(on)
+  await openUi($)
+  expect(seen.userCalls).toEqual([['add', USERS, 's1', '4242']])
+  // The pid comes from the walk up the process tree, run as one shell.
+  const walk = seen.runs.find(r => r.argv[0] === 'sh')
+  expect(walk?.argv).toEqual(['sh', '-c', CLAUDE_PID_SCRIPT])
+  seen.session = 's2'
+  await openUi($)
+  await openUi($)
+  expect(seen.spawned.length).toBe(1)
+  // Each reuse lists s2 again: bin/ui-users.ts gives it a fresh `at` (tests/bun/ui-users.spec.ts).
+  expect(seen.userCalls.slice(1)).toEqual([
+    ['add', USERS, 's2', '4242'],
+    ['add', USERS, 's2', '4242'],
+  ])
+  expect([...seen.users.keys()]).toEqual(['s1', 's2'])
+})
+
+test('review r2 item 3: a pid lookup that times out on a reuse keeps the pid read before, never relists the session as unknown', async ($, on) => {
+  const seen = world(on)
+  await openUi($)
+  seen.walkTimesOut = true
+  await openUi($)
+  expect(seen.userCalls).toEqual([
+    ['add', USERS, 's1', '4242'],
+    ['add', USERS, 's1', '4242'],
+  ])
+})
+
+test('a pid that cannot be read (no claude above the hook) is listed as unknown, not guessed', async ($, on) => {
+  const seen = world(on, { claudePid: 0 })
+  await openUi($)
+  expect(seen.userCalls).toEqual([['add', USERS, 's1', '-']])
+})
+
+test('review r1 finding 1: a slow first add is tried again, with a 3 s timeout each, so the session is listed', async ($, on) => {
+  const seen = world(on, { usersFail: { add: 1 } })
+  const text = textOf(await openUi($))
+  const adds = seen.runs.filter(r => r.argv[1]?.endsWith('/bin/ui-users.ts'))
+  expect(adds.length).toBe(2)
+  expect(adds.map(r => r.init?.timeoutMs)).toEqual([USERS_TIMEOUT_MS, USERS_TIMEOUT_MS])
+  expect(USERS_TIMEOUT_MS).toBeGreaterThanOrEqual(3_000)
+  expect(USERS_TRIES).toBe(2)
+  expect([...seen.users.keys()]).toEqual(['s1'])
+  expect(text).not.toContain('could not be listed')
+})
+
+for (const fail of ['timeout', 'exit'] as const) {
+  test(`review r1 finding 1: an add that fails every try (${fail}) is said in the reply`, async ($, on) => {
+    const seen = world(on, { usersFail: { add: fail } })
+    const text = textOf(await openUi($))
+    expect(seen.userCalls.filter(call => call[0] === 'add').length).toBe(USERS_TRIES)
+    expect(text).toContain('could not be listed')
+    expect(text).toContain('Link: http://127.0.0.1:4321/')
+  })
+}
+
+for (const fail of ['timeout', 'exit'] as const) {
+  test(`review r1 finding 1: a leave with no answer (${fail}) is never read as "no one else": nothing is killed`, async ($, on) => {
+    const clock = mock.clock(on)
+    const seen = world(on, { usersFail: { leave: fail } })
+    await openUi($)
+    const child = seen.spawned[0]!
+    const ending = $.session.end(end('s1', 'other'))
+    await clock.settle()
+    await ending
+    // The holder goes; the server is left to its own poll of the list (it still names s1 while Claude runs).
+    expect(child.ended).toBe(true)
+    expect(kills(seen)).toEqual([])
+    expect(seen.signalled).toEqual([])
+    expect(seen.userCalls.filter(call => call[0] === 'leave').length).toBe(1)
+  })
+
+  test(`review r1 finding 1: a reusing last user whose leave has no answer (${fail}) kills nothing`, async ($, on) => {
+    const seen = world(on, { state: { port: 5555, token: TOKEN_A, pid: 42 }, usersFail: { leave: fail } })
+    seen.session = 's2'
+    await openUi($)
+    await $.session.end(end('s2', 'other'))
+    expect(kills(seen)).toEqual([])
+    expect(seen.signalled).toEqual([])
+  })
+}
+
+test('SHARE.1: the starter ends while another session still uses the server: its loop ends, the server is not signalled', async ($, on) => {
+  const clock = mock.clock(on)
+  const seen = world(on)
+  await openUi($)
+  const child = seen.spawned[0]!
+  seen.session = 's2'
+  await openUi($)
+
+  const ending = $.session.end(end('s1', 'clear'))
+  await clock.settle()
+  expect(child.ended).toBe(true)
+  await ending
+  expect(kills(seen)).toEqual([])
+  expect(seen.signalled).toEqual([])
+  expect(seen.userCalls.at(-1)).toEqual(['leave', USERS, 's1', '901'])
+  expect([...seen.users.keys()]).toEqual(['s2'])
+})
+
+test('SHARE.2: the last session ends, whoever started the server: its one leave stops the server ui.json names', async ($, on) => {
+  const clock = mock.clock(on)
+  const seen = world(on)
+  await openUi($)
+  seen.session = 's2'
+  await openUi($)
+  const first = $.session.end(end('s1', 'other'))
+  await clock.settle()
+  await first
+  expect(seen.signalled).toEqual([])
+
+  // s2 only reused the server and is the last user: `leave` (no server pid of its own) signals the one ui.json names.
+  const from = seen.runs.length
+  await $.session.end(end('s2', 'other'))
+  expect(runsSince(seen, from)).toEqual([['bun', expect.stringMatching(/\/bin\/ui-users\.ts$/), 'leave', USERS, 's2']])
+  expect(seen.signalled).toEqual([901])
+  expect(seen.users.size).toBe(0)
+})
+
+test('review r1 finding 2: session.end is one leave run (no ping, no separate kill), bounded well inside the 1.5 s budget', async ($, on) => {
+  const clock = mock.clock(on)
+  const seen = world(on)
+  await openUi($)
+  seen.session = 's2'
+  await openUi($)
+
+  // The starter: one leave beside its loop's end.
+  let from = seen.runs.length
+  const starter = $.session.end(end('s1', 'other'))
+  await clock.settle()
+  await starter
+  const starterRuns = seen.runs.slice(from)
+  expect(starterRuns.length).toBe(1)
+  expect(starterRuns[0]!.argv.slice(2)).toEqual(['leave', USERS, 's1', '901'])
+  expect(starterRuns[0]!.init?.timeoutMs).toBe(LEAVE_TIMEOUT_MS)
+
+  // The reusing last user: one leave, nothing else.
+  from = seen.runs.length
+  await $.session.end(end('s2', 'other'))
+  const reuserRuns = seen.runs.slice(from)
+  expect(reuserRuns.length).toBe(1)
+  expect(reuserRuns[0]!.init?.timeoutMs).toBe(LEAVE_TIMEOUT_MS)
+  expect(reuserRuns.some(r => isPing(r.argv) || isKill(r.argv))).toBe(false)
+
+  // The loop's wait and the leave run side by side: the slower of the two, plus a margin for the fs.read.
+  expect(SESSION_END_BUDGET_MS).toBe(1_500)
+  expect(Math.max(LEAVE_TIMEOUT_MS, STOP_WAIT_MS)).toBeLessThanOrEqual(SESSION_END_BUDGET_MS - 400)
+  expect(KILL_TIMEOUT_MS).toBeLessThan(SESSION_END_BUDGET_MS)
+})
+
+test('review r1 finding 6: a session listed in ui-users.json but unknown to this module (it was reloaded) still leaves and stops the server', async ($, on) => {
+  const seen = world(on, { state: { port: 5555, token: TOKEN_A, pid: 42 } })
+  // An earlier load of this module listed s9; this one never saw it.
+  seen.users.set('s9', '777')
+  await $.session.end(end('s9', 'other'))
+  expect(seen.userCalls).toEqual([['leave', USERS, 's9']])
+  expect(seen.signalled).toEqual([42])
+  expect(seen.users.size).toBe(0)
+})
+
+test('review r1 finding 6: with others still listed, a reloaded session only leaves', async ($, on) => {
+  const seen = world(on, { state: { port: 5555, token: TOKEN_A, pid: 42 } })
+  seen.users.set('s9', '777')
+  seen.users.set('s10', '778')
+  await $.session.end(end('s9', 'other'))
+  expect(seen.userCalls).toEqual([['leave', USERS, 's9']])
+  expect(seen.signalled).toEqual([])
+  expect([...seen.users.keys()]).toEqual(['s10'])
+})
+
+test('SHARE.4: /clear in the only session stops the server as before, and the next /mnemosyne-ui starts a new one', async ($, on) => {
+  const clock = mock.clock(on)
+  const seen = world(on)
+  await openUi($)
+  const ending = $.session.end(end('s1', 'clear'))
+  await clock.settle()
+  await ending
+  expect(seen.signalled).toEqual([901])
+  seen.session = 's1b'
+  seen.state = undefined
+  await openUi($)
+  expect(seen.spawned.length).toBe(2)
+  expect([...seen.users.keys()]).toEqual(['s1b'])
+})
+
+test('a session that never opened the dashboard ends with no process run at all', async ($, on) => {
+  const clock = mock.clock(on)
+  const seen = world(on)
+  await openUi($)
+  const from = seen.runs.length
+  const ending = $.session.end(end('other-session', 'other'))
+  await clock.settle()
+  await ending
+  expect(runsSince(seen, from)).toEqual([])
+})
+
+test('an unreadable ui-users.json, with nothing in memory, runs nothing and kills nothing', async ($, on) => {
+  const seen = world(on, { state: { port: 5555, token: TOKEN_A, pid: 42 } })
+  seen.users.set('s9', '777')
+  seen.usersReadable = false
+  await $.session.end(end('s9', 'other'))
+  expect(seen.runs).toEqual([])
+  expect(seen.signalled).toEqual([])
+})

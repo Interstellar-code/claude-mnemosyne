@@ -9,9 +9,19 @@ const REAL_HOME = homedir()
 export const ROOT = join(import.meta.dir, '..', '..')
 export const INSTALLER = join(ROOT, 'bin', 'install-engine.ts')
 
+// Every tempDir() not yet disposed: a spec that forgets dispose(), or whose cleanup test never runs
+// (a filter, an earlier failure), still gets its folder removed by cleanupIsolated() at the end of the run.
+const _tempDirs = new Set<string>()
 export function tempDir(prefix: string) {
   const dir = mkdtempSync(join(tmpdir(), `mnemosyne-${prefix}-`))
-  return { dir, dispose: () => rmSync(dir, { recursive: true, force: true }) }
+  _tempDirs.add(dir)
+  return {
+    dir,
+    dispose: () => {
+      rmSync(dir, { recursive: true, force: true })
+      _tempDirs.delete(dir)
+    },
+  }
 }
 
 const _isolatedHomes = new Set<string>()
@@ -32,15 +42,20 @@ export function isolatedEnv(prefix = 'isolated') {
   // tests offline-fast and writes no logs to the real home.
   return { HOME: home, PI_CONFIG_DIR: piConfig, BUN_INSTALL_CACHE_DIR: process.env.BUN_INSTALL_CACHE_DIR || join(REAL_HOME, '.bun', 'install', 'cache') }
 }
-// Removes every temp home isolatedEnv() made (rmSync removes the cache symlink, not its target).
-// `bun test` never fires process 'exit', so tests/bun/cleanup-preload.ts (bunfig.toml) calls this
-// from an afterAll once the whole run is done; a plain script still gets it from 'exit'.
+// Removes every temp home isolatedEnv() made (rmSync removes the cache symlink, not its target)
+// and every tempDir() still left. `bun test` never fires process 'exit', so
+// tests/bun/cleanup-preload.ts (bunfig.toml) calls this from an afterAll once the whole run is
+// done; a plain script still gets it from 'exit'.
 export function cleanupIsolated() {
-  for (const home of _isolatedHomes) {
-    try { rmSync(home, { recursive: true, force: true }) } catch {}
+  for (const dir of [..._isolatedHomes, ..._tempDirs]) {
+    try { rmSync(dir, { recursive: true, force: true }) } catch {}
   }
   _isolatedHomes.clear()
+  _tempDirs.clear()
 }
+
+/** The tempDir() folders not yet removed (for the specs that check they clean up). */
+export const liveTempDirs = () => [..._tempDirs]
 process.on('exit', cleanupIsolated)
 
 export async function runInstaller(engineDir: string, storeDir: string, env: Record<string, string> = {}) {

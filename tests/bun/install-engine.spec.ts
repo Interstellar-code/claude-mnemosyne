@@ -6,7 +6,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync,
 import { join } from 'node:path'
 import { cliOf, installStep, installStepEnv, type Runner } from '../../bin/install-engine'
 import { ENGINE_BUILD } from '../../hooks/engine-build'
-import { body, engineCall, isolatedEnv, ROOT, runInstaller, tempDir, toolCall } from './helpers'
+import { body, engineCall, isolatedEnv, liveTempDirs, ROOT, runInstaller, tempDir, toolCall } from './helpers'
 
 const INSTALL_TIMEOUT = 300_000
 
@@ -215,6 +215,10 @@ describe('the upgrade path (review r1 MED 2)', () => {
   }, INSTALL_TIMEOUT)
 })
 
+// The folders of the two refused-swap blocks below; each holds a whole installed engine, and runs
+// that never removed them filled TMPDIR with hundreds of 400 MB copies.
+const refuseDirs: string[] = []
+
 // EMB.3.a4: with embeddings on, the install check also runs remember, recall and a
 // clean exit. A stub engine that answers tools/list but fails the remember step
 // must make the installer refuse to swap, leaving the old engine in place.
@@ -223,6 +227,12 @@ describe('a failing embeddings check refuses the swap (EMB.3.a4)', () => {
   const temp = tempDir('emb-refuse')
   const engine = join(temp.dir, 'engine')
   const store = join(temp.dir, 'store')
+  // temp holds a whole installed engine (about 400 MB): removed as soon as this block is done.
+  refuseDirs.push(stubRoot.dir, temp.dir)
+  afterAll(() => {
+    temp.dispose()
+    stubRoot.dispose()
+  })
 
   beforeAll(async () => {
     // A stub plugin root: engine/package.json names our build, and its cli answers
@@ -278,6 +288,12 @@ describe('an embeddings check whose recall has no dense score refuses the swap (
   const temp = tempDir('emb-fulltext')
   const engine = join(temp.dir, 'engine')
   const store = join(temp.dir, 'store')
+  // temp holds a whole installed engine (about 400 MB): removed as soon as this block is done.
+  refuseDirs.push(stubRoot.dir, temp.dir)
+  afterAll(() => {
+    temp.dispose()
+    stubRoot.dispose()
+  })
 
   beforeAll(async () => {
     const stubEngine = join(stubRoot.dir, 'engine')
@@ -323,6 +339,15 @@ for (const line of lines) {
     expect(existsSync(`${engine}.next`)).toBe(false)
     expect(readdirSync(engine).sort()).toEqual(listing)
   }, INSTALL_TIMEOUT)
+})
+
+// Runs after both refused-swap blocks (bun runs a file's describes in order, each afterAll first).
+describe('the refused-swap blocks leave no temp folder behind', () => {
+  test('their engine copies and stub roots are gone', () => {
+    expect(refuseDirs).toHaveLength(4)
+    for (const dir of refuseDirs) expect(existsSync(dir)).toBe(false)
+    expect(liveTempDirs().filter(dir => refuseDirs.includes(dir))).toEqual([])
+  })
 })
 
 // H1 (final review r1): onnxruntime-node 1.26.0's postinstall downloads the
