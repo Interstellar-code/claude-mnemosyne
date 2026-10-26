@@ -2,6 +2,21 @@
 
 Newest first. Each release is tagged `vX.Y.Z` on GitHub; the README and DESIGN.md describe the contracts.
 
+## 0.9.0 (dashboard writes and review, importers, session summaries)
+
+1. Dashboard writes. The Memories tab has New memory and Edit (text, kind, tags from the vocabulary, importance, expiry, Pinned, project). A dashboard save passes the same save guard as every other save: a block cannot be overridden, a warning (or a near-duplicate) offers "Save anyway". Rows are saved as source `dashboard`, trust tier STATED. Routes: `POST /api/memory/create`, `/update`, `/retire`, `/restore`; create and update take bodies up to 24 KB, every other route 4096 bytes.
+2. Review tab. Retire candidates (with their reasons) and a Not live list with Restore and each row's last audit rows. Retire is one memory at a time, never deletes, and can be restored. Forget stays in the memory detail sheet only. Every memory has one of four states: live, retired, expired (by the sweep) or lapsed (its own expiry passed); Memories shows non-live rows only behind "Show retired".
+3. Vocabulary tab. The shared tags by namespace with counts, and the candidates with Admit and "Alias to" (`POST /api/vocabulary/admit` and `/alias`, `GET /api/vocabulary`, `GET /api/review`). The Health tab labels the engine's empty-on-purpose tables "unused by design".
+4. `/mnemosyne-import doc <path>` and `/mnemosyne-import session <id | last>`: a dry run, then `apply` after a backup, every candidate checked again by the guard, in the current project only. A session import sends the redacted conversation to the `extractionModel` (Haiku by default); a document import sends nothing.
+5. Pinned memories. `memory_update` takes `pinned`; a pinned memory is never a retirement candidate and never expires on its own. Outside agents cannot pin.
+6. Session summaries (`sessionSummary`, off by default) and the first-prompt block: the newest summary and up to 5 pinned memories go into a session's first prompt. When on, the redacted conversation of an ended session goes to the `extractionModel` (Haiku by default) in the background.
+7. Unused-memory sweep (`expireUnusedDays`, 90 by default, `0` off, 30 minimum): once a day, in the background, memories of the kinds context, event, error and artifact that were neither saved nor recalled for that many days get an end date. Pinned memories and the other kinds are never touched, nothing is deleted, the store is backed up first, and at most 50 per run. Preview: `bun bin/memories.ts --store <store> expire`.
+8. Engine log pruning: `omp.*.log` files older than 7 days in the model cache's logs folder are removed (the newest 20 are kept) at session start and by `/mnemosyne-setup`. Setup now names the platforms: embeddings are tested on macOS Apple Silicon only, and an Intel Mac is told they are unsupported.
+9. The map's space station threshold is a setting, `map.stationMin` (default 50, 2 to 1000).
+10. Activity log: new actions `restore`, `import` and `expire`, and origins `import` and `session`.
+
+No change to `engine/`.
+
 ## 0.8.5 (Settings tab)
 
 1. Settings tab. The dashboard has an eighth tab, Settings, where every setting of the memory system shows its value, its default, where it is stored and when a change takes effect. You can change a value (checked against its range first), add or remove list items, reset one setting or all of them (with a confirm), and make a backup now. See the README's Settings section.

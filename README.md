@@ -78,7 +78,7 @@ With embeddings off, recall matches words, not meaning: "deploy Fridays" finds t
 
 A save must name its kind: `memory_remember` (Claude's tool, and the MCP proxy for outside agents) refuses a call with no `kind` instead of storing it as `unknown`, and the refusal does not use up a remember phrase. See [Kinds](#kinds).
 
-Dashboard writes (create, edit, retire and restore on the page), the Review queue's actions, importers for documents and past sessions, session summaries and the sweep that expires unused memories are not in 0.8.0; they are planned for 0.9.0 (see [What 0.8.0 does not do yet](#what-080-does-not-do-yet)).
+Dashboard writes (create, edit, retire and restore on the page), the Review queue's actions, importers for documents and past sessions, session summaries and the sweep that expires unused memories are not in 0.8.0; they came in 0.9.0 (see [What 0.9.0 adds](#what-090-adds) and [What 0.8.0 did not do](#what-080-did-not-do)).
 
 ### The save guard
 
@@ -137,7 +137,7 @@ Since 0.8.0 a save says honestly who wrote it and through what. The engine's `so
 | You, with a remember phrase | `user` | `STATED` | `stated` |
 | An outside agent through the proxy | `mcp:<client name>` | `EXTERNAL_WRITE` | `unknown` |
 
-Memories saved before 0.8.0 keep `source` `imported` (that was the only label the old trim allowed); they are not relabelled, and a later retag changes tags and, where the kind is `unknown`, the kind, nothing else. An outside agent cannot set its own trust tier, veracity or a `valid_until` date (the proxy drops them); it can ask for an expiry with `expires_in_days` (1 to 365) on a save. The dashboard and the importers will add rows for their own paths in 0.9.0.
+Memories saved before 0.8.0 keep `source` `imported` (that was the only label the old trim allowed); they are not relabelled, and a later retag changes tags and, where the kind is `unknown`, the kind, nothing else. An outside agent cannot set its own trust tier, veracity or a `valid_until` date (the proxy drops them); it can ask for an expiry with `expires_in_days` (1 to 365) on a save. Since 0.9.0 the dashboard's saves and the importers (`import:doc`, `import:session`) record their own source too.
 
 If the same text is saved again, the first writer's `source` and trust tier stay (and the first author and veracity, as before); the scope only widens, and a protected kind keeps its kind. So a fact you stated and an agent later repeats still reads as yours. The reverse also holds: if Claude saved a sentence first and you later say it with a remember phrase, the row keeps `claude-code` and `DERIVED` and only its veracity moves to `stated`.
 
@@ -145,8 +145,8 @@ If the same text is saved again, the first writer's `source` and trust tier stay
 
 1. **Trim by scope.** The engine used to delete any memory not labelled `imported` after 24 hours (or past 1000 per owner). That is why every save used to carry that label. Now the trim only touches memories whose scope is `session`. The plugin always saves with scope `global` (or `channel` in per-project mode), so none of its saves is trimmed, and each can carry its true source. A memory with no scope is also spared.
 2. **Project state expires.** A `context` note gets an expiry 14 days after the save (`expiry.contextDays`). Any save can pass `expires_in_days` (1 to 365). Recall stops returning an expired memory; it is not deleted.
-3. **Restore.** The engine can bring a retired or expired memory back (`mnemopi_update` with `restore: true`, for the owner's own row). An outside agent can do it through the proxy: `memory_update` with `restore: true` is passed to the engine, and it restores a retired row that belongs to the agent's own owner (the engine answers `not_found` for another owner's row, and `unchanged` for a row that is not retired). Claude's own `memory_update` tool does not offer `restore`, and the dashboard has no button for it yet; a Restore button is planned for 0.9.0.
-4. **Unused memories.** The engine also has `mnemopi_expire_unused`, which expires memories of the kinds `context`, `event`, `error` and `artifact` that nobody recalled for 90 days (a dry run by default). Nothing in the plugin calls it in 0.8.0. The sweep itself arrives in 0.9.0.
+3. **Restore.** The engine can bring a retired or expired memory back (`mnemopi_update` with `restore: true`, for the owner's own row). An outside agent can do it through the proxy: `memory_update` with `restore: true` is passed to the engine, and it restores a retired row that belongs to the agent's own owner (the engine answers `not_found` for another owner's row, and `unchanged` for a row that is not retired). Claude's own `memory_update` tool does not offer `restore`; since 0.9.0 the dashboard's Review tab has a Restore button (see [Dashboard writes and the Review tab](#dashboard-writes-and-the-review-tab)).
+4. **Unused memories.** Since 0.9.0 a sweep calls the engine's `mnemopi_expire_unused` once a day and expires memories of the kinds `context`, `event`, `error` and `artifact` that nobody recalled for `expireUnusedDays` (90 by default). See [Unused memories: expireUnusedDays](#unused-memories-expireunuseddays).
 
 ### Near-duplicates and replacing a memory
 
@@ -154,7 +154,7 @@ When a close memory exists, Claude is told to update it. When the new text super
 
 ### The audit trail
 
-Each retire, restore, text update, attest and expiry writes one row to the engine's `memory_validations` table: which memory, who did it, what was done and when. The row never holds memory text. The "who" is `claude-code` for Claude's own text updates and for retires made through `replaces`, `mcp:<client name>` for an outside agent's text update, and `unknown` otherwise (a restore made through the proxy is recorded as `unknown`). The engine keeps only the last 3 rows per memory, so it is the last three actions, not a full history. Forgetting a memory deletes its rows. The dashboard does not show the trail yet.
+Each retire, restore, text update, attest and expiry writes one row to the engine's `memory_validations` table: which memory, who did it, what was done and when. The row never holds memory text. The "who" is `claude-code` for Claude's own text updates and for retires made through `replaces`, `mcp:<client name>` for an outside agent's text update, `dashboard` for a retire, restore or edit made on the dashboard, `expire-sweep` for the daily sweep's expiries, and `unknown` otherwise (a restore made through the proxy is recorded as `unknown`). The engine keeps only the last 3 rows per memory, so it is the last three actions, not a full history. Forgetting a memory deletes its rows. Since 0.9.0 the Review tab's "Not live" list shows each row's last audit rows (action, who, when).
 
 ### Backups
 
@@ -187,19 +187,65 @@ The tagger is shown up to 150 admitted tags by namespace, asked for 2 to 5 tags 
 
 Nothing new leaves it in 0.8.0. The guard, the near-duplicate check, the vocabulary, the backup and the audit trail all run on your machine. Memory text goes to one place, as before: the `extractionModel` (Haiku by default), through Claude Code's own model channel, for the tag dry runs, the retag dry run and knowledge extraction. A retag dry run sends the text of every memory (a plain tag run sends only the untagged ones), so it costs one model call per memory. `extractionModel` set to `off` stops all of it.
 
+0.9.0 adds two more things that go to the same model (Haiku by default) and nothing else: `/mnemosyne-import session` sends the redacted conversation of the session you name, and, only when `sessionSummary` is `on`, the background summary of an ended session sends that session's redacted conversation. Both are described in [Importing documents and sessions](#importing-documents-and-sessions-mnemosyne-import) and [Session summaries and pinned memories](#session-summaries-and-pinned-memories). Everything else 0.9.0 adds (dashboard writes, the Review tab, the vocabulary tab, `/mnemosyne-import doc`, the expiry sweep and log pruning) runs on your machine and sends nothing.
+
 ### Saves cannot move to another bank
 
 A `.env` file in the folder where an agent runs used to be able to point the engine at a different bank, and so a different database folder. The engine environment, both `mnemosyne-mcp` wrappers and the installer now pin the bank to `default`, so a hostile or stray `.env` cannot divert saves.
 
-### What 0.8.0 does not do yet
+### What 0.8.0 did not do
 
-1. The dashboard is read-only apart from Forget (and, since 0.8.5, the Settings tab): no create, edit, retire or restore, no tag vocabulary page, and the Review tab keeps its list with Open and Forget. All of that is planned for 0.9.0.
-2. No importers for documents or past sessions, and no session summaries.
-3. No expiry sweep for unused memories; the engine tool exists but nothing runs it.
-4. Claude's own tools and the dashboard cannot restore a retired or expired memory. Only an outside agent (`memory_update` with `restore: true` through the proxy, on its own owner's row) or a direct engine call can; the dashboard's Restore button is planned for 0.9.0.
-5. The Health tab still shows the engine's unused tables (`episodic_memory`, `consolidation_log`, `gists`, `facts`, `graph_edges`, `triples`, `scratchpad` and their search indexes) as plain "empty". They stay empty on purpose, because the plugin never uses the engine tools that fill them (see [DESIGN.md](DESIGN.md)).
-6. A tag update whose tags all clean away (only punctuation or blanks such as `["!!!"]`, or only the project's own name) is refused since 0.8.2, from Claude and from an outside agent alike, and the stored tags stay; send `tags: []` to remove tags on purpose.
-7. Embeddings, and so G3, are tested on macOS on Apple Silicon only.
+0.8.0 left five things for 0.9.0, all now done (see [What 0.9.0 adds](#what-090-adds)): dashboard writes and restore, a tag vocabulary page, the importers, session summaries, and the expiry sweep, plus the Health tab's "unused by design" labels for the engine's seven tables that stay empty on purpose (`episodic_memory`, `consolidation_log`, `gists`, `facts`, `graph_edges`, `triples`, `scratchpad` and their search indexes; see [DESIGN.md](DESIGN.md)). Two limits are still true:
+
+1. A tag update whose tags all clean away (only punctuation or blanks such as `["!!!"]`, or only the project's own name) is refused since 0.8.2, from Claude, from an outside agent and from the dashboard alike, and the stored tags stay; send `tags: []` to remove tags on purpose.
+2. Embeddings, and so G3, are tested on macOS on Apple Silicon only (see [Engine logs and platforms](#engine-logs-and-platforms)).
+
+## What 0.9.0 adds
+
+0.9.0 is about working with what is in the memory: you can write and review memories on the dashboard, import documents and past sessions, carry the last session's summary and your pinned memories into the next session, and let unused project notes expire. It needs no new engine build beyond 0.8.0's. The importers are described in [Importing documents and sessions](#importing-documents-and-sessions-mnemosyne-import) below; the rest follows here.
+
+### Dashboard writes and the Review tab
+
+The dashboard was read-only apart from Forget. It now writes, through the same guards as every other save.
+
+1. New memory and Edit. The Memories tab has a New memory button, and a memory's detail sheet has Edit. The form takes the text, the kind (required), tags (picked from the [vocabulary](#tags-vocabulary-and-namespaces)), importance, an expiry in days (1 to 365; Edit can remove an expiry), Pinned (Edit only) and, for a new memory, where it belongs: `global` or a project already in the store. A `context` note gets its 14-day expiry unless you set another.
+2. The save guard runs first, with the settings in `config.json`. A blocked text (a secret, or empty, too short or too long text) is refused with the rule names and cannot be saved. A warning (chatter, or a near-duplicate found by meaning when embeddings are on) is shown and offers "Save anyway", which sends the same text again with `confirm: true`; a confirmed save is flagged in `metadata.guard`. The page shows a save as done only after the server said so. A body over 24 KB is refused (the other write routes take 4096 bytes).
+3. A dashboard save is recorded as source `dashboard`, trust tier STATED, author type human and veracity `stated`. Edits go through the engine as the memory's own owner and are recorded in the audit trail as `dashboard`. Tags that all clean away are refused rather than read as "remove the tags".
+4. Forget stays in the memory detail sheet only (a first button, then a confirm that cannot be undone). The Review tab never offers it.
+
+The Review tab keeps its four lists of the newest memories (never recalled, no tags, not recalled in 30 days, importance under 0.4) and adds two:
+
+1. Retire candidates: live memories the server flags, each with its reasons: marked superseded (the capital words SUPERSEDED, HISTORICAL or DEPRECATED, or "possibly stale"), a near-duplicate of another live memory (by meaning, so only with embeddings), a dated status note, a guard flag, or never recalled and older than 30 days. A pinned memory is never listed. The most reasons come first, then the oldest; at most 200 are shown, with the total.
+2. Not live: the memories that are no longer recalled, each with its state, the date it stopped, its last audit rows (what was done, by whom, when; never text) and a Restore button.
+
+Retire works on one memory at a time, behind a confirm that names the memory and offers an optional "replaced by" id. A retired memory is not deleted: it stops being recalled and Restore brings it back. Nothing is retired in bulk.
+
+Every memory has one of four states, shown in the Memories tab and the Review tab (the map draws them too): `live`; `retired` (retired by hand or by `replaces`); `expired` (ended by the daily sweep); `lapsed` (its own expiry date passed, such as a `context` note after 14 days). The states `retired` and `expired` come from the audit trail, which keeps only the last 3 actions per memory, and the engine writes a trail row only when the caller names itself; a memory retired with no replacement and no such name, or whose trail rows were pushed out, reads as `lapsed`. In the Memories tab only live memories show unless you tick Show retired (off by default; the choice is kept in your browser only), and the others are dimmed with their state.
+
+The Vocabulary tab lists the shared tags by namespace with their use counts, and the candidates the tagger proposed, each with Admit and "Alias to". It writes through the same code as `bun bin/vocab.ts admit` and `alias`, and says so when there is no vocabulary yet (run `/mnemosyne-tags` once to make one). The Health tab now labels the engine's tables that stay empty on purpose as "unused by design", with the reason, instead of "empty".
+
+Security is as before: every write is a POST behind the token, the Host and Origin checks, a JSON body and a size cap, and the server writes through the engine, not the database file. The activity log gets a `remember`, `update`, `retire` or `restore` line from the dashboard (origin `ui`) with ids and rule names, never memory text.
+
+### Session summaries and pinned memories
+
+1. Pinned memories. A memory marked pinned is never a retirement candidate, never expires on its own and never goes in the sweep. Claude can pin with `memory_update` (`pinned: true`; `false` unpins), and the dashboard's Edit form has the same checkbox. Outside agents cannot pin (the proxy takes no `pinned`).
+2. The first-prompt block. On a session's first prompt, before the usual related-memories recall, Claude is given "what we were doing last time, and pinned memories": the newest session summary of this owner, then up to 5 pinned memories (fewer if `recall.firstPromptCount` is lower) and at most 2000 characters of them, the last one cut with an ellipsis. A memory shown there is left out of the related-memories list so it appears once. The block is read from the store: no model call, nothing leaves your machine.
+3. Session summaries are off by default (`sessionSummary` in the [settings](#settings)). When on, a session ending (exit, `/clear` or resume) leaves a small marker in `~/.claude/mnemosyne/session-pending/`: the session id, its owner and its transcript path, no text. On a later session's first prompt, after Claude's reply and in the background, the marker is claimed and the session's conversation (your messages and Claude's text replies only, key and token shapes replaced by `[redacted]`, the newest 30,000 characters) goes to the `extractionModel` (Haiku by default) through Claude Code's own model channel. Haiku's note, at most 600 characters, is checked by the save guard and saved as one `event` memory with source `import:session`, kept 30 days. A session of fewer than 2 turns is skipped, a reply of `NONE` saves nothing, at most 3 summaries are made per run, and a session is summarised once (a summary that was retired or expired is not made again). `extractionModel` set to `off` stops it.
+
+### Unused memories: expireUnusedDays
+
+`expireUnusedDays` (90 by default) sets how long a memory can go without being recalled before the daily sweep expires it.
+
+1. What it expires: only memories of the kinds `context` (project state), `event` (including session summaries), `error` (bug notes) and `artifact` (references), that have no end date yet, are not pinned and were neither saved nor recalled for that many days (a memory's last use is the later of the two). A memory with an unreadable `metadata` or no scope is spared. A `fact`, `preference`, `instruction`, `decision` or `unknown` memory is never touched, whatever the number, and no setting can widen the list.
+2. It never deletes. Expiring gives the memory an end date, so it stops being recalled; the Review tab's Not live list shows it as `expired` and Restore brings it back.
+3. The number is 30 to 3650; `0` turns the sweep off; 1 to 29 (or anything that is not a whole number) is refused and no sweep runs.
+4. When: at most once a day (a marker file, `expire-sweep.json`, in the Mnemosyne root), started in the background by a session's first prompt, for the current owner's own memories only (this project's in `per-project` scope, the global ones in `global` scope), and at most 50 memories per run, longest unused first; the rest wait for the next day. The store is backed up first, and if the backup fails nothing is expired. Each expiry is recorded in the audit trail as `expire-sweep`, and the activity log gets one `expire` line with counts and ids.
+5. Preview it, changing nothing: `bun bin/memories.ts --store ~/.claude/mnemosyne/store expire` (add `--days N` or `--owner <owner>`). It lists what would expire and prints the exact `--apply` command to run it by hand.
+
+### Engine logs and platforms
+
+1. Engine logs. The engine writes one `omp.*.log` file per run into `~/.claude/mnemosyne/model-cache/logs` and never trims them. Session start and `/mnemosyne-setup` now delete, in the background and without any message, the `omp.*.log` files in that folder that are older than 7 days, always keeping the newest 20. Only regular files with that name directly in that folder are touched; a linked folder or file is left alone, and a run removes at most 1000.
+2. Platform notes. `/mnemosyne-setup` ends its reply by saying that embeddings are tested on macOS Apple Silicon only and that Linux and Windows are untested. On an Intel Mac (darwin x64) it also says embeddings are not supported there, and leaves them off even when `embeddings` is `on`.
 
 ## Importing documents and sessions: /mnemosyne-import
 
@@ -237,22 +283,23 @@ That is a dry run: it counts the memories with no vector. Then `/mnemosyne-embed
 /mnemosyne-ui
 ```
 
-Starts a small local web page for your memories and opens it in your default browser. The reply shows the full link, with its key after `#`, and the link is on the clipboard too, so you can open it in another browser. The page has eight tabs and opens on Map:
+Starts a small local web page for your memories and opens it in your default browser. The reply shows the full link, with its key after `#`, and the link is on the clipboard too, so you can open it in another browser. The page has nine tabs and opens on Map:
 
-- **Map:** the solar-system Galaxy view: the sun and writer nodules, planets and crafts with their styles, land, moons, asteroids, belts, black holes, satellites, comets and beams, clouds and ice cap (see [The galaxy](#the-galaxy)). Arrange by, Find, the Bodies strip, the Details panel (read-only until the 0.9.0 dashboard writes), and the live events; Timeline and Meaning unchanged. Two new files in the Mnemosyne root: `activity-daily.json` (counts only) and `projects.json` (project names and the remote's host only); a project is recorded the next time a Claude session starts in it.
-- **Memories:** every memory, with a project filter, sorting (newest, most recalled, never recalled), a text and tag filter. A memory opens in a panel that slides up from the bottom, with a Forget button that asks before it deletes. Knowledge and Search open memories in the same panel.
+- **Map:** the solar-system Galaxy view: the sun and writer nodules, planets and crafts with their styles, land, moons, asteroids, belts, black holes, satellites, comets and beams, clouds and ice cap (see [The galaxy](#the-galaxy)). Arrange by, Find, the Bodies strip, the Details panel, and the live events; Timeline and Meaning unchanged. Two new files in the Mnemosyne root: `activity-daily.json` (counts only) and `projects.json` (project names and the remote's host only); a project is recorded the next time a Claude session starts in it.
+- **Memories:** every memory, with a project filter, sorting (newest, most recalled, never recalled), a text and tag filter. A memory opens in a panel that slides up from the bottom, with Edit and a Forget button that asks before it deletes. New memory creates one, and Show retired (off by default) adds the memories that are no longer live, dimmed (see [Dashboard writes and the Review tab](#dashboard-writes-and-the-review-tab)). Knowledge and Search open memories in the same panel.
 - **Activity:** the activity log, live, one plain sentence per call, with the app and the session that made it; click a line for its details (see [Activity log](#activity-log)).
 - **Search:** the same recall Claude uses, with scores and the top 20 results. Match by Keyword, or Keyword + meaning when embeddings are on; each result says whether it matched on words, meaning or both. Searching here does not change any memory's recall count.
 - **Knowledge:** the facts, preferences, instructions, dated events and relations that extraction pulled out of your memories (see [The Knowledge and Health tabs](#the-knowledge-and-health-tabs)).
-- **Review:** memories to look at again: never recalled, no tags, not recalled in 30 days, or low importance, each with Open and Forget.
+- **Review:** memories to look at again: never recalled, no tags, not recalled in 30 days, or low importance, then Retire candidates with their reasons and a Not live list with Restore. Each row has Open and a one-at-a-time Retire; Forget is not here.
 - **Health:** how much of your memory is used, how much has never been recalled, and which features are switched on.
-- **Settings:** every setting of the memory system with its value and default, where you change, reset and back up (see [Settings](#settings)). It is the one tab that writes: to `~/.claude/mnemosyne/config.json` and, through the `claude` command, to the plugin options.
+- **Vocabulary:** the shared tags by namespace with counts, and the candidates to Admit or Alias.
+- **Settings:** every setting of the memory system with its value and default, where you change, reset and back up (see [Settings](#settings)). It writes to `~/.claude/mnemosyne/config.json` and, through the `claude` command, to the plugin options.
 
 The Theme button in the header switches the whole dashboard between Auto (follows your system), Light and Dark, and remembers your choice. The header shows the plugin version the dashboard runs (for example `v0.8.0`) beside the engine's. The block at the bottom of the Health tab shows the store, the server process and whether the activity log is on.
 
 One dashboard runs at a time: running `/mnemosyne-ui` again, in this session or another, hands over the same link. It keeps running until every session that opened or reused it has ended (`/clear` counts as an end), so a session ending does not take it away from another one; a session that crashed does not hold it up. Run `/mnemosyne-ui` again for a fresh one.
 
-**Security.** The server binds `127.0.0.1` only, so nothing outside your machine can reach it. It makes a new random token each time it starts; the link carries it after `#`, which a browser never sends, and the page sends it only in a request header. Without it, every data route answers 401. The page loads no outside files, and a strict content security policy blocks inline script and style. The server reads the database read-only: a forget or a search goes through the engine, as Claude's would. Anyone who can run programs as your user can read the token from `~/.claude/mnemosyne/ui.json`, as they could read the database itself.
+**Security.** The server binds `127.0.0.1` only, so nothing outside your machine can reach it. It makes a new random token each time it starts; the link carries it after `#`, which a browser never sends, and the page sends it only in a request header. Without it, every data route answers 401. The page loads no outside files, and a strict content security policy blocks inline script and style. The server reads the database read-only: a write (create, edit, retire, restore, forget) or a search goes through the engine, as Claude's would. Anyone who can run programs as your user can read the token from `~/.claude/mnemosyne/ui.json`, as they could read the database itself.
 
 The dashboard and the activity log are tested on macOS and Linux, not on Windows.
 
@@ -282,7 +329,7 @@ The mapping (how a thing on the map comes from the store):
 | Update beam / forget laser | a live update (green beam) / a live forget (red laser; the memory fades) |
 | Clouds / ice cap | needs review / idle 30+ days (clouds when more than a quarter of live memories are kind unknown) |
 
-Arrange by re-orders the planets' orbits: activity (busier = closer, the default), size, age, or recalls. Each keeps its angle. At most 10 orbits. Find dims every body except those whose tag, project or label holds the text. The Bodies strip lists what matches. The Details panel shows a body's facts and is read-only until the dashboard's write controls (0.9.0) land. A memory's text, tags, writer, provenance, dates, state, pin, history and similar memories all show there.
+Arrange by re-orders the planets' orbits: activity (busier = closer, the default), size, age, or recalls. Each keeps its angle. At most 10 orbits. Find dims every body except those whose tag, project or label holds the text. The Bodies strip lists what matches. The Details panel shows a body's facts and is read-only; edit, retire and restore a memory from the Memories and Review tabs. A memory's text, tags, writer, provenance, dates, state, pin, history and similar memories all show there.
 
 Meaning and Similar memories. With embeddings on and vectors filled (see [Embeddings](#embeddings-meaning-based-recall)), the Meaning layout places every memory that has a vector by its meaning: the engine's vectors are laid out in 3D with UMAP, so memories that say similar things sit near each other, across projects. Project colours stay. A memory without a vector waits on a ring at the edge, labelled "Not embedded", until `/mnemosyne-embed apply` fills it. Meaning needs at least 10 memories with a vector; below that the map keeps the topic layout. The first layout over a new set of vectors takes a moment and is cached in `~/.claude/mnemosyne/meaning.json` (owner-only); if it is not ready within 8 seconds the map shows the topic layout and the layout appears on the next load. The Similar memories switch draws faint links between a memory and its closest neighbours (up to 3, at a cosine of at least 0.65), and the Details panel lists them with a percentage. In Meaning every star shows its links. The Meaning button and the Similar memories switch are disabled, with the hint "Turn on embeddings, then run /mnemosyne-embed apply", until there are enough vectors.
 

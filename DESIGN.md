@@ -1552,6 +1552,56 @@ banks. Claims marked *verified* were observed directly; the rest are marked as
 inference where they appear. Re-probed on 2026-10-20 with `pi-mnemopi` 18.12.3:
 remember, owner-scoped recall, owner-only forget and stats behave the same.
 
+## v0.9.0: dashboard writes and review, the importers, session summaries and the expiry sweep
+
+`README.md` describes the release for a person; this section records the contracts as built and what they cannot do. The plan is `docs/plans/mnemosyne-v3.md` (phases CRUDX, IMPORT, CRUD, SESSION, HARDEN part B, REL9). `engine/` is not touched in 0.9.0; it uses the tools MODEL added in 0.8.0 (`mnemopi_similar`, `mnemopi_expire_unused`, update's `restore` and `pinned` metadata, the `validator` argument).
+
+### C7: the dashboard's write and review routes (CRUDX.1 to CRUDX.4)
+
+1. Routes. `POST /api/memory/create`, `/api/memory/update`, `/api/memory/retire`, `/api/memory/restore`, `/api/vocabulary/admit` and `/api/vocabulary/alias`; `GET /api/review` and `GET /api/vocabulary`. Every POST goes through `post()` in `ui/server.ts` behind the outer Host and token checks (and the Origin, JSON and size checks); each has a 403 spec.
+2. Body cap. `post()` takes a per-route cap: `MAX_WRITE_BODY_BYTES` (24 KB) for create and update, `MAX_BODY_BYTES` (4096) for everything else; 413 means over the cap. The guard allows 4000 characters, which can pass 4096 bytes once wrapped in JSON.
+3. Answers. 422 is a block (rule ids, no override), 409 is a warning that needs `confirm: true` (the guard's hits, and G3's near-duplicates, which the server finds with `mnemopi_similar` and `NEAR_DUPLICATE_SCORE` because the server cannot import `register.ts`) or a state conflict, 400 is a bad field, 404 is a missing memory, 502 is an engine failure with nothing changed.
+4. Create takes `{ owner, content, kind, tags?, importance?, expires_in_days?, confirm? }` (kind required; owner `global` or one in the store). Update takes `{ memory_id, content?, kind?, tags?, importance?, expires_in_days?, pinned?, confirm? }`; the owner is the row's, as in forget. `pinned` is sent as an engine metadata merge, `expires_in_days: null` clears the expiry. Tags go through `cleanTags` and `tagRules`; `valid_until` comes from `validUntilFor`; a change of content clears an old guard flag. Writes pass C4's dashboard row (source `dashboard`, STATED, human, `stated`) and update passes `validator: 'dashboard'`.
+5. Retire is `mnemopi_invalidate` (the route's `replaced_by` is the engine's `replacement_id`), refused with 409 for a memory that is not live. Restore is update with `restore: true`; both pass `validator: 'dashboard'`. Nothing retires or deletes more than the one memory named.
+6. Row state. `/api/memories` and `/api/review` rows carry `state`: `live`, `retired`, `expired` or `lapsed`, from the exported `memoryState` helper (the rule is in v0.8.3's C11.4 above). Its limit: the engine writes an audit row only when a `validator` is passed, and the trail keeps the newest 3 rows per memory, so a retire with no validator and no replacement, or one whose rows were pushed out, reads as `lapsed`.
+7. `GET /api/review` is read-only on the read-only handle (it never changes `recall_count`). Retire candidates carry reasons (marked superseded, near-duplicate by vector among the newest 1000 live memories that have one, a dated status note by G4's own test, a guard flag, never recalled and older than 30 days); a pinned memory is never listed; at most `REVIEW_LIMIT` (200) of each list come back with their totals. Not-live rows carry their state, the date they stopped and their last 3 audit rows (action, validator, time; no text).
+8. Vocabulary. Admit and alias call `admitTag` and the alias code of `bin/vocab.ts`, the one writer of `vocabulary.json` (C5), one write at a time; with no vocabulary file the answer is 409 and the page says to run `/mnemosyne-tags`.
+9. Logging. Each write adds one activity line (`remember`, `update`, `retire`, `restore`; origin `ui`) with ids and rule ids, never memory text. CRUDX.0 added the actions `restore`, `import` and `expire` and the origins `import` and `session` to `hooks/activity-log.ts`.
+
+### C8: proposal files hold no memory text (VOCAB.2, IMPORT.1 to IMPORT.3)
+
+`tags-proposed.json` (the tagger) and `import-proposed.json` (the importers) are mode 0600 and hold ids, paths, headings, sha256 values, rule ids and verdicts, never memory text. A document import's text is read again from the file at apply; a session import's memories stay in the Claude Code process between the dry run and the apply (an apply after a restart needs a new dry run). `bin/import.ts` writes the file by a rename over the old one. Every apply runs the C9 backup first and stops if it fails, then checks each candidate with the guard (origin `import`) and G3 again. An import stays inside the current project: it sees and replaces only that owner's earlier rows, so another project's copy of the same file is never touched. A changed chunk is saved and the old row is retired (restorable), not deleted. A session import sends the redacted conversation (your messages and Claude's text replies, key and token shapes replaced, the newest 30,000 characters) to the `extractionModel` and nowhere else; a document import sends nothing.
+
+### C10.5: unused tables, "unused by design" (CRUDX.5)
+
+`GET /api/health-report` gains `unusedByDesign: { <table>: <reason> }` (`UNUSED_BY_DESIGN` in `ui/server.ts`) for the engine tables the plugin never fills: `episodic_memory`, `consolidation_log`, `gists`, `facts`, `graph_edges`, `triples`, `scratchpad` and the shadow tables of the `fts_episodes*` and `fts_facts*` indexes, limited to those present in the store. The Health tab shows each empty one as "unused by design" with its reason and does not count it as a gap. Why the tables stay empty is in section 3.9, "Why the seven engine tables stay unused".
+
+### The review history
+
+C10.3: the engine's trigger `trim_validations_to_3` keeps only the newest 3 `memory_validations` rows per memory, so the trail is "the last 3 actions", not a history. C10.1: a row is `{ memory_id, validator, action, validated_at }`; `new_content` and `note` stay NULL, so memory text never enters the trail. Validators: `dashboard`, `claude-code`, `expire-sweep`, else `unknown` (a restore through the outside-agent proxy). Forget deletes the memory's rows in the same transaction (C10.4). The Review tab's Not-live list is the only place the trail is shown.
+
+### Session summaries and the first-prompt block (SESSION.1, SESSION.2)
+
+1. The plugin API gives `session.start` no way to add context (it returns only `{ cwd }`), and `/clear` fires `session.end` but no `session.start`. So `session.end` writes a pending marker (`<root>/session-pending/<session id>.json`, mode 0600: the session id, owner and transcript path, no text), and the next session's first prompt finishes it after the reply, in the background. A marker is claimed by renaming it to `<id>.claim`, so only one session summarises it; a claim older than 10 minutes is put back.
+2. The summary is `sessionSummary: on` only (off by default). `hooks/session.ts` holds the pure parts: the prompt (the transcript goes in as a quoted JSON string, marked as data), the reply reader (`NONE`, an empty or a too-short reply saves nothing; at most 600 characters), the caps (at most 3 per run, at least 2 turns, 90 s per call) and the saved row (`event`, source `import:session`, 30 days, `metadata.session`, through `admit()`). Transcripts are read through `bin/import.ts` because `$.fs.read` refuses files over 4 MiB.
+3. The first-prompt block is read from the store by `bin/memories.ts first-prompt` (no model, no engine process): the newest live summary of the owner, then up to `min(5, recall.firstPromptCount)` pinned memories and 2000 characters of them. What it shows is left out of the related-memories recall so nothing appears twice. It is added in `prompt.submit`'s first-prompt recall, the only place the API lets context in.
+
+### The expiry sweep and its limits (SESSION.4)
+
+1. `mnemopi_expire_unused` with `dry_run: false` and `validator: 'expire-sweep'`, run by `bin/memories.ts expire --apply`, started by the first prompt of a session and gated by `expire-sweep.json` (24 hours; a claim lock, `expire-sweep.lock`, is stale after 60 s). A marker dated more than 24 hours ahead counts as due.
+2. Kinds are fixed in `EXPIRE_KINDS`: `context`, `event`, `error`, `artifact`. The option moves the number of days only (0 off, 30 to 3650; 1 to 29 refused, because the engine would clamp them up to 30 and the number would mislead), and the engine also refuses the protected kinds and honours `metadata.pinned`. A memory that already has an end date is not a candidate.
+3. It only expires (sets `valid_until`), never deletes; `restore` undoes it. It runs for the current owner only (the project's in `per-project`, `global` in `global`), at most 50 rows per run, so a large backlog takes several days.
+4. A dry run comes first; only when it finds something is the store backed up (C9), and a failed backup stops the sweep before any change. A failure records one `expire` activity line with a fixed sentence, not the engine's message.
+5. Limits: a memory's last use is the later of its save and its last recall, so one recalled every quarter never expires; the engine spares a row with no scope, a `session` scope or unreadable metadata; the 24-hour marker is per data root, not per owner; and the Review tab shows the result as `expired` only while the audit row is among the newest 3 (otherwise `lapsed`).
+
+### Engine logs and platforms (HARDEN.3)
+
+`pruneEngineLogs` in `bin/install-engine.ts` removes `omp.*.log` files directly inside `<root>/model-cache/logs` that are older than 7 days, always keeping the newest 20, at most 1000 per run, regular files only (a linked folder or file is left alone). Session start and `/mnemosyne-setup` run it through `bun bin/install-engine.ts prune-logs <dir>` in the background (15 s bound, errors swallowed). Setup's reply names the platforms: embeddings are tested on macOS Apple Silicon only, Linux and Windows are untested, and an Intel Mac (darwin x64) is told embeddings are unsupported and stays off even with `embeddings: on`.
+
+### The map setting (map.stationMin)
+
+On the solar-system map a plain folder (no git repo) with at least `map.stationMin` live memories is a space station and one with fewer a starship (default 50, range 2 to 1000, applies now). The galaxy reply carries the value. Git repos are always planets.
+
 ## v0.8.5: the Settings tab and config.json
 
 `README.md` describes the tab for a person; this section records the contracts. The plan is `docs/plans/mnemosyne-settings.md` (phases CFG, WIRE, SRV, UI, REL85). `engine/` is not touched.
