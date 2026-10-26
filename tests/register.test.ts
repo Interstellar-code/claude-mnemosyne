@@ -3544,3 +3544,53 @@ test('WIRE.3.a2: session.end drops the session from the registered record', asyn
   // The record is gone, so the settings decide again.
   expect((await compose()).sections.some(s => s.id === 'mnemosyne:rules')).toBe(true)
 })
+
+// ---- IMPORT.1: /mnemosyne-import (the real work is specced in tests/bun/import.spec.ts over a real engine and store) ----
+
+const importRun = ($: Engine, args = '') => $.command.run({ command: 'mnemosyne-import', args } as never) as Promise<{ text?: string }>
+
+test('IMPORT.1: /mnemosyne-import is registered at session start', async ($, on) => {
+  const names: string[] = []
+  world(on, '{}', true, 0, ENGINE_BUILD)
+  on('command.register', (_$, e) => {
+    names.push((e as { name: string }).name)
+    return { value: {} } as never
+  })
+  on('tool.register', () => ({ value: {} }) as never)
+  on('ui.toast', () => ({ value: undefined }) as never)
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/w', surface: null, isInteractive: false } as never)
+  expect(names).toContain('mnemosyne-import')
+})
+
+test('IMPORT.1: a bad argument gets the usage text and starts no process', async ($, on) => {
+  const state = tagsWorld(on, [])
+  for (const args of ['', 'tags', 'doc', 'apply now']) expect((await importRun($, args)).text).toContain('Usage: /mnemosyne-import')
+  expect(state.other).toEqual([])
+  expect(state.backups).toEqual([])
+  expect(state.engine).toEqual([])
+})
+
+test('IMPORT.1: apply with no dry run makes no backup and runs no engine', async ($, on) => {
+  const state = tagsWorld(on, [])
+  expect((await importRun($, 'apply')).text).toContain('There is no dry run to apply')
+  expect(state.backups).toEqual([])
+  expect(state.other.filter(run => String(run.argv[1] ?? '').endsWith('/bin/import.ts'))).toEqual([])
+  expect(state.engine).toEqual([])
+})
+
+test('IMPORT.1: a stale engine stops both modes before bin/import.ts reads anything', async ($, on) => {
+  const state = tagsWorld(on, [], { build: '18.12.3-mnemosyne.1' })
+  expect((await importRun($, 'doc /w/notes.md')).text).toContain('out of date')
+  expect((await importRun($, 'apply')).text).toContain('out of date')
+  expect(state.other).toEqual([])
+  expect(state.backups).toEqual([])
+})
+
+test('IMPORT.1: a failed bin/import.ts is reported with its reason and nothing is written', async ($, on) => {
+  const state = tagsWorld(on, [])
+  const text = (await importRun($, 'doc /w/notes.md')).text ?? ''
+  expect(text).toContain('Mnemosyne import failed')
+  expect(state.backups).toEqual([])
+  expect(state.engine.some(run => String(run.init?.stdin).includes('mnemopi_remember'))).toBe(false)
+})
