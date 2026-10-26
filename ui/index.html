@@ -436,6 +436,26 @@
     </footer>
   </main>
 
+  <main id="view-settings" class="main view column wide" hidden>
+    <div class="titlebar">
+      <h1 id="settings-title" tabindex="-1">Settings</h1>
+      <span class="muted small">View, change and reset how Mnemosyne guards, tags, recalls and stores memories. Each setting says when a change takes effect.</span>
+    </div>
+    <div class="status-row">
+      <p id="settings-status" class="notice-line small muted" role="status">Loading…</p>
+      <button id="settings-retry" class="btn" type="button" hidden>Try again</button>
+    </div>
+    <div id="settings-body" hidden>
+      <div class="toolbar">
+        <label class="field grow" for="settings-filter">Filter settings
+          <input id="settings-filter" class="input" type="search" autocomplete="off" placeholder="Name, help text or group">
+        </label>
+      </div>
+      <div id="settings-top"></div>
+      <div id="settings-groups" class="set-groups"></div>
+    </div>
+  </main>
+
   <!-- The shared bottom sheet (ui/sheet.ts): one panel for every tab. -->
   <aside id="sheet" class="sheet" role="dialog" aria-modal="false" aria-labelledby="sheet-title" hidden>
     <div class="sheet-grip" aria-hidden="true"></div>

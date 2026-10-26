@@ -411,8 +411,8 @@ describe('VIEWS.1: the Knowledge tab on a real store', () => {
   test('VIEWS.1.a4: the page has the Knowledge tab, its markup, and tsc covers the new files', () => {
     const app = readFileSync(join(ROOT, 'ui', 'app.ts'), 'utf8')
     const html = readFileSync(join(ROOT, 'ui', 'index.html'), 'utf8')
-    expect(app).toMatch(/const VIEWS = \['map', 'memories', 'activity', 'search', 'knowledge', 'review', 'health'\] as const/)
-    expect(app).toMatch(/knowledge: 'Knowledge', review: 'Review', health: 'Health'/)
+    expect(app).toMatch(/const VIEWS = \['map', 'memories', 'activity', 'search', 'knowledge', 'review', 'health', 'settings'\] as const/)
+    expect(app).toMatch(/knowledge: 'Knowledge', review: 'Review', health: 'Health', settings: 'Settings'/)
     for (const id of ['view-knowledge', 'view-review', 'review-status', 'review-retry', 'review-title', 'review-body', 'view-health', 'know-status', 'know-notice', 'know-tabs', 'know-summary', 'know-owner', 'know-sort', 'know-find', 'know-never', 'know-status-head', 'know-rows', 'know-item-head', 'know-body', 'know-retry', 'health-status', 'health-retry', 'health-title']) expect(html).toContain(`id="${id}"`)
     // Plain toggle buttons in a labelled group: no tablist without tabpanels and arrow keys.
     expect(html).toContain('<div id="know-tabs" class="chips" role="group" aria-label="Knowledge kind">')
