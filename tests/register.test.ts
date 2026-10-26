@@ -45,12 +45,22 @@ type Extra = {
   cwd?: string
   // MAPX.8: each `bun bin/projects.ts write <path>` spawn finishes (default), never finishes, or throws.
   projects?: 'ok' | 'hang' | 'throw'
+  // SESSION: the answer to a session command of bin/memories.ts (first-prompt, summarised, session-pending, sweep-claim, expire); undefined falls back to a quiet default (nothing pinned, nothing pending, no sweep due).
+  memories?: (argv: readonly string[], stdin: string) => { stdout?: string; exitCode?: number; stderr?: string } | undefined
+}
+const SESSION_COMMANDS = ['first-prompt', 'summarised', 'session-pending', 'sweep-claim', 'expire']
+const QUIET_REPLIES: Record<string, string> = {
+  'first-prompt': '{"summary":null,"pinned":[]}\n',
+  summarised: '{"done":[]}\n',
+  'session-pending': '[]\n',
+  'sweep-claim': '{"due":false}\n',
+  expire: '{"dryRun":false,"count":0,"rows":[]}\n',
 }
 const MODEL_DIR = '/home/u/.claude/mnemosyne/model-cache/cache/fastembed/Qdrant_bge-small-en-v1.5-onnx-Q'
 const MARKER = '/home/u/.claude/mnemosyne/embeddings.json'
 
 function world(on: On, reply: string, isInstalled = true, exitCode = 0, build: string = ENGINE_BUILD, extra: Extra = {}) {
-  const runs: Run[] & { appends: Run[]; projects: Run[] } = Object.assign([] as Run[], { appends: [] as Run[], projects: [] as Run[] })
+  const runs: Run[] & { appends: Run[]; projects: Run[]; session: Run[] } = Object.assign([] as Run[], { appends: [] as Run[], projects: [] as Run[], session: [] as Run[] })
   on('env.get', (_$, e) => ({ value: extra.env?.[(e as { name: string }).name] ?? '/home/u' }))
   // A file for the installed engine; an empty embedding cache unless extra.embeddingsReady.
   on(
@@ -91,6 +101,13 @@ function world(on: On, reply: string, isInstalled = true, exitCode = 0, build: s
     if (e.argv[0] === 'uname') {
       const stdout = e.argv[1] === '-s' ? (extra.darwinArm64 ? 'Darwin\n' : 'Linux\n') : extra.darwinArm64 ? 'arm64\n' : 'x86_64\n'
       return { value: { exitCode: 0, stdout, stderr: '' } } as never
+    }
+    // SESSION: the session commands of bin/memories.ts are kept apart, so the engine runs these specs count stay the engine's.
+    const command = SESSION_COMMANDS.find(name => e.argv.includes(name))
+    if ((e.argv[1] ?? '').endsWith('/bin/memories.ts') && command !== undefined) {
+      runs.session.push(e)
+      const given = extra.memories?.(e.argv, e.init?.stdin ?? '')
+      return { value: { exitCode: given?.exitCode ?? 0, stdout: given?.stdout ?? QUIET_REPLIES[command], stderr: given?.stderr ?? '' } } as never
     }
     runs.push(e)
     const sent = (e.init?.stdin ?? '').split('\n').filter(Boolean).map(line => JSON.parse(line))

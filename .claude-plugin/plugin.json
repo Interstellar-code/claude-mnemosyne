@@ -100,6 +100,24 @@
       "default": "haiku",
       "description": "The model that pulls facts, preferences, instructions, dated events and relations out of each saved memory in the background (an alias such as haiku, or a full model id). It also drives /mnemosyne-tags. off turns extraction off: no model call, and /mnemosyne-tags says so."
     },
+    "sessionSummary": {
+      "title": "Summarise the last session",
+      "type": "string",
+      "options": [
+        "off",
+        "on"
+      ],
+      "default": "off",
+      "description": "off (default): nothing. on: when a session ends (exit, /clear or resume) a small marker is left (the session id, its owner and its transcript path; no text); on a later session's first prompt, after the reply and in the background, Haiku (the extractionModel) summarises that session's redacted conversation (at most 30,000 characters leave this machine) into one session-summary memory of at most 600 characters, kept 30 days. The next session's first prompt shows the newest summary."
+    },
+    "expireUnusedDays": {
+      "title": "Expire unused memories after (days)",
+      "type": "number",
+      "default": 90,
+      "min": 0,
+      "max": 3650,
+      "description": "Once a day, in the background, a memory of the kinds project state, session summary, bug note or reference that nobody has recalled for this many days is expired: it gets an end date and stops being recalled, nothing is deleted, and it can be restored from the dashboard's Review tab. Pinned memories, facts, preferences, rules and decisions are never touched; the store is backed up first. 90 is the default, 0 turns the sweep off, 1 to 29 are refused. Preview it with: bun bin/memories.ts --store <store> expire"
+    },
     "embeddings": {
       "title": "Embeddings (meaning-based recall)",
       "type": "string",

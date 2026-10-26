@@ -76,6 +76,8 @@ export async function makeHost(opts: HostOptions = {}) {
     writeFileSync(join(scope, 'pi-mnemopi', 'src', 'cli.ts'), '')
   }
 
+  // The running session's id: a spec changes it to play a /clear (the old id ends, the process goes on under a new one).
+  let sessionId = 's1'
   const runs: Ran[] = []
   const model: { request: ModelRequest; startedAt: number; endedAt?: number }[] = []
   const handlers: Handler[] = []
@@ -103,7 +105,7 @@ export async function makeHost(opts: HostOptions = {}) {
     atoms: new Map<string, unknown>(),
     plugin: { root: ROOT, name: 'mnemosyne' },
     env: { get: async (name: string) => env[name] ?? '' },
-    session: { id: async () => 's1', repo: async () => ({ root: '/work/My Repo' }), cwd: async () => '/work/My Repo' },
+    session: { id: async () => sessionId, repo: async () => ({ root: '/work/My Repo' }), cwd: async () => '/work/My Repo' },
     fs: {
       read: async (path: string) => readFileSync(path, 'utf8'),
       stat: async (path: string) => {
@@ -169,6 +171,20 @@ export async function makeHost(opts: HostOptions = {}) {
     turn: async (extra: Record<string, unknown> = {}) => {
       const fn = find('turn.complete')
       return fn($, { answer: 'done', turnId: 't1', durationMs: 1, isAborted: false, ...extra }, passThrough())
+    },
+    /** The session id the hooks see from now on. */
+    setSession: (id: string) => {
+      sessionId = id
+    },
+    /** A session.end for `id` (a /clear is reason 'clear': the end of the old session, no start of the new one). */
+    sessionEnd: async (id: string, reason = 'other') => {
+      const fn = find('session.end')
+      return fn($, { sessionId: id, reason, resume: { id } }, passThrough())
+    },
+    /** A session.start, as the host delivers it. */
+    sessionStart: async () => {
+      const fn = find('session.start')
+      return fn($, { cwd: '/work/My Repo', surface: null, isInteractive: false }, passThrough())
     },
     /** A slash command: /mnemosyne-knowledge [apply]. */
     command: async (command: string, args = '', signal?: AbortSignal) => {
