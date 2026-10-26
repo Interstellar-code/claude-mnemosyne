@@ -3627,3 +3627,20 @@ test('IMPORT.3: a pinned value that is not a boolean is refused before any engin
   expect(ran.deny).toBe('Mnemosyne: pinned must be true or false.')
   expect(runs).toEqual([])
 })
+
+test('IMPORT.2: a session import with extractionModel off makes no model call and reads no transcript', { options: { extractionModel: 'off' } }, async ($, on) => {
+  const state = tagsWorld(on, [])
+  const text = (await importRun($, 'session last')).text ?? ''
+  expect(text).toContain('extractionModel')
+  expect(state.model).toEqual([])
+  expect(state.other.filter(run => String(run.argv[1] ?? '').endsWith('/bin/import.ts'))).toEqual([])
+  expect(state.backups).toEqual([])
+})
+
+test('IMPORT.2: apply for a session proposal whose memories this process does not hold makes no backup and saves nothing', async ($, on) => {
+  const proposal = JSON.stringify({ version: 1, kind: 'session', created: 'x', sessionId: 'abc-123', chunks: [{ heading: 'memory 1', sha256: 'a'.repeat(64), verdict: 'allow', rules: [] }] })
+  const runs = world(on, '{}', true, 0, ENGINE_BUILD, { files: { '/home/u/.claude/mnemosyne/import-proposed.json': proposal } })
+  const text = (await importRun($, 'apply')).text ?? ''
+  expect(text).toContain('no longer in this Claude Code process')
+  expect(runs.filter(run => String(run.argv[1] ?? '').endsWith('/bin/memories.ts') || run.argv[2] === 'mcp')).toEqual([])
+})
