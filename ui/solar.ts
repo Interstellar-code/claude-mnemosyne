@@ -1068,7 +1068,7 @@ class SolarImpl {
     pG.add(sp)
   }
 
-  /** A plain folder (no git repo): a space station when it is a lasting workspace (5+ memories), else a starship. */
+  /** A plain folder (no git repo): a space station when it is a lasting workspace (map.stationMin memories, 50 by default), else a starship. */
   private makeCraft(b: Body, r: number, previous: PlanetRec | undefined): PlanetRec {
     const T = this.T
     const craft = b.craft

@@ -188,7 +188,7 @@ describe('UI.1: the Settings tab draws from /api/settings only', () => {
       host.browser = [{ label: 'Theme', help: 'h', choices: [{ value: 'auto', label: 'Auto' }], get: () => 'auto', set: () => {} }]
       const cards = drawGroups(data, view, host) as FakeNode[]
       const titles = cards.map(card => card.find('h2')!.textContent)
-      expect(titles).toEqual(['Guard', 'Tags', 'Recall and embeddings', 'Expiry', 'Storage', 'Tools', 'Setup', 'This browser'])
+      expect(titles).toEqual(['Guard', 'Tags', 'Recall and embeddings', 'Expiry', 'Storage', 'Map', 'Tools', 'Setup', 'This browser'])
       const max = rowOf(cards, 'guard.maxLength')!
             const joined = max.all().map(node => node.textContent).join(' | ')
       expect(joined).toContain('Max length')

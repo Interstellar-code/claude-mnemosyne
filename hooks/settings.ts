@@ -20,7 +20,7 @@ export const CONFIG_FILE = 'config.json'
 /** A config file larger than this is not read (a settings file is a few hundred bytes). */
 export const MAX_CONFIG_BYTES = 64 * 1024
 
-export const GROUPS = ['guard', 'tags', 'recall', 'expiry', 'tools', 'storage'] as const
+export const GROUPS = ['guard', 'tags', 'recall', 'expiry', 'tools', 'storage', 'map'] as const
 export type Group = (typeof GROUPS)[number]
 
 /** When a change takes effect: `now` (the next call reads config.json), `next session` (tools are registered at session start), `after restart`. */
@@ -60,6 +60,7 @@ export interface Settings {
   expiry: { contextDays: number }
   tools: Record<ToolName, boolean> & { externalAllow: ToolName[] }
   storage: { activityLogMaxBytes: number; backupsKeep: number }
+  map: { stationMin: number }
 }
 
 /** A problem with the config file or one of its keys. `key` is a dotted setting id, or `config.json` for the file itself. The reason never holds a value. */
@@ -157,6 +158,8 @@ export const SETTINGS: readonly SettingDef[] = [
     help: 'The activity log rolls over to a single backup file when it passes this many bytes (256 KiB to 16 MiB).' },
   { key: 'storage.backupsKeep', ref: 'S5', group: 'storage', label: 'Backups to keep', applies: 'now', type: 'integer', default: 10, min: 3, max: 50,
     help: 'A backup keeps this many of the newest files and removes the older ones.' },
+  { key: 'map.stationMin', ref: 'V1', group: 'map', label: 'Space station from', applies: 'now', type: 'integer', default: 50, min: 2, max: 1000,
+    help: 'On the map, a plain folder (no git repo) with at least this many live memories is drawn as a space station; one with fewer is a starship. Git repos are always planets.' },
 ]
 
 const BY_KEY: ReadonlyMap<string, SettingDef> = new Map(SETTINGS.map(setting => [setting.key, setting]))

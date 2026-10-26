@@ -269,7 +269,7 @@ The mapping (how a thing on the map comes from the store):
 | Sun | the memory store (all live memories) |
 | Writer nodules | the writers (claude-code, dashboard, …), sized by count |
 | Planets (gas 30+, ice 10–29, rocky, dwarf <3) | git repos, styled by live memory count |
-| Crafts (space station 5+, starship under 5) | plain folders (no git repo) |
+| Crafts (space station at 50+ memories, starship below; the Settings tab's `map.stationMin`) | plain folders (no git repo) |
 | Land masses / bands | a project's tags (top 12 by uses) |
 | Moons | memory kinds present (one per kind; none for dwarfs and crafts, never for kind unknown; at most 8; size = count) |
 | Asteroids | that kind's memories (size = importance, brightness = recalls, colour = writer or recalls or age) |
@@ -413,6 +413,7 @@ Defaults and ranges are the ones in the schema (`hooks/settings.ts`); a spec (`t
 | `tools.externalAllow` | all 5 tools | any of the 5 tool names | now | Which of the five tools the outside-agent wrapper serves (see [Use the memory from other tools](#use-the-memory-from-other-tools)). Needs `externalMcp` on. |
 | `storage.activityLogMaxBytes` | 1048576 | 262144 to 16777216 | now | The activity log rolls over to its one backup file past this many bytes (1 MiB by default; 256 KiB to 16 MiB). |
 | `storage.backupsKeep` | 10 | 3 to 50 | now | A backup keeps this many of the newest files and removes older ones. |
+| `map.stationMin` | 50 | 2 to 1000 | now | On the map, a plain folder with at least this many live memories is a space station; with fewer, a starship. Git repos are always planets. |
 
 Rules between settings are checked together: `guard.minLength` must stay below `guard.warnLength`, and that below `guard.maxLength`; `recall.defaultLimit` cannot be above `recall.maxLimit`; the three ranking weights cannot all be 0, and they are scaled to add up to 1. A change that would break a rule is refused and the message names the setting.
 

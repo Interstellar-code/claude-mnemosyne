@@ -65,6 +65,8 @@ export type SolarGalaxy = {
   memories: SolarMemory[]
   writers: SolarWriter[]
   globalLive: number
+  /** The space station threshold from the map.stationMin setting (absent: STATION_MIN). */
+  stationMin?: number
   /** Absent when the store has no vectors (C11.3). */
   links?: SolarLink[]
 }
@@ -86,8 +88,8 @@ export const MAX_MOONS = 8
 export const ICE_CAP_DAYS = 30
 /** Clouds when more than this share of a project's live memories are kind unknown. */
 export const CLOUD_SHARE = 0.25
-/** A plain folder with this many live memories is a space station, else a starship. */
-export const STATION_MIN = 5
+/** A plain folder with this many live memories is a space station, else a starship (the default of the map.stationMin setting; /api/galaxy sends the value in use). */
+export const STATION_MIN = 50
 /** Under this many live memories a planet is a dwarf. */
 export const DWARF_UNDER = 3
 
@@ -263,7 +265,8 @@ const daysBetween = (now: number, then: number): number => (now - then) / 864000
  * The bodies of a galaxy reply, sorted by label then owner. The owner 'global' is never
  * a body (its rows feed the sun belt only). `now` (ms) dates the ice cap.
  */
-export function buildBodies(galaxy: Pick<SolarGalaxy, 'projects'>, now: number): Body[] {
+export function buildBodies(galaxy: Pick<SolarGalaxy, 'projects' | 'stationMin'>, now: number): Body[] {
+  const stationMin = galaxy.stationMin ?? STATION_MIN
   const projects = galaxy.projects.filter(project => project.owner !== 'global')
   const shared = new Map<string, number>()
   for (const project of projects) shared.set(projectLabel(project.owner), (shared.get(projectLabel(project.owner)) ?? 0) + 1)
@@ -276,7 +279,7 @@ export function buildBodies(galaxy: Pick<SolarGalaxy, 'projects'>, now: number):
     })
     .sort((a, b) => before(a.label, b.label) || before(a.project.owner, b.project.owner))
   const craftOf = (project: SolarProject): Craft | null =>
-    project.projectKind === 'folder' ? (project.liveCount >= STATION_MIN ? 'station' : 'ship') : null
+    project.projectKind === 'folder' ? (project.liveCount >= stationMin ? 'station' : 'ship') : null
   const styles = assignStyles(
     rows.filter(row => craftOf(row.project) === null).map(row => ({ owner: row.project.owner, label: row.label, seed: row.seed, count: row.project.liveCount })),
   )

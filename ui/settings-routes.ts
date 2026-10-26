@@ -59,6 +59,7 @@ export const GROUPS = [
   { id: 'recall', label: 'Recall and embeddings' },
   { id: 'expiry', label: 'Expiry' },
   { id: 'storage', label: 'Storage' },
+  { id: 'map', label: 'Map' },
   { id: 'tools', label: 'Tools' },
   { id: 'setup', label: 'Setup' },
   { id: 'other', label: 'Other plugin options' },
