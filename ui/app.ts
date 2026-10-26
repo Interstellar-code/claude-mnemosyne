@@ -21,16 +21,17 @@ import { extractionState, hasStatus, itemHead, NO_FILTER, neverUsedText, ownersO
 import { chartBars, chartText, coverageRows, dayBars, kpiTiles as healthKpiTiles, parseHealth, projectRows as healthProjectRows, storageList, storageSummary, tableFilterButtons, type HealthData, type HealthHost, type TableFilter } from './health'
 import { filterButtons, parseReview, reviewCounts, reviewList, reviewRow, reviewText, type ReviewData, type ReviewFilter, type ReviewHost } from './review'
 import { isClaudeRecall } from './recalls'
-import { startTheme } from './theme'
+import { startTheme, type ThemeMode } from './theme'
+import { drawGroups, drawTop, newView, parseSettings, type BrowserPrefs, type SettingsData, type SettingsHost } from './settings'
 import { closeSheet, openSheet, wireSheet } from './sheet'
 import { chooseMode, countNote, matchLabel, MEANING_OFF_HINT, readMode, saveMode, SHOW_FIRST, type SearchMode } from './search-mode'
 import { createWatch, type ProbeResult } from './connection'
 import { createStream, type StreamApi, type StreamHandle, type StreamListener, type StreamStatus } from './stream'
 
 const TOKEN_KEY = 'mnemosyne.token'
-const VIEWS = ['map', 'memories', 'activity', 'search', 'knowledge', 'review', 'health'] as const
+const VIEWS = ['map', 'memories', 'activity', 'search', 'knowledge', 'review', 'health', 'settings'] as const
 type View = (typeof VIEWS)[number]
-const VIEW_NAMES: Record<View, string> = { map: 'Map', memories: 'Memories', activity: 'Activity', search: 'Search', knowledge: 'Knowledge', review: 'Review', health: 'Health' }
+const VIEW_NAMES: Record<View, string> = { map: 'Map', memories: 'Memories', activity: 'Activity', search: 'Search', knowledge: 'Knowledge', review: 'Review', health: 'Health', settings: 'Settings' }
 const FEED_KEEP = 1000
 const FEED_SHOW = 300
 const CONNECTED = 'Connected to the local Mnemosyne server.'
@@ -716,6 +717,7 @@ const watch = createWatch({
       if (current === 'knowledge') void loadKnowledge()
       if (current === 'review') void loadReview()
       if (current === 'health') void loadHealthReport()
+      if (current === 'settings') void loadSettings()
     }
   },
 })
@@ -764,6 +766,8 @@ export function show(view: View) {
   if (view === 'knowledge') void loadKnowledge()
   if (view === 'review') void loadReview()
   if (view === 'health') void loadHealthReport()
+  // Settings reads fresh values every time it opens, so a change made elsewhere shows.
+  if (view === 'settings') void loadSettings()
   map?.visible(view === 'map')
 }
 
@@ -810,7 +814,7 @@ function showOnMap(id: string) {
 const knowledgeView = { kind: 'fact' as KnowledgeKind, data: null as KnowledgeData | null, filter: { ...NO_FILTER } as KnowledgeFilter }
 
 /** A tab's own status line (Knowledge, Review and Health): the text, as an error or not, and its Try again button. */
-function tabStatus(name: 'know' | 'review' | 'health', text: string, error = false) {
+function tabStatus(name: 'know' | 'review' | 'health' | 'settings', text: string, error = false) {
   const line = byId(`${name}-status`)
   line.textContent = text
   line.className = error ? 'notice-line small is-error' : 'notice-line small muted'
@@ -961,6 +965,93 @@ export async function loadHealthReport() {
   }
 }
 
+// ---- Settings ----
+
+const settingsView = newView()
+let themeNow: (() => ThemeMode) | null = null
+
+/** The "This browser" rows: the theme (it presses the header button, so the two stay in step) and the search mode. */
+function browserPrefs(): BrowserPrefs {
+  return [
+    {
+      label: 'Theme',
+      help: 'Auto follows your system. The choice is kept in this browser only.',
+      choices: [{ value: 'auto', label: 'Auto' }, { value: 'light', label: 'Light' }, { value: 'dark', label: 'Dark' }],
+      get: () => themeNow?.() ?? 'auto',
+      set: value => {
+        for (let press = 0; press < 3 && themeNow !== null && themeNow() !== value; press++) byId('theme').click()
+      },
+    },
+    {
+      label: 'Search mode',
+      help: 'How the Search tab matches. Keyword plus meaning needs embeddings turned on. The choice is kept in this browser only.',
+      choices: [{ value: 'keyword', label: 'Keyword' }, { value: 'hybrid', label: 'Keyword + meaning', disabled: !embeddingsOn, title: embeddingsOn ? '' : MEANING_OFF_HINT }],
+      get: () => searchMode,
+      set: value => {
+        if (value !== 'keyword' && value !== 'hybrid') return
+        if (value === 'hybrid' && !embeddingsOn) return
+        searchMode = value
+        saveMode(prefStorage(), value)
+        drawMode()
+      },
+    },
+  ]
+}
+
+const settingsHost: SettingsHost = {
+  post: async (path, body) => {
+    try {
+      const response = await api(path, { method: 'POST', body })
+      return { status: response.status, body: await readJson<unknown>(response) }
+    } catch (err) {
+      return { status: 0, body: { error: err instanceof Expired ? 'This link no longer works. Run /mnemosyne-ui again.' : `Could not reach the server: ${failure(err)}` } }
+    }
+  },
+  copy: async text => {
+    try {
+      await navigator.clipboard.writeText(text)
+      return true
+    } catch {
+      return false
+    }
+  },
+  reload: () => void loadSettings(),
+  get browser() {
+    return browserPrefs()
+  },
+}
+
+export function drawSettings() {
+  const data = settingsView.data
+  if (data === null) return
+  byId('settings-top').replaceChildren(...drawTop(data, settingsView, settingsHost, drawSettings))
+  drawSettingsGroups(data)
+  tabStatus('settings', '')
+  byId('settings-body').hidden = false
+}
+
+/** Only the groups: the filter box redraws them per keystroke, so the box keeps focus. */
+function drawSettingsGroups(data: SettingsData) {
+  byId('settings-groups').replaceChildren(...drawGroups(data, settingsView, settingsHost))
+}
+
+export async function loadSettings() {
+  if (settingsView.data === null) tabStatus('settings', 'Loading…')
+  try {
+    const response = await api('/api/settings')
+    if (!response.ok) throw new Error(`the server answered ${response.status}`)
+    const data = parseSettings(await readJson<unknown>(response))
+    if (data === null) throw new Error('the reply was not a settings list')
+    settingsView.data = data
+    drawSettings()
+    // The notice (after Reset all) shows once, with the fresh values.
+    settingsView.notice = ''
+  } catch (err) {
+    if (err instanceof Expired) return
+    tabStatus('settings', `Could not load the settings: ${failure(err)}`, true)
+  }
+}
+
 // ---- Review ----
 
 // After a forget, the row index whose successor gets the focus once the list is redrawn.
@@ -1040,6 +1131,11 @@ export function wireKnowledgeHealth() {
     drawKnowledge()
   })
   byId('health-retry').addEventListener('click', () => void loadHealthReport())
+  byId('settings-retry').addEventListener('click', () => void loadSettings())
+  byId<HTMLInputElement>('settings-filter').addEventListener('input', () => {
+    settingsView.filter = byId<HTMLInputElement>('settings-filter').value
+    if (settingsView.data !== null) drawSettingsGroups(settingsView.data)
+  })
 }
 
 // ---- Header and footer ----
@@ -1704,7 +1800,7 @@ async function runSearch() {
 
 export async function main() {
   // The theme first, so the page is not drawn in the wrong colours while it loads.
-  startTheme(byId('theme'), document.documentElement, (() => {
+  themeNow = startTheme(byId('theme'), document.documentElement, (() => {
     try {
       return typeof localStorage === 'undefined' ? undefined : localStorage
     } catch {
