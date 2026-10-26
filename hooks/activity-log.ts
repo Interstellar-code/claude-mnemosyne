@@ -7,8 +7,8 @@
 // the call's preview (query, fact, tags): secret-shaped strings are replaced by
 // [redacted] first, then it is cut to TEXT_LIMIT characters.
 
-export type ActivityAction = 'recall' | 'remember' | 'update' | 'forget' | 'stats' | 'rearm' | 'extract' | 'retire' | 'settings'
-export type ActivityOrigin = 'hook' | 'trigger' | 'tool' | 'external' | 'ui' | 'backfill'
+export type ActivityAction = 'recall' | 'remember' | 'update' | 'forget' | 'stats' | 'rearm' | 'extract' | 'retire' | 'settings' | 'restore' | 'import' | 'expire'
+export type ActivityOrigin = 'hook' | 'trigger' | 'tool' | 'external' | 'ui' | 'backfill' | 'import' | 'session'
 
 export type ActivityEntry = {
   t: string

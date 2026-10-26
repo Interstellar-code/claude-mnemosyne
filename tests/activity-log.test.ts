@@ -96,6 +96,20 @@ test('CTX.1.a2: the extract action is part of the line format', () => {
   expect(JSON.parse(activityLine({ action: 'extract', origin: 'hook', owner: 'global', ok: true })).action).toBe('extract')
 })
 
+test('CRUDX.0: restore, import and expire, and the import and session origins, are part of the line format', () => {
+  const lines = [
+    { action: 'restore', origin: 'ui' },
+    { action: 'import', origin: 'import' },
+    { action: 'expire', origin: 'session' },
+  ] as const
+  for (const { action, origin } of lines) {
+    expect(activityEntry({ action, origin, owner: 'global', ok: true }).action).toBe(action)
+    const read = JSON.parse(activityLine({ action, origin, owner: 'global', ok: true }))
+    expect(read.action).toBe(action)
+    expect(read.origin).toBe(origin)
+  }
+})
+
 test('review 2 LOW 4: client and session drop bidi and zero-width characters too', () => {
   const entry = activityEntry({
     action: 'recall', origin: 'external', owner: 'global', ok: true,

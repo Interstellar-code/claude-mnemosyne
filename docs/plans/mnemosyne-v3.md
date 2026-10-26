@@ -220,6 +220,17 @@ Rules:
 4. HARDEN.2's gate counts files in the real home's engine log folder before and after the test run. While other lanes run `bun run test:bun` at the same time that count can move for reasons that are not HARDEN.2's, so run that one gate when the other lanes are not running tests, or read a changed count as inconclusive and rerun.
 5. Workers do not choose models, efforts or agents and do not dispatch other workers; the coordinator alone does that.
 
+### Waves 4-7 routing (Rohit's decision, 2026-10-26; replaces the tables above for these waves)
+
+Two lanes, both Claude Sonnet, in two fresh Orca worktrees off `main` (the 0.8.0 `v3-lane-*` worktrees were removed on 2026-10-26). Lane C (OMP) is dropped. Both worktrees are kept for all four waves; each lane's agent session is cleared at every phase boundary. Each phase is reviewed by a separate Sonnet high review session (not the other lane) before it merges into `main`.
+
+| Wave | Lane A `v3-lane-a` | Lane B `v3-lane-b` |
+|---|---|---|
+| 4 | CRUDX (Sonnet high), after the coordinator's CRUDX.0 | IMPORT (Sonnet high) |
+| 5 | CRUD (Sonnet medium) | SESSION (Sonnet high, it holds the expiry sweep) |
+| 6 | HARDEN.3 (Sonnet medium) | idle |
+| 7 | REL9.1 (Sonnet low) | idle |
+
 ---
 
 ## Wave 1: MODEL (engine) and GUARD (plugin)
