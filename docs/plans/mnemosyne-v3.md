@@ -681,6 +681,7 @@ Two importers, both with a dry run and an apply after a backup: markdown or text
 #### IMPORT.2: /mnemosyne-import session \<id | last\>
 
 1. Goal: the session importer. Depends on IMPORT.0's report.
+   IMPORT.0 result (2026-10-26, approved): transcripts are `~/.claude/projects/<slug>/<session id>.jsonl` (slug = the cwd with every character outside [A-Za-z0-9] replaced by '-'); `session.end` carries no transcript path; 19% of real transcripts are over `$.fs.read`'s 4 MiB cap (max 157 MB). So the reading moves to `bin/import.ts session <id | last>`, run from the hook through `$.process.run`: it streams the file, keeps only user and assistant conversation text, runs `redact()` over it, and caps the Haiku input at 30,000 characters, keeping the newest turns. `last` is the newest `.jsonl` in the project folder, not the running session's own.
 2. Acceptance:
    1. Haiku is asked for at most 5 durable memories (preferences, decisions, rules, runbooks; never task progress) as JSON with kind and tags from the vocabulary; replies are parsed like tags, junk gives nothing;
    2. each candidate goes through `admit()` and `mnemopi_similar`; the dry run shows them; apply after the backup saves them with source 'import:session', trust_tier IMPORTED;
