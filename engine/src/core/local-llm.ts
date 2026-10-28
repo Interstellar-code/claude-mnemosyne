@@ -264,8 +264,6 @@ export function cleanOutput(text: string): string {
 		.replace(/^(?:\s*<think>[\s\S]*?<\/think>)+\s*/i, "")
 		.replace(/^(Summarize the following memories.*?[.!?:]\s*)/is, "")
 		.replace(/^(Preserve facts.*?[.!?:]\s*)/is, "")
-		.replace(/^Source:.*?\n/im, "")
-		.replace(/^\s*[-*]\s.*\n/gm, "")
 		.trim();
 }
 
