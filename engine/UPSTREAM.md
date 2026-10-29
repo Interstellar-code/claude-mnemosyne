@@ -33,10 +33,19 @@ Ours, not upstream's (engine-diff ignores them): `UPSTREAM.md`, `bun.lock` (our 
 | 18.12.3-mnemosyne.8 | bb74cd49b07a45c613548b1cedc512b6ebcb3d48d0093b64bcf3dc0e80fa72eb |
 | 18.12.3-mnemosyne.9 | bf27822ea047eeb27f4c13db5a58df456ab3e0b9640121ef701d417156be04eb |
 | 18.12.3-mnemosyne.10 | 66eece5060a572c5be790528b0e4eedf1b7b898ff228010ca325884c7d14be02 |
+| 18.12.3-mnemosyne.11 | 2a26da6bbc75f3393b40e0d7ba582350b5f62955b120821a56b0927c3c153035 |
 
 The `18.12.3` row is the untouched upstream source, for reference. `.1` had changes 1 to 3; `.2` makes the change 1 merge keep a `__proto__` key as plain data (it was dropped); `.3` adds the two knowledge tools (change 4) and keeps the first author on dedupe with empty author env unset (change 5); `.4` is the review fix round: the knowledge reply is normalised by `parseExtractedFactCategories` (change 4), and the author pair merges as one unit (change 5); `.5` turns embeddings on: fastembed is a real dependency with an onnxruntime override (change 6), the CLI exits naturally on success (change 7), the on-demand runtime install is gone (change 8), and a `reembed` command backfills vectors (change 9); `.6` is the review fix round: `reembed` recounts after the drain and proves the model before a rebuild (change 9), and the API embedding route is refused without an explicit opt-in (change 10); `.7` is the second fix round: the fastembed cache dir is read from the plugin-pinned `PI_CONFIG_DIR` directly, immune to the dotenv/XDG/profile refill (change 11), and the dry run prints the 'apply' hint only when something is missing (change 9). `.8` is phase MODEL (v3): the trim spares every row whose scope is not 'session' (change 12), remember and update store `memory_type`, `trust_tier` and `valid_until` and update can restore a retired row (change 13), the read-only `mnemopi_similar` (change 14), `mnemopi_expire_unused` (change 15), and the audit trail in `memory_validations` that forget purges (change 16). `.9` MODEL.7 fix round: a re-save of the same text by the same owner never lowers a stored scope, keeps the stored trust tier unless the call names one, and never relabels a fact, preference, instruction or decision or gives it an expiry (change 17). `.10` MODEL.8: a re-save also keeps the first writer's `source` and `trust_tier` (change 18).
 
 ## Changes
+
+### 19. Preserve nested LLM disablement
+
+- What: preserve an explicit `llm.enabled: false` when resolving instance options, including when a model or completion is configured. Explicit top-level `llmEnabled` retains precedence. Extraction uses the same instance-aware host selection as consolidation.
+- Why: losing `false` fell back to the enabled default and could invoke a model the caller disabled.
+- Files: `src/core/memory.ts` `src/core/local-llm.ts` `src/core/extraction.ts` `dist/types/core/local-llm.d.ts`
+- Tests: `test/llm-enabled.spec.ts`
+- Status: open
 
 Status is `open` (ours only) or `merged-upstream` (drop it at the next rebase).
 
@@ -60,7 +69,7 @@ Status is `open` (ours only) or `merged-upstream` (drop it at the next rebase).
 
 ### 3. Packaging: our build number
 
-- What: `package.json` `version` is `18.12.3-mnemosyne.10` (our build number) instead of `18.12.3`, so the plugin can tell its own build from the npm one (`ENGINE_BUILD` in `hooks/engine-build.ts`, the `isCurrent` check in `hooks/register.ts`, the proxy's check in `bin/mcp-proxy.ts`). Nothing else in `package.json` changes here: the dependencies stay pinned at `18.12.3` (the fastembed dependency and the onnxruntime override are change 6).
+- What: `package.json` `version` is `18.12.3-mnemosyne.11` (our build number) instead of `18.12.3`, so the plugin can tell its own build from the npm one (`ENGINE_BUILD` in `hooks/engine-build.ts`, the `isCurrent` check in `hooks/register.ts`, the proxy's check in `bin/mcp-proxy.ts`). Nothing else in `package.json` changes here: the dependencies stay pinned at `18.12.3` (the fastembed dependency and the onnxruntime override are change 6).
 - Why: a stale engine (the npm one, or an older build of ours) must be spotted and refused for features that need changes 1 and 2.
 - Files: `package.json`
 - Upstream issue: none (ours only)
