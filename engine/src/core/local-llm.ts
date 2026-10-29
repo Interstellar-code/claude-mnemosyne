@@ -231,7 +231,7 @@ export function buildHostPrompt(memories: readonly string[], source = ""): strin
 	return `${header}\n\n${memoryLines(memories)}`;
 }
 
-function hostBackendWillHandleCall(): boolean {
+export function hostBackendWillHandleCall(): boolean {
 	return llmEnabled() && hostLlmEnabled() && getHostLlmBackend() !== null;
 }
 
