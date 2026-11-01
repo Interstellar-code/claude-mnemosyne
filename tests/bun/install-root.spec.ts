@@ -118,7 +118,7 @@ describe('--root with HOME at a fake home holding a .claude tree (a, c, g, h, i)
   })
 
   test('the root holds exactly the planned layout, and no lock, .next or .old', () => {
-    expect(readdirSync(root).sort()).toEqual(['activity.jsonl', 'bin', 'config.json', 'engine', 'model-cache', 'plugin', 'store', 'vocabulary.json'])
+    expect(readdirSync(root).sort()).toEqual(['.mnemosyne-root', 'activity.jsonl', 'bin', 'config.json', 'engine', 'model-cache', 'plugin', 'store', 'vocabulary.json'])
     expect(readdirSync(layout.bin)).toEqual(['mnemosyne-mcp'])
     expect(readdirSync(layout.plugin).sort()).toEqual(['bin', 'hooks'])
   })
@@ -126,7 +126,7 @@ describe('--root with HOME at a fake home holding a .claude tree (a, c, g, h, i)
   test.if(POSIX)('(c) folders 0700, the launcher 0700, config, vocabulary and activity log 0600', () => {
     for (const dir of [root, layout.engine, layout.store, layout.modelCache, layout.plugin, layout.bin]) expect([dir, mode(dir)]).toEqual([dir, 0o700])
     expect(mode(layout.launcher)).toBe(0o700)
-    for (const file of [layout.config, layout.vocabulary, layout.activity]) expect([file, mode(file)]).toEqual([file, 0o600])
+    for (const file of [layout.config, layout.vocabulary, layout.activity, layout.marker]) expect([file, mode(file)]).toEqual([file, 0o600])
   })
 
   test('(c) the launcher answers initialize and tools/list through the copied proxy', async () => {
@@ -166,7 +166,8 @@ describe('--root with HOME at a fake home holding a .claude tree (a, c, g, h, i)
       root: pluginRoot,
       modelCacheDir: EMBEDDINGS_CACHE_DIR,
     }
-    let mapped = written
+    // The root's cache folder is quoted and the plugin's default is not: that quoting is part of the path.
+    let mapped = written.split(`'${ours.modelCacheDir}'`).join(plugin.modelCacheDir)
     for (const key of ['cli', 'proxy', 'activity', 'vocabulary', 'store', 'modelCacheDir', 'root'] as const) mapped = mapped.split(ours[key]).join(plugin[key])
     expect(mapped).toBe(shWrapper(plugin))
   })
@@ -431,6 +432,28 @@ describe('refusals', () => {
     expect(readdirSync(temp.dir)).toEqual([])
   })
 
+  test('a --store inside <root>/plugin, plugin.next or plugin.old is refused before anything is written', async () => {
+    const env = rootEnv(join(temp.dir, 'home'))
+    const root = join(temp.dir, 'r-store')
+    for (const folder of ['plugin', 'plugin.next', 'plugin.old']) {
+      const ran = await runRoot(['--root', root, '--store', join(root, folder, 'store')], env)
+      expect([folder, ran.exitCode]).toEqual([folder, 1])
+      expect(ran.stderr.trim()).toBe(`install-engine: the store ${join(root, folder, 'store')} is inside ${join(root, folder)}; refusing to install there`)
+    }
+    expect(existsSync(root)).toBe(false)
+  })
+
+  test('a non-empty --root without the marker is refused and left as it was', async () => {
+    const root = join(temp.dir, 'r-busy')
+    mkdirSync(root)
+    writeFileSync(join(root, 'notes.txt'), 'mine')
+    const ran = await runRoot(['--root', root], rootEnv(join(temp.dir, 'home')))
+    expect(ran.exitCode).toBe(1)
+    expect(ran.stderr.trim()).toBe(`install-engine: ${root} is not empty and has no .mnemosyne-root from an earlier install; pass an empty or new folder`)
+    expect(readdirSync(root)).toEqual(['notes.txt'])
+    rmSync(join(temp.dir, 'r-busy'), { recursive: true })
+  })
+
   test('(j) on Windows a root or derived path holding ", % or ! is refused (the check alone)', () => {
     expect(windowsPathProblem(Object.values(rootLayout('C:/Users/a/.switch/memory')))).toBeUndefined()
     for (const bad of ['C:/Users/a"b/memory', 'C:/Users/100%/memory', 'C:/Users/wow!/memory']) {
@@ -468,5 +491,11 @@ describe("the walker refuses a closure the root could not run", () => {
     expect(() => proxyClosure(plugin({ 'bin/mcp-proxy.ts': "import { x } from './gone'\n" }))).toThrow('bin/gone.ts, which does not exist')
     expect(() => proxyClosure(plugin({ 'bin/mcp-proxy.ts': "import { x } from '../ui/x'\n", 'ui/x.ts': '' }))).toThrow('outside bin/ and hooks/')
     expect(() => proxyClosure(plugin({ 'bin/mcp-proxy.ts': "const m = await import('./x')\n" }))).toThrow('loads a module at run time')
+  })
+
+  test('a package import is refused; node: and bun: built-ins are allowed', () => {
+    expect(() => proxyClosure(plugin({ 'bin/mcp-proxy.ts': "import { z } from 'zod'\n" }))).toThrow('bin/mcp-proxy.ts imports the package zod; the proxy may import only relative files, node: and bun: modules')
+    expect(() => proxyClosure(plugin({ 'bin/mcp-proxy.ts': "import { x } from '@scope/pkg/sub'\n" }))).toThrow('imports the package @scope/pkg/sub')
+    expect(proxyClosure(plugin({ 'bin/mcp-proxy.ts': "import { readFileSync } from 'node:fs'\nimport { Database } from 'bun:sqlite'\n" }))).toEqual(['bin/mcp-proxy.ts'])
   })
 })

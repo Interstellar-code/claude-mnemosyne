@@ -372,7 +372,8 @@ export async function withInstallLock<T>(file: string, work: () => Promise<T>, t
 }
 
 // The proxy's import closure: bin/mcp-proxy.ts and every file it reaches by a
-// relative runtime import (`import type` is erased, so not followed). Paths are
+// relative runtime import (`import type` is erased, so not followed); any other
+// runtime import must be a node: or bun: built-in. Paths are
 // relative to the plugin root, with forward slashes. Each file must be under
 // bin/ or hooks/, so <root>/plugin keeps the ../hooks layout, and none may
 // import claude-code at runtime: such a root would fail at its first call.
@@ -393,13 +394,19 @@ export function proxyClosure(pluginRoot: string, entry = 'bin/mcp-proxy.ts') {
       const [, typeOnly, spec] = match as unknown as [string, string | undefined, string]
       if (typeOnly) continue
       if (spec === 'claude-code' || spec.startsWith('claude-code/')) throw new InstallError(`${rel} imports ${spec}, which only the Claude Code host has`)
-      if (!spec.startsWith('.')) continue
+      // Built-ins only: <root>/plugin has no node_modules, so a package import would fail at the first call.
+      if (spec.startsWith('node:') || spec.startsWith('bun:')) continue
+      if (!spec.startsWith('.')) throw new InstallError(`${rel} imports the package ${spec}; the proxy may import only relative files, node: and bun: modules`)
       const target = slashes(relative(pluginRoot, join(dirname(file), spec)))
       queue.push(/\.[a-z]+$/.test(target) ? target : `${target}.ts`)
     }
   }
   return [...seen].sort()
 }
+
+// Marks a folder as a root this installer made: a non-empty --root without it
+// is refused, so a typo cannot fill an unrelated folder (or a home) with files.
+export const ROOT_MARKER = '.mnemosyne-root'
 
 /** Every path under a standalone root (`--root`). */
 export function rootLayout(root: string, store = join(root, 'store')) {
@@ -415,6 +422,7 @@ export function rootLayout(root: string, store = join(root, 'store')) {
     vocabulary: join(root, VOCAB_FILE),
     activity: join(root, 'activity.jsonl'),
     lock: join(root, 'engine.lock'),
+    marker: join(root, ROOT_MARKER),
   }
 }
 
@@ -446,6 +454,7 @@ const createOnly = (file: string, text: string) => {
  *   plugin/{bin,hooks}/  the proxy's import closure, replaced whole at each install
  *   bin/mnemosyne-mcp    the launcher (.cmd on Windows), rewritten at each install, 0700
  *   config.json, vocabulary.json, activity.jsonl   created once, 0600; existing ones are kept
+ *   .mnemosyne-root      the marker, 0600; a non-empty root without it is refused
  * Folders are 0700 on POSIX. A same-build rerun is a full reinstall.
  */
 export async function installRoot(pluginRoot: string, rootDir: string, options: { store?: string; embeddings?: boolean; lock?: LockTiming } = {}) {
@@ -460,8 +469,21 @@ export async function installRoot(pluginRoot: string, rootDir: string, options: 
   for (const folder of [engine, `${engine}.next`, `${engine}.old`]) {
     if (isInside(root, folder)) throw new InstallError(`the root ${root} is inside ${folder}; refusing to install there`)
   }
+  // Each install replaces these folders whole: a store inside one would be deleted.
+  for (const folder of [layout.plugin, `${layout.plugin}.next`, `${layout.plugin}.old`]) {
+    if (isInside(store, folder)) throw new InstallError(`the store ${store} is inside ${folder}; refusing to install there`)
+  }
+  if (existsSync(root) && !existsSync(layout.marker) && readdirSync(root).length > 0) {
+    throw new InstallError(`${root} is not empty and has no ${ROOT_MARKER} from an earlier install; pass an empty or new folder`)
+  }
   const closure = proxyClosure(resolve(pluginRoot))
   secureDir(root)
+  // Before the lock, so a second install that starts now finds the root marked.
+  try {
+    createOnly(layout.marker, `${JSON.stringify({ by: 'claude-mnemosyne bin/install-engine.ts --root', created: new Date().toISOString() })}\n`)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+  }
   return withInstallLock(
     layout.lock,
     async () => {
