@@ -214,6 +214,35 @@ describe('(b) --root and the launcher with HOME set to a folder that does not ex
   }, INSTALL_TIMEOUT)
 })
 
+describe('a root whose name holds a space, a $ and $( ) (fix round 1)', () => {
+  const temp = tempDir('root-quote')
+  const home = join(temp.dir, 'home')
+  const root = join(temp.dir, 'my memory $HOME $(touch pwned)')
+  const layout = rootLayout(root)
+  afterAll(() => temp.dispose())
+
+  test('installs, the launcher answers a remember and a recall, PI_CONFIG_DIR is the exact folder, and nothing ran', async () => {
+    mkdirSync(home)
+    const ran = await runRoot(['--root', root], rootEnv(home))
+    expect([ran.exitCode, ran.stderr]).toEqual([0, ''])
+    expect(readFileSync(layout.launcher, 'utf8')).toContain(`\nexport PI_CONFIG_DIR='${layout.modelCache}'\n`)
+    const { replies } = await launch(layout.launcher, rootEnv(home), [
+      INITIALIZE,
+      INITIALIZED,
+      toolCall(2, 'memory_remember', { content: 'A root folder name may hold a space and a dollar sign.', kind: 'fact', tags: ['install'] }),
+      toolCall(3, 'memory_recall', { query: 'root folder name dollar' }),
+    ])
+    expect(body(replies.get(2))).toMatchObject({ status: 'stored' })
+    expect(body(replies.get(3)).count).toBe(1)
+    expect(existsSync(join(layout.store, 'mnemopi.db'))).toBe(true)
+    // $(touch pwned) would have made a file in the cwd or under the root's parent.
+    for (const dir of [process.cwd(), temp.dir, home]) expect(existsSync(join(dir, 'pwned'))).toBe(false)
+    expect(readdirSync(home)).toEqual([])
+    const printed = Bun.spawnSync(['sh', '-c', readFileSync(layout.launcher, 'utf8').replace(/^exec bun .*$/m, 'printf %s "$PI_CONFIG_DIR"')], { env: { ...isolatedEnv('root-quote-sh'), ...rootEnv(home) }, stdout: 'pipe' })
+    expect(printed.stdout.toString()).toBe(layout.modelCache)
+  }, INSTALL_TIMEOUT)
+})
+
 describe('(d) two installs at once into one root', () => {
   const temp = tempDir('root-d')
   const home = join(temp.dir, 'home')

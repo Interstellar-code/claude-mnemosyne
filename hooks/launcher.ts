@@ -3,7 +3,7 @@
 // it at each session start (register.ts syncWrapper) and `install-engine.ts
 // --root` writes it under a standalone root. This file imports nothing from
 // claude-code, so a plain script can load it.
-import { EMBEDDINGS_MODEL } from './engine'
+import { EMBEDDINGS_CACHE_DIR, EMBEDDINGS_MODEL } from './engine'
 
 export type LauncherOptions = {
   store: string
@@ -21,6 +21,10 @@ export type LauncherOptions = {
 
 // Single-quoted for sh: the store path comes from settings and may hold anything.
 export const shellQuote = (text: string) => `'${text.replace(/'/g, `'\\''`)}'`
+
+// The plugin's default PI_CONFIG_DIR is written bare, as 0.9.0 wrote it (its bytes
+// stay the same); any other folder is quoted, since a --root may hold a space or a $.
+const shCacheDir = (dir: string) => (dir === EMBEDDINGS_CACHE_DIR ? dir : shellQuote(dir))
 
 export const WRAPPER_NOTE = `Written by the Mnemosyne plugin (externalMcp). A stdio MCP server over its store,
 serving only remember / recall / update / forget / stats.
@@ -52,7 +56,7 @@ export OPENROUTER_API_KEY=
 export OPENAI_API_KEY=
 export MNEMOPI_EMBEDDINGS_API_OPT_IN=0
 export HF_ENDPOINT=https://huggingface.co
-export PI_CONFIG_DIR=${modelCacheDir}
+export PI_CONFIG_DIR=${shCacheDir(modelCacheDir)}
 export MNEMOSYNE_CLI=${shellQuote(cli)}
 export MNEMOSYNE_ACTIVITY_LOG=${activity ? shellQuote(activity) : ''}
 export MNEMOSYNE_GUARD_MODE=${guardMode}

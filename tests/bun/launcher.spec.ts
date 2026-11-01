@@ -1,7 +1,11 @@
 import { describe, expect, test } from 'bun:test'
+import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { cmdWrapper, shellQuote, shWrapper } from '../../hooks/launcher'
 import type { LauncherOptions } from '../../hooks/launcher'
 import { EMBEDDINGS_CACHE_DIR } from '../../hooks/engine'
+import { isolatedEnv } from './helpers'
 
 // The launcher bytes the plugin wrote before the templates left hooks/register.ts
 // (SA.1), captured once from register.ts over a stub host. Byte equality here
@@ -412,9 +416,29 @@ describe('launcher templates match the pre-move plugin output (SA.1)', () => {
 
   test('modelCacheDir sets PI_CONFIG_DIR, absolute or relative', () => {
     const abs = { ...options(CASES[0]!), modelCacheDir: '/s/memory/model-cache' }
-    expect(shWrapper(abs)).toContain('\nexport PI_CONFIG_DIR=/s/memory/model-cache\n')
+    expect(shWrapper(abs)).toContain(`\nexport PI_CONFIG_DIR='/s/memory/model-cache'\n`)
     expect(cmdWrapper(abs)).toContain('\r\nset "PI_CONFIG_DIR=/s/memory/model-cache"\r\n')
     expect(shWrapper(options(CASES[0]!))).toContain(`\nexport PI_CONFIG_DIR=${EMBEDDINGS_CACHE_DIR}\n`)
+  })
+
+  test('sh: a cache folder with a space, a $ and $( ) reaches PI_CONFIG_DIR exactly and runs nothing', () => {
+    const work = mkdtempSync(join(tmpdir(), 'mnemosyne-launcher-'))
+    try {
+      for (const dir of [`${work}/my memory/model-cache`, `${work}/$HOME/$(touch pwned)/model-cache`, `${work}/it's \`touch pwned\`/cache`]) {
+        // The launcher up to its exec line, then print what sh exported.
+        const text = shWrapper({ ...options(CASES[0]!), modelCacheDir: dir }).replace(/^exec bun .*$/m, 'printf %s "$PI_CONFIG_DIR"')
+        const ran = Bun.spawnSync(['sh', '-c', text], { cwd: work, env: { ...(process.env as Record<string, string>), ...isolatedEnv('launcher-sh') }, stdout: 'pipe', stderr: 'pipe' })
+        expect([dir, ran.exitCode, ran.stdout.toString()]).toEqual([dir, 0, dir])
+        expect(existsSync(join(work, 'pwned'))).toBe(false)
+      }
+    } finally {
+      rmSync(work, { recursive: true, force: true })
+    }
+  })
+
+  test('the plugin default PI_CONFIG_DIR stays bare (0.9.0 bytes), any other folder is quoted', () => {
+    expect(shWrapper(options(CASES[0]!))).toContain(`\nexport PI_CONFIG_DIR=${EMBEDDINGS_CACHE_DIR}\n`)
+    expect(shWrapper({ ...options(CASES[0]!), modelCacheDir: '/a b/c' })).toContain(`\nexport PI_CONFIG_DIR='/a b/c'\n`)
   })
 
   test('shellQuote survives a single quote', () => {
