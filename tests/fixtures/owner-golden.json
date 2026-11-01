@@ -1,0 +1,82 @@
+{
+  "about": "Owner ids from Mnemosyne hooks/owner.ts (ownerId), for Switch to copy as its golden fixture. input is the path asked about; root is the folder hashed (the parent of git rev-parse --path-format=absolute --git-common-dir inside a repo, else input as given); expected is the id. Checked by tests/bun/owner-cli.spec.ts.",
+  "rows": [
+    {
+      "kind": "global",
+      "scope": "global",
+      "input": "/Users/a/dev/switch-agent",
+      "root": null,
+      "expected": "global"
+    },
+    {
+      "kind": "plain",
+      "scope": "per-project",
+      "input": "/Users/a/notes",
+      "root": "/Users/a/notes",
+      "expected": "project-notes-h5tsx6"
+    },
+    {
+      "kind": "trailing-slash",
+      "scope": "per-project",
+      "input": "/Users/a/notes/",
+      "root": "/Users/a/notes/",
+      "expected": "project-notes-h5tsx6"
+    },
+    {
+      "kind": "filesystem-root",
+      "scope": "per-project",
+      "input": "/",
+      "root": "/",
+      "expected": "project-root-45h"
+    },
+    {
+      "kind": "git-repo",
+      "scope": "per-project",
+      "input": "/Users/a/dev/switch-agent/crates/switch-store",
+      "root": "/Users/a/dev/switch-agent",
+      "expected": "project-switch-agent-17jdhcn",
+      "note": "a folder inside a repo: the root is the parent of --git-common-dir"
+    },
+    {
+      "kind": "git-worktree",
+      "scope": "per-project",
+      "input": "/Users/a/orca/workspaces/switch-agent/bridge",
+      "root": "/Users/a/dev/switch-agent",
+      "expected": "project-switch-agent-17jdhcn",
+      "note": "a linked worktree of /Users/a/dev/switch-agent: it shares the main worktree's owner (not --show-toplevel)"
+    },
+    {
+      "kind": "non-ascii",
+      "scope": "per-project",
+      "input": "/Users/a/dev/naïve 日本語",
+      "root": "/Users/a/dev/naïve 日本語",
+      "expected": "project-na-ve--iq4hx1"
+    },
+    {
+      "kind": "astral",
+      "scope": "per-project",
+      "input": "/Users/a/dev/emoji-😀",
+      "root": "/Users/a/dev/emoji-😀",
+      "expected": "project-emoji--2kjcmd",
+      "note": "hashed per code point, first UTF-16 unit each; a per-unit loop gives another id"
+    },
+    {
+      "kind": "windows-backslash",
+      "scope": "per-project",
+      "input": "C:\\Users\\a\\dev\\switch-agent",
+      "root": "C:\\Users\\a\\dev\\switch-agent",
+      "expected": "project-switch-agent-llob8u",
+      "note": "backslashes become forward slashes before hashing"
+    },
+    {
+      "kind": "symlink-into-repo",
+      "scope": "per-project",
+      "input": "/tmp/switch-link/crates",
+      "root": "/private/tmp/switch-real",
+      "expected": "project-switch-real-sf3lsb",
+      "lexicalRoot": "/tmp/switch-link",
+      "lexicalExpected": "project-switch-link-17xyd1v",
+      "note": "/tmp/switch-link is a symlink to the repo /private/tmp/switch-real (macOS: /tmp is /private/tmp). git reports the root symlink-resolved and the CLI hashes it as reported, giving expected; a host that hashes the lexical root would get lexicalExpected instead. A path outside any repo is never canonicalised."
+    }
+  ]
+}
