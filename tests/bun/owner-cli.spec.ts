@@ -79,6 +79,27 @@ describe('bun bin/owner.ts <path>', () => {
     expect(got).not.toBe(ownerId('per-project', link))
   })
 
+  test('a git failure other than "not a repository" exits 1 with git\'s message instead of hashing the folder', () => {
+    const broken = join(base, 'broken-gitfile')
+    mkdirSync(broken)
+    writeFileSync(join(broken, '.git'), 'gitdir: /nonexistent/mnemosyne-test\n')
+    const ran = owner(broken)
+    expect([ran.exitCode, ran.stdout]).toEqual([1, ''])
+    expect(ran.stderr.trim()).toStartWith(`owner: git rev-parse failed in ${broken}: fatal: not a git repository: `)
+    expect(ran.stderr.trim().split('\n')).toHaveLength(1)
+  })
+
+  test('a git that fails for another reason (a stand-in on PATH) also exits 1 with its message', () => {
+    const bin = join(base, 'fake-git-bin')
+    mkdirSync(bin)
+    writeFileSync(join(bin, 'git'), '#!/bin/sh\necho "fatal: detected dubious ownership in repository" >&2\nexit 128\n', { mode: 0o755 })
+    const plain = join(base, 'plain-for-fake-git')
+    mkdirSync(plain)
+    const ran = Bun.spawnSync([process.execPath, OWNER_CLI, plain], { env: { ...(process.env as Record<string, string>), ...isolatedEnv('owner-fake-git'), PATH: `${bin}:${process.env.PATH ?? ''}` }, stdout: 'pipe', stderr: 'pipe' })
+    expect(ran.exitCode).toBe(1)
+    expect(ran.stderr.toString().trim()).toBe(`owner: git rev-parse failed in ${plain}: fatal: detected dubious ownership in repository`)
+  })
+
   test('a missing path, a file, no argument and two arguments exit 1 with one line on stderr', () => {
     const file = join(base, 'file.txt')
     writeFileSync(file, 'x')
