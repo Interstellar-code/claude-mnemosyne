@@ -25,6 +25,10 @@ export type EngineEnvOptions = {
   // marker and the model files are there. Otherwise the engine keeps embeddings
   // off so it never downloads the model behind the user's back (EMB.2.a4).
   embeddings?: boolean
+  // PI_CONFIG_DIR: none means EMBEDDINGS_CACHE_DIR (relative to $HOME, the
+  // plugin's); a standalone root passes its absolute <root>/model-cache, which
+  // the engine takes as is (<dir>/cache/fastembed).
+  modelCacheDir?: string
 }
 
 // The variables every engine process gets, laid over the caller's own
@@ -78,7 +82,7 @@ export function engineEnv(store: string, owner: string, options: EngineEnvOption
     // The model cache under the plugin's root, never the shared ~/.omp one.
     // Read directly by the engine (not through pi-utils' XDG/profile resolver),
     // so a `~/.env`/project `.env` line cannot move it (H1b).
-    PI_CONFIG_DIR: EMBEDDINGS_CACHE_DIR,
+    PI_CONFIG_DIR: options.modelCacheDir ?? EMBEDDINGS_CACHE_DIR,
     // Recall ranking, pinned so a shell variable can never change it silently (R5.2); the settings' weights, or the engine's own 0.5 / 0.3 / 0.2.
     MNEMOPI_VEC_WEIGHT: String(weights.vector),
     MNEMOPI_FTS_WEIGHT: String(weights.keyword),
