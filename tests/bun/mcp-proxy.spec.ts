@@ -423,7 +423,7 @@ describe('the proxy against a real installed engine', () => {
     for (const [id, rule] of [[1, 'G1'], [2, 'G2'], [3, 'G1']] as const) {
       expect(replies.get(id).error.code).toBe(-32602)
       expect(replies.get(id).error.message).toContain(rule)
-      expect(replies.get(id).error.data).toEqual({ rules: [rule] })
+      expect(replies.get(id).error.data).toEqual({ rules: [rule], verdict: 'block' })
       expect(replies.get(id).result).toBeUndefined()
     }
     expect(JSON.stringify([...replies.values()]).includes(AWS_KEY)).toBe(false)
@@ -438,6 +438,20 @@ describe('the proxy against a real installed engine', () => {
     ])
     const written = readFileSync(log, 'utf8')
     for (const piece of [AWS_KEY, 'hunter2', 'bucket', 'tiny']) expect(written.includes(piece)).toBe(false)
+  })
+
+  test('SA.4: a secret block and a size block carry data.verdict block, in warn mode and with confirm: true too', async () => {
+    const before = rowCount()
+    const replies = await proxy(cli, store, [
+      toolCall(1, 'memory_remember', { kind: 'fact', content: `the deploy uses the access key ${AWS_KEY} in staging`, confirm: true }),
+      toolCall(2, 'memory_remember', { kind: 'fact', content: 'a fact that never ends '.repeat(2000), confirm: true }),
+    ], 'global', join(temp.dir, 'logs-guard-verdict', 'activity.jsonl'), { MNEMOSYNE_GUARD_MODE: 'warn' })
+    for (const [id, kind] of [[1, 'G1 secret'], [2, 'G2 size: text is over']] as const) {
+      expect(replies.get(id).error.code).toBe(-32602)
+      expect(replies.get(id).error.message).toContain(kind)
+      expect(replies.get(id).error.data).toEqual({ rules: [kind.slice(0, 2)], verdict: 'block' })
+    }
+    expect(rowCount()).toBe(before)
   })
 
   test('GUARD.2: in warn mode a warned remember is stored with metadata.guard beside its tags, and the reply carries one warning line per hit', async () => {
@@ -472,7 +486,7 @@ describe('the proxy against a real installed engine', () => {
         expect(replies.get(id).error.code).toBe(-32602)
         expect(replies.get(id).error.message).toContain(rule)
         expect(replies.get(id).error.message).toContain('Resend with confirm: true if the save is wanted.')
-        expect(replies.get(id).error.data).toEqual({ rules: [rule] })
+        expect(replies.get(id).error.data).toEqual({ rules: [rule], verdict: 'warn' })
         expect(replies.get(id).error.message.includes('importer')).toBe(false)
       }
     }
@@ -933,7 +947,7 @@ for await (const chunk of Bun.stdin.stream()) {
     const { replies, forwarded } = await run([call(1, 'memory_remember', { kind: 'fact', content: 'The roadmap for project falcon ships in the spring with the new dashboard.', confirm: true })], {}, log)
     expect(replies.get(1).error.code).toBe(-32602)
     expect(replies.get(1).error.message).toContain('G7')
-    expect(replies.get(1).error.data).toEqual({ rules: ['G7'] })
+    expect(replies.get(1).error.data).toEqual({ rules: ['G7'], verdict: 'block' })
     expect(forwarded).toEqual([])
     const logged = readFileSync(log, 'utf8')
     expect(logged).toContain('guard:G7')

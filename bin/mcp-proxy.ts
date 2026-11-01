@@ -200,7 +200,7 @@ void (async () => {
             message.id,
             action,
             {},
-            { code: -32602, message: `The save guard blocked this save (${ids.join(', ')}). ${guard.hits.map(hit => hit.message).join(' ')}`, data: { rules: ids } },
+            { code: -32602, message: `The save guard blocked this save (${ids.join(', ')}). ${guard.hits.map(hit => hit.message).join(' ')}`, data: { rules: ids, verdict: 'block' } },
             `guard:${ids.join(',')}`,
           )
           continue
@@ -213,7 +213,7 @@ void (async () => {
               message.id,
               action,
               {},
-              { code: -32602, message: `The save guard warns about this save (${ids.join(', ')}). ${guard.hits.map(hit => hit.message).join(' ')} Resend with confirm: true if the save is wanted.`, data: { rules: ids } },
+              { code: -32602, message: `The save guard warns about this save (${ids.join(', ')}). ${guard.hits.map(hit => hit.message).join(' ')} Resend with confirm: true if the save is wanted.`, data: { rules: ids, verdict: 'warn' } },
               `guard:${ids.join(',')}`,
             )
             continue

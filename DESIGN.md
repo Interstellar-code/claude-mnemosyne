@@ -1152,7 +1152,8 @@ Messages name the rule and never the matched text, so a caller can log or show
 them. The guard runs in `hooks/register.ts` `tool.call` (for `memory_remember`
 and for `memory_update` when it changes `content`) before the trigger step and
 before any engine process, and in `bin/mcp-proxy.ts` before the engine (a block
-or a strict refusal is a JSON-RPC `-32602` with `data.rules`). A tags-only,
+or a strict refusal is a JSON-RPC `-32602` with `data.rules`, the rule ids, and
+`data.verdict`, `block` or `warn`, so a caller need not read the message). A tags-only,
 importance-only or kind-only update is not checked. A refused save does not
 consume the remember-phrase trigger, so the retry is still the person's. The
 activity line of a refusal is `ok: false`, `error: guard:<rule ids>`, empty
