@@ -2,6 +2,13 @@
 
 Newest first. Each release is tagged `vX.Y.Z` on GitHub; the README and DESIGN.md describe the contracts.
 
+## 0.10.1 (install fixes)
+
+1. A killed installer (SIGTERM, Ctrl-C) now also stops the `bun install` and engine-check processes it started (not anything those start in turn), so they no longer run on and race the next setup.
+2. A blank `MNEMOSYNE_LOCK_WAIT_MS` (spaces) keeps the default wait instead of meaning no wait.
+3. `--root` pointing at a file is refused with `--root <path> is a file, not a folder` instead of a raw `ENOTDIR`.
+4. The README's layout table lists `activity-daily.json`.
+
 ## 0.10.0 (install outside Claude Code, owner CLI, guard verdict)
 
 1. `bun bin/install-engine.ts --root <dir> [--store <dir>] [--embeddings]` installs the engine, the proxy and its launcher under one folder, outside Claude Code (issue #43, for Switch): `engine/`, `store/`, `model-cache/`, `plugin/{bin,hooks}`, `bin/mnemosyne-mcp`, `config.json`, `vocabulary.json`, `activity.jsonl` and the marker `.mnemosyne-root`. Folders and the launcher are 0700; `config.json`, `vocabulary.json`, `activity.jsonl` and the marker are 0600; the copied proxy files keep 0644 inside the 0700 `plugin/` folder. A non-empty root without the marker is refused, and so is a `--store` inside `<root>/plugin`. The installer and the launcher read and write nothing under `~/.claude` or `~/.omp` (tested with a fake home and with a missing one). Existing settings, vocabulary and log are kept; the rest is replaced at each run. See the README's "Install outside Claude Code".

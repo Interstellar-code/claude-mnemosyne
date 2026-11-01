@@ -8,7 +8,7 @@ import { join, relative } from 'node:path'
 import { EMBEDDINGS_CACHE_DIR } from '../../hooks/engine'
 import { shWrapper } from '../../hooks/launcher'
 import { configText, emptyConfig } from '../../hooks/settings'
-import { cliOf, installRoot, launcherOptions, LockBusy, proxyClosure, rootLayout, windowsPathProblem, withInstallLock } from '../../bin/install-engine'
+import { cliOf, installRoot, launcherOptions, LockBusy, lockTimingFromEnv, proxyClosure, rootLayout, windowsPathProblem, withInstallLock } from '../../bin/install-engine'
 import { body, engineCall, INSTALLER, isolatedEnv, ROOT, tempDir, toolCall } from './helpers'
 
 const INSTALL_TIMEOUT = 300_000
@@ -447,6 +447,25 @@ describe('refusals', () => {
       expect(ran.stderr.trim()).toBe(`install-engine: the store ${join(root, folder, 'store')} is inside ${join(root, folder)}; refusing to install there`)
     }
     expect(existsSync(root)).toBe(false)
+  })
+
+  test('a --root that is a file is refused with a plain message', async () => {
+    const file = join(temp.dir, 'r-file')
+    writeFileSync(file, 'x')
+    const ran = await runRoot(['--root', file], rootEnv(join(temp.dir, 'home')))
+    expect(ran.exitCode).toBe(1)
+    expect(ran.stderr.trim()).toBe(`install-engine: --root ${file} is a file, not a folder`)
+    expect(readFileSync(file, 'utf8')).toBe('x')
+  })
+
+  test('MNEMOSYNE_LOCK_WAIT_MS: blank or bad keeps the default wait, a number sets it', () => {
+    expect(lockTimingFromEnv(undefined)).toEqual({})
+    expect(lockTimingFromEnv('')).toEqual({})
+    expect(lockTimingFromEnv('  ')).toEqual({})
+    expect(lockTimingFromEnv('abc')).toEqual({})
+    expect(lockTimingFromEnv('-5')).toEqual({})
+    expect(lockTimingFromEnv('0')).toEqual({ waitMs: 0 })
+    expect(lockTimingFromEnv('1500')).toEqual({ waitMs: 1500 })
   })
 
   test('a non-empty --root without the marker is refused and left as it was', async () => {

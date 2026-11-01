@@ -22,7 +22,7 @@
 // and refuses a store inside any of them, compared as real paths (symlinks
 // followed, case-folded on macOS and Windows). The cli path stays
 // <engine dir>/node_modules/@oh-my-pi/pi-mnemopi/src/cli.ts.
-import { chmodSync, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { Database } from 'bun:sqlite'
 import { EMBEDDINGS_CACHE_DIR, EMBEDDINGS_MODEL } from '../hooks/engine'
@@ -104,6 +104,20 @@ export function installStep(next: string, runner: Runner = run) {
   return runner([process.execPath, 'install', '--production', '--omit=peer'], next, undefined, INSTALL_STEP_TIMEOUT_MS, installStepEnv())
 }
 
+// The install's running children, so a killed installer can stop them: left
+// alone, a bun install or an engine check outlives it and races the next setup.
+const liveChildren = new Set<{ kill: () => void }>()
+export function killInstallChildren() {
+  for (const child of liveChildren) {
+    try {
+      child.kill()
+    } catch {
+      // already gone
+    }
+  }
+  liveChildren.clear()
+}
+
 async function run(argv: string[], cwd: string, input: string | undefined, timeoutMs: number, env?: Record<string, string>) {
   const child = Bun.spawn(argv, {
     cwd,
@@ -116,6 +130,7 @@ async function run(argv: string[], cwd: string, input: string | undefined, timeo
     child.stdin.write(input)
     child.stdin.end()
   }
+  liveChildren.add(child)
   const timer = setTimeout(() => child.kill(), timeoutMs)
   try {
     const [stdout, stderr, exitCode] = await Promise.all([
@@ -126,6 +141,7 @@ async function run(argv: string[], cwd: string, input: string | undefined, timeo
     return { stdout, stderr, exitCode }
   } finally {
     clearTimeout(timer)
+    liveChildren.delete(child)
   }
 }
 
@@ -331,6 +347,13 @@ export const LOCK_POLL_MS = 1_000
 export const LOCK_REFRESH_MS = 60_000
 export type LockTiming = { waitMs?: number; pollMs?: number; staleMs?: number; refreshMs?: number }
 
+/** MNEMOSYNE_LOCK_WAIT_MS as a lock timing; empty, blank or not a number keeps the default wait. */
+export function lockTimingFromEnv(value: string | undefined): LockTiming {
+  if (value === undefined || value.trim() === '') return {}
+  const waitMs = Number(value)
+  return Number.isFinite(waitMs) && waitMs >= 0 ? { waitMs } : {}
+}
+
 export async function withInstallLock<T>(file: string, work: () => Promise<T>, timing: LockTiming = {}): Promise<T> {
   const { waitMs = LOCK_WAIT_MS, pollMs = LOCK_POLL_MS, staleMs = LOCK_STALE_MS, refreshMs = LOCK_REFRESH_MS } = timing
   const note = `${JSON.stringify({ pid: process.pid, started: new Date().toISOString() })}\n`
@@ -348,6 +371,7 @@ export async function withInstallLock<T>(file: string, work: () => Promise<T>, t
   // so the next setup need not wait out the 30-minute stale time. SIGKILL cannot
   // be caught; that lock goes stale as before.
   const onSignal = (signal: NodeJS.Signals) => {
+    killInstallChildren()
     rmSync(file, { force: true })
     process.exit(signal === 'SIGINT' ? 130 : 143)
   }
@@ -473,6 +497,7 @@ export async function installRoot(pluginRoot: string, rootDir: string, options: 
   for (const folder of [layout.plugin, `${layout.plugin}.next`, `${layout.plugin}.old`]) {
     if (isInside(store, folder)) throw new InstallError(`the store ${store} is inside ${folder}; refusing to install there`)
   }
+  if (existsSync(root) && !statSync(root).isDirectory()) throw new InstallError(`--root ${root} is a file, not a folder`)
   if (existsSync(root) && !existsSync(layout.marker) && readdirSync(root).length > 0) {
     throw new InstallError(`${root} is not empty and has no ${ROOT_MARKER} from an earlier install; pass an empty or new folder`)
   }
@@ -581,8 +606,7 @@ if (import.meta.main && process.argv[2] === 'prune-logs') {
 } else if (import.meta.main) {
   const args = process.argv.slice(2)
   // A script that would rather not wait can shorten the lock wait (milliseconds).
-  const waitMs = Number(process.env.MNEMOSYNE_LOCK_WAIT_MS)
-  const lock: LockTiming = Number.isFinite(waitMs) && waitMs >= 0 && process.env.MNEMOSYNE_LOCK_WAIT_MS !== '' ? { waitMs } : {}
+  const lock = lockTimingFromEnv(process.env.MNEMOSYNE_LOCK_WAIT_MS)
   try {
     if (args.includes('--root')) {
       const flags: { root?: string; store?: string; embeddings?: boolean } = {}

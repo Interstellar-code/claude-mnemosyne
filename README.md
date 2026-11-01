@@ -540,6 +540,7 @@ bun bin/install-engine.ts --root ~/.switch/memory --embeddings   # also download
 | `bin/mnemosyne-mcp` | the launcher | 700 |
 | `config.json`, `vocabulary.json` | settings and tags | 600 |
 | `activity.jsonl` | the activity log | 600 |
+| `activity-daily.json` | per-day counts for the dashboard, written beside the log | 600 |
 | `.mnemosyne-root` | marks the folder as a root | 600 |
 
 Point an MCP client at `<root>/bin/mnemosyne-mcp`, as in [Use the memory from other tools](#use-the-memory-from-other-tools). The checkout is not needed after the install. The engine, the launcher and the proxy files are replaced at each run (a run with the same tag is a full reinstall); an existing store, `config.json`, `vocabulary.json` and `activity.jsonl` are kept as they are. The new engine is swapped in only after it answers `initialize` and `tools/list` (and, with `--embeddings`, a remember and a recall), so a failed install leaves the previous engine working and exits 1.
