@@ -520,6 +520,42 @@ For Cursor, Codex and others, use the same path as the server command. It offers
 
 **Security.** There is no token because there is no network port: the client starts the server itself over stdin/stdout, and nothing listens on the network. Access is whoever can run programs as your user, the same people who could read the database file directly. To keep other accounts on the machine out, the plugin sets `~/.claude/mnemosyne` and the store to owner-only (`700`) on macOS and Linux; on Windows your user profile's permissions already do. Don't wrap the server in an HTTP bridge without adding authentication there.
 
+## Install outside Claude Code
+
+Since 0.10.0 the engine and the proxy can be installed without Claude Code, everything under one folder you name (Switch keeps its copy in `~/.switch/memory`). From a checkout of a release tag, with Bun on the PATH:
+
+```sh
+bun bin/install-engine.ts --root ~/.switch/memory            # embeddings off
+bun bin/install-engine.ts --root ~/.switch/memory --embeddings   # also downloads the local model once
+```
+
+`--root` must be an absolute path; `--store <abs dir>` puts the store somewhere else (default `<root>/store`). It prints one JSON line (`ok`, `root`, `engine`, `build`, `cli`, `store`, `launcher`, `proxy`) and creates what is missing:
+
+| Path | What | Mode |
+|---|---|---|
+| `engine/` | the engine, staged and swapped in | 700 |
+| `store/` | the memory store | 700 |
+| `model-cache/` | the local model (`PI_CONFIG_DIR`) | 700 |
+| `plugin/bin`, `plugin/hooks` | the proxy and the files it imports | 700 |
+| `bin/mnemosyne-mcp` | the launcher | 700 |
+| `config.json`, `vocabulary.json` | settings and tags | 600 |
+| `activity.jsonl` | the activity log | 600 |
+
+Point an MCP client at `<root>/bin/mnemosyne-mcp`, as in [Use the memory from other tools](#use-the-memory-from-other-tools). Nothing under `~/.claude` or `~/.omp` is read or written, and the checkout is not needed after the install. The engine, the launcher and the proxy files are replaced at each run (a run with the same tag is a full reinstall); an existing store, `config.json`, `vocabulary.json` and `activity.jsonl` are kept as they are. The new engine is swapped in only after it answers `initialize` and `tools/list` (and, with `--embeddings`, a remember and a recall), so a failed install leaves the previous engine working and exits 1.
+
+Two installs at once: each holds `<root>/engine.lock` while it runs. A second install waits up to 10 minutes and then exits 3 with `another install holds <path>`; `MNEMOSYNE_LOCK_WAIT_MS` shortens the wait. A lock older than 30 minutes is taken over; a running install keeps its lock fresh. `/mnemosyne-setup` takes the same lock beside its own engine folder.
+
+The owner id for a folder, the same one the plugin uses with `scope: per-project`:
+
+```sh
+bun bin/owner.ts ~/dev/switch-agent    # project-switch-agent-…
+bun bin/owner.ts --global              # global
+```
+
+Inside a git repo the id is that of the main worktree (the parent of `git rev-parse --path-format=absolute --git-common-dir`, as git reports it, symlinks resolved), so a linked worktree shares its repo's owner; any other folder is hashed as given. `tests/fixtures/owner-golden.json` lists paths and their ids for another implementation to check against.
+
+Two notes. On Windows the launcher is `bin\mnemosyne-mcp.cmd` and a root holding `"`, `%` or `!` is refused; this path is untested on Windows. When the installed engine is not the build the proxy expects, a save is refused with a message that says to run `/mnemosyne-setup` in Claude Code; outside Claude Code, run the install above again instead (the text is unchanged so the plugin's message stays right).
+
 ## How it works
 
 The plugin hooks into Claude Code at four points:

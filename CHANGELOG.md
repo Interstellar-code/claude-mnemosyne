@@ -2,6 +2,17 @@
 
 Newest first. Each release is tagged `vX.Y.Z` on GitHub; the README and DESIGN.md describe the contracts.
 
+## 0.10.0 (install outside Claude Code, owner CLI, guard verdict)
+
+1. `bun bin/install-engine.ts --root <dir> [--store <dir>] [--embeddings]` installs the engine, the proxy and its launcher under one folder, outside Claude Code (issue #43, for Switch): `engine/`, `store/`, `model-cache/`, `plugin/{bin,hooks}`, `bin/mnemosyne-mcp`, `config.json`, `vocabulary.json` and `activity.jsonl`, folders and the launcher owner-only, files 0600. Nothing under `~/.claude` or `~/.omp` is read or written. Existing settings, vocabulary and log are kept; the rest is replaced at each run. See the README's "Install outside Claude Code".
+2. The install check sends `initialize` before `tools/list`; the new engine is swapped in only after it answers both, as before.
+3. An install lock, in both forms: `<engine dir>.lock` (under `--root`, `<root>/engine.lock`). A second install waits up to 10 minutes and then exits 3 with `another install holds <path>`; a lock older than 30 minutes is taken over, and a running install keeps its lock fresh. The lock code is the one the activity log already used, now in `bin/lockfile.ts`.
+4. `bun bin/owner.ts <path>` prints the owner id for a folder (`--global` prints `global`), and `tests/fixtures/owner-golden.json` lists paths and ids for another implementation to check.
+5. The proxy's save-guard errors carry `data.verdict`, `block` or `warn`, next to `data.rules`.
+6. The launcher template and the owner formula moved out of `hooks/register.ts` into `hooks/launcher.ts` and `hooks/owner.ts`, which import nothing from Claude Code. The plugin's own launcher is byte for byte what 0.9.0 wrote (a golden test), and owner ids are unchanged.
+
+The engine is unchanged: `ENGINE_BUILD` stays `18.12.3-mnemosyne.10`, so no `/mnemosyne-setup` is needed after the update. The Windows launcher of `--root` is generated but untested on Windows. The specs in `tests/*.test.ts` need the Claude Code host and run only there; `bun test ./tests/bun ./engine/test` runs anywhere.
+
 ## 0.9.0 (dashboard writes and review, importers, session summaries)
 
 1. Dashboard writes. The Memories tab has New memory and Edit (text, kind, tags from the vocabulary, importance, expiry, Pinned, project). A dashboard save passes the same save guard as every other save: a block cannot be overridden, a warning (or a near-duplicate) offers "Save anyway". Rows are saved as source `dashboard`, trust tier STATED. Routes: `POST /api/memory/create`, `/update`, `/retire`, `/restore`; create and update take bodies up to 24 KB, every other route 4096 bytes.
