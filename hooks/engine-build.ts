@@ -11,3 +11,7 @@ export const INSTALL_STEP_TIMEOUT_MS = 240_000
 // The embeddings check downloads the ~63 MB model once on this run, so it is
 // allowed far longer than a plain tools/list probe.
 export const INSTALL_CHECK_TIMEOUT_MS = 300_000
+// How long a second install waits for another's lock (bin/install-engine.ts):
+// longer than one whole install step plus check, so a healthy install is
+// waited out. Under /mnemosyne-setup the host's own limit ends the wait first.
+export const INSTALL_LOCK_WAIT_MS = 600_000

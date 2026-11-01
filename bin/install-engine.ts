@@ -26,7 +26,7 @@ import { chmodSync, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, read
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { Database } from 'bun:sqlite'
 import { EMBEDDINGS_CACHE_DIR, EMBEDDINGS_MODEL } from '../hooks/engine'
-import { INSTALL_CHECK_TIMEOUT_MS, INSTALL_STEP_TIMEOUT_MS } from '../hooks/engine-build'
+import { INSTALL_CHECK_TIMEOUT_MS, INSTALL_LOCK_WAIT_MS, INSTALL_STEP_TIMEOUT_MS } from '../hooks/engine-build'
 import { cmdWrapper, shWrapper } from '../hooks/launcher'
 import { slashes } from '../hooks/owner'
 import { configText, emptyConfig } from '../hooks/settings'
@@ -324,7 +324,7 @@ export async function install(pluginRoot: string, engineDir: string, storeDir: s
 // LOCK_POLL_MS for up to LOCK_WAIT_MS (longer than the 240 s install step plus
 // the 300 s check), then gives up with LockBusy.
 export const LOCK_STALE_MS = 30 * 60_000
-export const LOCK_WAIT_MS = 600_000
+export const LOCK_WAIT_MS = INSTALL_LOCK_WAIT_MS
 export const LOCK_POLL_MS = 1_000
 export const LOCK_REFRESH_MS = 60_000
 export type LockTiming = { waitMs?: number; pollMs?: number; staleMs?: number; refreshMs?: number }
