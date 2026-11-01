@@ -529,21 +529,27 @@ bun bin/install-engine.ts --root ~/.switch/memory            # embeddings off
 bun bin/install-engine.ts --root ~/.switch/memory --embeddings   # also downloads the local model once
 ```
 
-`--root` must be an absolute path; `--store <abs dir>` puts the store somewhere else (default `<root>/store`). It prints one JSON line (`ok`, `root`, `engine`, `build`, `cli`, `store`, `launcher`, `proxy`) and creates what is missing:
+`--root` must be an absolute path to a new or empty folder, or to one an earlier install made (it holds `.mnemosyne-root`); any other non-empty folder is refused. `--store <abs dir>` puts the store somewhere else (default `<root>/store`), but not inside `<root>/engine` or `<root>/plugin`, which each install replaces. It prints one JSON line (`ok`, `root`, `engine`, `build`, `cli`, `store`, `launcher`, `proxy`) and creates what is missing:
 
 | Path | What | Mode |
 |---|---|---|
 | `engine/` | the engine, staged and swapped in | 700 |
 | `store/` | the memory store | 700 |
 | `model-cache/` | the local model (`PI_CONFIG_DIR`) | 700 |
-| `plugin/bin`, `plugin/hooks` | the proxy and the files it imports | 700 |
+| `plugin/bin`, `plugin/hooks` | the proxy and the files it imports | folders 700, files 644 |
 | `bin/mnemosyne-mcp` | the launcher | 700 |
 | `config.json`, `vocabulary.json` | settings and tags | 600 |
 | `activity.jsonl` | the activity log | 600 |
+| `.mnemosyne-root` | marks the folder as a root | 600 |
 
-Point an MCP client at `<root>/bin/mnemosyne-mcp`, as in [Use the memory from other tools](#use-the-memory-from-other-tools). Nothing under `~/.claude` or `~/.omp` is read or written, and the checkout is not needed after the install. The engine, the launcher and the proxy files are replaced at each run (a run with the same tag is a full reinstall); an existing store, `config.json`, `vocabulary.json` and `activity.jsonl` are kept as they are. The new engine is swapped in only after it answers `initialize` and `tools/list` (and, with `--embeddings`, a remember and a recall), so a failed install leaves the previous engine working and exits 1.
+Point an MCP client at `<root>/bin/mnemosyne-mcp`, as in [Use the memory from other tools](#use-the-memory-from-other-tools). The checkout is not needed after the install. The engine, the launcher and the proxy files are replaced at each run (a run with the same tag is a full reinstall); an existing store, `config.json`, `vocabulary.json` and `activity.jsonl` are kept as they are. The new engine is swapped in only after it answers `initialize` and `tools/list` (and, with `--embeddings`, a remember and a recall), so a failed install leaves the previous engine working and exits 1.
 
-Two installs at once: each holds `<root>/engine.lock` while it runs. A second install waits up to 10 minutes and then exits 3 with `another install holds <path>`; `MNEMOSYNE_LOCK_WAIT_MS` shortens the wait. A lock older than 30 minutes is taken over; a running install keeps its lock fresh. `/mnemosyne-setup` takes the same lock beside its own engine folder.
+What stays out of `$HOME`, and what does not. The installer and the launcher do not read or write `~/.claude` or `~/.omp`, as far as the tests show: they install and run remember and recall with `HOME` pointing at a fake home (unchanged afterwards) and at a folder that does not exist (still missing afterwards). Two writers outside the root remain:
+
+1. Bun itself keeps a package cache (`~/.bun/install/cache`) and a transpiler cache (`~/Library/Caches/bun` on macOS) under `$HOME`. Set `BUN_INSTALL_CACHE_DIR` and `BUN_RUNTIME_TRANSPILER_CACHE_PATH=0` (for both the install and the launcher) to keep them out; the tests above pass only with both set.
+2. The engine's logger (pi-utils) builds its folder as `path.join($HOME, PI_CONFIG_DIR)`, so with the root's absolute cache folder its logs would go to `$HOME/<root path>/model-cache/logs`, or to `$XDG_STATE_HOME/omp/logs` when that folder exists. It writes only when the engine logs something: a corrupt model being replaced, an embedding failure, a model change that rebuilds the vectors, a failed consolidation. A normal install, remember and recall wrote nothing there in the tests, with embeddings on or off. pi-utils has no setting that moves this folder, and the engine is not changed in this release; this is a known limit.
+
+Two installs at once: each holds `<root>/engine.lock` while it runs. A second install waits up to 10 minutes and then exits 3 with `another install holds <path>`; `MNEMOSYNE_LOCK_WAIT_MS` (milliseconds) changes the wait. A lock older than 30 minutes is taken over, a running install keeps its lock fresh, and an install stopped by SIGTERM or SIGINT removes its lock (one killed outright leaves it for the 30 minutes). `/mnemosyne-setup` takes the same lock beside its own engine folder and waits only 30 seconds for it, so it ends inside its own time limit.
 
 The owner id for a folder, the same one the plugin uses with `scope: per-project`:
 
@@ -552,7 +558,7 @@ bun bin/owner.ts ~/dev/switch-agent    # project-switch-agent-…
 bun bin/owner.ts --global              # global
 ```
 
-Inside a git repo the id is that of the main worktree (the parent of `git rev-parse --path-format=absolute --git-common-dir`, as git reports it, symlinks resolved), so a linked worktree shares its repo's owner; any other folder is hashed as given. `tests/fixtures/owner-golden.json` lists paths and their ids for another implementation to check against.
+Inside a git repo the id is that of the main worktree (the parent of `git rev-parse --path-format=absolute --git-common-dir`, as git reports it, symlinks resolved), so a linked worktree shares its repo's owner; any other folder is hashed as given. A git failure other than "not a git repository" (a broken `.git` file, an unsafe-directory refusal) exits 1 with git's message. Known limit: inside a submodule, or a repo made with `git init --separate-git-dir`, the parent of the common git dir is not the work tree, so the id is built from the wrong folder; the rule is kept as is because other implementations copy it. `tests/fixtures/owner-golden.json` lists paths and their ids for another implementation to check against.
 
 Two notes. On Windows the launcher is `bin\mnemosyne-mcp.cmd` and a root holding `"`, `%` or `!` is refused; this path is untested on Windows. When the installed engine is not the build the proxy expects, a save is refused with a message that says to run `/mnemosyne-setup` in Claude Code; outside Claude Code, run the install above again instead (the text is unchanged so the plugin's message stays right).
 

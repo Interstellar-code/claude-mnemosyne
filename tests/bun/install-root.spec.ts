@@ -189,6 +189,12 @@ describe('--root with HOME at a fake home holding a .claude tree (a, c, g, h, i)
   }, INSTALL_TIMEOUT)
 })
 
+// Precondition: Bun itself writes two caches under HOME, the package cache
+// (~/.bun/install/cache) and the transpiler cache (~/Library/Caches/bun on macOS).
+// This test passes only because every spawn sets BUN_INSTALL_CACHE_DIR (through
+// isolatedEnv) and BUN_RUNTIME_TRANSPILER_CACHE_PATH=0 (rootEnv). Without them
+// Bun, not the installer or the engine, would create HOME. The engine's logger
+// is a separate gap: it writes under $HOME only when it logs (README, known limits).
 describe('(b) --root and the launcher with HOME set to a folder that does not exist', () => {
   const temp = tempDir('root-b')
   const home = join(temp.dir, 'no-such-home')
