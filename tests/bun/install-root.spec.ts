@@ -338,6 +338,30 @@ describe('(e) the install lock', () => {
     expect(later).toBeGreaterThan(first + 5 * 60_000)
   })
 
+  test('SIGTERM and SIGINT remove the lock the installer holds, and it exits 143 or 130', async () => {
+    for (const [signal, code] of [['SIGTERM', 143], ['SIGINT', 130]] as const) {
+      const file = join(temp.dir, `signal-${signal}.lock`)
+      const script = `import { withInstallLock } from ${JSON.stringify(join(ROOT, 'bin', 'install-engine.ts'))}
+await withInstallLock(${JSON.stringify(file)}, async () => { console.log('held'); await new Promise(() => setInterval(() => {}, 1000)) })`
+      const child = Bun.spawn([process.execPath, '-e', script], { env: { ...(process.env as Record<string, string>), ...isolatedEnv('root-signal') }, stdout: 'pipe', stderr: 'pipe' })
+      const reader = child.stdout.getReader()
+      const first = new TextDecoder().decode((await reader.read()).value)
+      expect(first.trim()).toBe('held')
+      expect(existsSync(file)).toBe(true)
+      child.kill(signal)
+      expect(await child.exited).toBe(code)
+      expect(existsSync(file)).toBe(false)
+    }
+  })
+
+  test('the signal handlers are gone once the lock is released', async () => {
+    const before = [process.listenerCount('SIGTERM'), process.listenerCount('SIGINT')]
+    await withInstallLock(join(temp.dir, 'listeners.lock'), async () => {
+      expect([process.listenerCount('SIGTERM'), process.listenerCount('SIGINT')]).toEqual([before[0]! + 1, before[1]! + 1])
+    })
+    expect([process.listenerCount('SIGTERM'), process.listenerCount('SIGINT')]).toEqual(before)
+  })
+
   test('a lock that cannot be created at all fails at once instead of waiting', async () => {
     const file = join(temp.dir, 'missing-folder', 'x.lock')
     const error = await withInstallLock(file, async () => 'ran', { waitMs: 60_000, pollMs: 10 }).catch(err => err)

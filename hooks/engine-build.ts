@@ -15,3 +15,7 @@ export const INSTALL_CHECK_TIMEOUT_MS = 300_000
 // longer than one whole install step plus check, so a healthy install is
 // waited out. Under /mnemosyne-setup the host's own limit ends the wait first.
 export const INSTALL_LOCK_WAIT_MS = 600_000
+// The wait /mnemosyne-setup asks for (MNEMOSYNE_LOCK_WAIT_MS): with the worst
+// install step plus check it still ends 30 s before SETUP_TIMEOUT_MS, so a
+// waiting setup reports "another install holds" instead of being killed.
+export const SETUP_LOCK_WAIT_MS = 30_000

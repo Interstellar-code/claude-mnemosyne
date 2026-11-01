@@ -2,7 +2,7 @@ import { expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On, ProcessRunInit, SessionCompactResult } from 'claude-code'
 import { afterTerm, EMBED_USAGE, embeddingsSetting, ENGINE_BUILD, ENGINE_VERSION, tagsApply, tagsDryRun } from '../hooks/register'
-import { ENGINE_BUILD as BUILD_FILE, INSTALL_CHECK_TIMEOUT_MS, INSTALL_STEP_TIMEOUT_MS, SETUP_TIMEOUT_MS } from '../hooks/engine-build'
+import { ENGINE_BUILD as BUILD_FILE, INSTALL_CHECK_TIMEOUT_MS, INSTALL_STEP_TIMEOUT_MS, SETUP_LOCK_WAIT_MS, SETUP_TIMEOUT_MS } from '../hooks/engine-build'
 import { engineTool, mnemosyneStats, publicTool } from '../hooks/surface'
 import { BACKFILL_CONCURRENCY, extractionModelOf, extractionOff, GET_BATCH, parseProposals, parseTags, pool, SYSTEM_PROMPT } from '../hooks/backfill'
 import type { Proposal } from '../hooks/backfill'
@@ -1210,6 +1210,7 @@ test('setup gives the installer the host limit, and the installer\'s own limits 
 
   const install = runs.find(r => (r.argv[1] ?? '').endsWith('/bin/install-engine.ts'))
   expect(install?.init?.timeoutMs).toBe(SETUP_TIMEOUT_MS)
+  expect(install?.init?.env).toEqual({ MNEMOSYNE_LOCK_WAIT_MS: String(SETUP_LOCK_WAIT_MS) })
   expect(INSTALL_STEP_TIMEOUT_MS + INSTALL_CHECK_TIMEOUT_MS).toBeLessThanOrEqual(SETUP_TIMEOUT_MS - 30_000)
 })
 

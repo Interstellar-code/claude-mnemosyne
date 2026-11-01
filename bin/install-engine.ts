@@ -322,7 +322,9 @@ export async function install(pluginRoot: string, engineDir: string, storeDir: s
 // LOCK_REFRESH_MS, so a healthy long install is never stale, and removes it in a
 // finally, after a failed install too. A second install polls every
 // LOCK_POLL_MS for up to LOCK_WAIT_MS (longer than the 240 s install step plus
-// the 300 s check), then gives up with LockBusy.
+// the 300 s check), then gives up with LockBusy. /mnemosyne-setup passes a
+// shorter wait (SETUP_LOCK_WAIT_MS) through MNEMOSYNE_LOCK_WAIT_MS. SIGTERM and
+// SIGINT remove a held lock before the process exits.
 export const LOCK_STALE_MS = 30 * 60_000
 export const LOCK_WAIT_MS = INSTALL_LOCK_WAIT_MS
 export const LOCK_POLL_MS = 1_000
@@ -342,6 +344,15 @@ export async function withInstallLock<T>(file: string, work: () => Promise<T>, t
     if (Date.now() >= deadline) throw new LockBusy(`another install holds ${file}`)
     await Bun.sleep(pollMs)
   }
+  // A killed installer (the host's timeout, Ctrl-C) removes the lock it holds,
+  // so the next setup need not wait out the 30-minute stale time. SIGKILL cannot
+  // be caught; that lock goes stale as before.
+  const onSignal = (signal: NodeJS.Signals) => {
+    rmSync(file, { force: true })
+    process.exit(signal === 'SIGINT' ? 130 : 143)
+  }
+  process.once('SIGTERM', onSignal)
+  process.once('SIGINT', onSignal)
   const refresh = setInterval(() => {
     try {
       const now = new Date()
@@ -354,6 +365,8 @@ export async function withInstallLock<T>(file: string, work: () => Promise<T>, t
     return await work()
   } finally {
     clearInterval(refresh)
+    process.off('SIGTERM', onSignal)
+    process.off('SIGINT', onSignal)
     rmSync(file, { force: true })
   }
 }

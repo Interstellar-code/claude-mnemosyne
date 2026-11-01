@@ -45,7 +45,7 @@ import type { ExtractOutcome, KnowledgeEngine } from './knowledge'
 import { buildRequests, EMBEDDINGS_CACHE_DIR, EMBEDDINGS_MODEL, engineEnv, parseReplies } from './engine'
 import type { RecallWeights } from './engine'
 import type { EngineRequest } from './engine'
-import { ENGINE_BUILD, SETUP_TIMEOUT_MS } from './engine-build'
+import { ENGINE_BUILD, SETUP_LOCK_WAIT_MS, SETUP_TIMEOUT_MS } from './engine-build'
 import { mnemosyneStats } from './surface'
 import { admit, guardConfigOf, nearDuplicateFlags, nearDuplicateMessage, nearMatchesOf } from './guard'
 import type { GuardResult, NearMatch } from './guard'
@@ -2013,7 +2013,8 @@ export const register: Register = (on, options) => {
       // Builds <engine>.next from the plugin's engine/ and swaps it in only once it answers (bin/install-engine.ts).
       const installed = await $.process.run(
         ['bun', `${root}/bin/install-engine.ts`, root, engine, store, ...(embeddings ? ['embeddings'] : [])],
-        { timeoutMs: SETUP_TIMEOUT_MS },
+        // Another install's lock is waited for only briefly, so this one still ends inside SETUP_TIMEOUT_MS.
+        { timeoutMs: SETUP_TIMEOUT_MS, env: { MNEMOSYNE_LOCK_WAIT_MS: String(SETUP_LOCK_WAIT_MS) } },
       )
       if (installed.exitCode !== 0) {
         // M2: when embeddings were requested but the install check could not prove
