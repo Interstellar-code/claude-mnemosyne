@@ -659,6 +659,8 @@ async function handleRemember(args: ToolArguments): Promise<ToolResult> {
 	const validUntil = validUntilArg(args);
 	if (validUntil !== null && typeof validUntil === "object") return validUntil;
 	return withBeam(args, (beam, bank) => {
+		// engine/UPSTREAM.md change 19: say when the text was already stored (the status stays "stored").
+		const duplicate = beam.hasDuplicate(content);
 		const memoryId = beam.remember(content, {
 			source: stringArg(args, "source", "mcp"),
 			importance: numberArg(args, "importance", 0.5),
@@ -671,7 +673,7 @@ async function handleRemember(args: ToolArguments): Promise<ToolResult> {
 			trustTier: trustTierArg(args),
 			validUntil: validUntil ?? undefined,
 		});
-		return { status: "stored", memory_id: memoryId, bank, content_preview: content.slice(0, 100) };
+		return { status: "stored", memory_id: memoryId, bank, content_preview: content.slice(0, 100), duplicate };
 	});
 }
 

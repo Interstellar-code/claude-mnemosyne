@@ -37,6 +37,7 @@ import {
 	getWorkingStats,
 	importFromDict,
 	invalidate,
+	hasDuplicate,
 	remember,
 	rememberBatch,
 	scratchpadClear,
@@ -227,6 +228,10 @@ export class BeamMemory implements BeamMemoryState {
 		while (this.pendingExtractions.size > 0) {
 			await Promise.allSettled(this.pendingExtractions);
 		}
+	}
+
+	hasDuplicate(content: string): boolean {
+		return hasDuplicate(this, content);
 	}
 
 	remember(content: string, options: RememberOptions = {}): string {

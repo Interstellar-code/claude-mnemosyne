@@ -2,6 +2,12 @@
 
 Newest first. Each release is tagged `vX.Y.Z` on GitHub; the README and DESIGN.md describe the contracts.
 
+## 0.11.0 (duplicate flag on memory_remember)
+
+1. The `memory_remember` reply carries `duplicate` (claude-mnemosyne#44, for Switch): `true` when this owner already held exactly the same text, `false` for a new memory. `status` stays `stored` and `memory_id` is the existing id, so nothing that reads the reply today changes.
+2. New engine build `18.12.3-mnemosyne.11` (change 19 in `engine/UPSTREAM.md`). Run `/mnemosyne-setup` once after updating. Until then the plugin treats the engine as out of date and refuses `memory_remember` and `memory_update` (the plugin's `NOT_CURRENT` denial, the proxy's `-32000`), and their message gives the old 24-hour-trim reason, which does not apply to this build. Recall is unaffected. Outside Claude Code, run the `--root` install again.
+3. `duplicate: true` means a row with exactly that text exists for the owner, including a retired or expired one (a re-save does not bring it back). The check and the save are two steps, so a save of the same text by another process in between can report `false` for an existing id.
+
 ## 0.10.1 (install fixes)
 
 1. A killed installer (SIGTERM, Ctrl-C) now also stops the `bun install` and engine-check processes it started (not anything those start in turn), so they no longer run on and race the next setup.
