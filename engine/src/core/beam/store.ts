@@ -153,6 +153,11 @@ function invalidateCaches(beam: BeamMemoryState): void {
 	beam.caches.queryCache?.invalidate();
 }
 
+/** Whether this owner already holds a working memory with exactly this text (what `remember` would re-save). */
+export function hasDuplicate(beam: BeamMemoryState, content: string): boolean {
+	return findDuplicate(beam, content) !== null;
+}
+
 function findDuplicate(beam: BeamMemoryState, content: string): string | null {
 	using statement = beam.db.prepare("SELECT id FROM working_memory WHERE content = ? AND session_id = ? LIMIT 1");
 	const row = statement.get(content, beam.sessionId) as { id: string } | null;

@@ -42,3 +42,11 @@ test('the installer\'s own timeouts stay well below the host\'s limit on setup (
   expect(installer).not.toMatch(/\d{3}_000/)
   expect(readFileSync(join(ROOT, 'hooks', 'register.ts'), 'utf8')).toContain('timeoutMs: SETUP_TIMEOUT_MS')
 })
+
+test('a setup that waits for another install\'s lock still ends 30 s before the host kills it (fix round 1)', async () => {
+  const { INSTALL_CHECK_TIMEOUT_MS, INSTALL_LOCK_WAIT_MS, INSTALL_STEP_TIMEOUT_MS, SETUP_LOCK_WAIT_MS, SETUP_TIMEOUT_MS } = await import('../../hooks/engine-build')
+  expect(SETUP_LOCK_WAIT_MS + INSTALL_STEP_TIMEOUT_MS + INSTALL_CHECK_TIMEOUT_MS).toBeLessThanOrEqual(SETUP_TIMEOUT_MS - 30_000)
+  // --root keeps the long wait: longer than a whole install, so a healthy one is waited out.
+  expect(INSTALL_LOCK_WAIT_MS).toBeGreaterThan(INSTALL_STEP_TIMEOUT_MS + INSTALL_CHECK_TIMEOUT_MS)
+  expect(readFileSync(join(ROOT, 'hooks', 'register.ts'), 'utf8')).toContain('env: { MNEMOSYNE_LOCK_WAIT_MS: String(SETUP_LOCK_WAIT_MS) }')
+})

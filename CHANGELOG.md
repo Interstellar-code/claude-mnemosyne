@@ -2,6 +2,30 @@
 
 Newest first. Each release is tagged `vX.Y.Z` on GitHub; the README and DESIGN.md describe the contracts.
 
+## 0.11.0 (duplicate flag on memory_remember)
+
+1. The `memory_remember` reply carries `duplicate` (claude-mnemosyne#44, for Switch): `true` when this owner already held exactly the same text, `false` for a new memory. `status` stays `stored` and `memory_id` is the existing id, so nothing that reads the reply today changes.
+2. New engine build `18.12.3-mnemosyne.11` (change 19 in `engine/UPSTREAM.md`). Run `/mnemosyne-setup` once after updating. Until then the plugin treats the engine as out of date and refuses `memory_remember` and `memory_update` (the plugin's `NOT_CURRENT` denial, the proxy's `-32000`), and their message gives the old 24-hour-trim reason, which does not apply to this build. Recall is unaffected. Outside Claude Code, run the `--root` install again.
+3. `duplicate: true` means a row with exactly that text exists for the owner, including a retired or expired one (a re-save does not bring it back). The check and the save are two steps, so a save of the same text by another process in between can report `false` for an existing id.
+
+## 0.10.1 (install fixes)
+
+1. A killed installer (SIGTERM, Ctrl-C) now also stops the `bun install` and engine-check processes it started (not anything those start in turn), so they no longer run on and race the next setup.
+2. A blank `MNEMOSYNE_LOCK_WAIT_MS` (spaces) keeps the default wait instead of meaning no wait.
+3. `--root` pointing at a file is refused with `--root <path> is a file, not a folder` instead of a raw `ENOTDIR`.
+4. The README's layout table lists `activity-daily.json`.
+
+## 0.10.0 (install outside Claude Code, owner CLI, guard verdict)
+
+1. `bun bin/install-engine.ts --root <dir> [--store <dir>] [--embeddings]` installs the engine, the proxy and its launcher under one folder, outside Claude Code (issue #43, for Switch): `engine/`, `store/`, `model-cache/`, `plugin/{bin,hooks}`, `bin/mnemosyne-mcp`, `config.json`, `vocabulary.json`, `activity.jsonl` and the marker `.mnemosyne-root`. Folders and the launcher are 0700; `config.json`, `vocabulary.json`, `activity.jsonl` and the marker are 0600; the copied proxy files keep 0644 inside the 0700 `plugin/` folder. A non-empty root without the marker is refused, and so is a `--store` inside `<root>/plugin`. The installer and the launcher read and write nothing under `~/.claude` or `~/.omp` (tested with a fake home and with a missing one). Existing settings, vocabulary and log are kept; the rest is replaced at each run. See the README's "Install outside Claude Code".
+2. The install check sends `initialize` before `tools/list`; the new engine is swapped in only after it answers both, as before.
+3. An install lock, in both forms: `<engine dir>.lock` (under `--root`, `<root>/engine.lock`). A second install waits up to 10 minutes (`/mnemosyne-setup`: 30 seconds, through `MNEMOSYNE_LOCK_WAIT_MS`) and then exits 3 with `another install holds <path>`; a lock older than 30 minutes is taken over, a running install keeps its lock fresh, and SIGTERM or SIGINT removes the lock before the installer exits. The lock code is the one the activity log already used, now in `bin/lockfile.ts`.
+4. `bun bin/owner.ts <path>` prints the owner id for a folder (`--global` prints `global`; a git failure other than "not a git repository" exits 1; submodules and `--separate-git-dir` repos get an id from the wrong folder, a known limit), and `tests/fixtures/owner-golden.json` lists paths and ids for another implementation to check.
+5. The proxy's save-guard errors carry `data.verdict`, `block` or `warn`, next to `data.rules`.
+6. The launcher template and the owner formula moved out of `hooks/register.ts` into `hooks/launcher.ts` and `hooks/owner.ts`, which import nothing from Claude Code. The plugin's own launcher is byte for byte what 0.9.0 wrote (a golden test), and owner ids are unchanged.
+
+The engine is unchanged: `ENGINE_BUILD` stays `18.12.3-mnemosyne.10`, so no `/mnemosyne-setup` is needed after the update. Known limits of `--root`: Bun writes its own caches under `$HOME` unless `BUN_INSTALL_CACHE_DIR` and `BUN_RUNTIME_TRANSPILER_CACHE_PATH=0` are set, and the engine's logger (pi-utils) puts its logs under `$HOME/<root path>/model-cache/logs` (or `$XDG_STATE_HOME/omp/logs`) when it logs at all; pi-utils has no setting to move them, and a normal install, remember and recall wrote none in the tests. The Windows launcher of `--root` is generated but untested on Windows. The specs in `tests/*.test.ts` need the Claude Code host and run only there; `bun test ./tests/bun ./engine/test` runs anywhere.
+
 ## 0.9.0 (dashboard writes and review, importers, session summaries)
 
 1. Dashboard writes. The Memories tab has New memory and Edit (text, kind, tags from the vocabulary, importance, expiry, Pinned, project). A dashboard save passes the same save guard as every other save: a block cannot be overridden, a warning (or a near-duplicate) offers "Save anyway". Rows are saved as source `dashboard`, trust tier STATED. Routes: `POST /api/memory/create`, `/update`, `/retire`, `/restore`; create and update take bodies up to 24 KB, every other route 4096 bytes.

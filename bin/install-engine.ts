@@ -1,13 +1,20 @@
 // Claude Mnemosyne — installs the plugin's own engine copy (engine/) into the
 // engine folder, without ever removing a working engine first.
 //
-//   bun bin/install-engine.ts <plugin root> <engine dir> <store dir>
+//   bun bin/install-engine.ts <plugin root> <engine dir> <store dir> [embeddings]
+//   bun bin/install-engine.ts --root <abs dir> [--store <abs dir>] [--embeddings]
+//
+// The second form installs outside Claude Code, everything under one root (for
+// Switch): see installRoot below. Both forms hold <engine dir>.lock while they
+// run (the only file written beside the engine folder); a second install waits
+// for it up to LOCK_WAIT_MS, then exits 3 with `another install holds <path>`.
 //
 // 1. Builds <engine dir>.next: engine/ (no node_modules, no test) copied whole
 //    to <engine dir>.next/pi-mnemopi, a package.json naming it as
 //    @oh-my-pi/pi-mnemopi = file:./pi-mnemopi, then `bun install` there
 //    (production, no peers).
-// 2. Checks the new cli answers tools/list with our build's mnemopi_update.
+// 2. Checks the new cli answers initialize and tools/list with our build's
+//    mnemopi_update.
 // 3. Only then renames <engine dir> to <engine dir>.old, <engine dir>.next to
 //    <engine dir>, and deletes <engine dir>.old.
 // On any failure it deletes <engine dir>.next, leaves <engine dir> as it was
@@ -15,16 +22,27 @@
 // and refuses a store inside any of them, compared as real paths (symlinks
 // followed, case-folded on macOS and Windows). The cli path stays
 // <engine dir>/node_modules/@oh-my-pi/pi-mnemopi/src/cli.ts.
-import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { Database } from 'bun:sqlite'
-import { INSTALL_CHECK_TIMEOUT_MS, INSTALL_STEP_TIMEOUT_MS } from '../hooks/engine-build'
+import { EMBEDDINGS_CACHE_DIR, EMBEDDINGS_MODEL } from '../hooks/engine'
+import { INSTALL_CHECK_TIMEOUT_MS, INSTALL_LOCK_WAIT_MS, INSTALL_STEP_TIMEOUT_MS } from '../hooks/engine-build'
+import { cmdWrapper, shWrapper } from '../hooks/launcher'
+import { slashes } from '../hooks/owner'
+import { configText, emptyConfig } from '../hooks/settings'
+import { VOCAB_FILE } from '../hooks/vocab'
+import { takeLock } from './lockfile'
+import { configFile } from './settings'
+import { initVocabulary } from './vocab'
 
 const PACKAGE = '@oh-my-pi/pi-mnemopi'
 // The default file systems of macOS and Windows ignore case: Engine/ is engine/.
 const FOLDS_CASE = process.platform === 'darwin' || process.platform === 'win32'
+const IS_WINDOWS = process.platform === 'win32'
 
 class InstallError extends Error {}
+/** Another install held the lock for the whole wait: the CLI exits 3. */
+export class LockBusy extends InstallError {}
 
 /**
  * The real path of `path`: the nearest part that exists, symlinks followed
@@ -86,6 +104,20 @@ export function installStep(next: string, runner: Runner = run) {
   return runner([process.execPath, 'install', '--production', '--omit=peer'], next, undefined, INSTALL_STEP_TIMEOUT_MS, installStepEnv())
 }
 
+// The install's running children, so a killed installer can stop them: left
+// alone, a bun install or an engine check outlives it and races the next setup.
+const liveChildren = new Set<{ kill: () => void }>()
+export function killInstallChildren() {
+  for (const child of liveChildren) {
+    try {
+      child.kill()
+    } catch {
+      // already gone
+    }
+  }
+  liveChildren.clear()
+}
+
 async function run(argv: string[], cwd: string, input: string | undefined, timeoutMs: number, env?: Record<string, string>) {
   const child = Bun.spawn(argv, {
     cwd,
@@ -98,6 +130,7 @@ async function run(argv: string[], cwd: string, input: string | undefined, timeo
     child.stdin.write(input)
     child.stdin.end()
   }
+  liveChildren.add(child)
   const timer = setTimeout(() => child.kill(), timeoutMs)
   try {
     const [stdout, stderr, exitCode] = await Promise.all([
@@ -108,11 +141,12 @@ async function run(argv: string[], cwd: string, input: string | undefined, timeo
     return { stdout, stderr, exitCode }
   } finally {
     clearTimeout(timer)
+    liveChildren.delete(child)
   }
 }
 
-/** The new engine answers tools/list, and its mnemopi_update takes metadata (our build). */
-async function check(next: string, build: string, embeddings: boolean) {
+/** The new engine answers initialize and tools/list, and its mnemopi_update takes metadata (our build). */
+async function check(next: string, build: string, embeddings: boolean, modelCacheDir: string) {
   const installed = join(next, 'node_modules', ...PACKAGE.split('/'), 'package.json')
   if (!existsSync(installed)) throw new InstallError(`bun install left no ${PACKAGE} in ${next}`)
   const version = JSON.parse(readFileSync(installed, 'utf8')).version
@@ -135,23 +169,28 @@ async function check(next: string, build: string, embeddings: boolean) {
     MNEMOPI_EMBEDDING_API_URL: '',
     MNEMOPI_EMBEDDINGS_VIA_API: '',
     MNEMOPI_EMBEDDING_API_KEY: '',
-    MNEMOPI_EMBEDDING_MODEL: 'BAAI/bge-small-en-v1.5',
+    MNEMOPI_EMBEDDING_MODEL: EMBEDDINGS_MODEL,
     MNEMOPI_EMBEDDING_DIM: '',
     OPENROUTER_BASE_URL: '',
     OPENROUTER_API_KEY: '',
     OPENAI_API_KEY: '',
     MNEMOPI_EMBEDDINGS_API_OPT_IN: '0',
     HF_ENDPOINT: 'https://huggingface.co',
-    PI_CONFIG_DIR: '.claude/mnemosyne/model-cache',
+    PI_CONFIG_DIR: modelCacheDir,
   }
   const request = (id: number, name: string, args: Record<string, unknown>) =>
     `${JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } })}\n`
-  // tools/list first; then, with embeddings on, one remember and one recall.
+  // initialize (id 0) and its notification, as an MCP client starts; then
+  // tools/list; then, with embeddings on, one remember and one recall.
+  const handshake =
+    `${JSON.stringify({ jsonrpc: '2.0', id: 0, method: 'initialize', params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'install-engine', version: build } } })}\n` +
+    `${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized', params: {} })}\n` +
+    `${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' })}\n`
   const stdin = embeddings
-    ? `${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' })}\n` +
+    ? handshake +
       request(2, 'mnemopi_remember', { content: 'The install check prefers dark mode.', source: 'imported', scope: 'global' }) +
       request(3, 'mnemopi_recall', { query: 'dark mode' })
-    : `${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' })}\n`
+    : handshake
   const ran = await run([process.execPath, cliOf(next), 'mcp'], next, stdin, INSTALL_CHECK_TIMEOUT_MS, env)
   const replies = new Map<number, { result?: { content?: { text?: string }[]; isError?: boolean }; error?: { message?: string } }>()
   for (const line of ran.stdout.split('\n')) {
@@ -162,6 +201,7 @@ async function check(next: string, build: string, embeddings: boolean) {
       // engine chatter
     }
   }
+  if (replies.get(0)?.result === undefined) throw new InstallError(`the new engine did not answer initialize (exit ${ran.exitCode}): ${ran.stderr.trim().slice(-400)}`)
   const tools = (replies.get(1)?.result as { tools?: { name: string; inputSchema?: { properties?: Record<string, unknown> } }[] } | undefined)?.tools
   if (!Array.isArray(tools)) throw new InstallError(`the new engine did not answer tools/list (exit ${ran.exitCode}): ${ran.stderr.trim().slice(-400)}`)
   const update = tools.find(tool => tool.name === 'mnemopi_update')
@@ -205,7 +245,7 @@ async function check(next: string, build: string, embeddings: boolean) {
   }
 }
 
-export async function install(pluginRoot: string, engineDir: string, storeDir: string, embeddings = false) {
+export async function install(pluginRoot: string, engineDir: string, storeDir: string, embeddings = false, modelCacheDir = EMBEDDINGS_CACHE_DIR) {
   for (const [name, path] of [['plugin root', pluginRoot], ['engine dir', engineDir], ['store dir', storeDir]] as const) {
     if (!path || !isAbsolute(path)) throw new InstallError(`${name} must be an absolute path (got "${path}")`)
   }
@@ -263,7 +303,7 @@ export async function install(pluginRoot: string, engineDir: string, storeDir: s
     if (installed.exitCode !== 0) {
       throw new InstallError(`bun install failed (exit ${installed.exitCode}): ${`${installed.stderr}\n${installed.stdout}`.trim().slice(-800)}`)
     }
-    await check(next, build, embeddings)
+    await check(next, build, embeddings, modelCacheDir)
   } catch (error) {
     rmSync(next, { recursive: true, force: true })
     throw error
@@ -290,6 +330,237 @@ export async function install(pluginRoot: string, engineDir: string, storeDir: s
     // The new engine is in place; a leftover .old is removed by the next install.
   }
   return { engine, build, cli: cliOf(engine) }
+}
+
+// The install lock: <engine dir>.lock, taken with bin/lockfile.ts. mtime is the
+// only stale test (older than LOCK_STALE_MS); the pid and time inside are for
+// people, so a dead pid alone never frees a lock. The holder touches it every
+// LOCK_REFRESH_MS, so a healthy long install is never stale, and removes it in a
+// finally, after a failed install too. A second install polls every
+// LOCK_POLL_MS for up to LOCK_WAIT_MS (longer than the 240 s install step plus
+// the 300 s check), then gives up with LockBusy. /mnemosyne-setup passes a
+// shorter wait (SETUP_LOCK_WAIT_MS) through MNEMOSYNE_LOCK_WAIT_MS. SIGTERM and
+// SIGINT remove a held lock before the process exits.
+export const LOCK_STALE_MS = 30 * 60_000
+export const LOCK_WAIT_MS = INSTALL_LOCK_WAIT_MS
+export const LOCK_POLL_MS = 1_000
+export const LOCK_REFRESH_MS = 60_000
+export type LockTiming = { waitMs?: number; pollMs?: number; staleMs?: number; refreshMs?: number }
+
+/** MNEMOSYNE_LOCK_WAIT_MS as a lock timing; empty, blank or not a number keeps the default wait. */
+export function lockTimingFromEnv(value: string | undefined): LockTiming {
+  if (value === undefined || value.trim() === '') return {}
+  const waitMs = Number(value)
+  return Number.isFinite(waitMs) && waitMs >= 0 ? { waitMs } : {}
+}
+
+export async function withInstallLock<T>(file: string, work: () => Promise<T>, timing: LockTiming = {}): Promise<T> {
+  const { waitMs = LOCK_WAIT_MS, pollMs = LOCK_POLL_MS, staleMs = LOCK_STALE_MS, refreshMs = LOCK_REFRESH_MS } = timing
+  const note = `${JSON.stringify({ pid: process.pid, started: new Date().toISOString() })}\n`
+  const deadline = Date.now() + waitMs
+  let missing = 0
+  while (takeLock(file, staleMs, note) === undefined) {
+    // takeLock also fails when the file cannot be made at all (a read-only
+    // folder): with no lock there to wait for, stop after a few tries.
+    missing = existsSync(file) ? 0 : missing + 1
+    if (missing >= 3) throw new InstallError(`could not create the lock ${file}`)
+    if (Date.now() >= deadline) throw new LockBusy(`another install holds ${file}`)
+    await Bun.sleep(pollMs)
+  }
+  // A killed installer (the host's timeout, Ctrl-C) removes the lock it holds,
+  // so the next setup need not wait out the 30-minute stale time. SIGKILL cannot
+  // be caught; that lock goes stale as before.
+  const onSignal = (signal: NodeJS.Signals) => {
+    killInstallChildren()
+    rmSync(file, { force: true })
+    process.exit(signal === 'SIGINT' ? 130 : 143)
+  }
+  process.once('SIGTERM', onSignal)
+  process.once('SIGINT', onSignal)
+  const refresh = setInterval(() => {
+    try {
+      const now = new Date()
+      utimesSync(file, now, now)
+    } catch {
+      // gone or unreachable: the install goes on, the finally still removes it
+    }
+  }, refreshMs)
+  try {
+    return await work()
+  } finally {
+    clearInterval(refresh)
+    process.off('SIGTERM', onSignal)
+    process.off('SIGINT', onSignal)
+    rmSync(file, { force: true })
+  }
+}
+
+// The proxy's import closure: bin/mcp-proxy.ts and every file it reaches by a
+// relative runtime import (`import type` is erased, so not followed); any other
+// runtime import must be a node: or bun: built-in. Paths are
+// relative to the plugin root, with forward slashes. Each file must be under
+// bin/ or hooks/, so <root>/plugin keeps the ../hooks layout, and none may
+// import claude-code at runtime: such a root would fail at its first call.
+const IMPORT = /^[ \t]*(?:import|export)[ \t]+(type[ \t]+)?(?:[^'";]*?[ \t\n]from[ \t]+)?['"]([^'"]+)['"]/gm
+export function proxyClosure(pluginRoot: string, entry = 'bin/mcp-proxy.ts') {
+  const seen = new Set<string>()
+  const queue = [entry]
+  while (queue.length > 0) {
+    const rel = queue.pop()!
+    if (seen.has(rel)) continue
+    const file = join(pluginRoot, rel)
+    if (!existsSync(file)) throw new InstallError(`the proxy imports ${rel}, which does not exist`)
+    if (!/^(bin|hooks)\/[^/]+\.ts$/.test(rel)) throw new InstallError(`the proxy imports ${rel}, outside bin/ and hooks/`)
+    seen.add(rel)
+    const text = readFileSync(file, 'utf8')
+    if (/\bimport\s*\(/.test(text) || /\brequire\s*\(/.test(text)) throw new InstallError(`${rel} loads a module at run time; the closure cannot follow it`)
+    for (const match of text.matchAll(IMPORT)) {
+      const [, typeOnly, spec] = match as unknown as [string, string | undefined, string]
+      if (typeOnly) continue
+      if (spec === 'claude-code' || spec.startsWith('claude-code/')) throw new InstallError(`${rel} imports ${spec}, which only the Claude Code host has`)
+      // Built-ins only: <root>/plugin has no node_modules, so a package import would fail at the first call.
+      if (spec.startsWith('node:') || spec.startsWith('bun:')) continue
+      if (!spec.startsWith('.')) throw new InstallError(`${rel} imports the package ${spec}; the proxy may import only relative files, node: and bun: modules`)
+      const target = slashes(relative(pluginRoot, join(dirname(file), spec)))
+      queue.push(/\.[a-z]+$/.test(target) ? target : `${target}.ts`)
+    }
+  }
+  return [...seen].sort()
+}
+
+// Marks a folder as a root this installer made: a non-empty --root without it
+// is refused, so a typo cannot fill an unrelated folder (or a home) with files.
+export const ROOT_MARKER = '.mnemosyne-root'
+
+/** Every path under a standalone root (`--root`). */
+export function rootLayout(root: string, store = join(root, 'store')) {
+  return {
+    root,
+    engine: join(root, 'engine'),
+    store,
+    modelCache: join(root, 'model-cache'),
+    plugin: join(root, 'plugin'),
+    bin: join(root, 'bin'),
+    launcher: join(root, 'bin', `mnemosyne-mcp${IS_WINDOWS ? '.cmd' : ''}`),
+    config: configFile(root),
+    vocabulary: join(root, VOCAB_FILE),
+    activity: join(root, 'activity.jsonl'),
+    lock: join(root, 'engine.lock'),
+    marker: join(root, ROOT_MARKER),
+  }
+}
+
+/** cmd has no safe quoting for ", % or !: a Windows root or derived path holding one is refused (as register.ts refuses memoryDir). */
+export function windowsPathProblem(paths: readonly string[]) {
+  const bad = paths.find(path => /["%!]/.test(path))
+  return bad === undefined ? undefined : `on Windows a path must not contain ", % or ! (got "${bad}")`
+}
+
+const secureDir = (dir: string) => {
+  mkdirSync(dir, { recursive: true, mode: 0o700 })
+  if (!IS_WINDOWS) chmodSync(dir, 0o700)
+}
+
+// Writes `text` to `file` only when there is no file: an existing one is kept byte for byte.
+const createOnly = (file: string, text: string) => {
+  if (existsSync(file)) return false
+  writeFileSync(file, text, { mode: 0o600, flag: 'wx' })
+  if (!IS_WINDOWS) chmodSync(file, 0o600)
+  return true
+}
+
+/**
+ * The standalone install (issue #43): everything under one root, nothing under
+ * $HOME/.claude or ~/.omp read or written. Creates what is missing:
+ *   engine/              the engine, staged and swapped in as install() does
+ *   store/               (or --store) the memory store
+ *   model-cache/         PI_CONFIG_DIR, absolute, so the engine never looks under $HOME
+ *   plugin/{bin,hooks}/  the proxy's import closure, replaced whole at each install
+ *   bin/mnemosyne-mcp    the launcher (.cmd on Windows), rewritten at each install, 0700
+ *   config.json, vocabulary.json, activity.jsonl   created once, 0600; existing ones are kept
+ *   .mnemosyne-root      the marker, 0600; a non-empty root without it is refused
+ * Folders are 0700 on POSIX. A same-build rerun is a full reinstall.
+ */
+export async function installRoot(pluginRoot: string, rootDir: string, options: { store?: string; embeddings?: boolean; lock?: LockTiming } = {}) {
+  if (!rootDir || !isAbsolute(rootDir)) throw new InstallError(`--root must be an absolute path (got "${rootDir}")`)
+  if (options.store !== undefined && !isAbsolute(options.store)) throw new InstallError(`--store must be an absolute path (got "${options.store}")`)
+  const layout = rootLayout(resolve(rootDir), options.store === undefined ? undefined : resolve(options.store))
+  const { root, engine, store } = layout
+  if (IS_WINDOWS) {
+    const problem = windowsPathProblem(Object.values(layout))
+    if (problem) throw new InstallError(problem)
+  }
+  for (const folder of [engine, `${engine}.next`, `${engine}.old`]) {
+    if (isInside(root, folder)) throw new InstallError(`the root ${root} is inside ${folder}; refusing to install there`)
+  }
+  // Each install replaces these folders whole: a store inside one would be deleted.
+  for (const folder of [layout.plugin, `${layout.plugin}.next`, `${layout.plugin}.old`]) {
+    if (isInside(store, folder)) throw new InstallError(`the store ${store} is inside ${folder}; refusing to install there`)
+  }
+  if (existsSync(root) && !statSync(root).isDirectory()) throw new InstallError(`--root ${root} is a file, not a folder`)
+  if (existsSync(root) && !existsSync(layout.marker) && readdirSync(root).length > 0) {
+    throw new InstallError(`${root} is not empty and has no ${ROOT_MARKER} from an earlier install; pass an empty or new folder`)
+  }
+  const closure = proxyClosure(resolve(pluginRoot))
+  secureDir(root)
+  // Before the lock, so a second install that starts now finds the root marked.
+  try {
+    createOnly(layout.marker, `${JSON.stringify({ by: 'claude-mnemosyne bin/install-engine.ts --root', created: new Date().toISOString() })}\n`)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+  }
+  return withInstallLock(
+    layout.lock,
+    async () => {
+      for (const dir of [store, layout.modelCache, layout.bin]) secureDir(dir)
+      const done = await install(pluginRoot, engine, store, options.embeddings === true, layout.modelCache)
+      // install() leaves the swapped-in folder at the default mode; under a root every folder is owner-only.
+      secureDir(engine)
+
+      // The proxy's files, staged and swapped like the engine, so a crash leaves the old copy or the new one.
+      const next = `${layout.plugin}.next`
+      const old = `${layout.plugin}.old`
+      rmSync(next, { recursive: true, force: true })
+      for (const rel of closure) {
+        mkdirSync(join(next, dirname(rel)), { recursive: true, mode: 0o700 })
+        copyFileSync(join(resolve(pluginRoot), rel), join(next, rel))
+      }
+      for (const dir of [next, join(next, 'bin'), join(next, 'hooks')]) secureDir(dir)
+      rmSync(old, { recursive: true, force: true })
+      if (existsSync(layout.plugin)) renameSync(layout.plugin, old)
+      renameSync(next, layout.plugin)
+      rmSync(old, { recursive: true, force: true })
+
+      const launcher = launcherOptions(layout, options.embeddings === true)
+      writeFileSync(layout.launcher, IS_WINDOWS ? cmdWrapper(launcher) : shWrapper(launcher))
+      if (!IS_WINDOWS) chmodSync(layout.launcher, 0o700)
+
+      createOnly(layout.config, configText(emptyConfig()))
+      // Seeded from the store, which must exist first (bin/vocab.ts).
+      if (!existsSync(layout.vocabulary)) {
+        initVocabulary(store, root)
+        if (!IS_WINDOWS) chmodSync(layout.vocabulary, 0o600)
+      }
+      createOnly(layout.activity, '')
+      return { ...done, root, store, launcher: layout.launcher, proxy: join(layout.plugin, 'bin', 'mcp-proxy.ts') }
+    },
+    options.lock,
+  )
+}
+
+/** The launcher's options for a standalone root: forward slashes on every OS, as the plugin writes them. */
+export function launcherOptions(layout: ReturnType<typeof rootLayout>, embeddings: boolean) {
+  return {
+    store: slashes(layout.store),
+    cli: slashes(cliOf(layout.engine)),
+    proxy: slashes(join(layout.plugin, 'bin', 'mcp-proxy.ts')),
+    activity: slashes(layout.activity),
+    embeddings,
+    guardMode: 'strict',
+    vocabulary: slashes(layout.vocabulary),
+    root: slashes(layout.root),
+    modelCacheDir: slashes(layout.modelCache),
+  }
 }
 
 // HARDEN.3: the engine writes one omp.*.log per run into <model cache>/logs and
@@ -333,14 +604,36 @@ if (import.meta.main && process.argv[2] === 'prune-logs') {
   // bun bin/install-engine.ts prune-logs <logs dir>: prints the number removed, never fails.
   console.log(pruneEngineLogs(process.argv[3] ?? ''))
 } else if (import.meta.main) {
-  const [pluginRoot = '', engineDir = '', storeDir = '', embeddingsArg = ''] = process.argv.slice(2)
+  const args = process.argv.slice(2)
+  // A script that would rather not wait can shorten the lock wait (milliseconds).
+  const lock = lockTimingFromEnv(process.env.MNEMOSYNE_LOCK_WAIT_MS)
   try {
-    // The 4th argument is "embeddings" when /mnemosyne-setup's option is on:
-    // the check then also downloads the model once and proves a clean exit.
-    const done = await install(pluginRoot, engineDir, storeDir, embeddingsArg === 'embeddings')
-    console.log(JSON.stringify({ ok: true, ...done }))
+    if (args.includes('--root')) {
+      const flags: { root?: string; store?: string; embeddings?: boolean } = {}
+      for (let i = 0; i < args.length; i++) {
+        const arg = args[i]
+        if (arg === '--embeddings') flags.embeddings = true
+        else if (arg === '--root' || arg === '--store') {
+          const value = args[++i]
+          if (value === undefined || value.startsWith('--')) throw new InstallError(`${arg} needs a folder`)
+          flags[arg === '--root' ? 'root' : 'store'] = value
+        } else throw new InstallError(`unknown argument "${arg}" (usage: --root <abs dir> [--store <abs dir>] [--embeddings])`)
+      }
+      // The plugin root is the checkout this script runs from.
+      const done = await installRoot(join(import.meta.dir, '..'), flags.root ?? '', { store: flags.store, embeddings: flags.embeddings, lock })
+      console.log(JSON.stringify({ ok: true, ...done }))
+    } else {
+      const [pluginRoot = '', engineDir = '', storeDir = '', embeddingsArg = ''] = args
+      // The 4th argument is "embeddings" when /mnemosyne-setup's option is on:
+      // the check then also downloads the model once and proves a clean exit.
+      const run = () => install(pluginRoot, engineDir, storeDir, embeddingsArg === 'embeddings')
+      // The lock sits beside the engine folder; a path install() will refuse anyway takes none.
+      const engine = isAbsolute(engineDir) ? resolve(engineDir) : ''
+      const done = engine && existsSync(dirname(engine)) ? await withInstallLock(`${engine}.lock`, run, lock) : await run()
+      console.log(JSON.stringify({ ok: true, ...done }))
+    }
   } catch (error) {
     console.error(`install-engine: ${(error as Error).message}`)
-    process.exit(1)
+    process.exit(error instanceof LockBusy ? 3 : 1)
   }
 }
