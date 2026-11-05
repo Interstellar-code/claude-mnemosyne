@@ -68,3 +68,27 @@ describe('MNEMOPI_MCP_BANK cannot be set from a .env (HARDEN.1)', () => {
     db2.close()
   })
 })
+describe('engineEnv modelCacheDir (SA.2)', () => {
+  test('the default stays the plugin cache under HOME', () => {
+    expect(engineEnv('/s', 'global').PI_CONFIG_DIR).toBe('.claude/mnemosyne/model-cache')
+  })
+
+  test('an absolute modelCacheDir puts the fastembed cache at <dir>/cache/fastembed, whatever HOME is (no engine change)', async () => {
+    const work = tempDir('cache-abs')
+    try {
+      const dir = join(work.dir, 'root', 'model-cache')
+      const embeddings = join(ROOT, 'engine', 'src', 'core', 'embeddings.ts')
+      const child = Bun.spawn([process.execPath, '-e', `import { resolveFastembedCacheDir } from ${JSON.stringify(embeddings)}; console.log(resolveFastembedCacheDir())`], {
+        cwd: work.dir,
+        env: { ...isolatedEnv(), HOME: join(work.dir, 'elsewhere'), ...engineEnv(join(work.dir, 'store'), 'global', { modelCacheDir: dir }) },
+        stdout: 'pipe',
+        stderr: 'pipe',
+      })
+      const [stdout, exitCode] = await Promise.all([new Response(child.stdout).text(), child.exited])
+      expect(exitCode).toBe(0)
+      expect(stdout.trim()).toBe(join(dir, 'cache', 'fastembed'))
+    } finally {
+      work.dispose()
+    }
+  })
+})

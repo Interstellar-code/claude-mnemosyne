@@ -45,7 +45,7 @@ import type { ExtractOutcome, KnowledgeEngine } from './knowledge'
 import { buildRequests, EMBEDDINGS_CACHE_DIR, EMBEDDINGS_MODEL, engineEnv, parseReplies } from './engine'
 import type { RecallWeights } from './engine'
 import type { EngineRequest } from './engine'
-import { ENGINE_BUILD, SETUP_TIMEOUT_MS } from './engine-build'
+import { ENGINE_BUILD, SETUP_LOCK_WAIT_MS, SETUP_TIMEOUT_MS } from './engine-build'
 import { mnemosyneStats } from './surface'
 import { admit, guardConfigOf, nearDuplicateFlags, nearDuplicateMessage, nearMatchesOf } from './guard'
 import type { GuardResult, NearMatch } from './guard'
@@ -101,13 +101,14 @@ import type { TagRules } from './tags'
 import { parseVocabulary, tagRules, VOCAB_FILE } from './vocab'
 import type { Vocabulary } from './vocab'
 import { openDashboard, stopDashboard } from './ui-launch'
+import { cmdWrapper, shWrapper } from './launcher'
+import { GLOBAL_OWNER, ownerId, slashes } from './owner'
 import { PROJECTS_FILE, projectName, remoteHostOf } from './projects'
 
 export { ENGINE_BUILD } from './engine-build'
 // The upstream base version; the plugin's own build of it is ENGINE_BUILD (engine/UPSTREAM.md).
 export const ENGINE_VERSION = '18.12.3'
 const ENGINE_PACKAGE = '@oh-my-pi/pi-mnemopi'
-const GLOBAL_OWNER = 'global'
 const NOT_INSTALLED = 'Mnemosyne Memory engine not installed: ask the user to run /mnemosyne-setup.'
 // memory_remember is refused on a stale engine too: that engine's 24 h trim deletes every row whose trust tier is not IMPORTED, and a save made with this build's honest provenance is not.
 const NOT_CURRENT = `Mnemosyne Memory engine is out of date (memory_remember and memory_update need build ${ENGINE_BUILD}; an older engine would delete this plugin's saves after 24 hours): ask the user to run /mnemosyne-setup.`
@@ -277,8 +278,6 @@ const clamp = (value: unknown, low: number, high: number, fallback: number) =>
 
 const isWindows = async ($: EngineInterface) => (await $.env.get('OS')) === 'Windows_NT'
 
-// Forward slashes on every OS: Bun and Windows both accept them.
-const slashes = (path: string) => path.replace(/\\/g, '/').replace(/\/+$/, '')
 const isAbsolute = (path: string) => /^(\/|[A-Za-z]:\/)/.test(path)
 // `.` and `..` resolved, so a/b/../c compares as a/c (forward slashes, as slashes() gives).
 function normalize(path: string) {
@@ -454,13 +453,10 @@ async function writeEmbeddingsMarker($: EngineInterface, root: string) {
   if (ran.exitCode !== 0) throw new Error(`could not write ${EMBEDDINGS_MARKER}: ${ran.stderr.trim().slice(0, 300)}`)
 }
 
+// The host supplies the root; the formula itself is host-free (hooks/owner.ts, shared with bin/owner.ts).
 async function owner($: EngineInterface, options: PluginOptions) {
   if (options.scope !== 'per-project') return GLOBAL_OWNER
-  const root = slashes((await $.session.repo())?.root ?? (await $.session.cwd()))
-  let hash = 5381
-  for (const char of root) hash = ((hash * 33) ^ char.charCodeAt(0)) >>> 0
-  // The hash keeps /a/b-c and /a/b/c apart; the name keeps it readable.
-  return `project-${root.split('/').filter(Boolean).at(-1)?.replace(/[^A-Za-z0-9]+/g, '-') ?? 'root'}-${hash.toString(36)}`
+  return ownerId(options.scope, (await $.session.repo())?.root ?? (await $.session.cwd()))
 }
 
 // Folder work runs through Bun, which every install has: mkdir, rm and chmod
@@ -471,9 +467,6 @@ const bunFs = async ($: EngineInterface, code: string, ...args: string[]) => {
   if (ran.exitCode !== 0) throw new Error(`bun -e failed (exit ${ran.exitCode}): ${ran.stderr.trim().slice(0, 300)}`)
   return ran
 }
-
-// Single-quoted for sh: the store path comes from settings and may hold anything.
-const shellQuote = (text: string) => `'${text.replace(/'/g, `'\\''`)}'`
 
 // Memories are private: owner-only folders on macOS and Linux, so other
 // accounts cannot read the store or run the wrapper. On Windows the user
@@ -501,83 +494,10 @@ async function syncWrapper($: EngineInterface, options: PluginOptions) {
   // The same env the hooks send: local-only embedding pins, embeddings on only
   // when the model is downloaded (EMB.3.a2).
   const embeddings = await embeddingsOn($, options)
-  const text = windows
-    ? cmdWrapper(store, cli, proxy, activity, embeddings, guardModeOf(options), `${root}/${VOCAB_FILE}`, root)
-    : shWrapper(store, cli, proxy, activity, embeddings, guardModeOf(options), `${root}/${VOCAB_FILE}`, root)
+  const launcher = { store, cli, proxy, activity, embeddings, guardMode: guardModeOf(options), vocabulary: `${root}/${VOCAB_FILE}`, root, modelCacheDir: EMBEDDINGS_CACHE_DIR }
+  const text = windows ? cmdWrapper(launcher) : shWrapper(launcher)
   await bunFs($, `fs.writeFileSync(a[0], a[1]); ${windows ? '' : 'fs.chmodSync(a[0], 0o700);'}`, wrapper, text)
 }
-
-const WRAPPER_NOTE = `Written by the Mnemosyne plugin (externalMcp). A stdio MCP server over its store,
-serving only remember / recall / update / forget / stats.
-MNEMOSYNE_OWNER picks the owner: global (default) or a project-... id.
-MNEMOSYNE_ACTIVITY_LOG is the activity log each call is recorded in; empty when activityLog is off.
-MNEMOSYNE_GUARD_MODE is the guardMode option: strict refuses a warned save unless the call passes confirm: true, warn saves it.
-MNEMOSYNE_VOCABULARY is the tag vocabulary file its tags are cleaned with (aliases folded).
-MNEMOSYNE_ROOT is the folder holding config.json, the settings it reads at each call (guard limits, tag count, tools served).`
-
-const shWrapper = (store: string, cli: string, proxy: string, activity: string, embeddings: boolean, guardMode: string, vocabulary: string, root: string) => `#!/bin/sh
-${WRAPPER_NOTE.replace(/^/gm, '# ')}
-export MNEMOPI_DATA_DIR=${shellQuote(store)}
-export MNEMOPI_SESSION_ID="\${MNEMOSYNE_OWNER:-global}"
-export MNEMOPI_CHANNEL_ID="$MNEMOPI_SESSION_ID"
-${embeddings ? 'unset MNEMOPI_NO_EMBEDDINGS' : 'export MNEMOPI_NO_EMBEDDINGS=1'}
-export MNEMOPI_MCP_BANK=default
-export MNEMOPI_LLM_BASE_URL=
-export MNEMOPI_HOST_LLM_ENABLED=
-export MNEMOPI_AUTHOR_ID=
-export MNEMOPI_AUTHOR_TYPE=
-export MNEMOPI_POLYPHONIC_RECALL=0
-export MNEMOPI_EMBEDDING_API_URL=
-export MNEMOPI_EMBEDDINGS_VIA_API=
-export MNEMOPI_EMBEDDING_API_KEY=
-export MNEMOPI_EMBEDDING_MODEL=${EMBEDDINGS_MODEL}
-export MNEMOPI_EMBEDDING_DIM=
-export OPENROUTER_BASE_URL=
-export OPENROUTER_API_KEY=
-export OPENAI_API_KEY=
-export MNEMOPI_EMBEDDINGS_API_OPT_IN=0
-export HF_ENDPOINT=https://huggingface.co
-export PI_CONFIG_DIR=${EMBEDDINGS_CACHE_DIR}
-export MNEMOSYNE_CLI=${shellQuote(cli)}
-export MNEMOSYNE_ACTIVITY_LOG=${activity ? shellQuote(activity) : ''}
-export MNEMOSYNE_GUARD_MODE=${guardMode}
-export MNEMOSYNE_VOCABULARY=${shellQuote(vocabulary)}
-export MNEMOSYNE_ROOT=${shellQuote(root)}
-exec bun ${shellQuote(proxy)}
-`
-
-// cmd has no safe quoting for " or %; paths() refuses a store holding either.
-const cmdWrapper = (store: string, cli: string, proxy: string, activity: string, embeddings: boolean, guardMode: string, vocabulary: string, root: string) => `@echo off\r
-${WRAPPER_NOTE.replace(/^/gm, 'rem ').replace(/\n/g, '\r\n')}\r
-set "MNEMOPI_DATA_DIR=${store}"\r
-if not defined MNEMOSYNE_OWNER set "MNEMOSYNE_OWNER=global"\r
-set "MNEMOPI_SESSION_ID=%MNEMOSYNE_OWNER%"\r
-set "MNEMOPI_CHANNEL_ID=%MNEMOSYNE_OWNER%"\r
-${embeddings ? 'set "MNEMOPI_NO_EMBEDDINGS="' : 'set "MNEMOPI_NO_EMBEDDINGS=1"'}\r
-set "MNEMOPI_MCP_BANK=default"\r
-set "MNEMOPI_LLM_BASE_URL="\r
-set "MNEMOPI_HOST_LLM_ENABLED="\r
-set "MNEMOPI_AUTHOR_ID="\r
-set "MNEMOPI_AUTHOR_TYPE="\r
-set "MNEMOPI_POLYPHONIC_RECALL=0"\r
-set "MNEMOPI_EMBEDDING_API_URL="\r
-set "MNEMOPI_EMBEDDINGS_VIA_API="\r
-set "MNEMOPI_EMBEDDING_API_KEY="\r
-set "MNEMOPI_EMBEDDING_MODEL=${EMBEDDINGS_MODEL}"\r
-set "MNEMOPI_EMBEDDING_DIM="\r
-set "OPENROUTER_BASE_URL="\r
-set "OPENROUTER_API_KEY="\r
-set "OPENAI_API_KEY="\r
-set "MNEMOPI_EMBEDDINGS_API_OPT_IN=0"\r
-set "HF_ENDPOINT=https://huggingface.co"\r
-set "PI_CONFIG_DIR=${EMBEDDINGS_CACHE_DIR}"\r
-set "MNEMOSYNE_CLI=${cli}"\r
-set "MNEMOSYNE_ACTIVITY_LOG=${activity}"\r
-set "MNEMOSYNE_GUARD_MODE=${guardMode}"\r
-set "MNEMOSYNE_VOCABULARY=${vocabulary}"\r
-set "MNEMOSYNE_ROOT=${root}"\r
-bun "${proxy}"\r
-`
 
 async function isInstalled($: EngineInterface, options: PluginOptions) {
   try {
@@ -2093,7 +2013,8 @@ export const register: Register = (on, options) => {
       // Builds <engine>.next from the plugin's engine/ and swaps it in only once it answers (bin/install-engine.ts).
       const installed = await $.process.run(
         ['bun', `${root}/bin/install-engine.ts`, root, engine, store, ...(embeddings ? ['embeddings'] : [])],
-        { timeoutMs: SETUP_TIMEOUT_MS },
+        // Another install's lock is waited for only briefly, so this one still ends inside SETUP_TIMEOUT_MS.
+        { timeoutMs: SETUP_TIMEOUT_MS, env: { MNEMOSYNE_LOCK_WAIT_MS: String(SETUP_LOCK_WAIT_MS) } },
       )
       if (installed.exitCode !== 0) {
         // M2: when embeddings were requested but the install check could not prove

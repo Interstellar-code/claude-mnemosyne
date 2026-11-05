@@ -16,8 +16,9 @@
 // MAPX.3: appendActivity also maintains <root>/activity-daily.json beside the
 // log: per owner, per UTC day, writes/recalls counts. The log is written first;
 // a tally failure never stops or throws.
-import { chmodSync, closeSync, existsSync, fchmodSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeSync } from 'node:fs'
+import { chmodSync, closeSync, existsSync, fchmodSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
+import { takeLock } from './lockfile'
 import { readConfig } from './settings'
 
 export const MAX_BYTES = 1024 * 1024
@@ -66,42 +67,6 @@ function normalize(line: unknown) {
   }
 }
 
-const isStale = (file: string, staleMs: number) => Date.now() - statSync(file).mtimeMs > staleMs
-
-// Takes <path>.lock with O_EXCL. A lock older than staleMs is first renamed to a
-// name of this writer's own: of two writers that both saw it stale, only one
-// rename succeeds. If what was renamed is fresh, it was a lock another writer
-// had just taken, so it is linked back (link, like O_EXCL, never replaces) and
-// this writer does not rotate.
-function lock(path: string, staleMs: number) {
-  const file = `${path}.lock`
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      closeSync(openSync(file, 'wx', 0o600))
-      return file
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') return undefined
-      try {
-        if (!isStale(file, staleMs)) return undefined
-        const mine = `${file}.${process.pid}.${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`
-        renameSync(file, mine)
-        if (!isStale(mine, staleMs)) {
-          try {
-            linkSync(mine, file)
-          } finally {
-            unlinkSync(mine)
-          }
-          return undefined
-        }
-        unlinkSync(mine)
-      } catch {
-        // another writer moved it first: the next attempt finds its lock or none
-      }
-    }
-  }
-  return undefined
-}
-
 /**
  * Renames <path> to <path>.1 when it is past maxBytes, under the lock. Returns
  * true only when this call rotated. A writer that cannot take the lock does not
@@ -110,7 +75,7 @@ function lock(path: string, staleMs: number) {
  */
 export function rotate(path: string, limits: Limits = {}) {
   const maxBytes = limits.maxBytes ?? MAX_BYTES
-  const held = lock(path, limits.staleMs ?? LOCK_STALE_MS)
+  const held = takeLock(`${path}.lock`, limits.staleMs ?? LOCK_STALE_MS)
   if (held === undefined) return false
   try {
     // Checked again under the lock: another writer may have rotated since this one looked.
@@ -168,7 +133,7 @@ export function appendActivity(path: string, lines: readonly unknown[], limits: 
 function updateTally(logPath: string, normalizedLines: readonly string[], limits: Limits) {
   const tally = tallyPath(logPath)
   const folder = dirname(logPath)
-  const held = lock(tally, limits.staleMs ?? LOCK_STALE_MS)
+  const held = takeLock(`${tally}.lock`, limits.staleMs ?? LOCK_STALE_MS)
   if (held === undefined) return
   try {
     if (!existsSync(folder)) {
