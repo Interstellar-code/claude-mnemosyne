@@ -133,7 +133,9 @@ describe('the store summary (Galaxy level)', () => {
     expect(fact(model, 'Memories')).toBe(`${galaxy.projects.reduce((sum, project) => sum + (project as { liveCount: number }).liveCount, 0)} live`)
     expect(fact(model, 'Projects (planets)')).toBe('5')
     expect(fact(model, 'Writers (nodules)')).toBe('claude-code 121 (100 inferred) · imported 2')
-    expect(fact(model, 'Global (sun belt)')).toBe('6')
+    // 0.13.0: the belt splits into true globals (owner global) and project memories shared with every project
+    // (the fixture's six are all project memories; none is owner global)
+    expect(fact(model, 'Global (sun belt)')).toBe('0 global · 6 shared from projects')
     expect(fact(model, 'Not live (outer belt)')).toBe('3')
     expect(fact(model, 'Busiest planet')).not.toBe('—')
     expect(fact(model, 'Plain folders')).toBe('3 stations · 3 starships')

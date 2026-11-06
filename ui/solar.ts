@@ -39,7 +39,7 @@ import {
   sharedCount,
   startAngle,
   STYLES,
-  sunBelt as beltOf,
+  beltDots,
   tagColour,
   tagHash,
   targets,
@@ -197,6 +197,12 @@ type PlanetRec = {
   craft: boolean
 }
 type HoleRec = { L: LinkInfo; pair: { g: O3; disc: O3 }[]; line: O3; pulse: O3[]; phase: number }
+/** The sun belt's tethers: one segment per (true global dot, related project); `local` is the dot in the belt's own frame. */
+type TetherRec = { lines: O3[]; ends: { local: [number, number, number]; owner: string; strength: number }[] }
+// The belt's two dot colours (RGB 0 to 1) and the tether colour.
+const BELT_GLOBAL_RGB: [number, number, number] = [1, 0.89, 0.64]
+const BELT_SHARED_RGB: [number, number, number] = [0.62, 0.77, 1]
+const BELT_TETHER_COLOUR = '#ffd27a'
 type Fade = { obj: O3; index: number; rgb: [number, number, number] }
 type EventRec = {
   type: 'recall' | 'save' | 'update' | 'forget' | 'pulse'
@@ -286,6 +292,7 @@ class SolarImpl {
   private sunG: O3 = null
   private sunR = SUN_R
   private sunBeltObj: O3 = null
+  private tethers: TetherRec | null = null
   private outer: O3 = null
   private outerLabel: O3 = null
   private now = Date.now()
@@ -1233,36 +1240,57 @@ class SolarImpl {
       this.nodules.set(w.source, nm)
     }
 
-    // The sun belt: global memories.
-    const belt = beltOf(g, this.bodies)
+    // The sun belt: global memories, each dot keyed to its memory (beltDots). A true global (owner
+    // 'global') is gold and has a faint tether to each project it is close to (the links with 'global'
+    // on one side); a project memory shared with every project (scope global) is drawn cool blue, no tether.
+    const belt = beltDots(g, this.bodies)
     if (belt.length > 0) {
       const beltR = (72 * sunR) / SUN_R
-      const globals = new Map<string | null, SolarMemory[]>()
-      for (const memory of g.memories) {
-        if (memory.state !== 'live' || (memory.scope !== 'global' && memory.owner !== 'global')) continue
-        const key = memory.owner === 'global' ? null : memory.owner
-        const list = globals.get(key) ?? []
-        list.push(memory)
-        globals.set(key, list)
-      }
+      const byId = new Map(g.memories.map(memory => [memory.id, memory]))
+      const labelOf = (owner: string): string => this.P[owner]?.body.label ?? this.bodies.find(b => b.owner === owner)?.label ?? projectLabel(owner)
       const pos: number[] = []
       const col: number[] = []
       const items: unknown[] = []
-      belt.forEach((entry, i) => {
+      const tethers: TetherRec['ends'] = []
+      let trueGlobals = 0
+      belt.forEach((dot, i) => {
         const ga = (i * Math.PI * 2) / belt.length
-        pos.push(Math.cos(ga) * beltR, Math.sin(ga * 3) * 3, Math.sin(ga) * beltR)
-        col.push(1, 0.89, 0.64)
-        const memory = globals.get(entry.owner)?.shift() ?? null
-        const where = entry.owner === null ? 'saved for every project' : `saved in ${this.P[entry.owner]?.body.label ?? this.bodies.find(b => b.owner === entry.owner)?.label ?? entry.owner}, seen by every project`
-        items.push({ tip: ['Global memory (scope global)', where, this.firstLine(memory)] })
+        const local: [number, number, number] = [Math.cos(ga) * beltR, Math.sin(ga * 3) * 3, Math.sin(ga) * beltR]
+        pos.push(...local)
+        const memory = dot.id === null ? null : (byId.get(dot.id) ?? null)
+        if (dot.owner === null) {
+          trueGlobals++
+          col.push(...BELT_GLOBAL_RGB)
+          const ties = dot.related.length > 0 ? `close to ${dot.related.map(r => `${labelOf(r.owner)} (${r.pairs} ${r.pairs === 1 ? 'pair' : 'pairs'}, best ${r.best})`).join(', ')}` : 'no project close enough to tie to (map.linkScore)'
+          items.push({ tip: ['Global memory: saved for every project', ties, this.firstLine(memory)] })
+          for (const r of dot.related) tethers.push({ local, owner: r.owner, strength: r.best })
+        } else {
+          col.push(...BELT_SHARED_RGB)
+          items.push({ tip: [`Project memory shared with every project`, `saved in ${labelOf(dot.owner)} (scope global)`, this.firstLine(memory)] })
+        }
       })
       this.sunBeltObj = this.pointsObject(pos, col, 6, items, 1, false)
       this.world.add(this.sunBeltObj)
       this.pickables.push(this.sunBeltObj)
       this.world.add(this.circle(beltR, 0xffd27a, 0.12))
-      const sbl = this.label(`Sun belt · ${belt.length} global memories`, null, '#e9c98a', 7)
+      const shared = belt.length - trueGlobals
+      const sbl = this.label(`Sun belt · ${trueGlobals} global${shared > 0 ? ` · ${shared} shared from projects` : ''}`, null, '#e9c98a', 7)
       sbl.position.set(0, -14 * k, 84 * k)
       this.world.add(sbl)
+      // One two-point Line per tether: the vendored three.js bundle has Line but no LineSegments.
+      // Brighter for a closer pair (best 0.65 to 1 maps to opacity 0.12 to 0.4).
+      if (tethers.length > 0) {
+        const lines = tethers.map(end => {
+          const geo = new T.BufferGeometry()
+          geo.setAttribute('position', new T.BufferAttribute(new Float32Array(6), 3))
+          const opacity = 0.12 + 0.28 * Math.max(0, Math.min(1, (end.strength - 0.65) / 0.35))
+          const line = new T.Line(geo, new T.LineBasicMaterial({ color: new T.Color(BELT_TETHER_COLOUR), transparent: true, opacity, depthWrite: false, blending: T.AdditiveBlending }))
+          line.frustumCulled = false
+          this.world.add(line)
+          return line
+        })
+        this.tethers = { lines, ends: tethers }
+      }
     }
   }
 
@@ -1451,6 +1479,7 @@ class SolarImpl {
     this.nodules = new Map()
     this.sunG = null
     this.sunBeltObj = null
+    this.tethers = null
     this.outer = null
     this.outerLabel = null
     this.P = {}
@@ -1883,6 +1912,31 @@ class SolarImpl {
       this.outerLabel.visible = s.sample
     }
     if (this.sunBeltObj) this.sunBeltObj.rotation.y += dt * 0.06 * motion
+
+    // Sun-belt tethers: each true global dot (it turns with the belt) to the planet it is close to (it orbits).
+    // A hidden project's tether collapses to a point, as its black holes go with it.
+    if (this.tethers && this.sunBeltObj) {
+      const v = new T.Vector3()
+      this.sunBeltObj.updateMatrixWorld()
+      this.tethers.ends.forEach((end, i) => {
+        const line = this.tethers!.lines[i]
+        const P = this.P[end.owner]
+        const shown = !!P && !s.hidden[end.owner]
+        line.visible = shown
+        if (!shown) return
+        v.set(end.local[0], end.local[1], end.local[2])
+        this.sunBeltObj.localToWorld(v)
+        const to = this.worldOf(P.pG)
+        const arr = line.geometry.attributes.position.array
+        arr[0] = v.x
+        arr[1] = v.y
+        arr[2] = v.z
+        arr[3] = to.x
+        arr[4] = to.y
+        arr[5] = to.z
+        line.geometry.attributes.position.needsUpdate = true
+      })
+    }
 
     // Black holes: a calm line from the older planet through both holes to the newer; one pulse every 30 s.
     for (let i = 0; i < this.holes.length; i++) {

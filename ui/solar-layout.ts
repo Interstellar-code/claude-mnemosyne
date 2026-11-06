@@ -516,6 +516,70 @@ export function sunBelt(galaxy: Pick<SolarGalaxy, 'globalLive'>, bodies: readonl
   return out
 }
 
+/** A global memory's tie to a project: its pairs with that project's memories in the galaxy's links (map.linkScore applies). */
+export type BeltRelation = { owner: string; pairs: number; best: number }
+/**
+ * One dot of the sun belt, keyed to its memory (0.13.0). `owner` is the project the row is saved in,
+ * null for an owner-'global' row (a true global); `id` is null for a padding slot (a global row the
+ * capped memory list does not carry). `related`: for a true global, the projects whose memories it
+ * is close to, from the links that have 'global' on one side (best first, at most BELT_RELATED_MAX);
+ * a project row shared with every project has none (it already sits on its own planet).
+ */
+export type BeltDot = { id: string | null; owner: string | null; related: BeltRelation[] }
+export const BELT_RELATED_MAX = 3
+
+/**
+ * The sun belt as dots keyed to memories: `globalLive` long, like sunBelt. Order: the project rows
+ * saved as global, by body (as sunBelt), then the true globals, those with relations first and grouped
+ * by their closest project (so neighbouring dots tie to the same planet), then the padding slots.
+ * Only live memories count; a relation to a project that is not a body is dropped.
+ */
+export function beltDots(galaxy: Pick<SolarGalaxy, 'globalLive' | 'memories' | 'links'>, bodies: readonly Body[]): BeltDot[] {
+  const total = Math.max(0, galaxy.globalLive)
+  const live = galaxy.memories.filter(memory => memory.state === 'live')
+  const ownerOf = new Map(live.map(memory => [memory.id, memory.owner]))
+  const bodyOrder = new Map(bodies.map((body, i) => [body.owner, i]))
+  // memory id (owner global) -> other owner -> { pairs, best }
+  const ties = new Map<string, Map<string, { pairs: number; best: number }>>()
+  for (const link of galaxy.links ?? []) {
+    if ((link.a === 'global') === (link.b === 'global')) continue
+    const other = link.a === 'global' ? link.b : link.a
+    if (!bodyOrder.has(other)) continue
+    for (const pair of link.pairs) {
+      const globalId = ownerOf.get(pair.older) === 'global' ? pair.older : ownerOf.get(pair.newer) === 'global' ? pair.newer : undefined
+      if (globalId === undefined) continue
+      const perOwner = ties.get(globalId) ?? new Map<string, { pairs: number; best: number }>()
+      ties.set(globalId, perOwner)
+      const tie = perOwner.get(other) ?? { pairs: 0, best: 0 }
+      tie.pairs++
+      tie.best = Math.max(tie.best, pair.score)
+      perOwner.set(other, tie)
+    }
+  }
+  const relatedOf = (id: string): BeltRelation[] =>
+    [...(ties.get(id) ?? new Map()).entries()]
+      .map(([owner, tie]) => ({ owner, pairs: tie.pairs, best: Math.round(tie.best * 100) / 100 }))
+      .sort((x, y) => y.best - x.best || y.pairs - x.pairs || before(x.owner, y.owner))
+      .slice(0, BELT_RELATED_MAX)
+  const shared: BeltDot[] = live
+    .filter(memory => memory.owner !== 'global' && memory.scope === 'global' && bodyOrder.has(memory.owner))
+    .sort((x, y) => (bodyOrder.get(x.owner) ?? 0) - (bodyOrder.get(y.owner) ?? 0) || before(x.id, y.id))
+    .map(memory => ({ id: memory.id, owner: memory.owner, related: [] }))
+  const globals: BeltDot[] = live
+    .filter(memory => memory.owner === 'global')
+    .map(memory => ({ id: memory.id, owner: null, related: relatedOf(memory.id) }))
+    .sort((x, y) => {
+      const xo = x.related[0]?.owner
+      const yo = y.related[0]?.owner
+      if (xo === undefined || yo === undefined) return xo === undefined ? (yo === undefined ? before(x.id ?? '', y.id ?? '') : 1) : -1
+      return (bodyOrder.get(xo) ?? 0) - (bodyOrder.get(yo) ?? 0) || before(x.id ?? '', y.id ?? '')
+    })
+  const out = [...shared, ...globals]
+  while (out.length < total) out.push({ id: null, owner: null, related: [] })
+  out.length = Math.min(out.length, total)
+  return out
+}
+
 // ---- Black holes: similar memories across projects ------------------------------------
 
 export type LinkInfo = { older: string; newer: string; pairs: number; best: number }

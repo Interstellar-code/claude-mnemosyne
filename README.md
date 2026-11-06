@@ -321,7 +321,8 @@ The mapping (how a thing on the map comes from the store):
 | Moons | memory kinds present (one per kind; none for dwarfs and crafts, never for kind unknown; at most 8; size = count) |
 | Asteroids | that kind's memories (size = importance, brightness = recalls, colour = writer or recalls or age) |
 | Planet asteroid belt | memories of kind `unknown` (old untyped rows; a dwarf's memories) |
-| Sun asteroid belt | global memories (scope global) |
+| Sun asteroid belt | global memories: gold = saved for every project (owner global), blue = a project's memory shared with every project (scope global); the card's "Global (sun belt)" counts both |
+| Gold tethers | a global memory to each project it is close to in meaning (up to 3, from the same pairs as the black holes, so `map.linkScore` applies) |
 | Outer galaxy belt | retired, expired, lapsed memories (faded; Restore brings them back) |
 | Black-hole pair | similar memories across two projects (2+ pairs, cosine ≥ 0.80 by default; the Settings tab's `map.linkMinPairs` and `map.linkScore`) |
 | Satellites | the knowledge items mined from the selected memory |

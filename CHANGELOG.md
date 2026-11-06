@@ -2,6 +2,12 @@
 
 Newest first. Each release is tagged `vX.Y.Z` on GitHub; the README and DESIGN.md describe the contracts.
 
+## 0.13.0 (global memories tied to their projects)
+
+1. The sun belt tells two things apart that it used to draw alike: a gold dot is a true global memory (saved for every project), a blue dot is a project's memory shared with every project (scope global; it also sits on its own planet). The store card's "Global (sun belt)" reads "N global · M shared from projects".
+2. Gold tethers: each true global memory draws a faint line to every project whose memories it is close to in meaning (up to 3, brighter for a closer pair), following the planet as it orbits. The pairs are the black holes' own, so `map.linkScore` decides what counts; a hidden project's tethers hide with it. Its tooltip names the projects with their pair counts.
+3. Each belt dot is now its own memory (before, a dot took the next memory of its group, so the tooltip could not be trusted to name a fixed memory). Legend rows for the blue dot and the gold tether. No server, setting or engine change.
+
 ## 0.12.1 (whose memory it is)
 
 1. The outside-agent server (`mnemosyne-mcp`) recalls every global-scope memory but changes only its own owner's, so `memory_update` and `memory_forget` of a project's memory from a server that runs as `global` answered a bare `not_found` for a memory recall had just shown. The reply now adds `owner` (the memory's owner) and a `hint` naming where it can be changed. The proxy reads the owner from the store, read-only; a missing id, an unreadable store or a memory of its own owner keeps the engine's reply as it was. The activity line still records the engine's own answer. The engine is unchanged.

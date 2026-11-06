@@ -5,6 +5,8 @@
 import { describe, expect, test } from 'bun:test'
 import fixture from './fixtures/galaxy-c11.json'
 import {
+  BELT_RELATED_MAX,
+  beltDots,
   buildBodies,
   STATION_MIN,
   describe as describeBody,
@@ -33,7 +35,7 @@ import {
   writerInfos,
   WRITER_PALETTE,
 } from '../../ui/solar-layout'
-import type { Arrange, Body, SolarGalaxy, SolarProject, StyleId } from '../../ui/solar-layout'
+import type { Arrange, Body, SolarGalaxy, SolarMemory, SolarProject, StyleId } from '../../ui/solar-layout'
 
 const NOW = Date.parse('2026-10-25T12:00:00Z')
 const DAY = 86400000
@@ -319,6 +321,48 @@ describe('labels, duplicates and the owner global', () => {
     expect(sunBelt(galaxy, bodiesOf())).toHaveLength(6)
     expect(sunBelt(galaxy, bodiesOf()).filter(i => i.owner === 'project-matrixkoder-1a2b3c')).toHaveLength(3)
     expect(sunBelt(galaxyOf([]), [])).toEqual([])
+  })
+
+  test('0.13.0 beltDots: each dot is a memory; true globals tie to the projects they are close to, shared project rows do not', () => {
+    const mem = (id: string, owner: string, scope = 'channel', state: SolarMemory['state'] = 'live'): SolarMemory => ({
+      id, owner, tags: [], recalls: 0, lastRecalled: null, created: null, label: id, source: 'claude-code', sourceInferred: false, kind: 'fact', scope, importance: 0.5, pinned: false, state, validUntil: null,
+    })
+    const projects = [project('project-api-aaaa'), project('project-web-bbbb')]
+    const g = galaxyOf(projects, {
+      globalLive: 6,
+      memories: [
+        mem('g1', 'global', 'global'), mem('g2', 'global', 'global'), mem('g3', 'global', 'global'), mem('gx', 'global', 'global', 'retired'),
+        mem('s1', 'project-web-bbbb', 'global'), mem('a1', 'project-api-aaaa'), mem('a2', 'project-api-aaaa'), mem('w1', 'project-web-bbbb'),
+      ],
+      links: [
+        { a: 'global', b: 'project-api-aaaa', pairs: [{ older: 'g1', newer: 'a1', score: 0.81 }, { older: 'a2', newer: 'g1', score: 0.7 }, { older: 'g2', newer: 'a1', score: 0.75 }] },
+        { a: 'global', b: 'project-web-bbbb', pairs: [{ older: 'g1', newer: 'w1', score: 0.9 }, { older: 'gx', newer: 'w1', score: 0.95 }] },
+        // two projects: a black hole, not a tether
+        { a: 'project-api-aaaa', b: 'project-web-bbbb', pairs: [{ older: 'a1', newer: 'w1', score: 0.85 }] },
+        // a project that is not a body is never tied to
+        { a: 'global', b: 'project-gone-cccc', pairs: [{ older: 'g3', newer: 'z1', score: 0.9 }] },
+      ],
+    })
+    const bodies = bodiesOf(g)
+    const dots = beltDots(g, bodies)
+    // globalLive long: the shared row, the three live globals (the retired one is not a dot), then 2 padding slots
+    expect(dots).toHaveLength(6)
+    expect(dots[0]).toEqual({ id: 's1', owner: 'project-web-bbbb', related: [] })
+    // g1 ties to both projects, best first; g2 to api; g3 to nothing (its only link is to a non-body)
+    const g1 = must(dots.find(d => d.id === 'g1'))
+    expect(g1.owner).toBeNull()
+    expect(g1.related).toEqual([{ owner: 'project-web-bbbb', pairs: 1, best: 0.9 }, { owner: 'project-api-aaaa', pairs: 2, best: 0.81 }])
+    expect(must(dots.find(d => d.id === 'g2')).related).toEqual([{ owner: 'project-api-aaaa', pairs: 1, best: 0.75 }])
+    expect(must(dots.find(d => d.id === 'g3')).related).toEqual([])
+    expect(dots.find(d => d.id === 'gx')).toBeUndefined()
+    // tied globals come before untied ones, grouped by their closest project
+    expect(dots.slice(1, 4).map(d => d.id)).toEqual(['g2', 'g1', 'g3'])
+    expect(dots.slice(4)).toEqual([{ id: null, owner: null, related: [] }, { id: null, owner: null, related: [] }])
+    // capped at globalLive, at most BELT_RELATED_MAX ties, and the same answer in any input order
+    expect(beltDots({ ...g, globalLive: 2 }, bodies)).toHaveLength(2)
+    expect(BELT_RELATED_MAX).toBe(3)
+    expect(beltDots({ ...g, memories: shuffled(g.memories) }, bodiesOf({ ...g, projects: shuffled(projects) }))).toEqual(dots)
+    expect(beltDots(galaxyOf([]), [])).toEqual([])
   })
 
   test('a scope-global row still counts toward its own project\'s size', () => {

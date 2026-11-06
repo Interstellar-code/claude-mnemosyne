@@ -468,6 +468,17 @@ const dayOf = (value: unknown): string => (typeof value === 'string' && /^\d{4}-
 const numberOf = (value: unknown): string => (typeof value === 'number' && Number.isFinite(value) ? String(Math.round(value * 100) / 100) : DASH)
 const plural = (n: number, one: string) => `${n} ${one}${n === 1 ? '' : 's'}`
 
+/**
+ * The sun belt in two parts (0.13.0): true globals (owner 'global', live, in the shown list) and
+ * project memories shared with every project (the rest of globalLive). Only the number when none is shared.
+ */
+function beltCount(galaxy: Pick<SolarGalaxy, 'globalLive' | 'memories'>): string {
+  const total = galaxy.globalLive ?? 0
+  const globals = Math.min(total, galaxy.memories.filter(memory => memory.owner === 'global' && memory.state === 'live').length)
+  const shared = total - globals
+  return shared > 0 ? `${globals} global · ${shared} shared from projects` : String(total)
+}
+
 /** Sums `{source count}` rows as "claude-code 12 · imported 2", most first; `inferred` adds "(n inferred)". */
 function writerLine(rows: readonly { source: string; count: number; inferred?: number }[]): string {
   return rows.map(row => `${row.source} ${row.count}${typeof row.inferred === 'number' && row.inferred > 0 ? ` (${row.inferred} inferred)` : ''}`).join(' · ') || 'none'
@@ -488,7 +499,7 @@ function storeModel(bodies: readonly Body[], galaxy: SolarGalaxy): PanelModel {
       { label: 'Memories', value: `${live} live` },
       { label: 'Projects (planets)', value: String(bodies.filter(body => body.craft === null).length) },
       { label: 'Writers (nodules)', value: writerLine(galaxy.writers ?? []) },
-      { label: 'Global (sun belt)', value: String(galaxy.globalLive ?? 0) },
+      { label: 'Global (sun belt)', value: beltCount(galaxy) },
       { label: 'Black-hole pairs', value: galaxy.links === undefined ? 'needs stored vectors' : `${infos.reduce((sum, link) => sum + link.pairs, 0)} (${plural(infos.length, 'link')})` },
       { label: 'Not live (outer belt)', value: states.length === 0 && galaxy.memories.length > 0 ? DASH : String(states.filter(memory => memory.state !== 'live').length) },
       { label: 'Busiest planet', value: busiest === undefined ? DASH : busiest.label },
