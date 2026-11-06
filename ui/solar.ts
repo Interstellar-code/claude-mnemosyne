@@ -132,7 +132,10 @@ const SUN_R = 34
 const REDUCED_MOTION = '(prefers-reduced-motion: reduce)'
 const FLIGHT_SECONDS = 1.4
 const MAX_STEP = 0.05
-const HOVER_SLOW = 0.15
+// 0.16.0: everything turns at half the earlier speed, and while a tooltip is open (and HOVER_HOLD_SECONDS
+// after it closes) nothing turns at all, so a hovered memory stays under the pointer long enough to read.
+const MOTION_SCALE = 0.5
+const HOVER_HOLD_SECONDS = 2
 // A port choice, not in the mockup: at most this many live events are drawn at once; the oldest end early.
 const MAX_EVENTS = 40
 // A port choice, not in the mockup: an opened memory shows at most this many knowledge satellites.
@@ -217,6 +220,10 @@ const ORBIT_SLATE = 0x7d8aa0
 const TETHER_BEADS = 16
 const TETHER_LIFT = 0.22
 const TETHER_BEAD_PX = 4
+// 0.16.0 folding: the beads drawn with no focus (three at the belt end, two at the planet end), and the
+// storage order that puts them first, so setDrawRange(0, stub) shows only them.
+const TETHER_STUB: readonly number[] = [0, 1, 2, TETHER_BEADS - 2, TETHER_BEADS - 1]
+const TETHER_ORDER: readonly number[] = [...TETHER_STUB, ...Array.from({ length: TETHER_BEADS }, (_, k) => k).filter(k => !TETHER_STUB.includes(k))]
 // A bond is two violet strands this far apart (a share of its length, at least 1.5 units).
 const BOND_GAP = 0.006
 // The probes' orbit is a dashed blue ring of this many dashes.
@@ -334,6 +341,13 @@ class SolarImpl {
   private flight: Flight | null = null
   private down: { x: number; y: number } | null = null
   private tipShown = false
+  /** 0.16.0: motion is held while a tooltip is open and until this clock time after it closes. */
+  private holdUntil = 0
+  private held = false
+  /** 0.16.0: the project the pointer last rested on (planet, its memory dots, probes), kept while held. */
+  private hoverOwner: string | null = null
+  /** 0.16.0: the white ring drawn around the focused body. */
+  private focusRing: O3 = null
   private w = 0
   private h = 0
   private handle: number | null = null
@@ -356,6 +370,8 @@ class SolarImpl {
     const hit = this.pick(e)
     if (hit) {
       this.tipShown = true
+      const owner = hit.planet ?? hit.item?.planet ?? hit.obj?.userData?.planet ?? hit.obj?.userData?.ringOf ?? null
+      if (typeof owner === 'string' && this.P[owner]) this.hoverOwner = owner
       this.opts.onHover?.(hit.tip, hit.x, hit.y)
     } else this.hideTip()
   }
@@ -401,7 +417,7 @@ class SolarImpl {
       this.controls = new T.OrbitControls(this.camera, canvas)
       this.controls.enableDamping = true
       this.controls.dampingFactor = 0.08
-      this.controls.autoRotateSpeed = 0.3
+      this.controls.autoRotateSpeed = 0.3 * MOTION_SCALE
       this.controls.minDistance = 6
       this.controls.maxDistance = 4000
       this.composer = (opts.createComposer ?? defaultComposer)(renderer, this.scene, this.camera, T)
@@ -1376,7 +1392,9 @@ class SolarImpl {
           // A fixed on-screen size (sizeAttenuation off): world-sized beads vanish from the galaxy view's distance.
           const pts = new T.Points(geo, new T.PointsMaterial({ size: TETHER_BEAD_PX, map: this.dotTex, color: new T.Color(BELT_TETHER_COLOUR), transparent: true, opacity, depthWrite: false, sizeAttenuation: false, blending: T.AdditiveBlending }))
           pts.frustumCulled = false
-          pts.userData = { kind: 'tether' }
+          pts.userData = { kind: 'tether', owner: end.owner, opacity }
+          // Folded until its project is in focus (0.16.0): the stub only.
+          geo.setDrawRange(0, TETHER_STUB.length)
           this.world.add(pts)
           return pts
         })
@@ -1572,6 +1590,7 @@ class SolarImpl {
     this.sunG = null
     this.sunBeltObj = null
     this.tethers = null
+    this.focusRing = null
     this.outer = null
     this.outerLabel = null
     this.P = {}
@@ -1913,7 +1932,7 @@ class SolarImpl {
   // ---------- the frame ----------
 
   private autoRotates(): boolean {
-    return this.view.rotate && !this.reduced && !this.flight && this.S.level === 'galaxy' && !this.tipShown
+    return this.view.rotate && !this.reduced && !this.flight && this.S.level === 'galaxy' && !this.tipShown && !this.held
   }
 
   private frame(ms: number): void {
@@ -1934,14 +1953,20 @@ class SolarImpl {
       this.camera.updateProjectionMatrix()
     }
     const motion = this.reduced ? 0 : 1
-    if (this.sunG) this.sunG.rotation.y += dt * 0.12 * motion
+    // `spin` drives every turning thing a pointer can rest on: half speed, and none while held (0.16.0).
+    if (this.tipShown) this.holdUntil = this.clock + HOVER_HOLD_SECONDS
+    this.held = this.tipShown || this.clock < this.holdUntil
+    const spin = motion * MOTION_SCALE * (this.held ? 0 : 1)
+    // Focus (0.16.0): the hovered project while held, else the project opened (planet, moon or memory level).
+    if (!this.held) this.hoverOwner = null
+    const focus = this.hoverOwner ?? (this.S.level !== 'galaxy' ? this.S.planet : null)
+    if (this.sunG) this.sunG.rotation.y += dt * 0.12 * spin
     for (const [source, mesh] of this.nodules) {
       const at = this.flares.get(source)
       mesh.scale.setScalar(1 + (at === undefined || this.reduced ? 0 : Math.max(0, 1 - (this.clock - at) * 1.5)) * 0.8)
     }
 
     // Arrange: planets glide to their rings; they orbit only in the Galaxy view.
-    const hoverSlow = this.tipShown ? HOVER_SLOW : 1
     this.speedOf = {}
     const S = this.S
     for (const ring of this.orbits.rings) {
@@ -1949,7 +1974,7 @@ class SolarImpl {
       const lead = members[0]
       if (!lead) continue
       const speed = ring.speed
-      if (S.level === 'galaxy') lead.angle += dt * speed * motion * hoverSlow
+      if (S.level === 'galaxy') lead.angle += dt * speed * spin
       members.forEach((member, mi) => {
         const og = member.orbitG
         og.rotation.x += (ring.tilt.x - og.rotation.x) * Math.min(1, dt * 3)
@@ -1968,19 +1993,21 @@ class SolarImpl {
       P.line.scale.set(P.r, 1, P.r)
       P.pG.position.set(Math.cos(P.angle) * P.r, 0, Math.sin(P.angle) * P.r)
       if (P.body.craft === 'ship') P.mesh.rotation.y = -(P.angle + Math.PI / 2)
-      else P.mesh.rotation.y += dt * (P.craft ? 0.2 : 0.15) * motion
-      P.ring.parent.rotation.y += dt * 0.25 * motion
+      else P.mesh.rotation.y += dt * (P.craft ? 0.2 : 0.15) * spin
+      P.ring.parent.rotation.y += dt * 0.25 * spin
       const here = S.planet === id && S.level !== 'galaxy'
       P.pG.visible = !s.hidden[id]
       P.ring.visible = !here
       const wp = this.worldOf(P.pG)
       P.label.position.set(wp.x, wp.y + P.R * 1.9 + 10, wp.z)
       P.label.visible = !here && !s.hidden[id]
+      // Focus (0.16.0): other projects' labels step back.
+      P.label.material.opacity = focus !== null && focus !== id ? 0.35 : 1
       // Probes circle slowly the other way to the moons; they stand still while you look at one memory.
-      if (P.probes && !(here && S.level === 'memory')) P.probes.rotation.y -= dt * 0.18 * motion
+      if (P.probes && !(here && S.level === 'memory')) P.probes.rotation.y -= dt * 0.18 * spin
       for (const mo of P.moons) {
         const frozen = here && (S.level === 'moon' || S.level === 'memory')
-        if (!frozen) mo.pivot.rotation.y += dt * mo.speed * motion
+        if (!frozen) mo.pivot.rotation.y += dt * mo.speed * spin
         mo.label.visible = here
         mo.swarm.visible = here
         const spreadOn = here && S.kind === mo.kind && (S.level === 'moon' || S.level === 'memory')
@@ -2000,24 +2027,29 @@ class SolarImpl {
     const outerR = this.maxR + 70
     if (this.outer) {
       this.outer.scale.set(outerR, 1, outerR)
-      this.outer.rotation.y += dt * 0.004 * motion
+      this.outer.rotation.y += dt * 0.004 * spin
       this.outer.visible = s.sample
       this.outerLabel.position.set(0, 30, -outerR)
       this.outerLabel.visible = s.sample
     }
-    if (this.sunBeltObj) this.sunBeltObj.rotation.y += dt * 0.06 * motion
+    if (this.sunBeltObj) this.sunBeltObj.rotation.y += dt * 0.06 * spin
 
     // Sun-belt tethers: each true global dot (it turns with the belt) to the planet it is close to (it orbits).
-    // A hidden project's tether collapses to a point, as its black holes go with it.
+    // A hidden project's tether is hidden, as its black holes go with it. 0.16.0, folding: with no focus only a
+    // stub shows (TETHER_STUB beads at the belt and at the planet); the focused project's tethers draw in full and
+    // brighter; another project's are hidden.
     if (this.tethers && this.sunBeltObj) {
       const v = new T.Vector3()
       this.sunBeltObj.updateMatrixWorld()
       this.tethers.ends.forEach((end, i) => {
         const beads = this.tethers!.beads[i]
         const P = this.P[end.owner]
-        const shown = !!P && !s.hidden[end.owner]
+        const mine = focus === end.owner
+        const shown = !!P && !s.hidden[end.owner] && (focus === null || mine)
         beads.visible = shown
         if (!shown) return
+        beads.geometry.setDrawRange(0, mine ? TETHER_BEADS : TETHER_STUB.length)
+        beads.material.opacity = mine ? Math.min(1, beads.userData.opacity * 1.6) : beads.userData.opacity
         v.set(end.local[0], end.local[1], end.local[2])
         this.sunBeltObj.localToWorld(v)
         const to = this.worldOf(P.pG)
@@ -2026,18 +2058,35 @@ class SolarImpl {
         const cx = (v.x + to.x) / 2
         const cy = (v.y + to.y) / 2 + len * TETHER_LIFT
         const cz = (v.z + to.z) / 2
+        // Beads are stored stub-first (TETHER_ORDER), so a draw range of TETHER_STUB.length shows only the stub.
         const arr = beads.geometry.attributes.position.array
-        for (let k = 0; k < TETHER_BEADS; k++) {
+        TETHER_ORDER.forEach((k, slot) => {
           const u = (k + 0.5) / TETHER_BEADS
           const a = (1 - u) * (1 - u)
           const b2 = 2 * (1 - u) * u
           const c2 = u * u
-          arr[k * 3] = a * v.x + b2 * cx + c2 * to.x
-          arr[k * 3 + 1] = a * v.y + b2 * cy + c2 * to.y
-          arr[k * 3 + 2] = a * v.z + b2 * cz + c2 * to.z
-        }
+          arr[slot * 3] = a * v.x + b2 * cx + c2 * to.x
+          arr[slot * 3 + 1] = a * v.y + b2 * cy + c2 * to.y
+          arr[slot * 3 + 2] = a * v.z + b2 * cz + c2 * to.z
+        })
         beads.geometry.attributes.position.needsUpdate = true
       })
+    }
+
+    // Focus ring (0.16.0): a white ring in the orbit plane around the focused body, at galaxy level.
+    const FP = focus === null ? undefined : this.P[focus]
+    const ringOn = !!FP && !s.hidden[focus as string] && this.S.level === 'galaxy'
+    if (ringOn && !this.focusRing) {
+      this.focusRing = this.circle(1, 0xffffff, 0.55)
+      this.focusRing.userData = { kind: 'focus-ring' }
+      this.world.add(this.focusRing)
+    }
+    if (this.focusRing) {
+      this.focusRing.visible = ringOn
+      if (ringOn && FP) {
+        this.focusRing.position.copy(this.worldOf(FP.pG))
+        this.focusRing.scale.setScalar(FP.R * 1.7 + 4)
+      }
     }
 
     // Black holes: a calm line from the older planet through both holes to the newer; one pulse every 30 s.
@@ -2047,7 +2096,11 @@ class SolarImpl {
       const B = this.P[H.L.newer]
       if (!A || !B) continue
       const gone = !!(s.hidden[H.L.older] || s.hidden[H.L.newer])
-      H.pair[0]!.g.visible = H.pair[1]!.g.visible = H.line.visible = H.line2.visible = H.chip.visible = !gone
+      // Focus (0.16.0): the focused project's bonds are brighter with their chip; others' fade and lose the chip.
+      const touches = focus !== null && (H.L.older === focus || H.L.newer === focus)
+      const faded = focus !== null && !touches
+      H.pair[0]!.g.visible = H.pair[1]!.g.visible = H.line.visible = H.line2.visible = !gone
+      H.chip.visible = !gone && !faded
       const a = this.worldOf(A.pG)
       const b = this.worldOf(B.pG)
       const dir = b.clone().sub(a)
@@ -2089,7 +2142,8 @@ class SolarImpl {
         arr2[k * 3 + 2] = q.z + side.z
       }
       H.line2.geometry.attributes.position.needsUpdate = true
-      H.line.material.opacity = 0.14 + 0.06 * (this.reduced ? 0.5 : 0.5 + 0.5 * Math.sin(this.clock * 0.5 + H.phase))
+      const breathe = 0.14 + 0.06 * (this.reduced ? 0.5 : 0.5 + 0.5 * Math.sin(this.clock * 0.5 + H.phase))
+      H.line.material.opacity = touches ? Math.min(0.6, breathe * 2.5) : faded ? breathe * 0.35 : breathe
       H.line2.material.opacity = H.line.material.opacity
       // The pair chip sits just above the top of the arc.
       const mid = pts[30] as O3
@@ -2214,7 +2268,11 @@ class SolarImpl {
         const ls = linksOf(this.links, b.owner).map(L => `${L.older === b.owner ? `to ${labelOf(L.newer)}` : `from ${labelOf(L.older)}`} (${L.pairs})`)
         const ring = this.orbits.rings[this.orbits.ringOf[b.owner] ?? -1]
         const shared = !!ring && ring.owners.length > 1
-        const minutes = Math.round(orbitSeconds(this.speedOf[b.owner] ?? orbitSpeed(b)) / 60)
+        const minutes = Math.round(orbitSeconds((this.speedOf[b.owner] ?? orbitSpeed(b)) * MOTION_SCALE) / 60)
+        // 0.16.0 card line: the probes (memories shared from here) and the global memories close to this project.
+        const kin = (this.tethers?.ends ?? []).filter(end => end.owner === b.owner)
+        const best = kin.reduce((m, end) => Math.max(m, end.strength), 0)
+        const globalLine = `${b.global} shared with every project (probes) · ${kin.length} global ${kin.length === 1 ? 'memory' : 'memories'} close${kin.length > 0 ? ` (best ${Math.round(best * 100) / 100})` : ''}`
         return {
           x,
           y,
@@ -2224,6 +2282,7 @@ class SolarImpl {
             labelName(b),
             `${describe(b)} · one orbit every ${minutes} min${shared ? ' (shared orbit)' : ''}`,
             `${b.count} memories · ${b.tagsTotal} tags · ${b.kinds.length} kinds`,
+            globalLine,
             `activity ${b.activity}${b.activitySource === 'lifetime' ? ' (lifetime so far)' : ' (30 days)'} · recalls ${b.recalls} · median age ${b.age === null ? 'unknown' : `${Math.round(b.age * 10) / 10} d`}`,
             `top tags: ${b.tags.slice(0, 3).map(t => t.tag).join(', ') || 'none'}`,
             ls.length ? `similar memories: ${ls.join(', ')}` : 'no black holes',

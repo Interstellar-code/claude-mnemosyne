@@ -254,6 +254,35 @@ describe('MAPX.5 hover', () => {
     r.scene.dispose()
   })
 
+  test('0.16.0 folding and focus: tethers show a stub until their project is hovered; then the full string, a focus ring, and only its bonds keep their chip', () => {
+    const data = galaxy()
+    const matrixMemory = data.memories.find((m: any) => m.owner === MATRIX && m.state === 'live')
+    data.memories.push({ ...data.memories[0], id: 'global-fold-test', owner: 'global', scope: 'global', state: 'live', label: 'a global memory' })
+    data.links = [...(data.links ?? []), { a: 'global', b: MATRIX, pairs: [{ older: 'global-fold-test', newer: matrixMemory.id, score: 0.9 }] }]
+    const r = rig({ data })
+    r.run(0.5)
+    const beads = r.all(o => o.userData?.kind === 'tether')[0]
+    // at rest: the stub only (3 beads at the belt, 2 at the planet), no focus ring
+    expect(beads.visible).toBe(true)
+    expect(beads.geometry.drawRange.count).toBe(5)
+    expect(r.all(o => o.userData?.kind === 'focus-ring' && o.visible)).toHaveLength(0)
+    // hover the matrixkoder planet: its tether draws in full, a focus ring appears, bonds not touching it lose their chip
+    const at = r.screen(r.planet(MATRIX))
+    expect(r.locate(t => kindOf(t) === 'planet' && t[0] === 'matrixkoder', { x0: at.x - 25, y0: at.y - 25, x1: at.x + 25, y1: at.y + 25 }, 3)).not.toBeNull()
+    r.run(0.1)
+    expect(beads.geometry.drawRange.count).toBe(16)
+    expect(r.all(o => o.userData?.kind === 'focus-ring' && o.visible)).toHaveLength(1)
+    const chips = r.all(o => o.userData?.kind === 'hole-chip')
+    const touching = (data.links as any[]).filter(l => l.a !== 'global' && l.b !== 'global' && (l.a === MATRIX || l.b === MATRIX)).length
+    expect(chips.filter((c: any) => c.visible)).toHaveLength(touching)
+    // the pointer leaves: after the 2 s hold the tether folds again and the ring goes
+    r.canvas.emit('pointerleave')
+    r.run(3)
+    expect(beads.geometry.drawRange.count).toBe(5)
+    expect(r.all(o => o.userData?.kind === 'focus-ring' && o.visible)).toHaveLength(0)
+    r.scene.dispose()
+  })
+
   test('0.14.0 probes: a project memory shared with every project circles its body; hover names it, a click selects it', () => {
     const data = galaxy()
     const r = rig({ data })
@@ -346,9 +375,11 @@ describe('MAPX.5 hover', () => {
     expect(tip[1]).toContain('repo on github.com')
     expect(tip[1]).toMatch(/one orbit every \d+ min$/)
     expect(tip[2]).toBe('48 memories · 27 tags · 5 kinds')
-    expect(tip[4]).toBe('top tags: workflow-rules, planning, user-preferences')
-    expect(tip[5]).toBe('similar memories: from hermes-switchui (3), to claude-mnemosyne (2)')
-    expect(tip[6]).toBe('click to fly in')
+    // 0.16.0: the card line for shared memories (probes) and close global memories
+    expect(tip[3]).toBe('3 shared with every project (probes) · 0 global memories close')
+    expect(tip[5]).toBe('top tags: workflow-rules, planning, user-preferences')
+    expect(tip[6]).toBe('similar memories: from hermes-switchui (3), to claude-mnemosyne (2)')
+    expect(tip[7]).toBe('click to fly in')
     // 11 bodies, 10 rings: the two quietest share the outer ring, and only they say so.
     const owners = [...new Set(r.all(o => o.userData?.kind === 'planet').map((o: any) => o.userData.id as string))]
     expect(owners).toHaveLength(11)
@@ -365,21 +396,29 @@ describe('MAPX.5 hover', () => {
     r.scene.dispose()
   })
 
-  test('hovering slows the orbits to 15%', () => {
+  test('0.16.0 hovering holds the map still, and for 2 s after the tooltip closes; free motion is half the old speed', () => {
     const lead = (r: ReturnType<typeof rig>) => angleOf(r.worldPos(r.planet(MATRIX)))
     const free = rig({ reduced: false })
     const a0 = lead(free)
     free.run(4)
     const freeMove = Math.abs(lead(free) - a0)
+    // half of the 0.11.0 speed: 4 s used to move this planet a little over 0.04 rad
+    expect(freeMove).toBeGreaterThan(0.015)
+    expect(freeMove).toBeLessThan(0.03)
     const held = rig({ reduced: false })
     const sun = held.screen(held.all(o => o.userData?.kind === 'sun')[0])
     expect(held.locate(t => kindOf(t) === 'sun' || kindOf(t) === 'nodule', { x0: sun.x - 6, y0: sun.y - 6, x1: sun.x + 6, y1: sun.y + 6 }, 2)).not.toBeNull()
     const b0 = lead(held)
     held.run(4)
-    const heldMove = Math.abs(lead(held) - b0)
-    expect(freeMove).toBeGreaterThan(0.03)
-    expect(heldMove / freeMove).toBeGreaterThan(0.12)
-    expect(heldMove / freeMove).toBeLessThan(0.18)
+    // nothing turns while the tooltip is open
+    expect(Math.abs(lead(held) - b0)).toBeLessThan(1e-9)
+    // the pointer leaves: still held for HOVER_HOLD_SECONDS (2), then the orbits move again
+    held.canvas.emit('pointerleave')
+    const c0 = lead(held)
+    held.run(1)
+    expect(Math.abs(lead(held) - c0)).toBeLessThan(1e-9)
+    held.run(3)
+    expect(Math.abs(lead(held) - c0)).toBeGreaterThan(0.005)
     free.scene.dispose()
     held.scene.dispose()
   })

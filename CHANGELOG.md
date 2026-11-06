@@ -2,6 +2,13 @@
 
 Newest first. Each release is tagged `vX.Y.Z` on GitHub; the README and DESIGN.md describe the contracts.
 
+## 0.16.0 (calm motion, folding tethers, focus)
+
+1. Calmer motion: everything on the map turns at half the earlier speed (orbits, planet rings, moons and their swarms, probes, the sun belt, the camera's auto-rotate). While a tooltip is open, and for 2 seconds after it closes, nothing turns, so a hovered memory stays under the pointer long enough to read (before, only the orbits slowed to 15% and the dots kept moving). The planet tooltip's "one orbit every N min" follows the new speed.
+2. Folding tethers (design proposal item 3): with no focus, each gold tether shows only a short stub (three beads at the sun belt, two at the planet), so long lines no longer cross the whole map. The focused project's tethers draw in full and brighter; other projects' are hidden.
+3. Focus (item 5): the project you hover (its planet, memory dots, ring or probes; kept for the 2-second hold) or the one you opened is in focus. A white ring marks it at galaxy level, its black-hole bonds brighten and keep their "N pairs" chip, other bonds fade and lose the chip, and other planets' labels step back.
+4. The planet tooltip gains a line: "N shared with every project (probes) · M global memories close (best S)". No server, setting or engine change.
+
 ## 0.15.0 (colours and lines)
 
 From the galaxy design proposal (items 1 and 2): each colour has one meaning and each kind of line its own shape, so they cannot be mistaken for each other.

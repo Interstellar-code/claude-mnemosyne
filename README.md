@@ -322,7 +322,7 @@ The mapping (how a thing on the map comes from the store):
 | Asteroids | that kind's memories (size = importance, brightness = recalls, colour = writer or recalls or age) |
 | Planet asteroid belt | memories of kind `unknown` (old untyped rows; a dwarf's memories) |
 | Sun asteroid belt | the true global memories (owner global, saved for every project), gold; the card's "Global (sun belt)" |
-| Gold beads (tethers) | a string of gold beads on an arc above the orbit plane, from a global memory to each project it is close to in meaning (up to 3, from the same pairs as the black holes, so `map.linkScore` applies; brighter = closer) |
+| Gold beads (tethers) | a string of gold beads on an arc above the orbit plane, from a global memory to each project it is close to in meaning (up to 3, from the same pairs as the black holes, so `map.linkScore` applies; brighter = closer). Folded to a short stub at both ends until you hover or open that project; then its strings draw in full |
 | Probes | a project's memory shared with every project (scope global): a small blue probe circling its planet, station or starship on a dashed blue ring just outside the moons (up to 48 per body); the memory also stays in its kind's swarm; hover names it, a click selects it; the card's "Probes (shared from projects)" |
 | Outer galaxy belt | retired, expired, lapsed memories, in ash grey (faded; Restore brings them back) |
 | Black-hole pair | similar memories across two projects: two black holes joined by twin violet strands with an "N pairs" label (2+ pairs, cosine ≥ 0.80 by default; the Settings tab's `map.linkMinPairs` and `map.linkScore`) |
@@ -330,6 +330,8 @@ The mapping (how a thing on the map comes from the store):
 | Recall comet / save comet | a live recall (planet → sun nodule, gold) / a live save (sun nodule → planet, blue) |
 | Update beam / forget laser | a live update (green beam) / a live forget (red laser; the memory fades) |
 | Clouds / ice cap | needs review / idle 30+ days (clouds when more than a quarter of live memories are kind unknown) |
+
+Motion and focus. The map turns slowly, and while a tooltip is open (and for 2 seconds after) nothing turns, so a memory you hover stays under the pointer long enough to read. The project you hover (its planet, its memory dots or its probes), or the one you opened, is in focus: a white ring marks it, its gold tethers draw in full, its black-hole bonds brighten and keep their "N pairs" label, and the other projects' bonds and labels step back. A planet's tooltip also says how many of its memories are shared with every project (probes) and how many global memories are close to it, with the best score.
 
 Arrange by re-orders the planets' orbits: activity (busier = closer, the default), size, age, or recalls. Each keeps its angle. At most 10 orbits. Find dims every body except those whose tag, project or label holds the text. The Bodies strip lists what matches. The Details panel shows a body's facts and is read-only; edit, retire and restore a memory from the Memories and Review tabs. A memory's text, tags, writer, provenance, dates, state, pin, history and similar memories all show there.
 
