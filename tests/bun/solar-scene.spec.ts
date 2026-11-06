@@ -223,6 +223,37 @@ describe('MAPX.5 hover', () => {
     r.scene.dispose()
   })
 
+  test('0.15.0 line grammar: twin strands and a pair chip per bond, gold beads on an arc per tether, a dashed probe ring', () => {
+    const data = galaxy()
+    const matrixMemory = data.memories.find((m: any) => m.owner === MATRIX && m.state === 'live')
+    data.memories.push({ ...data.memories[0], id: 'global-tether-test', owner: 'global', scope: 'global', state: 'live', label: 'a global memory' })
+    data.links = [...(data.links ?? []), { a: 'global', b: MATRIX, pairs: [{ older: 'global-tether-test', newer: matrixMemory.id, score: 0.9 }] }]
+    const r = rig({ data })
+    r.run(1)
+    // bonds: two violet strands and one chip per drawn black-hole link
+    const bonds = (data.links as any[]).filter(l => l.a !== 'global' && l.b !== 'global' && l.pairs.length > 0).length
+    expect(bonds).toBeGreaterThan(0)
+    const strands = r.all(o => o.type === 'Line' && o.material?.color?.getHex?.() === 0xe8b8ff)
+    expect(strands).toHaveLength(bonds * 2)
+    expect(r.all(o => o.userData?.kind === 'hole-chip')).toHaveLength(bonds)
+    // the two strands of a bond run side by side, not on top of each other
+    const [s1, s2] = strands as any[]
+    const p1 = s1.geometry.attributes.position.array
+    const p2 = s2.geometry.attributes.position.array
+    expect(Math.hypot(p1[90] - p2[90], p1[91] - p2[91], p1[92] - p2[92])).toBeGreaterThan(1)
+    // the tether: one string of 16 gold beads, its middle lifted above the straight line between its ends
+    const beads = r.all(o => o.userData?.kind === 'tether')
+    expect(beads).toHaveLength(1)
+    const arr = beads[0].geometry.attributes.position.array
+    expect(arr.length).toBe(16 * 3)
+    expect(arr[25]).toBeGreaterThan((arr[1] + arr[46]) / 2)
+    // each body with probes has a dashed ring of 28 dashes
+    const owners = new Set(r.all(o => o.userData?.kind === 'probe').map(o => o.userData.planet))
+    expect(owners.size).toBeGreaterThan(0)
+    expect(r.all(o => o.userData?.kind === 'probe-ring')).toHaveLength(owners.size * 28)
+    r.scene.dispose()
+  })
+
   test('0.14.0 probes: a project memory shared with every project circles its body; hover names it, a click selects it', () => {
     const data = galaxy()
     const r = rig({ data })

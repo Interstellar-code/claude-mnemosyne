@@ -2,6 +2,16 @@
 
 Newest first. Each release is tagged `vX.Y.Z` on GitHub; the README and DESIGN.md describe the contracts.
 
+## 0.15.0 (colours and lines)
+
+From the galaxy design proposal (items 1 and 2): each colour has one meaning and each kind of line its own shape, so they cannot be mistaken for each other.
+
+1. Colour roles: gold = belongs to every project (sun belt, tethers), blue = shared but lives in a project (probes), violet = a bond between two projects only, slate = structure (orbits), ash = no longer live. The outer belt of retired, expired and lapsed memories moves from violet to ash grey; orbits are slate.
+2. Gold tethers are strings of gold beads on an arc lifted above the orbit plane (16 beads, a fixed 4 px on screen so they read from the galaxy view), not straight lines.
+3. A black-hole bond is two violet strands side by side with an "N pairs" label at the top of its arc.
+4. Probes ride a dashed blue ring (28 dashes), so the ring reads as "shared from this home" even where the probes are tiny.
+5. The legend's right card names them: Orbit, Gold beads, Probe · dashed ring, Outer belt (ash), Twin violet strands. No server, setting or engine change.
+
 ## 0.14.0 (probes)
 
 1. A project's memory shared with every project (scope global) is now a **probe** circling its own planet, station or starship, just outside the moons (up to 48 per body), instead of a blue dot in the sun belt. It belongs to that project and is visible to every project; the probe says so. Hover names the memory; a click selects it and flies to its body. The memory also stays an asteroid in its kind's swarm, so sizes and counts are unchanged.

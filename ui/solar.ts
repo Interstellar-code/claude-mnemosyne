@@ -199,14 +199,28 @@ type PlanetRec = {
   angle: number
   craft: boolean
 }
-type HoleRec = { L: LinkInfo; pair: { g: O3; disc: O3 }[]; line: O3; pulse: O3[]; phase: number }
+/** A black hole pair; `line` and `line2` are its twin violet strands, `chip` its "N pairs" label (0.15.0). */
+type HoleRec = { L: LinkInfo; pair: { g: O3; disc: O3 }[]; line: O3; line2: O3; chip: O3; pulse: O3[]; phase: number }
 /** The sun belt's tethers: one segment per (true global dot, related project); `local` is the dot in the belt's own frame. */
-type TetherRec = { lines: O3[]; ends: { local: [number, number, number]; owner: string; strength: number }[] }
+/** 0.15.0: one Points string of TETHER_BEADS beads per (true global dot, related project). */
+type TetherRec = { beads: O3[]; ends: { local: [number, number, number]; owner: string; strength: number }[] }
 // The belt's dot colour (RGB 0 to 1) and the tether colour.
 const BELT_GLOBAL_RGB: [number, number, number] = [1, 0.89, 0.64]
 const BELT_TETHER_COLOUR = '#ffd27a'
 // A probe's glow: a project memory shared with every project (0.14.0).
 const PROBE_COLOUR = '#9ec4ff'
+// 0.15.0 colour roles: gold = belongs to every project, blue = shared but lives in a project,
+// violet = a bond between two projects only, slate = structure (orbits), ash = no longer live.
+const OUTER_ASH_RGB: [number, number, number] = [0.44, 0.47, 0.53]
+const ORBIT_SLATE = 0x7d8aa0
+// A gold tether is a string of beads on an arc lifted above the orbit plane (lift = share of its length).
+const TETHER_BEADS = 16
+const TETHER_LIFT = 0.22
+const TETHER_BEAD_PX = 4
+// A bond is two violet strands this far apart (a share of its length, at least 1.5 units).
+const BOND_GAP = 0.006
+// The probes' orbit is a dashed blue ring of this many dashes.
+const PROBE_DASHES = 28
 type Fade = { obj: O3; index: number; rgb: [number, number, number] }
 type EventRec = {
   type: 'recall' | 'save' | 'update' | 'forget' | 'pulse'
@@ -964,7 +978,7 @@ class SolarImpl {
     orbitG.rotation.x = shared.x
     orbitG.rotation.z = shared.z
     this.world.add(orbitG)
-    const line = this.circle(1, 0x8caadc, 0.09)
+    const line = this.circle(1, ORBIT_SLATE, 0.09)
     line.scale.set(r, 1, r)
     orbitG.add(line)
     const pG = new T.Group()
@@ -1115,6 +1129,21 @@ class SolarImpl {
       probe.add(core, wingA, wingB, this.glow(PROBE_COLOUR, s * 5, 0.35))
       group.add(probe)
     })
+    // 0.15.0: the probes ride a dashed blue ring (PROBE_DASHES short Lines; the bundle has no dashed
+    // material), so the ring itself reads as "shared from this home" even when the probes are tiny.
+    const ringMat = new T.LineBasicMaterial({ color: new T.Color(PROBE_COLOUR), transparent: true, opacity: 0.32, depthWrite: false })
+    for (let k = 0; k < PROBE_DASHES; k++) {
+      const a0 = (k / PROBE_DASHES) * Math.PI * 2
+      const a1 = a0 + (Math.PI / PROBE_DASHES) * 0.9
+      const pts: O3[] = []
+      for (let q = 0; q <= 3; q++) {
+        const a = a0 + ((a1 - a0) * q) / 3
+        pts.push(new T.Vector3(Math.cos(a) * R * outer, Math.sin(a * 2) * R * 0.12, Math.sin(a) * R * outer))
+      }
+      const dash = new T.Line(new T.BufferGeometry().setFromPoints(pts), ringMat)
+      dash.userData = { kind: 'probe-ring' }
+      group.add(dash)
+    }
     return group
   }
 
@@ -1140,7 +1169,7 @@ class SolarImpl {
     orbitG.rotation.x = shared.x
     orbitG.rotation.z = shared.z
     this.world.add(orbitG)
-    const line = this.circle(1, 0x8caadc, 0.09)
+    const line = this.circle(1, ORBIT_SLATE, 0.09)
     line.scale.set(r, 1, r)
     orbitG.add(line)
     const pG = new T.Group()
@@ -1242,11 +1271,21 @@ class SolarImpl {
       this.pickables.push(catcher)
       pair.push({ g, disc })
     }
-    const geo = new T.BufferGeometry()
-    geo.setAttribute('position', new T.BufferAttribute(new Float32Array(61 * 3), 3))
-    const line = new T.Line(geo, new T.LineBasicMaterial({ color: 0xe8b8ff, transparent: true, opacity: 0.2, depthWrite: false, blending: T.AdditiveBlending }))
-    line.frustumCulled = false
-    this.world.add(line)
+    // 0.15.0: a bond is two violet strands side by side (twin strands read as "a pair of projects" and never
+    // as an orbit or a tether), with a "N pairs" chip at the top of the arc.
+    const strand = (): O3 => {
+      const geo = new T.BufferGeometry()
+      geo.setAttribute('position', new T.BufferAttribute(new Float32Array(61 * 3), 3))
+      const s = new T.Line(geo, new T.LineBasicMaterial({ color: 0xe8b8ff, transparent: true, opacity: 0.2, depthWrite: false, blending: T.AdditiveBlending }))
+      s.frustumCulled = false
+      this.world.add(s)
+      return s
+    }
+    const line = strand()
+    const line2 = strand()
+    const chip = this.label(`${L.pairs} ${L.pairs === 1 ? 'pair' : 'pairs'}`, null, '#e8b8ff', 7)
+    chip.userData = { kind: 'hole-chip' }
+    this.world.add(chip)
     const pulse: O3[] = []
     for (let t = 0; t < 8; t++) {
       const sp = this.glow('#fff0ff', t === 0 ? 14 : 10 * (1 - t / 8) + 2, t === 0 ? 1 : 0.6 * (1 - t / 8))
@@ -1255,7 +1294,7 @@ class SolarImpl {
       this.world.add(sp)
       pulse.push(sp)
     }
-    this.holes.push({ L, pair, line, pulse, phase: 26 - i * 8 })
+    this.holes.push({ L, pair, line, line2, chip, pulse, phase: 26 - i * 8 })
   }
 
   private makeSun(): void {
@@ -1326,19 +1365,22 @@ class SolarImpl {
       const sbl = this.label(`Sun belt · ${trueGlobals} global ${trueGlobals === 1 ? 'memory' : 'memories'}`, null, '#e9c98a', 7)
       sbl.position.set(0, -14 * k, 84 * k)
       this.world.add(sbl)
-      // One two-point Line per tether: the vendored three.js bundle has Line but no LineSegments.
-      // Brighter for a closer pair (best 0.65 to 1 maps to opacity 0.12 to 0.4).
+      // 0.15.0: a tether is a string of TETHER_BEADS gold beads (Points) on an arc lifted above the orbit
+      // plane, so it never reads as an orbit or a bond line. Brighter for a closer pair (best 0.65 to 1
+      // maps to opacity 0.25 to 0.75); the beads are placed each frame (the planet orbits).
       if (tethers.length > 0) {
-        const lines = tethers.map(end => {
+        const beads = tethers.map(end => {
           const geo = new T.BufferGeometry()
-          geo.setAttribute('position', new T.BufferAttribute(new Float32Array(6), 3))
-          const opacity = 0.12 + 0.28 * Math.max(0, Math.min(1, (end.strength - 0.65) / 0.35))
-          const line = new T.Line(geo, new T.LineBasicMaterial({ color: new T.Color(BELT_TETHER_COLOUR), transparent: true, opacity, depthWrite: false, blending: T.AdditiveBlending }))
-          line.frustumCulled = false
-          this.world.add(line)
-          return line
+          geo.setAttribute('position', new T.BufferAttribute(new Float32Array(TETHER_BEADS * 3), 3))
+          const opacity = 0.25 + 0.5 * Math.max(0, Math.min(1, (end.strength - 0.65) / 0.35))
+          // A fixed on-screen size (sizeAttenuation off): world-sized beads vanish from the galaxy view's distance.
+          const pts = new T.Points(geo, new T.PointsMaterial({ size: TETHER_BEAD_PX, map: this.dotTex, color: new T.Color(BELT_TETHER_COLOUR), transparent: true, opacity, depthWrite: false, sizeAttenuation: false, blending: T.AdditiveBlending }))
+          pts.frustumCulled = false
+          pts.userData = { kind: 'tether' }
+          this.world.add(pts)
+          return pts
         })
-        this.tethers = { lines, ends: tethers }
+        this.tethers = { beads, ends: tethers }
       }
     }
   }
@@ -1355,7 +1397,8 @@ class SolarImpl {
       const oa = ro() * Math.PI * 2
       const oj = 1 + (ro() - 0.5) * 0.1
       pos.push(Math.cos(oa) * oj, (ro() - 0.5) * 0.02, Math.sin(oa) * oj)
-      col.push(0.66, 0.6, 0.84)
+      // Ash (0.15.0): violet now means only a bond between two projects.
+      col.push(...OUTER_ASH_RGB)
       const when = (memory.validUntil ?? memory.created ?? '').slice(0, 10) || 'an unknown date'
       const what = memory.state === 'retired' ? `retired: ${when}` : memory.state === 'expired' ? `expired by the sweep: unused 90 days, ${when}` : `its own expiry date passed: ${when}`
       const owner = this.bodies.find(b => b.owner === memory.owner)?.label ?? projectLabel(memory.owner)
@@ -1365,7 +1408,7 @@ class SolarImpl {
     this.outer = this.pointsObject(pos, col, 3, items, 0.45, true)
     this.world.add(this.outer)
     this.pickables.push(this.outer)
-    this.outerLabel = this.label(`Outer belt · retired, expired, lapsed (${dead.length})`, null, '#b9addf', 9)
+    this.outerLabel = this.label(`Outer belt · retired, expired, lapsed (${dead.length})`, null, '#9aa3b2', 9)
     this.world.add(this.outerLabel)
   }
 
@@ -1970,22 +2013,30 @@ class SolarImpl {
       const v = new T.Vector3()
       this.sunBeltObj.updateMatrixWorld()
       this.tethers.ends.forEach((end, i) => {
-        const line = this.tethers!.lines[i]
+        const beads = this.tethers!.beads[i]
         const P = this.P[end.owner]
         const shown = !!P && !s.hidden[end.owner]
-        line.visible = shown
+        beads.visible = shown
         if (!shown) return
         v.set(end.local[0], end.local[1], end.local[2])
         this.sunBeltObj.localToWorld(v)
         const to = this.worldOf(P.pG)
-        const arr = line.geometry.attributes.position.array
-        arr[0] = v.x
-        arr[1] = v.y
-        arr[2] = v.z
-        arr[3] = to.x
-        arr[4] = to.y
-        arr[5] = to.z
-        line.geometry.attributes.position.needsUpdate = true
+        // A quadratic arc from the belt dot to the planet, its control point lifted by TETHER_LIFT of the length.
+        const len = v.distanceTo(to)
+        const cx = (v.x + to.x) / 2
+        const cy = (v.y + to.y) / 2 + len * TETHER_LIFT
+        const cz = (v.z + to.z) / 2
+        const arr = beads.geometry.attributes.position.array
+        for (let k = 0; k < TETHER_BEADS; k++) {
+          const u = (k + 0.5) / TETHER_BEADS
+          const a = (1 - u) * (1 - u)
+          const b2 = 2 * (1 - u) * u
+          const c2 = u * u
+          arr[k * 3] = a * v.x + b2 * cx + c2 * to.x
+          arr[k * 3 + 1] = a * v.y + b2 * cy + c2 * to.y
+          arr[k * 3 + 2] = a * v.z + b2 * cz + c2 * to.z
+        }
+        beads.geometry.attributes.position.needsUpdate = true
       })
     }
 
@@ -1996,7 +2047,7 @@ class SolarImpl {
       const B = this.P[H.L.newer]
       if (!A || !B) continue
       const gone = !!(s.hidden[H.L.older] || s.hidden[H.L.newer])
-      H.pair[0]!.g.visible = H.pair[1]!.g.visible = H.line.visible = !gone
+      H.pair[0]!.g.visible = H.pair[1]!.g.visible = H.line.visible = H.line2.visible = H.chip.visible = !gone
       const a = this.worldOf(A.pG)
       const b = this.worldOf(B.pG)
       const dir = b.clone().sub(a)
@@ -2028,7 +2079,21 @@ class SolarImpl {
         pts.push(q)
       }
       H.line.geometry.attributes.position.needsUpdate = true
+      // The second strand: the same curve, moved sideways (across the bond, in the orbit plane) by BOND_GAP of its length.
+      const side = new T.Vector3(-dir.z, 0, dir.x).normalize().multiplyScalar(Math.max(1.5, len * BOND_GAP))
+      const arr2 = H.line2.geometry.attributes.position.array
+      for (let k = 0; k <= 60; k++) {
+        const q = pts[k] as O3
+        arr2[k * 3] = q.x + side.x
+        arr2[k * 3 + 1] = q.y + side.y
+        arr2[k * 3 + 2] = q.z + side.z
+      }
+      H.line2.geometry.attributes.position.needsUpdate = true
       H.line.material.opacity = 0.14 + 0.06 * (this.reduced ? 0.5 : 0.5 + 0.5 * Math.sin(this.clock * 0.5 + H.phase))
+      H.line2.material.opacity = H.line.material.opacity
+      // The pair chip sits just above the top of the arc.
+      const mid = pts[30] as O3
+      H.chip.position.set(mid.x, mid.y + 6, mid.z)
       const local = (((this.clock + H.phase) % PULSE_EVERY) + PULSE_EVERY) % PULSE_EVERY
       const on = local < 7 && !this.reduced && !gone
       for (let k = 0; k < H.pulse.length; k++) {
