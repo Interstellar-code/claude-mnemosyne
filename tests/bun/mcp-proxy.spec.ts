@@ -399,6 +399,37 @@ describe('the proxy against a real installed engine', () => {
     ])
   })
 
+  test('OWNERHINT: an update or forget of another owner\'s memory says whose it is; a missing id gets no hint; the row is untouched', async () => {
+    const saved = await proxy(cli, store, [toolCall(1, 'memory_remember', { kind: 'fact', content: 'the owner hint memory belongs to project alpha' })], 'project-alpha-1a2b')
+    const id = text(saved.get(1)).memory_id as string
+    const log = join(temp.dir, 'logs-owner-hint', 'activity.jsonl')
+    const replies = await proxy(cli, store, [
+      toolCall(2, 'memory_update', { memory_id: id, importance: 0.9 }),
+      toolCall(3, 'memory_forget', { memory_id: id }),
+      toolCall(4, 'memory_update', { memory_id: 'no-such-memory', importance: 0.9 }),
+    ], 'global', log)
+    for (const call of [2, 3]) {
+      const reply = text(replies.get(call))
+      expect(reply.status).toBe('not_found')
+      expect(reply.owner).toBe('project-alpha-1a2b')
+      expect(reply.hint).toContain('belongs to project-alpha-1a2b, not to global')
+      expect(reply.hint).toContain('MNEMOSYNE_OWNER=project-alpha-1a2b')
+    }
+    const missing = text(replies.get(4))
+    expect(missing.status).toBe('not_found')
+    expect(missing.owner).toBeUndefined()
+    expect(missing.hint).toBeUndefined()
+    // the engine's own answer is what the log records
+    expect(logLines(log).map(l => [l.action, l.ok, l.error])).toEqual([
+      ['update', false, 'not_found'],
+      ['forget', false, 'not_found'],
+      ['update', false, 'not_found'],
+    ])
+    // the memory is still there, unchanged, and its own owner can still change it
+    const own = await proxy(cli, store, [toolCall(5, 'memory_update', { memory_id: id, importance: 0.9 })], 'project-alpha-1a2b')
+    expect(text(own.get(5)).status).toBe('updated')
+  })
+
   // GUARD.2: the same admission check as the plugin's own tools, before anything reaches the engine.
   const rowCount = () => {
     if (!existsSync(join(store, 'mnemopi.db'))) return 0

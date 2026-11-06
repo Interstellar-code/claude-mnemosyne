@@ -20,7 +20,10 @@
 // confirm: true, and in warn mode it is stored with metadata.guard.
 // Each call of the five tools is recorded in MNEMOSYNE_ACTIVITY_LOG (empty: off)
 // as one activity line with origin external, written once its reply is read.
+// An update or forget of another owner's memory answers not_found from the engine; the proxy then
+// adds whose memory it is (`owner`, `hint`), read-only from the store (OWNERHINT).
 // Run by ~/.claude/mnemosyne/bin/mnemosyne-mcp, which sets the environment.
+import { Database } from 'bun:sqlite'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { activityLine, callOutcome, callText, TOOL_ACTIONS } from '../hooks/activity-log'
@@ -100,6 +103,29 @@ function installedBuild(cliPath: string) {
   }
 }
 const build = installedBuild(cli)
+
+// OWNERHINT: the engine changes only its own owner's rows, so an update or forget of another
+// owner's memory answers not_found although recall shows the memory (every global-scope row is
+// recalled by every owner). The proxy then looks the id up, read-only, in the store mnemosyne-mcp
+// names (MNEMOPI_DATA_DIR; the bank is always `default`), and says whose it is. Never fatal: no
+// store, a locked file or a missing row gives no hint and the reply stays as the engine sent it.
+const storeDb = process.env.MNEMOPI_DATA_DIR ? join(process.env.MNEMOPI_DATA_DIR, 'mnemopi.db') : ''
+function ownerOfMemory(dbPath: string, id: unknown): string | undefined {
+  if (dbPath === '' || typeof id !== 'string' || id === '' || id.length > 64) return undefined
+  let db: Database | undefined
+  try {
+    db = new Database(dbPath, { readonly: true })
+    const row = db.query('SELECT session_id AS owner FROM working_memory WHERE id = ?').get(id) as { owner: unknown } | null
+    return typeof row?.owner === 'string' && row.owner !== '' ? row.owner : undefined
+  } catch {
+    return undefined
+  } finally {
+    db?.close()
+  }
+}
+const otherOwnerHint = (memoryOwner: string, ownOwner: string) =>
+  `This memory belongs to ${memoryOwner}, not to ${ownOwner}, the owner this MCP server writes as, so it can only be read here. ` +
+  `Change it from the Mnemosyne dashboard, from a Claude Code session in that project, or through a server started with MNEMOSYNE_OWNER=${memoryOwner}.`
 
 const engine = Bun.spawn(['bun', cli, 'mcp'], { stdin: 'pipe', stdout: 'pipe', stderr: 'inherit' })
 const listIds = new Set<unknown>()
@@ -357,6 +383,18 @@ for await (const line of lines(engine.stdout)) {
   const failure = message?.error?.message ?? (message?.result?.isError ? String(text?.text ?? 'failed') : undefined)
   // One warning line per hit, after the engine's reply.
   if (call?.warnings && failure === undefined && typeof text?.text === 'string') text.text = `${text.text}\n${call.warnings.join('\n')}`
+  // OWNERHINT: a not_found update or forget of a memory another owner holds says whose it is.
+  if ((call?.action === 'update' || call?.action === 'forget') && failure === undefined && typeof text?.text === 'string') {
+    try {
+      const reply = JSON.parse(text.text) as Record<string, unknown>
+      if (reply?.status === 'not_found') {
+        const holder = ownerOfMemory(storeDb, call.args.memory_id)
+        if (holder !== undefined && holder !== owner) text.text = JSON.stringify({ ...reply, owner: holder, hint: otherOwnerHint(holder, owner) })
+      }
+    } catch {
+      // not a JSON reply: left as it is
+    }
+  }
   send(message)
   if (call) {
     log(call, failure !== undefined ? { ok: false, error: failure } : callOutcome(call.action, call.args, replyText))
