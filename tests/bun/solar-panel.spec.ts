@@ -133,9 +133,10 @@ describe('the store summary (Galaxy level)', () => {
     expect(fact(model, 'Memories')).toBe(`${galaxy.projects.reduce((sum, project) => sum + (project as { liveCount: number }).liveCount, 0)} live`)
     expect(fact(model, 'Projects (planets)')).toBe('5')
     expect(fact(model, 'Writers (nodules)')).toBe('claude-code 121 (100 inferred) · imported 2')
-    // 0.13.0: the belt splits into true globals (owner global) and project memories shared with every project
-    // (the fixture's six are all project memories; none is owner global)
-    expect(fact(model, 'Global (sun belt)')).toBe('0 global · 6 shared from projects')
+    // 0.14.0: the belt holds the true globals (owner global); a project's memory shared with every project is
+    // a probe around its body (the fixture's six global-scope rows are all project memories)
+    expect(fact(model, 'Global (sun belt)')).toBe('0')
+    expect(fact(model, 'Probes (shared from projects)')).toBe('6')
     expect(fact(model, 'Not live (outer belt)')).toBe('3')
     expect(fact(model, 'Busiest planet')).not.toBe('—')
     expect(fact(model, 'Plain folders')).toBe('3 stations · 3 starships')
@@ -152,6 +153,7 @@ describe('the store summary (Galaxy level)', () => {
     expect(fact(plain, 'Black-hole pairs')).toBe('needs stored vectors')
     expect(fact(plain, 'Writers (nodules)')).toBe('none')
     expect(fact(plain, 'Global (sun belt)')).toBe('0')
+    expect(fact(plain, 'Probes (shared from projects)')).toBe('0')
     expect(fact(plain, 'Not live (outer belt)')).toBe('—')
   })
 

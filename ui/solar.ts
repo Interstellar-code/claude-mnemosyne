@@ -40,6 +40,7 @@ import {
   startAngle,
   STYLES,
   beltDots,
+  probesOf,
   tagColour,
   tagHash,
   targets,
@@ -189,6 +190,8 @@ type PlanetRec = {
   mesh: O3
   ring: O3
   moons: MoonRec[]
+  /** The probes' group (0.14.0), or null when the body has no memory shared with every project. */
+  probes: O3 | null
   label: O3
   tagLabels: O3[]
   blobs: Blob[]
@@ -199,10 +202,11 @@ type PlanetRec = {
 type HoleRec = { L: LinkInfo; pair: { g: O3; disc: O3 }[]; line: O3; pulse: O3[]; phase: number }
 /** The sun belt's tethers: one segment per (true global dot, related project); `local` is the dot in the belt's own frame. */
 type TetherRec = { lines: O3[]; ends: { local: [number, number, number]; owner: string; strength: number }[] }
-// The belt's two dot colours (RGB 0 to 1) and the tether colour.
+// The belt's dot colour (RGB 0 to 1) and the tether colour.
 const BELT_GLOBAL_RGB: [number, number, number] = [1, 0.89, 0.64]
-const BELT_SHARED_RGB: [number, number, number] = [0.62, 0.77, 1]
 const BELT_TETHER_COLOUR = '#ffd27a'
+// A probe's glow: a project memory shared with every project (0.14.0).
+const PROBE_COLOUR = '#9ec4ff'
 type Fade = { obj: O3; index: number; rgb: [number, number, number] }
 type EventRec = {
   type: 'recall' | 'save' | 'update' | 'forget' | 'pulse'
@@ -1060,9 +1064,58 @@ class SolarImpl {
       moons.push({ kind: mk.kind, c, pivot, mesh: moon, label: ml, swarm, speed: 0.6 / (m + 1) })
     })
     this.register(ring, ring.userData.items)
+    // Probes circle just outside the outermost moon (moons sit at R * (1.95 + 0.2 per moon)).
+    const probes = this.makeProbes(b, pG, R, 2.35 + b.moons.length * 0.2)
     const lab = this.label(labelName(b), metricText(b, this.view.arrange), '#e6edf7', 14)
     this.world.add(lab)
-    return { body: b, R, orbitG, line, pG, mesh, ring, moons, label: lab, tagLabels, blobs: pt.blobs, r: previous?.r ?? r, angle: previous?.angle ?? startAngle(b), craft: false }
+    return { body: b, R, orbitG, line, pG, mesh, ring, moons, probes, label: lab, tagLabels, blobs: pt.blobs, r: previous?.r ?? r, angle: previous?.angle ?? startAngle(b), craft: false }
+  }
+
+  /**
+   * Probes (0.14.0): one small probe per memory of this body that is shared with every project
+   * (scope global), circling just outside its moons on one slowly turning group. A probe is a memory
+   * marker: the memory also stays an asteroid in its kind's swarm, so counts and moons are unchanged.
+   * Hover names the memory; a click selects it and flies to its body. At most PROBES_MAX are drawn.
+   */
+  private makeProbes(b: Body, pG: O3, R: number, outer: number): O3 | null {
+    const { memories, total } = probesOf(this.galaxy as SceneGalaxy, b.owner)
+    if (memories.length === 0) return null
+    const T = this.T
+    const group = new T.Group()
+    group.rotation.x = 0.5
+    group.rotation.z = (hashOf(b, 'probes') % 100) / 100 - 0.5
+    pG.add(group)
+    const s = Math.max(0.8, R * 0.06)
+    const hull = new T.MeshStandardMaterial({ color: 0xd8e4f5, metalness: 0.6, roughness: 0.35, emissive: 0x16243a })
+    const panel = new T.MeshStandardMaterial({ color: 0x2a5bd7, metalness: 0.3, roughness: 0.4, emissive: 0x0d2266 })
+    const more = total > memories.length ? ` · ${memories.length} of ${total} drawn` : ''
+    memories.forEach((memory, i) => {
+      const a = (i / memories.length) * Math.PI * 2 + (hashOf(b, `probe${i}`) % 100) / 400
+      const d = R * outer * (1 + (i % 3) * 0.06)
+      const probe = new T.Group()
+      probe.position.set(Math.cos(a) * d, Math.sin(a * 2) * R * 0.12, Math.sin(a) * d)
+      probe.rotation.y = -a
+      const tip = [
+        `Probe · ${kindOne(memory.kind)} memory shared with every project`,
+        `saved in ${b.label} (scope global); also in its ${kindLabel(memory.kind)} swarm${more}`,
+        this.firstLine(memory),
+        'click: select it and fly here',
+      ]
+      const data = { kind: 'probe', planet: b.owner, memKind: memory.kind, memId: memory.id, tip }
+      const core = new T.Mesh(new T.CylinderGeometry(s * 0.45, s * 0.45, s * 1.2, 10), hull)
+      core.rotation.z = Math.PI / 2
+      const wingA = new T.Mesh(new T.BoxGeometry(s * 0.08, s * 0.5, s * 1.6), panel)
+      wingA.position.set(0, 0, s * 1.15)
+      const wingB = new T.Mesh(new T.BoxGeometry(s * 0.08, s * 0.5, s * 1.6), panel)
+      wingB.position.set(0, 0, -s * 1.15)
+      for (const part of [core, wingA, wingB]) {
+        part.userData = data
+        this.pickables.push(part)
+      }
+      probe.add(core, wingA, wingB, this.glow(PROBE_COLOUR, s * 5, 0.35))
+      group.add(probe)
+    })
+    return group
   }
 
   /** The "no remote" and "kind unknown" marks: a small word under the body, kept at every level. */
@@ -1157,9 +1210,11 @@ class SolarImpl {
     this.addMarks(b, pG, R)
     const ring = this.memoryRing(b, pG, R, 1.35)
     this.register(ring, ring.userData.items)
+    // A craft has no moons: its probes circle just outside its memory ring.
+    const probes = this.makeProbes(b, pG, R, 2.1)
     const lab = this.label(labelName(b), metricText(b, this.view.arrange), '#e6edf7', 14)
     this.world.add(lab)
-    return { body: b, R, orbitG, line, pG, mesh: body, ring, moons: [], label: lab, tagLabels: [], blobs: [], r: previous?.r ?? r, angle: previous?.angle ?? startAngle(b), craft: true }
+    return { body: b, R, orbitG, line, pG, mesh: body, ring, moons: [], probes, label: lab, tagLabels: [], blobs: [], r: previous?.r ?? r, angle: previous?.angle ?? startAngle(b), craft: true }
   }
 
   private makeHoles(L: LinkInfo, i: number): void {
@@ -1240,9 +1295,9 @@ class SolarImpl {
       this.nodules.set(w.source, nm)
     }
 
-    // The sun belt: global memories, each dot keyed to its memory (beltDots). A true global (owner
-    // 'global') is gold and has a faint tether to each project it is close to (the links with 'global'
-    // on one side); a project memory shared with every project (scope global) is drawn cool blue, no tether.
+    // The sun belt: the true global memories (owner 'global'), each dot keyed to its memory (beltDots),
+    // gold, with a faint tether to each project it is close to (the links with 'global' on one side).
+    // Since 0.14.0 a project's memory shared with every project is a probe around its own body instead.
     const belt = beltDots(g, this.bodies)
     if (belt.length > 0) {
       const beltR = (72 * sunR) / SUN_R
@@ -1258,23 +1313,17 @@ class SolarImpl {
         const local: [number, number, number] = [Math.cos(ga) * beltR, Math.sin(ga * 3) * 3, Math.sin(ga) * beltR]
         pos.push(...local)
         const memory = dot.id === null ? null : (byId.get(dot.id) ?? null)
-        if (dot.owner === null) {
-          trueGlobals++
-          col.push(...BELT_GLOBAL_RGB)
-          const ties = dot.related.length > 0 ? `close to ${dot.related.map(r => `${labelOf(r.owner)} (${r.pairs} ${r.pairs === 1 ? 'pair' : 'pairs'}, best ${r.best})`).join(', ')}` : 'no project close enough to tie to (map.linkScore)'
-          items.push({ tip: ['Global memory: saved for every project', ties, this.firstLine(memory)] })
-          for (const r of dot.related) tethers.push({ local, owner: r.owner, strength: r.best })
-        } else {
-          col.push(...BELT_SHARED_RGB)
-          items.push({ tip: [`Project memory shared with every project`, `saved in ${labelOf(dot.owner)} (scope global)`, this.firstLine(memory)] })
-        }
+        trueGlobals++
+        col.push(...BELT_GLOBAL_RGB)
+        const ties = dot.related.length > 0 ? `close to ${dot.related.map(r => `${labelOf(r.owner)} (${r.pairs} ${r.pairs === 1 ? 'pair' : 'pairs'}, best ${r.best})`).join(', ')}` : 'no project close enough to tie to (map.linkScore)'
+        items.push({ tip: ['Global memory: saved for every project', ties, this.firstLine(memory)] })
+        for (const r of dot.related) tethers.push({ local, owner: r.owner, strength: r.best })
       })
       this.sunBeltObj = this.pointsObject(pos, col, 6, items, 1, false)
       this.world.add(this.sunBeltObj)
       this.pickables.push(this.sunBeltObj)
       this.world.add(this.circle(beltR, 0xffd27a, 0.12))
-      const shared = belt.length - trueGlobals
-      const sbl = this.label(`Sun belt · ${trueGlobals} global${shared > 0 ? ` · ${shared} shared from projects` : ''}`, null, '#e9c98a', 7)
+      const sbl = this.label(`Sun belt · ${trueGlobals} global ${trueGlobals === 1 ? 'memory' : 'memories'}`, null, '#e9c98a', 7)
       sbl.position.set(0, -14 * k, 84 * k)
       this.world.add(sbl)
       // One two-point Line per tether: the vendored three.js bundle has Line but no LineSegments.
@@ -1884,6 +1933,8 @@ class SolarImpl {
       const wp = this.worldOf(P.pG)
       P.label.position.set(wp.x, wp.y + P.R * 1.9 + 10, wp.z)
       P.label.visible = !here && !s.hidden[id]
+      // Probes circle slowly the other way to the moons; they stand still while you look at one memory.
+      if (P.probes && !(here && S.level === 'memory')) P.probes.rotation.y -= dt * 0.18 * motion
       for (const mo of P.moons) {
         const frozen = here && (S.level === 'moon' || S.level === 'memory')
         if (!frozen) mo.pivot.rotation.y += dt * mo.speed * motion
@@ -2128,6 +2179,7 @@ class SolarImpl {
     if (k === 'planet') return { level: 'planet', owner: o.userData.id }
     if (k === 'moon') return { level: 'moon', owner: o.userData.planet, kind: o.userData.id }
     if (k === 'hole') return { level: 'planet', owner: o.userData.partner }
+    if (k === 'probe') return { level: 'memory', owner: o.userData.planet, kind: o.userData.memKind, id: o.userData.memId }
     if (k === 'sun' || k === 'nodule') return { level: 'galaxy' }
     if (k === 'points' && hit.item) {
       if (o.userData.ringOf) return { level: 'planet', owner: o.userData.ringOf }
@@ -2149,6 +2201,8 @@ class SolarImpl {
     else if (target.level === 'planet') this.flyPlanet(target.owner)
     else if (target.level === 'moon') this.flyMoon(target.owner, target.kind)
     else if (hit.item) this.flyMemory(hit.item, o)
+    // A probe has no dot of its own to fly to: the memory is selected (onPick) and the camera goes to its body.
+    else if (o.userData.kind === 'probe') this.flyPlanet(target.owner)
   }
 }
 

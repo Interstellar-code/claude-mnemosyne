@@ -516,26 +516,49 @@ export function sunBelt(galaxy: Pick<SolarGalaxy, 'globalLive'>, bodies: readonl
   return out
 }
 
+/**
+ * How many live memories the owner 'global' holds (the true globals): the store's own count from the
+ * reply's projects list, else (no such entry) the live owner-'global' rows of the shown list.
+ */
+export function globalOwnedOf(galaxy: Pick<SolarGalaxy, 'projects' | 'memories'>): number {
+  const entry = galaxy.projects.find(project => project.owner === 'global')
+  if (entry !== undefined) return Math.max(0, entry.liveCount)
+  return galaxy.memories.filter(memory => memory.owner === 'global' && memory.state === 'live').length
+}
+
+// ---- Probes: a project's memories shared with every project (0.14.0) ------------------
+
+/** The most probes drawn around one body; the rest are counted in each probe's tooltip. */
+export const PROBES_MAX = 48
+/** A body's probes: its live memories saved with scope 'global', in the reply's order (newest first), at most PROBES_MAX. */
+export type Probes = { memories: SolarMemory[]; total: number }
+
+export function probesOf(galaxy: Pick<SolarGalaxy, 'memories'>, owner: string): Probes {
+  if (owner === 'global') return { memories: [], total: 0 }
+  const all = galaxy.memories.filter(memory => memory.owner === owner && memory.scope === 'global' && memory.state === 'live')
+  return { memories: all.slice(0, PROBES_MAX), total: all.length }
+}
+
 /** A global memory's tie to a project: its pairs with that project's memories in the galaxy's links (map.linkScore applies). */
 export type BeltRelation = { owner: string; pairs: number; best: number }
 /**
- * One dot of the sun belt, keyed to its memory (0.13.0). `owner` is the project the row is saved in,
- * null for an owner-'global' row (a true global); `id` is null for a padding slot (a global row the
- * capped memory list does not carry). `related`: for a true global, the projects whose memories it
- * is close to, from the links that have 'global' on one side (best first, at most BELT_RELATED_MAX);
- * a project row shared with every project has none (it already sits on its own planet).
+ * One dot of the sun belt, keyed to its memory (0.13.0). Since 0.14.0 the belt holds only the true
+ * globals (owner 'global'), so `owner` is always null; a project's memory shared with every project is
+ * a probe around its own body instead (probesOf). `id` is null for a padding slot (a global row the
+ * capped memory list does not carry). `related`: the projects whose memories it is close to, from the
+ * links that have 'global' on one side (best first, at most BELT_RELATED_MAX).
  */
 export type BeltDot = { id: string | null; owner: string | null; related: BeltRelation[] }
 export const BELT_RELATED_MAX = 3
 
 /**
- * The sun belt as dots keyed to memories: `globalLive` long, like sunBelt. Order: the project rows
- * saved as global, by body (as sunBelt), then the true globals, those with relations first and grouped
- * by their closest project (so neighbouring dots tie to the same planet), then the padding slots.
- * Only live memories count; a relation to a project that is not a body is dropped.
+ * The sun belt as dots keyed to memories: one per true global (globalOwnedOf long). Order: those with
+ * relations first, grouped by their closest project (so neighbouring dots tie to the same planet), then
+ * the rest, then the padding slots. Only live memories count; a relation to a project that is not a body
+ * is dropped.
  */
-export function beltDots(galaxy: Pick<SolarGalaxy, 'globalLive' | 'memories' | 'links'>, bodies: readonly Body[]): BeltDot[] {
-  const total = Math.max(0, galaxy.globalLive)
+export function beltDots(galaxy: Pick<SolarGalaxy, 'projects' | 'memories' | 'links'>, bodies: readonly Body[]): BeltDot[] {
+  const total = globalOwnedOf(galaxy)
   const live = galaxy.memories.filter(memory => memory.state === 'live')
   const ownerOf = new Map(live.map(memory => [memory.id, memory.owner]))
   const bodyOrder = new Map(bodies.map((body, i) => [body.owner, i]))
@@ -561,10 +584,6 @@ export function beltDots(galaxy: Pick<SolarGalaxy, 'globalLive' | 'memories' | '
       .map(([owner, tie]) => ({ owner, pairs: tie.pairs, best: Math.round(tie.best * 100) / 100 }))
       .sort((x, y) => y.best - x.best || y.pairs - x.pairs || before(x.owner, y.owner))
       .slice(0, BELT_RELATED_MAX)
-  const shared: BeltDot[] = live
-    .filter(memory => memory.owner !== 'global' && memory.scope === 'global' && bodyOrder.has(memory.owner))
-    .sort((x, y) => (bodyOrder.get(x.owner) ?? 0) - (bodyOrder.get(y.owner) ?? 0) || before(x.id, y.id))
-    .map(memory => ({ id: memory.id, owner: memory.owner, related: [] }))
   const globals: BeltDot[] = live
     .filter(memory => memory.owner === 'global')
     .map(memory => ({ id: memory.id, owner: null, related: relatedOf(memory.id) }))
@@ -574,7 +593,7 @@ export function beltDots(galaxy: Pick<SolarGalaxy, 'globalLive' | 'memories' | '
       if (xo === undefined || yo === undefined) return xo === undefined ? (yo === undefined ? before(x.id ?? '', y.id ?? '') : 1) : -1
       return (bodyOrder.get(xo) ?? 0) - (bodyOrder.get(yo) ?? 0) || before(x.id ?? '', y.id ?? '')
     })
-  const out = [...shared, ...globals]
+  const out = [...globals]
   while (out.length < total) out.push({ id: null, owner: null, related: [] })
   out.length = Math.min(out.length, total)
   return out

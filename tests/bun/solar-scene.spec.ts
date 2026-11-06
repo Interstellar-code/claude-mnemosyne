@@ -151,6 +151,7 @@ function kindOf(tip: string[]): string {
   if (title.endsWith('(writer nodule)')) return 'nodule'
   if (title.startsWith('Tag: ')) return tip.length === 3 && tip[2] === 'click: light its memories' ? 'surface-tag' : 'craft-tag'
   if (title.startsWith('Global memory')) return 'sun-belt'
+  if (title.startsWith('Probe · ')) return 'probe'
   if (title.startsWith('Outer belt · ')) return 'outer-belt'
   if (title.startsWith('Black hole')) return 'black-hole'
   if (title.startsWith('Knowledge')) return 'satellite'
@@ -211,10 +212,31 @@ describe('MAPX.5 the C13 interface', () => {
 
 describe('MAPX.5 hover', () => {
   test('every hover kind: sun, nodule, planet, ring dot, sun belt, outer belt and black hole from afar', () => {
-    const r = rig()
+    // 0.14.0: the sun belt holds only true globals (owner global); the fixture's global-scope rows are all
+    // project memories (probes), so one owner-global memory is added for the belt.
+    const data = galaxy()
+    data.memories.push({ ...data.memories[0], id: 'global-belt-test', owner: 'global', scope: 'global', state: 'live', label: 'a global memory' })
+    const r = rig({ data })
     // The ring dots, belts and holes are small: look for each over the whole canvas.
     const seen = r.kinds(undefined, 6)
     for (const kind of ['sun', 'planet', 'ring-memory', 'sun-belt', 'black-hole']) expect([...seen.keys()]).toContain(kind)
+    r.scene.dispose()
+  })
+
+  test('0.14.0 probes: a project memory shared with every project circles its body; hover names it, a click selects it', () => {
+    const data = galaxy()
+    const r = rig({ data })
+    // One probe (three meshes: body and two panels) per live global-scope memory of a project in the list.
+    const probes = r.all(o => o.userData?.kind === 'probe')
+    const ids = new Set(probes.map(o => o.userData.memId))
+    const expected = new Set(data.memories.filter((m: any) => m.owner !== 'global' && m.scope === 'global' && m.state === 'live').map((m: any) => m.id))
+    expect(expected.size).toBeGreaterThan(0)
+    expect(ids).toEqual(expected)
+    const one = probes.find(o => o.userData.planet === MATRIX)
+    expect(one).toBeDefined()
+    expect(one.userData.tip[0]).toStartWith('Probe · ')
+    expect(one.userData.tip[1]).toContain('scope global')
+    expect(kindOf(one.userData.tip)).toBe('probe')
     r.scene.dispose()
   })
 

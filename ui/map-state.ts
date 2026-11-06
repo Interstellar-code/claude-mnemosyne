@@ -2065,7 +2065,7 @@ export const LEGEND_LEFT: readonly LegendRow[] = legend([
   ['#ffffff', 'Brightness', 'recalls'], ['#9fb0c8', 'Asteroid size', 'importance'], ['#F0E442', 'Halo · satellite', 'pinned · knowledge item'],
 ])
 export const LEGEND_RIGHT: readonly LegendRow[] = legend([
-  ['#56B4E9', 'Planet ring', 'its memories, from afar'], ['#8b93a3', 'Grey asteroid', 'kind unknown (planet belt)'], ['#ffe3a3', 'Sun belt', 'global memories'], ['#9ec4ff', 'Blue belt dot', 'project memory shared with all'], ['#ffd27a', 'Gold tether', 'global memory → close project'],
+  ['#56B4E9', 'Planet ring', 'its memories, from afar'], ['#8b93a3', 'Grey asteroid', 'kind unknown (planet belt)'], ['#ffe3a3', 'Sun belt', 'global memories'], ['#ffd27a', 'Gold tether', 'global memory → close project'], ['#9ec4ff', 'Probe', 'project memory shared with all'],
   ['#a99bd6', 'Outer belt', 'retired, expired, lapsed'], ['#000000', 'Black hole', 'similar across projects'], ['#E8B8FF', 'Energy line', 'older → newer; pulse /30 s'],
   ['#F0E442', 'Recall comet', 'planet → sun'], ['#56B4E9', 'Save comet', 'sun → planet'], ['#3DDC97', 'Update beam', 'green, writer → body'],
   ['#FF4D4D', 'Forget laser', 'red, writer → body'], ['#ecf1fa', 'Clouds · ice', 'needs review · idle 30 d'],

@@ -7,6 +7,9 @@ import fixture from './fixtures/galaxy-c11.json'
 import {
   BELT_RELATED_MAX,
   beltDots,
+  globalOwnedOf,
+  PROBES_MAX,
+  probesOf,
   buildBodies,
   STATION_MIN,
   describe as describeBody,
@@ -323,10 +326,11 @@ describe('labels, duplicates and the owner global', () => {
     expect(sunBelt(galaxyOf([]), [])).toEqual([])
   })
 
-  test('0.13.0 beltDots: each dot is a memory; true globals tie to the projects they are close to, shared project rows do not', () => {
-    const mem = (id: string, owner: string, scope = 'channel', state: SolarMemory['state'] = 'live'): SolarMemory => ({
-      id, owner, tags: [], recalls: 0, lastRecalled: null, created: null, label: id, source: 'claude-code', sourceInferred: false, kind: 'fact', scope, importance: 0.5, pinned: false, state, validUntil: null,
-    })
+  const mem = (id: string, owner: string, scope = 'channel', state: SolarMemory['state'] = 'live', kind = 'fact'): SolarMemory => ({
+    id, owner, tags: [], recalls: 0, lastRecalled: null, created: null, label: id, source: 'claude-code', sourceInferred: false, kind, scope, importance: 0.5, pinned: false, state, validUntil: null,
+  })
+
+  test('0.14.0 beltDots: the belt holds only the true globals, each a memory, tied to the projects they are close to', () => {
     const projects = [project('project-api-aaaa'), project('project-web-bbbb')]
     const g = galaxyOf(projects, {
       globalLive: 6,
@@ -345,24 +349,44 @@ describe('labels, duplicates and the owner global', () => {
     })
     const bodies = bodiesOf(g)
     const dots = beltDots(g, bodies)
-    // globalLive long: the shared row, the three live globals (the retired one is not a dot), then 2 padding slots
-    expect(dots).toHaveLength(6)
-    expect(dots[0]).toEqual({ id: 's1', owner: 'project-web-bbbb', related: [] })
+    // no 'global' project entry: the live owner-global rows of the list count (g1-g3; the retired gx is not a dot),
+    // and the shared project row s1 is not in the belt (it is a probe)
+    expect(globalOwnedOf(g)).toBe(3)
+    expect(dots.map(d => d.id)).toEqual(['g2', 'g1', 'g3'])
+    expect(dots.every(d => d.owner === null)).toBe(true)
     // g1 ties to both projects, best first; g2 to api; g3 to nothing (its only link is to a non-body)
-    const g1 = must(dots.find(d => d.id === 'g1'))
-    expect(g1.owner).toBeNull()
-    expect(g1.related).toEqual([{ owner: 'project-web-bbbb', pairs: 1, best: 0.9 }, { owner: 'project-api-aaaa', pairs: 2, best: 0.81 }])
+    expect(must(dots.find(d => d.id === 'g1')).related).toEqual([{ owner: 'project-web-bbbb', pairs: 1, best: 0.9 }, { owner: 'project-api-aaaa', pairs: 2, best: 0.81 }])
     expect(must(dots.find(d => d.id === 'g2')).related).toEqual([{ owner: 'project-api-aaaa', pairs: 1, best: 0.75 }])
     expect(must(dots.find(d => d.id === 'g3')).related).toEqual([])
-    expect(dots.find(d => d.id === 'gx')).toBeUndefined()
-    // tied globals come before untied ones, grouped by their closest project
-    expect(dots.slice(1, 4).map(d => d.id)).toEqual(['g2', 'g1', 'g3'])
-    expect(dots.slice(4)).toEqual([{ id: null, owner: null, related: [] }, { id: null, owner: null, related: [] }])
-    // capped at globalLive, at most BELT_RELATED_MAX ties, and the same answer in any input order
-    expect(beltDots({ ...g, globalLive: 2 }, bodies)).toHaveLength(2)
+    // with the store's own count (the 'global' entry of projects) larger than the list carries, padding slots follow
+    const counted = { ...g, projects: [...projects, project('global', { liveCount: 5 })] }
+    expect(globalOwnedOf(counted)).toBe(5)
+    const padded = beltDots(counted, bodiesOf(counted))
+    expect(padded).toHaveLength(5)
+    expect(padded.slice(3)).toEqual([{ id: null, owner: null, related: [] }, { id: null, owner: null, related: [] }])
+    // ...and a smaller one caps the belt
+    expect(beltDots({ ...g, projects: [...projects, project('global', { liveCount: 2 })] }, bodies)).toHaveLength(2)
     expect(BELT_RELATED_MAX).toBe(3)
     expect(beltDots({ ...g, memories: shuffled(g.memories) }, bodiesOf({ ...g, projects: shuffled(projects) }))).toEqual(dots)
     expect(beltDots(galaxyOf([]), [])).toEqual([])
+  })
+
+  test('0.14.0 probesOf: a body\'s live memories shared with every project, newest first, capped', () => {
+    const g = galaxyOf([project('project-api-aaaa')], {
+      memories: [
+        mem('p1', 'project-api-aaaa', 'global'), mem('p2', 'project-api-aaaa', 'global', 'live', 'decision'), mem('pr', 'project-api-aaaa', 'global', 'retired'),
+        mem('c1', 'project-api-aaaa', 'channel'), mem('o1', 'project-web-bbbb', 'global'), mem('gg', 'global', 'global'),
+      ],
+    })
+    expect(probesOf(g, 'project-api-aaaa')).toEqual({ memories: [must(g.memories[0]), must(g.memories[1])], total: 2 })
+    // the true globals are the belt's, never probes; an owner with none has none
+    expect(probesOf(g, 'global')).toEqual({ memories: [], total: 0 })
+    expect(probesOf(g, 'project-none-cccc')).toEqual({ memories: [], total: 0 })
+    const many = galaxyOf([], { memories: Array.from({ length: PROBES_MAX + 5 }, (_, i) => mem(`m${i}`, 'project-api-aaaa', 'global')) })
+    const capped = probesOf(many, 'project-api-aaaa')
+    expect(capped.memories).toHaveLength(PROBES_MAX)
+    expect(capped.total).toBe(PROBES_MAX + 5)
+    expect(capped.memories[0]?.id).toBe('m0')
   })
 
   test('a scope-global row still counts toward its own project\'s size', () => {

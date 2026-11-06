@@ -2,6 +2,11 @@
 
 Newest first. Each release is tagged `vX.Y.Z` on GitHub; the README and DESIGN.md describe the contracts.
 
+## 0.14.0 (probes)
+
+1. A project's memory shared with every project (scope global) is now a **probe** circling its own planet, station or starship, just outside the moons (up to 48 per body), instead of a blue dot in the sun belt. It belongs to that project and is visible to every project; the probe says so. Hover names the memory; a click selects it and flies to its body. The memory also stays an asteroid in its kind's swarm, so sizes and counts are unchanged.
+2. The sun belt holds only the true global memories (owner global, gold), with their tethers from 0.13.0. The store card shows "Global (sun belt)" and "Probes (shared from projects)" as two numbers. Legend row "Probe". No server, setting or engine change.
+
 ## 0.13.0 (global memories tied to their projects)
 
 1. The sun belt tells two things apart that it used to draw alike: a gold dot is a true global memory (saved for every project), a blue dot is a project's memory shared with every project (scope global; it also sits on its own planet). The store card's "Global (sun belt)" reads "N global · M shared from projects".

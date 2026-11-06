@@ -19,7 +19,7 @@ import type { ForceGraph3DInstance, GraphNode } from './vendor/map-lib.js'
 import { plainLabel } from './escape'
 import type { GalaxyHub, GalaxyStar, Vec3 } from './map-layout'
 import { simulate, toMapEvent, type MapEvent } from './map-live'
-import { ARRANGE, buildBodies, COLOURS, SEARCH_MIN, describe, kindLabel, kindOne, linkInfos, linksOf, searchResults, tagColour, type Body, type SolarGalaxy, type SolarMemory, type Target } from './solar-layout'
+import { ARRANGE, buildBodies, COLOURS, SEARCH_MIN, describe, globalOwnedOf, kindLabel, kindOne, linkInfos, linksOf, searchResults, tagColour, type Body, type SolarGalaxy, type SolarMemory, type Target } from './solar-layout'
 import {
   addMemory,
   announcement,
@@ -469,14 +469,12 @@ const numberOf = (value: unknown): string => (typeof value === 'number' && Numbe
 const plural = (n: number, one: string) => `${n} ${one}${n === 1 ? '' : 's'}`
 
 /**
- * The sun belt in two parts (0.13.0): true globals (owner 'global', live, in the shown list) and
- * project memories shared with every project (the rest of globalLive). Only the number when none is shared.
+ * 0.14.0: the sun belt holds the true globals (owner 'global'); the rest of globalLive (scope 'global'
+ * rows of projects) are probes around their own bodies.
  */
-function beltCount(galaxy: Pick<SolarGalaxy, 'globalLive' | 'memories'>): string {
-  const total = galaxy.globalLive ?? 0
-  const globals = Math.min(total, galaxy.memories.filter(memory => memory.owner === 'global' && memory.state === 'live').length)
-  const shared = total - globals
-  return shared > 0 ? `${globals} global · ${shared} shared from projects` : String(total)
+function beltCounts(galaxy: Pick<SolarGalaxy, 'globalLive' | 'memories' | 'projects'>): { globals: number; probes: number } {
+  const globals = globalOwnedOf(galaxy)
+  return { globals, probes: Math.max(0, (galaxy.globalLive ?? 0) - globals) }
 }
 
 /** Sums `{source count}` rows as "claude-code 12 · imported 2", most first; `inferred` adds "(n inferred)". */
@@ -499,7 +497,8 @@ function storeModel(bodies: readonly Body[], galaxy: SolarGalaxy): PanelModel {
       { label: 'Memories', value: `${live} live` },
       { label: 'Projects (planets)', value: String(bodies.filter(body => body.craft === null).length) },
       { label: 'Writers (nodules)', value: writerLine(galaxy.writers ?? []) },
-      { label: 'Global (sun belt)', value: beltCount(galaxy) },
+      { label: 'Global (sun belt)', value: String(beltCounts(galaxy).globals) },
+      { label: 'Probes (shared from projects)', value: String(beltCounts(galaxy).probes) },
       { label: 'Black-hole pairs', value: galaxy.links === undefined ? 'needs stored vectors' : `${infos.reduce((sum, link) => sum + link.pairs, 0)} (${plural(infos.length, 'link')})` },
       { label: 'Not live (outer belt)', value: states.length === 0 && galaxy.memories.length > 0 ? DASH : String(states.filter(memory => memory.state !== 'live').length) },
       { label: 'Busiest planet', value: busiest === undefined ? DASH : busiest.label },
