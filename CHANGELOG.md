@@ -2,6 +2,10 @@
 
 Newest first. Each release is tagged `vX.Y.Z` on GitHub; the README and DESIGN.md describe the contracts.
 
+## 0.12.1 (whose memory it is)
+
+1. The outside-agent server (`mnemosyne-mcp`) recalls every global-scope memory but changes only its own owner's, so `memory_update` and `memory_forget` of a project's memory from a server that runs as `global` answered a bare `not_found` for a memory recall had just shown. The reply now adds `owner` (the memory's owner) and a `hint` naming where it can be changed. The proxy reads the owner from the store, read-only; a missing id, an unreadable store or a memory of its own owner keeps the engine's reply as it was. The activity line still records the engine's own answer. The engine is unchanged.
+
 ## 0.12.0 (black-hole settings)
 
 1. The map's black holes follow two settings instead of fixed numbers: `map.linkScore` (how close a cross-project pair must be, 0.65 to 0.95, default 0.80) and `map.linkMinPairs` (how many such pairs two projects need, 1 to 50, default 2). The defaults draw what 0.11.0 drew. A small store often has no two projects with two pairs at 0.80 and so shows no black hole at all; `map.linkMinPairs` 1 or a lower `map.linkScore` brings them in. Both apply on the next map load.
