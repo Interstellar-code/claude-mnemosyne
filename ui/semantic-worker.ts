@@ -25,7 +25,7 @@ export type Vec3 = [number, number, number]
 export type MeaningInput = { id: string; owner?: string; json: string }
 export type MeaningRequest = { id: number; inputs: MeaningInput[] }
 export type MeaningNeighbour = { id: string; score: number }
-/** Two memories of different owners with a cosine at or above LINK_COSINE (MAPX.2, C11.3 `links`). */
+/** Two memories of different owners with a cosine at or above LINK_FLOOR (MAPX.2, C11.3 `links`; the server applies map.linkScore). */
 export type MeaningPair = { a: string; b: string; score: number }
 /**
  * The worker's first word on a request: it has taken the job off its queue and is about to
@@ -45,9 +45,13 @@ export const SEED = 0x5eed1a7
 // "Similar memories": the top neighbours at or above this cosine.
 export const TOP_K = 3
 export const MIN_COSINE = 0.65
-// MAPX.2: two projects' memories this close are a black hole's pair; at most this many
-// per pair of owners leave the worker, best first (the server keeps 50 after dropping the dead).
+// MAPX.2: two projects' memories this close are a black hole's pair by default (the
+// map.linkScore setting, 0.65 to 0.95). The worker reports every cross-owner pair down to
+// LINK_FLOOR, the setting's lowest value, so the server can apply any setting to a cached
+// layout; at most LINK_PAIRS_PER_OWNERS per pair of owners leave the worker, best first
+// (the server keeps 50 after dropping the dead and those under the setting).
 export const LINK_COSINE = 0.8
+export const LINK_FLOOR = 0.65
 export const LINK_PAIRS_PER_OWNERS = 200
 
 /** A mulberry32 stream from SEED: umap-js's `random`, so the embedding is reproducible. */
@@ -116,7 +120,7 @@ function cosine(a: readonly number[], b: readonly number[]): number {
  * of the work (review MEDIUM-2).
  *
  * MAPX.2: the same cosine also feeds `pairs`, every two vectors of different `owners`
- * (one entry per vector, by index) at or above LINK_COSINE, at most
+ * (one entry per vector, by index) at or above LINK_FLOOR, at most
  * LINK_PAIRS_PER_OWNERS per pair of owners, best first, ties by the earlier index.
  * Without `owners` there are no pairs.
  */
@@ -131,7 +135,7 @@ export function neighbourPass(
     for (let j = 0; j < vectors.length; j++) {
       if (j === i) continue
       const score = cosine(vector, vectors[j] ?? [])
-      if (j > i && score >= LINK_COSINE) {
+      if (j > i && score >= LINK_FLOOR) {
         const other = owners[j]
         if (owner !== undefined && other !== undefined && owner !== other) {
           const key = owner < other ? `${owner}\u0000${other}` : `${other}\u0000${owner}`

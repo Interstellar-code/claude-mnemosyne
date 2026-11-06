@@ -1603,6 +1603,10 @@ C10.3: the engine's trigger `trim_validations_to_3` keeps only the newest 3 `mem
 
 On the solar-system map a plain folder (no git repo) with at least `map.stationMin` live memories is a space station and one with fewer a starship (default 50, range 2 to 1000, applies now). The galaxy reply carries the value. Git repos are always planets.
 
+### The black-hole settings (map.linkScore, map.linkMinPairs; 0.12.0)
+
+C11.3's link rule is two settings, read per call by `linkRuleOf` in `ui/server.ts`: a pair counts when its cosine is at least `map.linkScore` (default 0.80 = `GALAXY_LINK_SCORE` = `LINK_COSINE`, range 0.65 to 0.95), and two projects are a black hole with at least `map.linkMinPairs` such pairs (default 2 = `GALAXY_LINK_MIN_PAIRS`, range 1 to 50). The worker reports every cross-owner pair down to `LINK_FLOOR` (0.65, the setting's minimum; still at most `LINK_PAIRS_PER_OWNERS` = 200 per owner pair, best first) and `linksOf` filters by the setting, so a changed setting applies to the cached layout with no new run. Lowering what the worker sends from 0.80 to 0.65 changed the cache's content, hence `MEANING_VERSION` 3. Global has no body, so a pair with a global memory is still never drawn (`linkInfos` in `ui/solar-layout.ts`).
+
 ## v0.8.5: the Settings tab and config.json
 
 `README.md` describes the tab for a person; this section records the contracts. The plan is `docs/plans/mnemosyne-settings.md` (phases CFG, WIRE, SRV, UI, REL85). `engine/` is not touched.

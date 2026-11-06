@@ -15,12 +15,15 @@ import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } 
 import { join } from 'node:path'
 import {
   GALAXY_LIMIT,
+  GALAXY_LINK_MIN_PAIRS,
+  GALAXY_LINK_SCORE,
   MEANING_CACHE,
   MEANING_VERSION,
   MIN_MEANING_VECTORS,
   MeaningRunner,
   meaningKey,
   meaningLevel,
+  linksOf,
   scaleMeaning,
   meaningRadius,
   readVectorIndex,
@@ -28,7 +31,8 @@ import {
   startServer,
 } from '../../ui/server'
 import type { ServerOptions, Started } from '../../ui/server'
-import { LINK_COSINE, LINK_PAIRS_PER_OWNERS, MIN_COSINE, TOP_K, meaningOf, neighbourPass, neighboursOf, parseVectors } from '../../ui/semantic-worker'
+import { LINK_COSINE, LINK_FLOOR, LINK_PAIRS_PER_OWNERS, MIN_COSINE, TOP_K, meaningOf, neighbourPass, neighboursOf, parseVectors } from '../../ui/semantic-worker'
+import { defaults as settingDefaults, findSetting } from '../../hooks/settings'
 import { ROOT, tempDir } from './helpers'
 
 const MODEL = 'bge-small-en-v1.5'
@@ -1019,23 +1023,29 @@ describe('MAPX.2.a5: cross-owner pairs on the worker’s own functions', () => {
   // `n` vectors close to the x axis; a larger `tilt` is a little further from it
   const near = (n: number, tilt: number) => Array.from({ length: n }, (_, i) => unit([1, tilt * (i + 1), 0, 0]))
 
-  test('LINK_COSINE is 0.80 and 200 pairs leave the worker per pair of owners', () => {
+  test('LINK_COSINE (the default link score) is 0.80, the worker floor 0.65, and 200 pairs leave the worker per pair of owners', () => {
     expect(LINK_COSINE).toBe(0.8)
+    expect(LINK_FLOOR).toBe(0.65)
+    // the floor is the lowest map.linkScore, so any setting can be applied to a cached layout
+    expect(findSetting('map.linkScore')).toMatchObject({ default: LINK_COSINE, min: LINK_FLOOR })
     expect(LINK_PAIRS_PER_OWNERS).toBe(200)
   })
 
-  test('only vectors of two different owners at or above 0.80 pair; the same owner, a lower cosine and a missing owner do not', () => {
+  test('only vectors of two different owners at or above the floor pair; the same owner, a lower cosine and a missing owner do not', () => {
     const vectors = [unit([1, 0, 0, 0]), unit([1, 0.1, 0, 0]), unit([1, 0.2, 0, 0]), unit([0, 1, 0, 0]), unit([1, 0.3, 0, 0])]
     // 0 and 1 share an owner; 2 is another; 3 is orthogonal to the rest; 4 has no owner
     const { pairs } = neighbourPass(vectors, ['a', 'a', 'b', 'b', undefined])
     const found = pairs.map(pair => [pair.i, pair.j]).sort()
     expect(found).toEqual([[0, 2], [1, 2]])
-    for (const pair of pairs) expect(pair.score).toBeGreaterThanOrEqual(LINK_COSINE)
+    for (const pair of pairs) expect(pair.score).toBeGreaterThanOrEqual(LINK_FLOOR)
     // exactly the floor counts
-    const edge = neighbourPass([unit([1, 0]), unit([LINK_COSINE, Math.sqrt(1 - LINK_COSINE ** 2)])], ['a', 'b'])
+    const edge = neighbourPass([unit([1, 0]), unit([LINK_FLOOR, Math.sqrt(1 - LINK_FLOOR ** 2)])], ['a', 'b'])
     expect(edge.pairs).toHaveLength(1)
-    const below = neighbourPass([unit([1, 0]), unit([LINK_COSINE - 0.001, Math.sqrt(1 - (LINK_COSINE - 0.001) ** 2)])], ['a', 'b'])
+    const below = neighbourPass([unit([1, 0]), unit([LINK_FLOOR - 0.001, Math.sqrt(1 - (LINK_FLOOR - 0.001) ** 2)])], ['a', 'b'])
     expect(below.pairs).toEqual([])
+    // a pair between the floor and the default score leaves the worker (the server decides)
+    const between = neighbourPass([unit([1, 0]), unit([0.7, Math.sqrt(1 - 0.7 ** 2)])], ['a', 'b'])
+    expect(between.pairs).toHaveLength(1)
   })
 
   test('each unordered pair of vectors is listed once, whichever owner comes first', () => {
@@ -1085,7 +1095,7 @@ describe('MAPX.2.a5: cross-owner pairs on the worker’s own functions', () => {
       const a = inputs.find(input => input.id === pair.a)!
       const b = inputs.find(input => input.id === pair.b)!
       expect(a.owner).not.toBe(b.owner)
-      expect(pair.score).toBeGreaterThanOrEqual(LINK_COSINE)
+      expect(pair.score).toBeGreaterThanOrEqual(LINK_FLOOR)
     }
     expect(meaningOf(inputs.map(({ id, json }) => ({ id, json }))).pairs).toEqual([])
   })
@@ -1108,9 +1118,10 @@ describe('MAPX.2.a5: links through the real server, and the cache under the bump
     temp.dispose()
   })
 
-  test('MEANING_VERSION is bumped, so a version 1 cache is a miss', () => {
-    expect(MEANING_VERSION).toBe(2)
+  test('MEANING_VERSION is bumped, so a version 1 or 2 cache is a miss', () => {
+    expect(MEANING_VERSION).toBe(3)
     expect(meaningKey(MODEL, ['a'], 'x', 1)).not.toBe(meaningKey(MODEL, ['a'], 'x'))
+    expect(meaningKey(MODEL, ['a'], 'x', 2)).not.toBe(meaningKey(MODEL, ['a'], 'x'))
   })
 
   test('links name two projects, with at most 50 pairs, best first, older memory first, in one cluster each', async () => {
@@ -1135,10 +1146,10 @@ describe('MAPX.2.a5: links through the real server, and the cache under the bump
     }
   }, 60_000)
 
-  test('meaning.json holds the pairs under the version 2 key', () => {
+  test('meaning.json holds the pairs under the version 3 key', () => {
     const stored = JSON.parse(readFileSync(cache, 'utf8')) as { key: string; meaning: { pairs: { a: string; b: string; score: number }[] } }
     const index = indexOf(store)
-    expect(stored.key).toBe(meaningKey(MODEL, index.ids, index.newest, 2))
+    expect(stored.key).toBe(meaningKey(MODEL, index.ids, index.newest, 3))
     expect(stored.key).not.toBe(meaningKey(MODEL, index.ids, index.newest, 1))
     expect(Array.isArray(stored.meaning.pairs)).toBe(true)
     expect(stored.meaning.pairs.length).toBeGreaterThan(50)
@@ -1170,6 +1181,57 @@ describe('MAPX.2.a5: links through the real server, and the cache under the bump
     expect(body.meaning).toBe(true)
     expect(body.links?.[0]?.pairs.length).toBeGreaterThan(0)
     const stored = JSON.parse(readFileSync(cache, 'utf8')) as { key: string }
-    expect(stored.key).toBe(meaningKey(MODEL, index.ids, index.newest, 2))
+    expect(stored.key).toBe(meaningKey(MODEL, index.ids, index.newest, 3))
   }, 60_000)
+})
+
+describe('map.linkScore and map.linkMinPairs: the black-hole rule is applied per call', () => {
+  // Pairs as the worker reports them (down to the floor); the rows are live, in three owners.
+  const temp = tempDir('semantic-link-rule')
+  const store = join(temp.dir, 'store')
+  let db: Database
+  const NOW = '2026-06-01T00:00:00.000Z'
+  beforeAll(() => {
+    mkdirSync(store, { recursive: true })
+    db = new Database(join(store, 'mnemopi.db'))
+    db.run('CREATE TABLE working_memory (id TEXT PRIMARY KEY, session_id TEXT, timestamp TEXT, superseded_by TEXT, valid_until TEXT)')
+    const rows: [string, string, string][] = [
+      ['a1', 'project-a', '2026-01-01'], ['a2', 'project-a', '2026-01-02'], ['b1', 'project-b', '2026-01-03'],
+      ['b2', 'project-b', '2026-01-04'], ['c1', 'project-c', '2026-01-05'],
+    ]
+    for (const [id, owner, day] of rows) db.run('INSERT INTO working_memory VALUES (?, ?, ?, NULL, NULL)', [id, owner, `${day}T00:00:00.000Z`])
+  })
+  afterAll(() => {
+    db?.close()
+    temp.dispose()
+  })
+  const pairs = [
+    { a: 'a1', b: 'b1', score: 0.83 },
+    { a: 'a2', b: 'b2', score: 0.72 },
+    { a: 'a1', b: 'c1', score: 0.81 },
+  ]
+  const first = new Map([['project-a', 1], ['project-b', 2], ['project-c', 3]])
+  const owners = (links: { a: string; b: string }[]) => links.map(link => `${link.a}+${link.b}`).sort()
+
+  test('the defaults (0.80, 2 pairs) draw nothing here: each owner pair has one pair at 0.80 or more', () => {
+    expect(GALAXY_LINK_SCORE).toBe(0.8)
+    expect(GALAXY_LINK_MIN_PAIRS).toBe(2)
+    expect(linksOf(db, pairs, first, NOW)).toEqual([])
+  })
+
+  test('1 pair needed draws both owner pairs that have one pair at 0.80 or more', () => {
+    expect(owners(linksOf(db, pairs, first, NOW, { minPairs: 1, minScore: 0.8 }))).toEqual(['project-a+project-b', 'project-a+project-c'])
+  })
+
+  test('a lower score lets the 0.72 pair count: a and b reach 2 pairs', () => {
+    const links = linksOf(db, pairs, first, NOW, { minPairs: 2, minScore: 0.7 })
+    expect(owners(links)).toEqual(['project-a+project-b'])
+    expect(links[0]!.pairs.map(pair => pair.score)).toEqual([0.83, 0.72])
+  })
+
+  test('the settings resolve with their defaults and ranges', () => {
+    expect(settingDefaults().map).toMatchObject({ linkScore: 0.8, linkMinPairs: 2 })
+    expect(findSetting('map.linkMinPairs')).toMatchObject({ type: 'integer', default: 2, min: 1, max: 50, applies: 'now' })
+    expect(findSetting('map.linkScore')).toMatchObject({ type: 'number', default: 0.8, min: 0.65, max: 0.95, applies: 'now' })
+  })
 })

@@ -2,6 +2,12 @@
 
 Newest first. Each release is tagged `vX.Y.Z` on GitHub; the README and DESIGN.md describe the contracts.
 
+## 0.12.0 (black-hole settings)
+
+1. The map's black holes follow two settings instead of fixed numbers: `map.linkScore` (how close a cross-project pair must be, 0.65 to 0.95, default 0.80) and `map.linkMinPairs` (how many such pairs two projects need, 1 to 50, default 2). The defaults draw what 0.11.0 drew. A small store often has no two projects with two pairs at 0.80 and so shows no black hole at all; `map.linkMinPairs` 1 or a lower `map.linkScore` brings them in. Both apply on the next map load.
+2. The semantic worker now reports cross-project pairs down to 0.65 (`LINK_FLOOR`, the lowest `map.linkScore`), and the server applies the setting to the cached layout, so changing it needs no new layout run. `MEANING_VERSION` is 3: the first map load after the update lays out once more and rewrites `meaning.json`.
+3. Links to and from global memories are still not drawn (global has no planet). The engine is unchanged; no `/mnemosyne-setup` is needed.
+
 ## 0.11.0 (duplicate flag on memory_remember)
 
 1. The `memory_remember` reply carries `duplicate` (claude-mnemosyne#44, for Switch): `true` when this owner already held exactly the same text, `false` for a new memory. `status` stays `stored` and `memory_id` is the existing id, so nothing that reads the reply today changes.

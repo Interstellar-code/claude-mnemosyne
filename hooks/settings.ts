@@ -60,7 +60,7 @@ export interface Settings {
   expiry: { contextDays: number }
   tools: Record<ToolName, boolean> & { externalAllow: ToolName[] }
   storage: { activityLogMaxBytes: number; backupsKeep: number }
-  map: { stationMin: number }
+  map: { stationMin: number; linkScore: number; linkMinPairs: number }
 }
 
 /** A problem with the config file or one of its keys. `key` is a dotted setting id, or `config.json` for the file itself. The reason never holds a value. */
@@ -160,6 +160,10 @@ export const SETTINGS: readonly SettingDef[] = [
     help: 'A backup keeps this many of the newest files and removes the older ones.' },
   { key: 'map.stationMin', ref: 'V1', group: 'map', label: 'Space station from', applies: 'now', type: 'integer', default: 50, min: 2, max: 1000,
     help: 'On the map, a plain folder (no git repo) with at least this many live memories is drawn as a space station; one with fewer is a starship. Git repos are always planets.' },
+  { key: 'map.linkScore', ref: 'V2', group: 'map', label: 'Black hole: closeness', applies: 'now', type: 'number', default: 0.8, min: 0.65, max: 0.95,
+    help: 'How close in meaning (0.65 to 0.95) a memory of one project must be to a memory of another for the pair to count toward a black hole between them. Lower draws more links. Needs the embeddings.' },
+  { key: 'map.linkMinPairs', ref: 'V3', group: 'map', label: 'Black hole: pairs needed', applies: 'now', type: 'integer', default: 2, min: 1, max: 50,
+    help: 'How many such pairs two projects need before the map draws a black hole between them. 1 draws a link from a single close pair.' },
 ]
 
 const BY_KEY: ReadonlyMap<string, SettingDef> = new Map(SETTINGS.map(setting => [setting.key, setting]))

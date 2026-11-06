@@ -1064,8 +1064,8 @@ export const MIN_MEANING_VECTORS = 10
 // The cached meaning layout, under the dashboard's root (MNEMOSYNE_ROOT), owner-only.
 export const MEANING_CACHE = 'meaning.json'
 // Bumped when the layout's maths or constants change: an older cache file is then a miss
-// instead of a stale layout (review LOW-1).
-export const MEANING_VERSION = 2
+// instead of a stale layout (review LOW-1). 3: pairs go down to LINK_FLOOR (map.linkScore).
+export const MEANING_VERSION = 3
 // A run that has not answered by now is dead: reject it, terminate the worker, start fresh.
 export const MEANING_RUN_TIMEOUT_MS = 30_000
 // How long a galaxy request waits for a cold layout before it answers the topic map instead.
@@ -1080,7 +1080,7 @@ export type Meaning = {
   meaning: boolean
   positions: Record<string, [number, number, number]>
   similar: Record<string, MeaningNeighbour[]>
-  // MAPX.2: every cross-owner pair at or above 0.80 the worker found, at most 200 per two owners.
+  // MAPX.2: every cross-owner pair at or above LINK_FLOOR (0.65) the worker found, at most 200 per two owners.
   pairs?: MeaningPair[]
 }
 export const NO_MEANING: Meaning = { meaning: false, positions: {}, similar: {} }
@@ -1450,8 +1450,11 @@ export const ACTIVITY_DAILY_FILE = 'activity-daily.json'
 // The most tags one planet carries, and the most pairs one link carries (C11.2, C11.3).
 export const GALAXY_PLANET_TAGS = 40
 export const GALAXY_LINK_PAIRS = 50
-// A pair of projects is a black hole only with this many pairs between them.
+// A pair of projects is a black hole only with this many pairs between them, each at least this
+// close: the defaults of the map.linkMinPairs and map.linkScore settings (read per call).
 export const GALAXY_LINK_MIN_PAIRS = 2
+export const GALAXY_LINK_SCORE = 0.8
+export type LinkRule = { minPairs: number; minScore: number }
 // The tally answers "how often in the last 30 days" only once it reaches back this far.
 export const ACTIVITY_WINDOW_DAYS = 30
 const DAY_MS = 86_400_000
@@ -1532,11 +1535,19 @@ function medianOf(values: number[]): number | null {
 }
 
 /**
- * The black holes (C11.3): the worker's cross-owner pairs, kept only when both memories are
- * live, grouped by the two projects, best first, at most GALAXY_LINK_PAIRS each, and only
- * for two projects with at least GALAXY_LINK_MIN_PAIRS. `a` is the project saved first.
+ * The black holes (C11.3): the worker's cross-owner pairs at or above `rule.minScore`
+ * (map.linkScore), kept only when both memories are live, grouped by the two projects, best
+ * first, at most GALAXY_LINK_PAIRS each, and only for two projects with at least
+ * `rule.minPairs` (map.linkMinPairs). `a` is the project saved first.
  */
-function linksOf(db: Database, pairs: readonly MeaningPair[], firstSaved: ReadonlyMap<string, number>, now: string): GalaxyLink[] {
+export function linksOf(
+  db: Database,
+  allPairs: readonly MeaningPair[],
+  firstSaved: ReadonlyMap<string, number>,
+  now: string,
+  rule: LinkRule = { minPairs: GALAXY_LINK_MIN_PAIRS, minScore: GALAXY_LINK_SCORE },
+): GalaxyLink[] {
+  const pairs = allPairs.filter(pair => pair.score >= rule.minScore)
   const wanted = [...new Set(pairs.flatMap(pair => [pair.a, pair.b]))]
   const rows = new Map<string, { owner: string; timestamp: string }>()
   for (let from = 0; from < wanted.length; from += VECTOR_CHUNK) {
@@ -1561,7 +1572,7 @@ function linksOf(db: Database, pairs: readonly MeaningPair[], firstSaved: Readon
   }
   const links: GalaxyLink[] = []
   for (const group of groups.values()) {
-    if (group.pairs.length < GALAXY_LINK_MIN_PAIRS) continue
+    if (group.pairs.length < rule.minPairs) continue
     group.pairs.sort((p, q) => q.score - p.score || (p.older < q.older ? -1 : p.older > q.older ? 1 : p.newer < q.newer ? -1 : p.newer > q.newer ? 1 : 0))
     const first = (owner: string) => firstSaved.get(owner) ?? Number.POSITIVE_INFINITY
     const swap = first(group.b) < first(group.a)
@@ -1592,6 +1603,11 @@ export type GalaxyOptions = {
  */
 // The map's station threshold (map.stationMin in config.json, read per call; the default without a root).
 const stationMinOf = (root: string | undefined) => (root === undefined ? settingDefaults().map.stationMin : readConfig(root).map.stationMin)
+// The black-hole rule (map.linkScore and map.linkMinPairs, read per call; the defaults without a root).
+const linkRuleOf = (root: string | undefined): LinkRule => {
+  const map = root === undefined ? settingDefaults().map : readConfig(root).map
+  return { minPairs: map.linkMinPairs, minScore: map.linkScore }
+}
 
 export function galaxyLevel(db: Database | null, limit = GALAXY_LIMIT, meaning: Meaning = NO_MEANING, options: GalaxyOptions = {}): Answer {
   if (db === null) return { status: 200, body: { projects: [], memories: [], knowledge: [], writers: [], globalLive: 0, stationMin: stationMinOf(options.root), meaning: false, total: 0, shown: 0 } }
@@ -1803,7 +1819,7 @@ export function galaxyLevel(db: Database | null, limit = GALAXY_LIMIT, meaning: 
     }
   }
   // Links need vectors: absent without them, and below the floor the worker does not run.
-  const links = meaning.meaning ? linksOf(db, meaning.pairs ?? [], firstSaved, now) : undefined
+  const links = meaning.meaning ? linksOf(db, meaning.pairs ?? [], firstSaved, now, linkRuleOf(options.root)) : undefined
   return {
     status: 200,
     body: { projects, memories, knowledge, writers, globalLive, stationMin: stationMinOf(options.root), ...(links ? { links } : {}), meaning: meaning.meaning, total, shown: memories.length },

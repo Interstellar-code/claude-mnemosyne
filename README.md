@@ -323,7 +323,7 @@ The mapping (how a thing on the map comes from the store):
 | Planet asteroid belt | memories of kind `unknown` (old untyped rows; a dwarf's memories) |
 | Sun asteroid belt | global memories (scope global) |
 | Outer galaxy belt | retired, expired, lapsed memories (faded; Restore brings them back) |
-| Black-hole pair | similar memories across two projects (2+ pairs, cosine ≥ 0.80) |
+| Black-hole pair | similar memories across two projects (2+ pairs, cosine ≥ 0.80 by default; the Settings tab's `map.linkMinPairs` and `map.linkScore`) |
 | Satellites | the knowledge items mined from the selected memory |
 | Recall comet / save comet | a live recall (planet → sun nodule, gold) / a live save (sun nodule → planet, blue) |
 | Update beam / forget laser | a live update (green beam) / a live forget (red laser; the memory fades) |
@@ -461,6 +461,8 @@ Defaults and ranges are the ones in the schema (`hooks/settings.ts`); a spec (`t
 | `storage.activityLogMaxBytes` | 1048576 | 262144 to 16777216 | now | The activity log rolls over to its one backup file past this many bytes (1 MiB by default; 256 KiB to 16 MiB). |
 | `storage.backupsKeep` | 10 | 3 to 50 | now | A backup keeps this many of the newest files and removes older ones. |
 | `map.stationMin` | 50 | 2 to 1000 | now | On the map, a plain folder with at least this many live memories is a space station; with fewer, a starship. Git repos are always planets. |
+| `map.linkScore` | 0.8 | 0.65 to 0.95 | now | How close in meaning a memory of one project must be to a memory of another for the pair to count toward a black hole between them. Lower draws more links. Needs the embeddings. |
+| `map.linkMinPairs` | 2 | 1 to 50 | now | How many such pairs two projects need before the map draws a black hole between them. A small store with few close pairs may show none until this is 1. |
 
 Rules between settings are checked together: `guard.minLength` must stay below `guard.warnLength`, and that below `guard.maxLength`; `recall.defaultLimit` cannot be above `recall.maxLimit`; the three ranking weights cannot all be 0, and they are scaled to add up to 1. A change that would break a rule is refused and the message names the setting.
 
