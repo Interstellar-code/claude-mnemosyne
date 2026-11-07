@@ -13,20 +13,25 @@
 // always-on dashboard's loop starts the server), elsewhere through nohup. Before
 // it starts, the server leaves <root>/ui-handoff.json (its port and token,
 // 0600, valid 30 minutes); the restarted server takes them over once
-// (takeHandoff), so the open page reloads into the new version.
+// (takeHandoff), so the open page reloads into the new version. A run whose
+// updater died (its pid gone, or no pid a minute after the start) is reported
+// as failed (settle), so the button never waits 30 minutes on a dead start.
 import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
-import { compareVersions, FINAL_STATES, latestReleaseTag, nextStatus, readStatus, REPO, type UpdateStatus } from '../bin/update'
+import { compareVersions, FINAL_STATES, HANDOFF_FILE, latestReleaseTag, nextStatus, readStatus, REPO, type UpdateStatus } from '../bin/update'
+
+export { HANDOFF_FILE }
 
 export const UPDATE_CHECK_FILE = 'update-check.json'
 export const UPDATE_STATUS_FILE = 'update-status.json'
 export const UPDATE_LOG_FILE = 'update.log'
-export const HANDOFF_FILE = 'ui-handoff.json'
 export const CHECK_EVERY_MS = 24 * 60 * 60 * 1000
 export const CHECK_TIMEOUT_MS = 5000
 export const HANDOFF_MS = 30 * 60 * 1000
 // A run whose progress file has not moved for this long is taken as dead (a new one may start).
 export const STALE_RUN_MS = 30 * 60 * 1000
+// A start the updater never answered (no pid written) counts as dead after this long.
+export const LAUNCH_GRACE_MS = 60 * 1000
 
 export type Latest = { tag: string; plugin: string; engine: string | null }
 export type CheckCache = { checked: string; latest: Latest | null }
@@ -45,6 +50,8 @@ export type UpdateDeps = {
   now?: () => number
   /** Starts the updater detached; resolves once it was handed to the OS. */
   launch?: (command: LaunchCommand) => Promise<void>
+  /** Whether an updater pid still runs (tests fake it). */
+  alive?: (pid: number) => boolean
 }
 
 export type LaunchCommand = { bun: string; script: string; args: string[]; cwd: string; log: string }
@@ -116,9 +123,33 @@ export function updaterHome(root: string, pluginRoot: string) {
   return home
 }
 
-/** True while a run is under way: a progress file not final and touched within STALE_RUN_MS. */
-export function running(status: UpdateStatus | undefined, now: number) {
-  return status !== undefined && !FINAL_STATES.includes(status.state) && now - Date.parse(status.updated) < STALE_RUN_MS
+/** True when process `pid` exists (EPERM: it exists but is not ours). */
+export function pidAlive(pid: number) {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM'
+  }
+}
+
+/**
+ * The progress file as the page should see it: a run that is not final but whose
+ * updater is gone (its pid dead, no pid a minute after the start, or no change
+ * for 30 minutes) is reported as failed, so the button does not sit on "starting".
+ */
+export function settle(status: UpdateStatus | undefined, now: number, alive: (pid: number) => boolean = pidAlive): UpdateStatus | undefined {
+  if (status === undefined || FINAL_STATES.includes(status.state)) return status
+  const quiet = now - Date.parse(status.updated)
+  const dead = status.pid !== undefined ? !alive(status.pid) : quiet >= LAUNCH_GRACE_MS
+  if (!dead && quiet < STALE_RUN_MS) return status
+  return { ...status, state: 'failed', lines: [...status.lines, 'The updater stopped without finishing. Its output is in ~/.claude/mnemosyne/update.log; the previous version keeps working unless the lines above say otherwise.'] }
+}
+
+/** True while a run is under way (see settle). */
+export function running(status: UpdateStatus | undefined, now: number, alive: (pid: number) => boolean = pidAlive) {
+  const settled = settle(status, now, alive)
+  return settled !== undefined && !FINAL_STATES.includes(settled.state)
 }
 
 // ---- the detached start ----
@@ -186,17 +217,22 @@ export function updateRoutes(input: { root: string; pluginRoot: string; plugin: 
   const statusFile = join(root, UPDATE_STATUS_FILE)
   const home = () => updaterHome(root, input.pluginRoot)
 
+  /** The progress, settled; a run that ended while this server stayed up leaves no use for the handoff. */
+  function current() {
+    const status = settle(readStatus(statusFile), now(), deps.alive) ?? null
+    if (status && FINAL_STATES.includes(status.state)) rmSync(join(root, HANDOFF_FILE), { force: true })
+    return status
+  }
+
   async function info(): Promise<Answer> {
     const latest = await latestRelease(root, deps)
-    const status = readStatus(statusFile) ?? null
-    // A run that ended while this server stayed up leaves no use for the handoff.
-    if (status && FINAL_STATES.includes(status.state)) rmSync(join(root, HANDOFF_FILE), { force: true })
+    const status = current()
     const body: UpdateInfo = { current: { plugin: input.plugin, engine: input.engine }, latest, available: updateAvailable(input.plugin, latest), updatable: home() !== undefined, status }
     return { status: 200, body }
   }
 
   function status(): Answer {
-    return { status: 200, body: { status: readStatus(statusFile) ?? null } }
+    return { status: 200, body: { status: current() } }
   }
 
   async function start(text: string): Promise<Answer> {
@@ -209,7 +245,7 @@ export function updateRoutes(input: { root: string; pluginRoot: string; plugin: 
     if (typeof body !== 'object' || body === null || Array.isArray(body)) return { status: 400, body: { error: 'the body must be an object' } }
     const updaterHomeDir = home()
     if (updaterHomeDir === undefined) return { status: 409, body: { error: 'This dashboard is not the Claude Desktop install under ~/.claude/mnemosyne/plugin; update it with `claude plugin update` instead.' } }
-    if (running(readStatus(statusFile), now())) return { status: 409, body: { error: 'An update is already running.' } }
+    if (running(readStatus(statusFile), now(), deps.alive)) return { status: 409, body: { error: 'An update is already running.' } }
     const latest = await latestRelease(root, deps)
     if (!updateAvailable(input.plugin, latest) || latest === null) return { status: 409, body: { error: 'There is no newer release to install.' } }
     const begun = nextStatus(undefined, { state: 'starting', lines: [`Starting the update to ${latest.tag} ...`] }, new Date(now()))!

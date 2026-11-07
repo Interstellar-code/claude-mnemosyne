@@ -3,14 +3,21 @@
 // network, no process listing, no install. Release staging runs against a fake
 // runner and a fake fetch in a temp folder.
 import { describe, expect, test } from 'bun:test'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { EMBEDDINGS_CACHE_DIR } from '../../hooks/engine'
 import { cmdWrapper } from '../../hooks/launcher'
 import { slashes } from '../../hooks/owner'
 import { cliOf } from '../../bin/install-engine'
 import {
+  fileList,
   isSwapFailure,
+  pluginCopyProblems,
+  pruneStaging,
+  REQUIRED_PLUGIN_FILES,
+  runStagingDir,
+  swapFolder,
+  writeLauncher,
   lockedMessage,
   nextStatus,
   classifyProcesses,
@@ -43,7 +50,7 @@ import { tempDir } from './helpers'
 
 const HOME = join(tempDir('update-home').dir, 'home')
 const layout = homeLayout(HOME, join(HOME, 'AppData', 'Roaming'))
-const NONE = { chats: [], dashboard: [] }
+const NONE = { chats: [], dashboard: [], others: [] }
 
 describe('parseArgs', () => {
   test('defaults and flags', () => {
@@ -89,12 +96,17 @@ function processes(): Proc[] {
     { pid: 20, ppid: 2, command: proxy },
     { pid: 21, ppid: 20, command: engine },
     { pid: 30, ppid: 3, command: `powershell.exe -WindowStyle Hidden -File "${join(layout.uiDir, 'run-ui.ps1')}"` },
-    { pid: 31, ppid: 4, command: `bun.exe "${join(layout.plugin, 'ui', 'server.ts')}" --hold` },
+    // start-ui.cmd's cmd.exe: its current folder is the plugin copy, and its command line names only start-ui.cmd.
+    { pid: 34, ppid: 4, command: `"C:\\WINDOWS\\System32\\cmd.exe" /d /c ""${join(layout.uiDir, 'start-ui.cmd')}""` },
+    { pid: 31, ppid: 34, command: `bun.exe "${join(layout.plugin, 'ui', 'server.ts')}" --hold` },
     { pid: 32, ppid: 31, command: `bun.exe ${join(layout.plugin, 'ui', 'server.ts')}` },
     { pid: 33, ppid: 32, command: engine },
+    { pid: 35, ppid: 32, command: 'git.exe status' },
     { pid: 40, ppid: 5, command: engine },
     { pid: 50, ppid: 6, command: 'bun --watch C:\\code\\claude-mnemosyne\\ui\\server.ts' },
     { pid: 60, ppid: 7, command: `bun ${slashes(cliOf(`${layout.engine}.next`))} mcp` },
+    { pid: 70, ppid: 8, command: `"C:\\Program Files\\Editor\\editor.exe" "${join(layout.plugin, 'ui', 'app.ts')}"` },
+    { pid: 80, ppid: 9, command: `bun "${join(layout.plugin, 'bin', 'update.ts')}"` },
   ]
 }
 
@@ -107,8 +119,11 @@ describe('classifyProcesses', () => {
       [undefined, [40]],
     ])
   })
-  test('the dashboard: loop, holder, server and the engine it runs', () => {
-    expect(sorted.dashboard.map(p => p.pid).sort()).toEqual([30, 31, 32, 33])
+  test('the dashboard: loop, the start-ui.cmd cmd.exe, holder, server and everything below them', () => {
+    expect(sorted.dashboard.map(p => p.pid).sort()).toEqual([30, 31, 32, 33, 34, 35])
+  })
+  test('others: a program naming a file of the install, never the updater itself', () => {
+    expect(sorted.others.map(p => p.pid)).toEqual([70])
   })
   test('a repo dev server and the install check engine are not ours', () => {
     const pids = [...sorted.dashboard.map(p => p.pid), ...sorted.chats.flatMap(chat => [chat.proxy?.pid, ...chat.engines.map(e => e.pid)])]
@@ -170,15 +185,29 @@ describe('planUpdate', () => {
   })
   test('a refused swap is reported with each connection, how many, and whether anything changed', () => {
     const sorted = classifyProcesses(processes(), layout)
-    const message = lockedMessage(sorted, true)
-    expect(message).toContain('(3 MCP connections running)')
+    const message = lockedMessage(sorted, true, 'C:/home/.claude/mnemosyne/plugin')
+    expect(message).toContain('Windows would not let the update replace C:/home/.claude/mnemosyne/plugin: a program has a file or the folder open.')
+    expect(message).toContain('(3 MCP connections running) and may be holding it')
     expect(message).toContain('proxy pid 10 with engine pid 11')
     expect(message).toContain('proxy pid 20 with engine pid 21')
     expect(message).toContain('engine pid 40')
+    expect(message).toContain('Dashboard processes still running: powershell.exe 30, cmd.exe 34')
+    expect(message).toContain('Other programs using the install: editor.exe 70')
     expect(message).toContain('Nothing was changed; the previous version keeps working.')
     expect(message).toContain('Quit Claude Desktop')
     expect(lockedMessage(sorted, false)).toContain('Part of the update is in place')
-    expect(lockedMessage({ chats: [{ engines: [{ pid: 9, ppid: 1, command: '' }] }], dashboard: [] }, true)).toContain('while a Claude chat uses them (1 MCP connection running)')
+    expect(lockedMessage({ chats: [{ engines: [{ pid: 9, ppid: 1, command: '' }] }], dashboard: [], others: [] }, true)).toContain('A Claude chat uses Mnemosyne (1 MCP connection running)')
+  })
+  test('nothing of Mnemosyne found: no chats are blamed, another program is named as the likely holder', () => {
+    const message = lockedMessage({ chats: [], dashboard: [], others: [] }, true)
+    expect(message).not.toContain('Claude chat')
+    expect(message).not.toContain('Quit Claude Desktop')
+    expect(message).toContain('No Mnemosyne process was found')
+    expect(message).toContain('Close what holds it, then update again.')
+  })
+  test('the message names the folder the refused rename was for', () => {
+    expect(swapFolder(new Error('could not move the new plugin copy into place (the old one is kept): EPERM'), layout)).toBe(layout.plugin)
+    expect(swapFolder(new Error('could not move the new engine into place: EBUSY'), layout)).toBe(layout.engine)
   })
   test('only a refused rename counts as a locked swap, not a failed build or check', () => {
     expect(isSwapFailure(new Error('could not move the new engine into place: EBUSY'))).toBe(true)
@@ -189,7 +218,7 @@ describe('planUpdate', () => {
   test('Windows: --stop-engines stops the chats only; the dashboard is stopped for the swap', () => {
     const plan = planUpdate({ ...base, stopEngines: true, processes: classifyProcesses(processes(), layout) })
     expect(plan).toMatchObject({ kind: 'update', stopChats: [10, 11, 20, 21, 40] })
-    expect((plan as { stopDashboard: Proc[] }).stopDashboard.map(p => p.pid).sort()).toEqual([30, 31, 32, 33])
+    expect((plan as { stopDashboard: Proc[] }).stopDashboard.map(p => p.pid).sort()).toEqual([30, 31, 32, 33, 34, 35])
   })
   test('processes are never stopped without --stop-engines', () => {
     for (const windows of [true, false]) {
@@ -390,5 +419,91 @@ describe('main refusals before anything runs', () => {
     const home = homeLayout(dir)
     mkdirSync(join(home.plugin, 'x'), { recursive: true })
     await expect(main(['--from', join(home.plugin, 'x'), '--home', dir], () => {})).rejects.toThrow('inside')
+  })
+})
+
+describe('staging per run (two runs never share a download)', () => {
+  test('each run gets its own folder', () => {
+    expect(runStagingDir('/s', 10, 1000)).toBe(join('/s', 'run-10-1000'))
+    expect(runStagingDir('/s', 10, 1000)).not.toBe(runStagingDir('/s', 11, 1000))
+    expect(runStagingDir('/s', 10, 1000)).not.toBe(runStagingDir('/s', 10, 1001))
+  })
+  test('pruneStaging removes only run folders older than a day, nothing else', () => {
+    const { dir } = tempDir('update-prune')
+    const now = Date.now()
+    for (const name of ['run-1-1', 'run-2-2', 'run-3-3.tar.gz', 'keep-me']) {
+      if (name.endsWith('.tar.gz') || name === 'keep-me') writeFileSync(join(dir, name), 'x')
+      else mkdirSync(join(dir, name))
+    }
+    const old = new Date(now - 2 * 24 * 60 * 60 * 1000)
+    for (const name of ['run-1-1', 'run-3-3.tar.gz', 'keep-me']) utimesSync(join(dir, name), old, old)
+    expect(pruneStaging(dir, now)).toBe(2)
+    expect(existsSync(join(dir, 'run-1-1'))).toBe(false)
+    expect(existsSync(join(dir, 'run-3-3.tar.gz'))).toBe(false)
+    expect(existsSync(join(dir, 'run-2-2'))).toBe(true)
+    expect(existsSync(join(dir, 'keep-me'))).toBe(true)
+    expect(pruneStaging(join(dir, 'missing'), now)).toBe(0)
+  })
+})
+
+describe('the staged plugin copy is checked before the swap', () => {
+  /** A minimal checkout: every required file, a proxy with no imports. */
+  function checkout(version = '0.28.0') {
+    const { dir } = tempDir('update-copy')
+    const source = join(dir, 'src')
+    for (const rel of REQUIRED_PLUGIN_FILES) {
+      mkdirSync(join(source, rel, '..'), { recursive: true })
+      writeFileSync(join(source, rel), rel === '.claude-plugin/plugin.json' ? JSON.stringify({ version }) : `// ${rel}\n`)
+    }
+    mkdirSync(join(source, 'tests'), { recursive: true })
+    writeFileSync(join(source, 'tests', 'a.spec.ts'), 'left out')
+    return { dir, source }
+  }
+  const copy = (from: string, to: string) => {
+    for (const [rel] of fileList(from, pluginCopyIncludes)) {
+      mkdirSync(join(to, rel, '..'), { recursive: true })
+      writeFileSync(join(to, rel), readFileSync(join(from, rel)))
+    }
+  }
+  test('a whole copy passes', () => {
+    const { dir, source } = checkout()
+    copy(source, join(dir, 'copy'))
+    expect(pluginCopyProblems(source, join(dir, 'copy'), '0.28.0')).toEqual([])
+  })
+  test('a missing or cut file, a wrong version, a missing required file are each refused', () => {
+    const { dir, source } = checkout()
+    const target = join(dir, 'copy')
+    copy(source, target)
+    writeFileSync(join(target, 'ui/app.ts'), '')
+    expect(pluginCopyProblems(source, target, '0.28.0')).toEqual(['ui/app.ts differs from the source'])
+    expect(pluginCopyProblems(source, target, '0.29.0')).toContain('the copy is version 0.28.0, expected 0.29.0')
+    const { dir: dir2, source: half } = checkout()
+    const bare = join(dir2, 'copy')
+    copy(half, bare)
+    for (const rel of ['ui/server.ts']) writeFileSync(join(half, 'ui', 'extra.ts'), rel)
+    expect(pluginCopyProblems(half, bare, '0.28.0')).toEqual(['ui/extra.ts was not copied'])
+    const { dir: dir3, source: broken } = checkout()
+    rmSync(join(broken, 'bin', 'mcp-proxy.ts'))
+    copy(broken, join(dir3, 'copy'))
+    const problems = pluginCopyProblems(broken, join(dir3, 'copy'), '0.28.0')
+    expect(problems).toContain('the source has no bin/mcp-proxy.ts')
+    expect(problems.some(p => p.includes('bin/mcp-proxy.ts, which does not exist'))).toBe(true)
+  })
+})
+
+describe('the launcher is replaced by rename', () => {
+  test('written whole; a failure keeps the old one and says why', () => {
+    const { dir } = tempDir('update-launcher')
+    const file = join(dir, 'bin', 'mnemosyne-mcp.cmd')
+    expect(writeLauncher(file, 'one\r\n')).toBe(true)
+    expect(readFileSync(file, 'utf8')).toBe('one\r\n')
+    expect(writeLauncher(file, 'two\r\n')).toBe(true)
+    expect(readFileSync(file, 'utf8')).toBe('two\r\n')
+    // A folder where the launcher should be: the rename fails, nothing is left behind.
+    const blocked = join(dir, 'blocked.cmd')
+    mkdirSync(join(blocked, 'inside'), { recursive: true })
+    expect(writeLauncher(blocked, 'three')).not.toBe(true)
+    expect(existsSync(join(blocked, 'inside'))).toBe(true)
+    expect(readdirSync(dir).filter(name => name.includes('.next'))).toEqual([])
   })
 })

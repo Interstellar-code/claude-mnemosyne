@@ -13,6 +13,7 @@ import {
   type LaunchCommand,
   latestRelease,
   running,
+  settle,
   takeHandoff,
   UPDATE_CHECK_FILE,
   UPDATE_STATUS_FILE,
@@ -113,14 +114,32 @@ describe('the handoff and the guards', () => {
     expect(updaterHome(root, ROOT)).toBeUndefined()
     expect(updaterHome(join(dir, 'elsewhere'), join(dir, 'elsewhere', 'plugin'))).toBeUndefined()
   })
-  test('running: a progress file that is not final and moved within 30 minutes', () => {
+  test('running: not final, its updater alive, moved within 30 minutes', () => {
     const now = Date.UTC(2026, 10, 7, 12)
-    const status = (state: string, minutes: number) => ({ state, lines: [], started: '', updated: new Date(now - minutes * 60_000).toISOString() }) as never
-    expect(running(status('running', 1), now)).toBe(true)
-    expect(running(status('starting', 1), now)).toBe(true)
-    expect(running(status('running', 31), now)).toBe(false)
-    expect(running(status('done', 1), now)).toBe(false)
-    expect(running(undefined, now)).toBe(false)
+    const alive = (pid: number) => pid === 42
+    const status = (state: string, minutes: number, pid?: number) => ({ state, lines: [], ...(pid === undefined ? {} : { pid }), started: '', updated: new Date(now - minutes * 60_000).toISOString() }) as never
+    expect(running(status('running', 1, 42), now, alive)).toBe(true)
+    expect(running(status('starting', 0.5), now, alive)).toBe(true)
+    expect(running(status('running', 31, 42), now, alive)).toBe(false)
+    expect(running(status('done', 1, 42), now, alive)).toBe(false)
+    expect(running(undefined, now, alive)).toBe(false)
+  })
+  test('a launch that died is settled as failed, not left on "starting" for 30 minutes', () => {
+    const now = Date.UTC(2026, 10, 7, 12)
+    const alive = (pid: number) => pid === 42
+    const at = (seconds: number) => new Date(now - seconds * 1000).toISOString()
+    // The server asked for a start a minute ago and no updater ever wrote: dead.
+    const never = settle({ state: 'starting', lines: ['Starting'], started: at(61), updated: at(61) }, now, alive)!
+    expect(never.state).toBe('failed')
+    expect(never.lines.at(-1)).toContain('The updater stopped without finishing')
+    expect(running({ state: 'starting', lines: [], started: at(61), updated: at(61) }, now, alive)).toBe(false)
+    // Its pid is gone: dead at once.
+    expect(settle({ state: 'running', lines: [], pid: 7, started: at(5), updated: at(5) }, now, alive)!.state).toBe('failed')
+    // Alive and recent: untouched; final: untouched.
+    const live = { state: 'running' as const, lines: ['x'], pid: 42, started: at(5), updated: at(5) }
+    expect(settle(live, now, alive)).toBe(live)
+    const done = { state: 'done' as const, lines: [], pid: 7, started: at(5), updated: at(5) }
+    expect(settle(done, now, alive)).toBe(done)
   })
   test('the Windows command line quotes paths with spaces and sends all output to the log', () => {
     const line = windowsCommandLine({ bun: 'C:\\Users\\a b\\bun.exe', script: 'C:/x/update.ts', args: ['--tag', 'v0.28.0'], cwd: 'C:/x', log: 'C:\\x\\update.log' }, 'C:\\Windows')
@@ -336,7 +355,7 @@ describe('the version line and the confirm (ui/update.ts)', () => {
   })
   test('a blocked run says so in plain words and that nothing was stopped', () => {
     const summary = view.statusSummary({ state: 'blocked', lines: ['Windows would not let ...'], started: '', updated: '' })
-    expect(summary.title).toContain('open Claude chats are using')
+    expect(summary.title).toContain('files that are in use')
     expect(summary.title).toContain('Nothing was stopped.')
   })
 })

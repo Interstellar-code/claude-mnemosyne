@@ -72,7 +72,7 @@ export function statusSummary(status: UpdateStatus): { title: string; lines: str
   if (status.state === 'starting' || status.state === 'running') return { title: 'Updating…', lines: tail }
   if (status.state === 'done') return { title: 'Update finished.', lines: tail }
   if (status.state === 'blocked') {
-    return { title: 'The update could not replace files that open Claude chats are using. Quit Claude Desktop, then click Update again. Nothing was stopped.', lines: tail }
+    return { title: 'The update could not replace files that are in use; the lines below say what was found holding them (often open Claude chats: quit Claude Desktop). Close it, then click Update again. Nothing was stopped.', lines: tail }
   }
   return { title: 'The update failed. The previous version keeps working unless the lines below say otherwise.', lines: tail }
 }
