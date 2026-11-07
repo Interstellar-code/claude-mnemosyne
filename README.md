@@ -283,7 +283,9 @@ That is a dry run: it counts the memories with no vector. Then `/mnemosyne-embed
 /mnemosyne-ui
 ```
 
-Starts a small local web page for your memories and opens it in your default browser. The reply shows the full link, with its key after `#`, and the link is on the clipboard too, so you can open it in another browser. The page has nine tabs and opens on Map:
+Starts a small local web page for your memories and opens it in your default browser. The reply shows the full link, with its key after `#`, and the link is on the clipboard too, so you can open it in another browser.
+
+The header shows how many memories are in how many projects, and a connection pill: teal "Local · live" while the server answers, amber "Reconnecting…" when it has stopped (an amber strip under the header counts down to the next check, offers Try now, and the page's data is dimmed as out of date), and "Link expired" when the server was restarted (a card then says how to get a fresh link with `/mnemosyne-ui`, with a Copy button; nothing is lost). The plugin and engine versions are behind the ⓘ button. The page has nine tabs and opens on Map:
 
 - **Map:** the solar-system Galaxy view: the sun and writer nodules, planets and crafts with their styles, land, moons, asteroids, belts, black holes, satellites, comets and beams, clouds and ice cap (see [The galaxy](#the-galaxy)). Arrange by, Find, the Bodies strip, the Details panel, and the live events; Timeline and Meaning unchanged. Two new files in the Mnemosyne root: `activity-daily.json` (counts only) and `projects.json` (project names and the remote's host only); a project is recorded the next time a Claude session starts in it.
 - **Memories:** every memory, with a project filter, sorting (newest, most recalled, never recalled), a text and tag filter. A memory opens in a panel that slides up from the bottom, with Edit and a Forget button that asks before it deletes. New memory creates one, and Show retired (off by default) adds the memories that are no longer live, dimmed (see [Dashboard writes and the Review tab](#dashboard-writes-and-the-review-tab)). Knowledge and Search open memories in the same panel.

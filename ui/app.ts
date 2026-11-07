@@ -650,6 +650,40 @@ function setStatus(text: string, kind: 'ok' | 'error' | 'plain' = 'plain') {
   const status = byId('status')
   status.textContent = text
   status.className = kind === 'plain' ? 'status' : `status is-${kind}`
+  // 0.17.0 shell: the standing "Connected" line is not shown (the connection pill says it); the lost and expired
+  // messages are styled by kind (an amber strip; the expired card says the rest).
+  status.hidden = text === CONNECTED
+  status.dataset.kind = text === LOST ? 'lost' : expired ? 'expired' : kind
+}
+
+// ---- The connection pill and the lost strip (0.17.0) ----
+
+/** The pill in the header: live (teal), lost (amber, reconnecting) or expired (a hollow red ring). */
+function setConnection(state: 'live' | 'lost' | 'expired') {
+  const pill = byId('conn')
+  pill.dataset.state = state
+  byId('conn-text').textContent = state === 'live' ? 'Local · live' : state === 'lost' ? 'Reconnecting…' : 'Link expired'
+  // While lost, the tab's data is from before: it is dimmed, and the strip says when the page will ask again.
+  for (const view of VIEWS) byId(`view-${view}`).classList.toggle('is-stale', state === 'lost')
+  byId('lost-extra').hidden = state !== 'lost'
+  if (state === 'lost') tickLost()
+}
+
+let lostTicking = false
+/** The strip's countdown, every half second while lost (under a second, so it never looks like a back-off wait). */
+function tickLost() {
+  if (lostTicking) return
+  lostTicking = true
+  const step = () => {
+    if (!watch.lost() || expired) {
+      lostTicking = false
+      return
+    }
+    const ms = watch.nextIn()
+    byId('lost-next').textContent = ms === null ? 'Waiting for the server…' : ms === 0 ? 'Checking now…' : `Next check in ${Math.ceil(ms / 1000)} s.`
+    setTimeout(step, 500)
+  }
+  step()
 }
 
 // Takes the token from the fragment (then drops the fragment), else from this tab's storage.
@@ -677,6 +711,9 @@ function expire() {
   for (const view of VIEWS) byId(`view-${view}`).hidden = true
   byId('foot').hidden = true
   setStatus('This link no longer works (the server was restarted). Run /mnemosyne-ui again for a fresh link.', 'error')
+  // 0.17.0: the recovery card (two steps, a Copy button, what this means) and the pill in its expired state.
+  setConnection('expired')
+  byId('expired').hidden = false
 }
 
 type ApiInit = { method?: string; body?: unknown; signal?: AbortSignal }
@@ -754,6 +791,7 @@ const watch = createWatch({
   onChange: lost => {
     if (expired) return
     if (serverLine !== null) serverLine.textContent = serverText(lost, serverPid)
+    setConnection(lost ? 'lost' : 'live')
     if (lost) setStatus(LOST, 'error')
     else {
       // The first load never finished: the page is not wired yet, so it loads and wires now, and says Connected after.
@@ -1359,9 +1397,9 @@ async function loadHealth() {
   useOwners(owners.map(row => row.owner))
   setEmbeddings(health.embeddings === true)
   const projects = owners.length
-  byId('summary').textContent = `${health.total} ${health.total === 1 ? 'memory' : 'memories'} · ${projects} ${projects === 1 ? 'project' : 'projects'}`
-  // The plugin version beside the engine's, on every tab (the footer with the rest is on Health).
-  byId('engine').textContent = [health.plugin ? `v${health.plugin}` : '', health.engine ? `engine ${health.engine}` : ''].filter(Boolean).join(' · ')
+  byId('summary').textContent = `${health.total} ${health.total === 1 ? 'memory' : 'memories'} in ${projects} ${projects === 1 ? 'project' : 'projects'}`
+  // The plugin and engine versions live in the About popover (0.17.0; the footer with the rest is on Health).
+  byId('engine').textContent = [health.plugin ? `plugin v${health.plugin}` : '', health.engine ? `engine ${health.engine}` : ''].filter(Boolean).join(' · ')
   for (const id of ['mem-owner', 'search-owner']) {
     const select = byId<HTMLSelectElement>(id)
     const chosen = select.value
@@ -2088,6 +2126,15 @@ export async function main() {
     }
   })())
   drawTabs()
+  // The shell's own buttons (0.17.0): "Try now" in the lost strip, and Copy on the expired card.
+  byId('lost-retry').addEventListener('click', () => watch.retry())
+  byId('expired-copy').addEventListener('click', () => {
+    const button = byId<HTMLButtonElement>('expired-copy')
+    void navigator.clipboard?.writeText('/mnemosyne-ui').then(
+      () => (button.textContent = 'Copied'),
+      () => (button.textContent = 'Copy failed'),
+    )
+  })
   const found = takeToken()
   if (found === undefined) {
     setStatus('Open this dashboard with the link from /mnemosyne-ui in Claude Code: it carries the key this page needs.', 'error')
