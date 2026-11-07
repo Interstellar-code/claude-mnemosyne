@@ -62,23 +62,143 @@ export function parseReview(body: unknown): ReviewData | null {
   return { total: whole(raw.total) || rows.length, rows }
 }
 
-/** Whether a memory belongs under a filter. Not recalled in 30 days: the last recall, else the day it was saved, is older than that (a memory saved last week is not yet cold). */
-export function matchesReview(memory: ReviewMemory, filter: RowFilter, now: number): boolean {
-  if (filter === 'never') return memory.recalls === 0
+/** 0.22.0: a memory saved in the last GRACE_DAYS days has had no chance to be recalled yet. */
+export const GRACE_DAYS = 7
+
+/** Whether a memory is still in its grace period (saved less than GRACE_DAYS ago). */
+export function isNew(memory: Pick<ReviewMemory, 'created'>, now: number): boolean {
+  const days = daysAgo(memory.created, now)
+  return days !== null && days < GRACE_DAYS
+}
+
+/**
+ * Whether a memory belongs under a filter. Not recalled in 30 days: the last recall, else the day it was saved, is older
+ * than that (a memory saved last week is not yet cold). With `graceDays` (0.22.0), Never recalled leaves out memories
+ * saved more recently than that.
+ */
+export function matchesReview(memory: ReviewMemory, filter: RowFilter, now: number, graceDays = 0): boolean {
+  if (filter === 'never') {
+    if (memory.recalls !== 0) return false
+    const days = daysAgo(memory.created, now)
+    return graceDays <= 0 || days === null || days >= graceDays
+  }
   if (filter === 'untagged') return memory.tags.length === 0
   if (filter === 'low') return memory.importance !== null && memory.importance < LOW_IMPORTANCE
   const days = daysAgo(memory.lastRecalled ?? memory.created, now)
   return days !== null && days >= STALE_DAYS
 }
 
-export const reviewList = (rows: readonly ReviewMemory[], filter: RowFilter, now: number) => rows.filter(row => matchesReview(row, filter, now))
+export const reviewList = (rows: readonly ReviewMemory[], filter: RowFilter, now: number, graceDays = 0) => rows.filter(row => matchesReview(row, filter, now, graceDays))
+
+// ---- 0.22.0: kept memories, reasons, titles, groups and the banner ----
+
+export const KEPT_KEY = 'mnemosyne.review.kept'
+/** A memory you kept leaves the queues for this many days. */
+export const KEEP_DAYS = 30
+export type Kept = Record<string, string>
+
+/** The kept memories still in their keep period (id → until, ISO); expired entries are dropped. Never throws. */
+export function readKept(storage: Pick<Storage, 'getItem'> | undefined, now: number): Kept {
+  try {
+    const raw: unknown = JSON.parse(storage?.getItem(KEPT_KEY) ?? '{}')
+    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return {}
+    const out: Kept = {}
+    for (const [id, until] of Object.entries(raw as Record<string, unknown>)) if (typeof until === 'string' && Date.parse(until) > now) out[id] = until
+    return out
+  } catch {
+    return {}
+  }
+}
+
+/** The kept map with `id` kept for KEEP_DAYS from `now` (or removed with `keep` false), stored when storage allows. */
+export function setKept(storage: Pick<Storage, 'getItem' | 'setItem'> | undefined, id: string, keep: boolean, now: number): Kept {
+  const kept = readKept(storage, now)
+  if (keep) kept[id] = new Date(now + KEEP_DAYS * 86_400_000).toISOString()
+  else delete kept[id]
+  try {
+    storage?.setItem(KEPT_KEY, JSON.stringify(kept))
+  } catch {
+    // storage is a convenience only
+  }
+  return kept
+}
+
+export type Reason = { text: string; tone: 'why' | 'ctx' | 'link' }
+
+/** The chips under a row: why it is listed (amber), context (blue: new, recalled), links (violet: close to another memory). */
+export function reasonChips(memory: ReviewMemory, now: number): Reason[] {
+  const out: Reason[] = []
+  if (memory.recalls === 0) out.push({ text: 'never recalled', tone: 'why' })
+  if (memory.tags.length === 0) out.push({ text: 'no tags', tone: 'why' })
+  const days = daysAgo(memory.lastRecalled ?? memory.created, now)
+  if (memory.recalls > 0 && days !== null && days >= STALE_DAYS) out.push({ text: `not recalled in ${days} days`, tone: 'why' })
+  if (memory.importance !== null && memory.importance < LOW_IMPORTANCE) out.push({ text: `low importance ${memory.importance.toFixed(1)}`, tone: 'why' })
+  const age = daysAgo(memory.created, now)
+  if (age !== null && age < GRACE_DAYS) out.push({ text: `new · ${age} ${age === 1 ? 'day' : 'days'}`, tone: 'ctx' })
+  if (memory.recalls > 0) out.push({ text: `recalled ${memory.recalls}×`, tone: 'ctx' })
+  return out
+}
+
+/** A candidate's server reasons as chips: a near-duplicate becomes a link chip, the rest say why. */
+export function candidateChips(candidate: Candidate): Reason[] {
+  return candidate.reasons.map(reason => {
+    const partner = nearPartner(reason)
+    return partner === null ? { text: reason, tone: 'why' as const } : { text: `close to ${partner}${/\(([\d.]+)\)/.exec(reason)?.[1] ? ` ${/\(([\d.]+)\)/.exec(reason)![1]}` : ''}`, tone: 'link' as const }
+  })
+}
+
+/**
+ * A memory's first line as a bold title and the rest: split after the first colon, or after the bracket closed by the first
+ * opening bracket, within 70 characters; else no title. Title + rest is always the line itself, character for character.
+ */
+export function titleOf(text: string): { title: string; rest: string } {
+  const line = (text.split('\n').find(part => part.trim() !== '') ?? '').trim()
+  const at = line.search(/[:(]/)
+  if (at > 0 && at <= 70) {
+    if (line[at] === ':') return { title: line.slice(0, at + 1), rest: line.slice(at + 1) }
+    const close = line.indexOf(')', at)
+    if (close > at && close <= 90) {
+      // "(06.11.2026):" keeps its colon in the title.
+      const end = line[close + 1] === ':' ? close + 2 : close + 1
+      return { title: line.slice(0, end), rest: line.slice(end) }
+    }
+  }
+  return { title: '', rest: line }
+}
+
+export type OwnerGroup<T> = { owner: string; items: T[] }
+
+/** Items grouped by owner: global first, then the larger groups, each keeping the list's order. */
+export function groupByOwner<T extends { owner: string }>(items: readonly T[]): OwnerGroup<T>[] {
+  const groups = new Map<string, T[]>()
+  for (const item of items) groups.set(item.owner, [...(groups.get(item.owner) ?? []), item])
+  return [...groups]
+    .map(([owner, list]) => ({ owner, items: list }))
+    .sort((a, b) => (a.owner === 'global' ? -1 : b.owner === 'global' ? 1 : b.items.length - a.items.length || a.owner.localeCompare(b.owner)))
+}
+
+/** The day a new memory leaves its grace period (YYYY-MM-DD, local), for the banner. */
+export function graceEnds(created: string | null, now: number): string {
+  const t = Date.parse(created ?? '')
+  return dayText(new Date((Number.isFinite(t) ? t : now) + GRACE_DAYS * 86_400_000).toISOString())
+}
+
+/** The banner's first sentence: why the shown memories are listed. */
+export const WHY: Record<ReviewFilter, string> = {
+  never: 'they have never come back in a Claude recall',
+  untagged: 'they have no tag, so recall finds them by their words only',
+  stale: `they have not come back in a recall for ${STALE_DAYS} days or more`,
+  low: `their importance is under ${LOW_IMPORTANCE}`,
+  retire: 'the server flagged them: a near-duplicate, a marked superseded text, or an old unused note',
+  notlive: 'they are retired, expired or lapsed, and Restore brings one back',
+}
 
 /** The memories that are live: a row with no state (an older server) is live. Only these are reviewed by the four filters. */
 export const liveRows = (rows: readonly ReviewMemory[]) => rows.filter(row => row.state === 'live')
 
 /** How many memories each filter holds; `queue` is the counts of the two queue lists (candidates, not-live rows). */
-export function reviewCounts(rows: readonly ReviewMemory[], now: number, queue: { retire: number; notlive: number } = { retire: 0, notlive: 0 }): Record<ReviewFilter, number> {
-  return { never: reviewList(rows, 'never', now).length, untagged: reviewList(rows, 'untagged', now).length, stale: reviewList(rows, 'stale', now).length, low: reviewList(rows, 'low', now).length, ...queue }
+export function reviewCounts(rows: readonly ReviewMemory[], now: number, queue: { retire: number; notlive: number } = { retire: 0, notlive: 0 }, graceDays = 0): Record<ReviewFilter, number> {
+  return { never: reviewList(rows, 'never', now, graceDays).length, untagged: reviewList(rows, 'untagged', now).length, stale: reviewList(rows, 'stale', now).length, low: reviewList(rows, 'low', now).length, ...queue }
 }
 
 // ---- The review queue: GET /api/review ----
@@ -202,19 +322,57 @@ export type ReviewHost = {
   /** The day a memory was last used (recalled, else saved), when the page has it; the "expired as unused" mark shows it. */
   lastUsed: (id: string) => string | null
   now: () => number
+  /** 0.22.0, optional: keep a memory (it leaves the queues for KEEP_DAYS); without it rows have no Keep button. */
+  keep?: (id: string) => void
 }
 
-/** The filter buttons (a segmented control of aria-pressed toggles), each with its count. */
+/** The short chip labels (0.22.0); REVIEW_FILTERS keeps the long ones for the banner and older callers. */
+const SHORT: Record<ReviewFilter, string> = { never: 'Never recalled', untagged: 'No tags', stale: `Cold ${STALE_DAYS} days`, low: 'Low importance', retire: 'Retire candidates', notlive: 'Not live' }
+
+/**
+ * The filter buttons (aria-pressed toggles), each with its count. 0.22.0: in two groups, "Needs a look" (a count over 0:
+ * an amber badge, ash for Not live) and "Clear" (a dashed outline and ✓ 0), each group led by its label.
+ */
 export function filterButtons(counts: Record<ReviewFilter, number>, selected: ReviewFilter, pick: (filter: ReviewFilter) => void): HTMLElement[] {
-  return REVIEW_FILTERS.map(({ id, label }) => {
-    const button = el('button', undefined, 'seg-btn')
-    button.type = 'button'
-    button.dataset.filter = id
-    button.setAttribute('aria-pressed', String(id === selected))
-    button.append(el('span', label), el('span', ` ${counts[id]}`, 'mono'))
-    button.addEventListener('click', () => pick(id))
-    return button
-  })
+  const button = (id: ReviewFilter, label: string) => {
+    const clear = counts[id] === 0
+    const b = el('button', undefined, `seg-btn q${clear ? ' q-clear' : id === 'notlive' ? ' q-ash' : ''}`)
+    b.type = 'button'
+    b.dataset.filter = id
+    b.title = REVIEW_FILTERS.find(f => f.id === id)?.label ?? label
+    b.setAttribute('aria-pressed', String(id === selected))
+    b.append(el('span', label), el('span', clear ? ' ✓ 0' : ` ${counts[id]}`, 'mono q-n'))
+    b.addEventListener('click', () => pick(id))
+    return b
+  }
+  const look = REVIEW_FILTERS.filter(({ id }) => counts[id] > 0)
+  const clear = REVIEW_FILTERS.filter(({ id }) => counts[id] === 0)
+  return [
+    ...(look.length > 0 ? [el('span', 'Needs a look', 'q-label')] : []),
+    ...look.map(({ id }) => button(id, SHORT[id])),
+    ...(clear.length > 0 ? [el('span', 'Clear', `q-label${look.length > 0 ? ' q-sep' : ''}`)] : []),
+    ...clear.map(({ id }) => button(id, SHORT[id])),
+  ]
+}
+
+/** The reason chips of a row: amber why, blue context, violet link. */
+export function chipRow(reasons: readonly Reason[]): HTMLElement {
+  const box = el('div', undefined, 'why-chips')
+  for (const reason of reasons) box.append(el('span', reason.text, `why-chip t-${reason.tone}`))
+  return box
+}
+
+/** The text cell: the title in bold and the rest muted (or the plain text), then the reason chips. */
+function textCell(text: string, reasons: readonly Reason[]): HTMLElement {
+  const td = el('td', undefined, 'know-text rv-text')
+  if (text === '') td.append(el('span', '(no text)'))
+  else {
+    const { title, rest } = titleOf(text)
+    if (title !== '') td.append(el('span', title, 'rv-title'))
+    td.append(el('span', rest, title === '' ? 'rv-rest rv-plain' : 'rv-rest'))
+  }
+  if (reasons.length > 0) td.append(chipRow(reasons))
+  return td
 }
 
 /** The first non-empty line of a text, cut to `max` characters. */
@@ -230,10 +388,12 @@ function lineOf(text: string, max = 80): string {
  */
 function retireCell(memory: { id: string; text: string }, host: ReviewHost, removed: () => void, note?: string): HTMLElement {
   const actions = el('td', undefined, 'row-actions')
-  const open = el('button', 'Open', 'link')
+  // 0.22.0: Open, Retire… (neutral until hovered), then Keep when the host offers it.
+  const keepIt = host.keep
+  const open = el('button', 'Open', keepIt ? 'btn small' : 'link')
   open.type = 'button'
   open.addEventListener('click', () => host.open(memory.id))
-  const ask = el('button', 'Retire…', 'link danger-link')
+  const ask = el('button', 'Retire…', keepIt ? 'btn small rv-retire' : 'link danger-link')
   ask.type = 'button'
   const confirm = el('span', undefined, 'confirm-inline')
   confirm.hidden = true
@@ -247,17 +407,29 @@ function retireCell(memory: { id: string; text: string }, host: ReviewHost, remo
   replaced.maxLength = 64
   const yes = el('button', 'Retire', 'btn danger')
   yes.type = 'button'
-  const keep = el('button', 'Keep', 'btn')
+  // 0.22.0: "Keep it" (was "Keep") cancels the confirm, so it is not mistaken for the row's Keep.
+  const keep = el('button', 'Keep it', 'btn')
   keep.type = 'button'
   const problem = el('span', undefined, 'warn small')
   problem.hidden = true
   confirm.append(warning, naming)
   if (note !== undefined) confirm.append(el('span', note, 'small'))
-  confirm.append(replaced, yes, keep, problem)
+  confirm.append(replaced, yes, keep, problem, el('span', 'Enter retires · Esc cancels', 'muted small'))
   ask.addEventListener('click', () => {
     ask.hidden = true
     confirm.hidden = false
     keep.focus()
+  })
+  // In the "replaced by" box: Enter retires, Esc cancels.
+  replaced.addEventListener('keydown', event => {
+    const key = (event as KeyboardEvent).key
+    if (key === 'Enter') {
+      event.preventDefault?.()
+      yes.click?.()
+    } else if (key === 'Escape') {
+      event.preventDefault?.()
+      keep.click?.()
+    }
   })
   keep.addEventListener('click', () => {
     confirm.hidden = true
@@ -280,6 +452,13 @@ function retireCell(memory: { id: string; text: string }, host: ReviewHost, remo
     })
   })
   actions.append(open, ask, confirm)
+  if (keepIt) {
+    const keepButton = el('button', 'Keep', 'btn small rv-keep')
+    keepButton.type = 'button'
+    keepButton.title = `Looks fine: hide it from these queues for ${KEEP_DAYS} days`
+    keepButton.addEventListener('click', () => keepIt(memory.id))
+    actions.append(keepButton)
+  }
   return actions
 }
 
@@ -290,7 +469,11 @@ export function reviewRow(memory: ReviewMemory, host: ReviewHost, removed: () =>
   const project = el('td', undefined, 'col-project')
   project.append(host.project(memory.owner))
   const recalled = memory.recalls === 0 ? 'never' : `${memory.recalls}, last ${agoText(memory.lastRecalled, host.now()) || 'unknown'}`
-  tr.append(el('td', memory.text === '' ? '(no text)' : memory.text, 'know-text'), project, el('td', agoText(memory.created, host.now()) || 'unknown', 'small'), el('td', recalled, 'small'), retireCell(memory, host, removed))
+  // 0.22.0: a title and the rest, the reason chips under them; importance under the recalls.
+  const recalls = el('td', undefined, 'small')
+  recalls.append(el('span', recalled))
+  if (memory.importance !== null) recalls.append(el('span', `importance ${memory.importance.toFixed(1)}`, 'rv-imp muted'))
+  tr.append(textCell(memory.text, reasonChips(memory, host.now())), project, el('td', agoText(memory.created, host.now()) || 'unknown', 'small'), recalls, retireCell(memory, host, removed))
   return tr
 }
 
@@ -309,7 +492,62 @@ export function candidateRow(candidate: Candidate, host: ReviewHost, removed: ()
   for (const reason of candidate.reasons) reasons.append(el('li', reason))
   why.append(reasons)
   if (partner !== null) why.append(el('span', `Keep one of these: retire only one of this pair (the other is ${partner}).`, 'is-stale small'))
-  tr.append(el('td', candidate.text === '' ? '(no text)' : candidate.text, 'know-text'), project, why, retireCell(candidate, host, removed, partner === null ? undefined : `This is one of a near-duplicate pair. Retire only one: the other is ${partner}.`))
+  tr.append(textCell(candidate.text, []), project, why, retireCell(candidate, host, removed, partner === null ? undefined : `This is one of a near-duplicate pair. Retire only one: the other is ${partner}.`))
+  return tr
+}
+
+/**
+ * A row done in this pass (0.22.0), in place of the memory: "✓ kept" with Undo, or "○ retired" with Restore. `cols` is
+ * the table's column count. `act` runs Undo or Restore; its `done` gets an error text on failure.
+ */
+export function doneRow(kind: 'kept' | 'retired', text: string, cols: number, act: (done: (error?: string) => void) => void): HTMLElement {
+  const tr = el('tr', undefined, `rv-done is-${kind}`)
+  const td = el('td')
+  td.colSpan = cols
+  const line = el('div', undefined, 'rv-done-line')
+  const { title, rest } = titleOf(text)
+  line.append(el('span', kind === 'kept' ? '✓ kept' : '○ retired', 'rv-done-mark'), el('span', title || plainLabel(rest, 80), 'rv-done-text'), el('span', kind === 'kept' ? `hidden from these queues for ${KEEP_DAYS} days` : 'now in Not live', 'muted small'))
+  const button = el('button', kind === 'kept' ? 'Undo' : 'Restore', 'btn small push-right')
+  button.type = 'button'
+  const problem = el('span', undefined, 'warn small')
+  problem.hidden = true
+  button.addEventListener('click', () => {
+    button.disabled = true
+    act(error => {
+      button.disabled = false
+      if (error === undefined) return
+      problem.textContent = error
+      problem.hidden = false
+    })
+  })
+  line.append(button, problem)
+  td.append(line)
+  tr.append(td)
+  return tr
+}
+
+/** A project heading over its rows (0.22.0): the owner chip, the count and a note (global belongs to every project). */
+export function groupHead(owner: string, count: number, cols: number, host: Pick<ReviewHost, 'project'>, note = ''): HTMLElement {
+  const tr = el('tr', undefined, 'rv-grp')
+  const td = el('td')
+  td.colSpan = cols
+  td.append(host.project(owner), el('span', String(count), 'mono rv-grp-n'))
+  const words = note || (owner === 'global' ? 'belongs to every project' : '')
+  if (words !== '') td.append(el('span', ` · ${words}`, 'muted small'))
+  tr.append(td)
+  return tr
+}
+
+/** The "▸ n more in <project>" row that shows the rest of a group. */
+export function moreRow(owner: string, hidden: number, cols: number, show: () => void, name: (owner: string) => string): HTMLElement {
+  const tr = el('tr', undefined, 'rv-more')
+  const td = el('td')
+  td.colSpan = cols
+  const button = el('button', `▸ ${hidden} more in ${name(owner)}`, 'link small')
+  button.type = 'button'
+  button.addEventListener('click', show)
+  td.append(button)
+  tr.append(td)
   return tr
 }
 

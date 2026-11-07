@@ -906,7 +906,8 @@ describe('VIEWS R2: the Knowledge and Health glue in app.ts', () => {
   test('items 6 and 7: a Review retire asks the server once per confirm; the focus moves to the next row, the new last row, then the heading; the Memories forget is still the one /api/forget', async () => {
     await app.loadReview()
     const rows = () => byId('review-rows').children as AppNode[]
-    const label = (row: AppNode) => (row.children[0] as AppNode).textContent
+    // 0.22.0: the text cell holds the title, the rest and the reason chips; the label is the memory's text without the chips.
+    const label = (row: AppNode) => ((row.children[0] as AppNode).children as AppNode[]).filter(part => !part.className?.includes('why-chips')).map(part => part.textContent).join('')
     const lastFocus = () => focused.at(-1)
     // Three memories never recalled; the fourth too (its knowledge does not count as a recall).
     expect(rows().map(label)).toEqual(['fourth note, forgotten from Memories', 'third never recalled note', 'second never recalled note', 'first never recalled note'])

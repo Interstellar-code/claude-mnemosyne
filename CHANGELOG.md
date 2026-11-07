@@ -2,6 +2,21 @@
 
 Newest first. Each release is tagged `vX.Y.Z` on GitHub; the README and DESIGN.md describe the contracts.
 
+## 0.22.0 (Review tab polish, one never-recalled count)
+
+The sixth step of the tab polish, following the design proposal's Review notes.
+
+1. **Triage chips:** the six queues split into **Needs a look** (a count over 0, as an amber badge; Not live in ash) and **Clear** (a dashed outline and ✓ 0). The labels are shorter; the long ones are the tooltips.
+2. **Why it is listed:** a banner says why the memories in the queue are there. Each row has reason chips: amber for why (never recalled, no tags, not recalled in n days, low importance), blue for context (new · n days, recalled n×).
+3. **A grace period:** a memory saved in the last 7 days has had no chance to be recalled. The banner says how many of the queue are that new. **Show new ones** (on by default, kept in this browser) hides them from Never recalled when turned off, and the banner names the day the last one returns.
+4. **Keep:** a row's **Keep** hides that memory from the queues for 30 days (kept in this browser). A "This pass" line counts kept and retired with a bar. Each one done is listed above the queue: "✓ kept · Undo" or "○ retired · Restore". The confirm's cancel now reads **Keep it**, and Retire… stays grey until hovered.
+5. **Readable rows and groups:** the text splits into a bold title (up to the first colon or closing bracket) and the rest. A queue that spans several projects is grouped by project (global first), with 4 rows each and "▸ n more".
+6. **Retire confirm:** it opens as a strip under the memory, with "Enter retires · Esc cancels".
+7. **Keys:** J and K move, O opens, Space keeps, R opens the retire confirm (Enter retires, Esc cancels), U undoes the last.
+8. **One never-recalled count:** the Health report's never-recalled count and list now count live memories only, the Review rule. On a store with 22 never-recalled memories, 8 of them retired or expired, both tabs say 14.
+
+No setting or engine change.
+
 ## 0.21.0 (Activity tab polish)
 
 The fifth step of the tab polish, following the design proposal's Activity notes.

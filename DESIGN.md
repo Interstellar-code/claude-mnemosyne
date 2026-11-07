@@ -1603,6 +1603,19 @@ C10.3: the engine's trigger `trim_validations_to_3` keeps only the newest 3 `mem
 
 On the solar-system map a plain folder (no git repo) with at least `map.stationMin` live memories is a space station and one with fewer a starship (default 50, range 2 to 1000, applies now). The galaxy reply carries the value. Git repos are always planets.
 
+### The Review tab (0.22.0)
+
+Sixth step of the tab polish (design proposal `tabs-after/NOTES-activity-review-health.md`, Review items 1 to 6), and the data mismatch the notes list first.
+- **One never-recalled rule.** `/api/health-report` counted every never-recalled row; Review counts live ones. The report now adds `LIVE_SQL` (not superseded, `valid_until` unset or in the future) to its never-recalled count and list when the store has those columns. A store without them has only live rows, so nothing changes there.
+- **Triage.** `filterButtons` returns a `q-label` span, then the queues with a count, then a "Clear" label and the empty queues: `seg-btn q`, plus `q-ash` (Not live) or `q-clear` (dashed, ✓ 0). The buttons keep `data-filter` and `aria-pressed`, and their title is the long label from `REVIEW_FILTERS`.
+- **Grace.** `GRACE_DAYS` is 7. `isNew` is "saved less than 7 days ago". `matchesReview(…, graceDays)` and `reviewList` / `reviewCounts` take it for Never recalled only. Show new ones is `mnemosyne.review.showNew` (on unless "off"). `graceEnds` gives the day the newest hidden one returns.
+- **Kept.** `readKept` / `setKept` keep `{id: until}` under `mnemosyne.review.kept`, `KEEP_DAYS` (30) from the keep. An expired entry is dropped on read, and broken JSON reads as empty. The four row filters and the candidates leave kept ids out; Not live does not. This is a per-browser choice and changes nothing in the store.
+- **This pass.** `reviewView.done` lists the kept and retired ids in order. `doneRow` draws them in `#review-done-rows`, outside `#review-rows`, so a retired row still leaves the list as before and the focus rules still hold. Undo removes a keep; Restore calls `restoreById`. U undoes the last. The progress line counts against the queue's size when the pass began.
+- **Rows.** `titleOf` splits the first line after its first colon, or after the bracket closed by its first opening bracket (within 70 characters, the bracket closing within 90). Title and rest are always the line itself. `reasonChips` gives the why (amber) and context (blue) chips. `candidateChips` turns a near-duplicate into a violet "close to <id>" link for later use; candidate rows keep their Why column. Importance shows under the recalls.
+- **Groups.** `groupByOwner` (global first, then size) is used only when a list spans more than one owner, with `groupHead` and `moreRow` (4 rows each, then "▸ n more").
+- **Confirm.** The confirm's cancel reads "Keep it" (was "Keep") so the row's Keep is not mistaken for it. In the "replaced by" box, Enter retires and Esc cancels. In `.rv-table` the open confirm is an absolute strip anchored to the actions cell, and the row reserves room with `tr:has(.confirm-inline:not([hidden])) > td { padding-bottom }`.
+- **Keys.** `reviewKey` on `document`: J/K focus the next row's first button, O opens, Space keeps (not on Not live), R presses Retire… and focuses the "replaced by" box, U undoes. Typing and modifiers are ignored.
+
 ### The Activity tab (0.21.0)
 
 Fifth step of the tab polish (design proposal `tabs-after/NOTES-activity-review-health.md`, Activity items 1 to 7). Page only: no server, setting or engine change.

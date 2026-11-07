@@ -13,6 +13,92 @@ import { body, engineCall, ROOT, tempDir, toolCall } from './helpers'
 const review = (await import(join(ROOT, 'ui', 'review.ts'))) as Record<string, any>
 const { candidateRow, filterButtons, historyLine, liveRows, LOW_IMPORTANCE, matchesReview, nearPartner, notLiveRow, parseQueue, parseReview, queueText, reviewCounts, reviewList, reviewRow, reviewText, stateMark } = review
 
+describe('REVIEW 0.22: grace, kept, reasons, titles, groups and done rows', () => {
+  const now = Date.UTC(2026, 10, 7, 12)
+  const mem = (over: Record<string, unknown> = {}) => ({ id: 'm', owner: 'p', text: 't', created: iso(now - 20 * DAY), lastRecalled: null, recalls: 0, importance: 0.5, tags: ['x'], state: 'live', ...over })
+
+  test('the 7-day grace: Never recalled leaves out new memories only when asked', () => {
+    const fresh = mem({ id: 'fresh', created: iso(now - 2 * DAY) })
+    const old = mem({ id: 'old' })
+    expect(review.isNew(fresh, now)).toBe(true)
+    expect(review.isNew(old, now)).toBe(false)
+    expect(review.isNew(mem({ created: null }), now)).toBe(false)
+    expect(reviewList([fresh, old], 'never', now).map((m: { id: string }) => m.id)).toEqual(['fresh', 'old'])
+    expect(reviewList([fresh, old], 'never', now, review.GRACE_DAYS).map((m: { id: string }) => m.id)).toEqual(['old'])
+    expect(reviewCounts([fresh, old], now, undefined, review.GRACE_DAYS).never).toBe(1)
+    // Grace touches Never recalled only.
+    expect(matchesReview(mem({ created: iso(now), tags: [] }), 'untagged', now, 7)).toBe(true)
+    expect(review.graceEnds(iso(Date.UTC(2026, 10, 6, 12)), now)).toBe('2026-11-13')
+  })
+
+  test('kept memories: 30 days in this browser, an expired entry is dropped, and storage failures are ignored', () => {
+    const map = new Map<string, string>()
+    const storage = { getItem: (k: string) => map.get(k) ?? null, setItem: (k: string, v: string) => void map.set(k, v) }
+    expect(review.readKept(storage, now)).toEqual({})
+    const kept = review.setKept(storage, 'a', true, now)
+    expect(Date.parse(kept.a) - now).toBe(review.KEEP_DAYS * DAY)
+    expect(Object.keys(review.readKept(storage, now + 29 * DAY))).toEqual(['a'])
+    expect(review.readKept(storage, now + 31 * DAY)).toEqual({})
+    expect(review.setKept(storage, 'a', false, now)).toEqual({})
+    map.set(review.KEPT_KEY, '[1,2]')
+    expect(review.readKept(storage, now)).toEqual({})
+    const broken = { getItem: () => { throw new Error('x') }, setItem: () => { throw new Error('x') } }
+    expect(Object.keys(review.setKept(broken, 'b', true, now))).toEqual(['b'])
+  })
+
+  test('reason chips: why (amber), context (blue); a near-duplicate is a link (violet)', () => {
+    const chips = (m: Record<string, unknown>) => review.reasonChips(mem(m), now).map((r: { text: string; tone: string }) => `${r.tone}:${r.text}`)
+    expect(chips({ created: iso(now), tags: [], importance: 0.3 })).toEqual(['why:never recalled', 'why:no tags', 'why:low importance 0.3', 'ctx:new · 0 days'])
+    expect(chips({ recalls: 4, lastRecalled: iso(now - 45 * DAY) })).toEqual(['why:not recalled in 45 days', 'ctx:recalled 4×'])
+    expect(review.candidateChips({ id: 'a', owner: 'p', text: '', reasons: ['near-duplicate of bbb (0.93)', 'marked superseded'] })).toEqual([
+      { text: 'close to bbb 0.93', tone: 'link' },
+      { text: 'marked superseded', tone: 'why' },
+    ])
+  })
+
+  test('titleOf: a title up to the colon or the closing bracket; title and rest give back the line exactly', () => {
+    const cases = ['NCE MCS INCO2 check (06.11.2026): guide for the check', 'AI tooling stack: OpenClaw and Hermes', 'No title here at all', `${MARKUP} never recalled`, 'A very long first part that runs well past the seventy character limit of the title rule: then text']
+    for (const text of cases) {
+      const { title, rest } = review.titleOf(text)
+      expect(title + rest).toBe(text)
+    }
+    expect(review.titleOf(cases[0]).title).toBe('NCE MCS INCO2 check (06.11.2026):')
+    expect(review.titleOf(cases[1]).title).toBe('AI tooling stack:')
+    expect(review.titleOf(cases[2]).title).toBe('')
+    expect(review.titleOf(cases[4]).title).toBe('')
+    expect(review.titleOf('\n\n  second line: x').title).toBe('second line:')
+  })
+
+  test('groupByOwner: global first, then the larger groups, each keeping its order', () => {
+    const items = [{ owner: 'b', id: '1' }, { owner: 'a', id: '2' }, { owner: 'global', id: '3' }, { owner: 'a', id: '4' }]
+    expect(review.groupByOwner(items).map((g: { owner: string; items: { id: string }[] }) => `${g.owner}:${g.items.map(i => i.id).join('')}`)).toEqual(['global:3', 'a:24', 'b:1'])
+  })
+
+  test('done rows, group headings and the more row', () => {
+    withDocumentSync(() => {
+      const calls: string[] = []
+      const kept = review.doneRow('kept', 'Title: rest', 5, (done: (e?: string) => void) => {
+        calls.push('undo')
+        done()
+      }) as FakeNode
+      expect(kept.className).toBe('rv-done is-kept')
+      expect(kept.texts()).toEqual(expect.arrayContaining(['✓ kept', 'Title:', 'Undo']))
+      kept.all().find(n => n.tagName === 'button')!.fire('click')
+      expect(calls).toEqual(['undo'])
+      const retired = review.doneRow('retired', 'plain', 5, (done: (e?: string) => void) => done('Restore failed: boom')) as FakeNode
+      retired.all().find(n => n.tagName === 'button')!.fire('click')
+      expect(retired.texts()).toEqual(expect.arrayContaining(['○ retired', 'Restore', 'Restore failed: boom']))
+      const head = review.groupHead('global', 4, 5, { project: (o: string) => fakeDocument.createElement('span') }) as FakeNode
+      expect(head.texts().join('')).toContain('4 · belongs to every project')
+      const shown: string[] = []
+      const more = review.moreRow('p', 3, 5, () => shown.push('p'), (o: string) => o.toUpperCase()) as FakeNode
+      expect(more.texts()).toEqual(['▸ 3 more in P'])
+      more.all().find(n => n.tagName === 'button')!.fire('click')
+      expect(shown).toEqual(['p'])
+    })
+  })
+})
+
 const CLI = join(ROOT, 'engine', 'src', 'cli.ts')
 const MARKUP = '<img src=x onerror=alert(1)>'
 const DAY = 86_400_000
@@ -172,12 +258,22 @@ describe('The Review tab on a real store', () => {
   test('the filter buttons are aria-pressed toggles with their counts', () => {
     withDocumentSync(() => {
       const picked: string[] = []
-      const buttons = filterButtons({ never: 4, untagged: 3, stale: 2, low: 1, retire: 5, notlive: 6 }, 'stale', (f: string) => picked.push(f)) as FakeNode[]
-      expect(buttons.map(b => b.texts().join(''))).toEqual(['Never recalled 4', 'No tags 3', 'Not recalled in 30 days 2', 'Low importance (under 0.4) 1', 'Retire candidates 5', 'Not live 6'])
+      // 0.22.0: short labels, the long ones as titles; a "Needs a look" label leads the queues with a count.
+      const nodes = filterButtons({ never: 4, untagged: 3, stale: 2, low: 1, retire: 5, notlive: 6 }, 'stale', (f: string) => picked.push(f)) as FakeNode[]
+      expect(nodes[0]!.textContent).toBe('Needs a look')
+      const buttons = nodes.filter(n => n.tagName === 'button')
+      expect(buttons.map(b => b.texts().join(''))).toEqual(['Never recalled 4', 'No tags 3', 'Cold 30 days 2', 'Low importance 1', 'Retire candidates 5', 'Not live 6'])
+      expect(buttons.map(b => (b as unknown as { title: string }).title)).toEqual(['Never recalled', 'No tags', 'Not recalled in 30 days', 'Low importance (under 0.4)', 'Retire candidates', 'Not live'])
       expect(buttons.map(b => b.attributes.get('aria-pressed'))).toEqual(['false', 'false', 'true', 'false', 'false', 'false'])
-      expect(buttons.every(b => b.className === 'seg-btn' && b.type === 'button')).toBe(true)
+      expect(buttons.every(b => b.className.startsWith('seg-btn q') && b.type === 'button')).toBe(true)
+      expect(buttons.find(b => b.dataset.filter === 'notlive')!.className).toBe('seg-btn q q-ash')
       buttons[1]!.fire('click')
       expect(picked).toEqual(['untagged'])
+      // A queue with nothing in it moves under "Clear", dashed, with ✓ 0.
+      const split = filterButtons({ never: 2, untagged: 0, stale: 0, low: 0, retire: 0, notlive: 1 }, 'never', () => {}) as FakeNode[]
+      expect(split.map(n => (n.tagName === 'button' ? n.dataset.filter : `[${n.textContent}]`))).toEqual(['[Needs a look]', 'never', 'notlive', '[Clear]', 'untagged', 'stale', 'low', 'retire'])
+      expect(split.find(n => n.dataset.filter === 'low')!.className).toBe('seg-btn q q-clear')
+      expect(split.find(n => n.dataset.filter === 'low')!.texts().join('')).toBe('Low importance ✓ 0')
     })
   })
 
@@ -205,17 +301,19 @@ describe('The Review tab on a real store', () => {
       const calls: string[] = []
       const memory = data.rows.find((m: { id: string }) => m.id === ids.never)
       const row = reviewRow(memory, host(calls), () => calls.push('removed')) as unknown as FakeNode
-      expect(row.texts()).toContain(`${MARKUP} never recalled`)
-      expect(row.all().map(n => n.tagName).filter(tag => !['tr', 'td', 'span', 'button', 'input'].includes(tag))).toEqual([])
+      // 0.22.0: the text cell is the title, the rest and the reason chips; the hostile text is still text.
       const cells = row.children as FakeNode[]
+      expect(cells[0]!.textContent).toStartWith(`${MARKUP} never recalled`)
+      expect(cells[0]!.all().filter(n => n.className.startsWith('why-chip')).map(n => n.textContent)).toEqual(expect.arrayContaining(['never recalled', 'new · 0 days']))
+      expect(row.all().map(n => n.tagName).filter(tag => !['tr', 'td', 'span', 'button', 'input', 'div'].includes(tag))).toEqual([])
       expect(cells).toHaveLength(5)
       expect(cells[1]!.texts()).toEqual(['project-alpha-1a2b'])
       expect(cells[2]!.texts()).toEqual(['today'])
-      expect(cells[3]!.texts()).toEqual(['never'])
+      expect(cells[3]!.texts()[0]).toBe('never')
       const buttons = row.all().filter(n => n.tagName === 'button')
       const [open, ask, yes, keep] = buttons
-      // Forget is gone from the row (it stays in the memory sheet): Retire takes its place.
-      expect(buttons.map(b => b.textContent)).toEqual(['Open', 'Retire…', 'Retire', 'Keep'])
+      // Forget is gone from the row (it stays in the memory sheet): Retire takes its place. The confirm's cancel reads "Keep it".
+      expect(buttons.map(b => b.textContent)).toEqual(['Open', 'Retire…', 'Retire', 'Keep it'])
       expect(row.texts().join(' ')).not.toContain('Forget')
       open!.fire('click')
       expect(calls).toEqual([`open ${ids.never}`])
@@ -242,7 +340,7 @@ describe('The Review tab on a real store', () => {
       expect(calls.at(-1)).toBe(`retire ${ids.never}`)
       // A recalled memory shows how often and when.
       const cold = reviewRow(data.rows.find((m: { id: string }) => m.id === ids.cold), host(), () => {}) as unknown as FakeNode
-      expect((cold.children as FakeNode[])[3]!.texts()).toEqual(['3, last 45 days ago'])
+      expect((cold.children as FakeNode[])[3]!.texts()[0]).toBe('3, last 45 days ago')
     })
     withDocumentSync(() => {
       // A failed retire keeps the row and says why.
@@ -321,7 +419,7 @@ describe('The Review tab on a real store', () => {
       expect(text).toContain('Keep one of these: retire only one of this pair (the other is bbb).')
       const confirm = row.all().find(n => n.className === 'confirm-inline')!
       expect(confirm.texts().join(' ')).toContain('Retire only one: the other is bbb.')
-      expect(row.all().filter(n => n.tagName === 'button').map(b => b.textContent)).toEqual(['Open', 'Retire…', 'Retire', 'Keep'])
+      expect(row.all().filter(n => n.tagName === 'button').map(b => b.textContent)).toEqual(['Open', 'Retire…', 'Retire', 'Keep it'])
       row.all().find(n => n.textContent === 'Retire' && n.tagName === 'button')!.fire('click')
       expect(calls).toEqual(['retire aaa', 'removed'])
       // A plain candidate has no pair note.

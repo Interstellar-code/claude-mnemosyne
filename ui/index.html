@@ -474,21 +474,37 @@
   <main id="view-review" class="main view column wide" hidden>
     <div class="titlebar">
       <h1 id="review-title" tabindex="-1">Memory review</h1>
-      <span class="muted small">Memories to review or retire: ones that were never used, have no tags, have gone cold, matter little, or look out of date. A retired memory can be restored from Not live.</span>
+      <span class="muted small">Go through one queue at a time: keep, open or retire. Retired memories can be restored from Not live.</span>
     </div>
     <div class="status-row">
       <p id="review-status" class="notice-line small muted" role="status">Loading…</p>
       <button id="review-retry" class="btn" type="button" hidden>Try again</button>
     </div>
-    <div id="review-body" hidden>
-      <div id="review-filters" class="segmented" role="group" aria-label="What to review"></div>
-      <p id="review-text" class="muted small"></p>
+    <div id="review-body" class="review-body" hidden>
+      <div id="review-filters" class="triage" role="group" aria-label="What to review"></div>
+      <div class="rv-banner">
+        <div class="rv-banner-text">
+          <p id="review-why" class="rv-why"></p>
+          <p id="review-text" class="muted small"></p>
+        </div>
+        <label id="review-new-box" class="switch"><input id="review-new" type="checkbox" checked> <span>Show new ones</span></label>
+      </div>
+      <div id="review-progress" class="rv-progress" hidden></div>
+      <section id="review-done-box" class="card rv-done-box" aria-label="Done in this pass" hidden>
+        <div class="table-wrap">
+          <table class="table rv-done-table"><tbody id="review-done-rows"></tbody></table>
+        </div>
+      </section>
       <section id="review-box" class="card" aria-label="Memories to review">
         <div class="table-wrap">
-          <table class="table compact">
+          <table class="table compact rv-table">
             <thead><tr><th>Memory</th><th>Project</th><th>Saved</th><th>Recalls</th><th>Actions</th></tr></thead>
             <tbody id="review-rows"></tbody>
           </table>
+        </div>
+        <div class="mem-foot">
+          <span class="muted small mem-keys"><kbd>J</kbd> <kbd>K</kbd> move · <kbd>O</kbd> open · <kbd>Space</kbd> keep · <kbd>R</kbd> retire, then <kbd>Enter</kbd> · <kbd>U</kbd> undo last</span>
+          <span class="muted small">One memory at a time; nothing is retired in bulk.</span>
         </div>
       </section>
       <section id="review-candidates-box" class="card" aria-label="Retire candidates" hidden>

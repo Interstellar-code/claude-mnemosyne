@@ -318,6 +318,11 @@ The header shows how many memories are in how many projects, and a connection pi
   - **A row opens its source:** the memory it was mined from, the other items from that memory, Open memory and Show on map.
   - **Source recalls** is how often the memory an item came from was recalled. A relation reads as subject, link and object with five confidence pips; an instruction shows Active or Retired.
 - **Review:** memories to look at again: never recalled, no tags, not recalled in 30 days, or low importance, then Retire candidates with their reasons and a Not live list with Restore. Each row has Open and a one-at-a-time Retire; Forget is not here.
+  - **Queues** are split into "Needs a look" and "Clear". A banner says why the memories are listed, and chips under each row give its reasons.
+  - **New memories** (saved in the last 7 days) are marked new; turn off Show new ones to hide them from Never recalled until their grace period ends.
+  - **Keep** hides a memory you checked from the queues for 30 days (in this browser). This pass counts what you kept and retired, with Undo and Restore.
+  - **Grouping:** rows are grouped by project when a queue spans several.
+  - **Keys:** J, K, O, Space (keep), R (retire, then Enter), U (undo).
 - **Health:** how much of your memory is used, how much has never been recalled, and which features are switched on.
 - **Vocabulary:** the shared tags by namespace with counts, and the candidates to Admit or Alias.
 - **Settings:** every setting of the memory system with its value and default, where you change, reset and back up (see [Settings](#settings)). It writes to `~/.claude/mnemosyne/config.json` and, through the `claude` command, to the plugin options.

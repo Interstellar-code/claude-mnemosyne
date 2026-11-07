@@ -350,6 +350,18 @@ describe('KAPI.2: GET /api/health and /api/health-report', () => {
     expect(report.mostRecalled.map(m => [m.id, m.recalls, m.lastRecalled])).toEqual([['m3', 5, null]])
   })
 
+  test('0.22.0: never recalled counts live memories only (the Review rule): a retired or expired one is not waiting to be recalled', async () => {
+    const report = await reportOf('live-never-health', db => {
+      db.run('CREATE TABLE working_memory (id TEXT PRIMARY KEY, session_id TEXT, content TEXT, timestamp TEXT, recall_count INTEGER DEFAULT 0, last_recalled TEXT, metadata_json TEXT, valid_until TEXT, superseded_by TEXT)')
+      db.run("INSERT INTO working_memory (id, session_id, content, timestamp) VALUES ('live1', 'p1', 'a', '2026-10-01'), ('live2', 'p1', 'b', '2026-10-02')")
+      db.run("INSERT INTO working_memory (id, session_id, content, timestamp, superseded_by) VALUES ('gone', 'p1', 'c', '2026-10-03', 'live1')")
+      db.run("INSERT INTO working_memory (id, session_id, content, timestamp, valid_until) VALUES ('old', 'p1', 'd', '2026-10-04', '2020-01-01T00:00:00Z'), ('later', 'p1', 'e', '2026-10-05', '2999-01-01T00:00:00Z')")
+    })
+    expect(report.total).toBe(5)
+    expect(report.neverRecalled.count).toBe(3)
+    expect(report.neverRecalled.list.map(m => m.id)).toEqual(['later', 'live2', 'live1'])
+  })
+
   test('KAPI.2: a table whose name needs quoting is counted', async () => {
     const report = await reportOf('odd-table-health', db => {
       db.run('CREATE TABLE working_memory (id TEXT PRIMARY KEY, session_id TEXT, content TEXT, timestamp TEXT, recall_count INTEGER, last_recalled TEXT, metadata_json TEXT)')

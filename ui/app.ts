@@ -52,7 +52,36 @@ import {
   type QuickState,
 } from './knowledge'
 import { chartBars, chartText, coverageRows, dayBars, kpiTiles as healthKpiTiles, parseHealth, projectRows as healthProjectRows, storageList, storageSummary, tableFilterButtons, type HealthData, type HealthHost, type TableFilter } from './health'
-import { candidateRow, filterButtons, liveRows, nearPartner, notLiveRow, parseQueue, parseReview, queueText, reviewCounts, reviewList, reviewRow, reviewText, type Queue, type ReviewData, type ReviewFilter, type ReviewHost, type RowFilter } from './review'
+import {
+  candidateRow,
+  doneRow,
+  filterButtons,
+  GRACE_DAYS,
+  graceEnds,
+  groupByOwner,
+  groupHead,
+  isNew,
+  liveRows,
+  moreRow,
+  nearPartner,
+  notLiveRow,
+  parseQueue,
+  parseReview,
+  queueText,
+  readKept,
+  reviewCounts,
+  reviewList,
+  reviewRow,
+  reviewText,
+  setKept,
+  WHY,
+  type Queue,
+  type ReviewData,
+  type ReviewFilter,
+  type ReviewHost,
+  type ReviewMemory,
+  type RowFilter,
+} from './review'
 import { buildForm, type FormMemory } from './form'
 import { candidateList, parseVocabulary, tagGroups, vocabularyText, type VocabData } from './vocabulary'
 import { isClaudeRecall, isOtherAppsRecall } from './recalls'
@@ -1644,9 +1673,25 @@ export async function loadSettings() {
 
 // After a retire, the row index whose successor gets the focus once the list is redrawn.
 // `data` is the newest memories (GET /api/memories); `queue` is GET /api/review, read once each time the tab opens (it compares every pair of vectors on the server, so a filter change never asks again).
-const reviewView = { data: null as ReviewData | null, queue: null as Queue | null, queueError: '', filter: 'never' as ReviewFilter, refocus: null as number | null }
+// 0.22.0: `showNew` shows memories in their grace period (the switch, kept in this browser); `done` is this pass's kept and
+// retired memories (in order, for the progress line and Undo); `start` is the queue's size when the pass began, per filter;
+// `openGroups` holds the projects showing all their rows.
+const reviewView = {
+  data: null as ReviewData | null,
+  queue: null as Queue | null,
+  queueError: '',
+  filter: 'never' as ReviewFilter,
+  refocus: null as number | null,
+  showNew: true,
+  done: [] as { id: string; kind: 'kept' | 'retired'; text: string }[],
+  start: new Map<ReviewFilter, number>(),
+  openGroups: new Set<string>(),
+}
+const REVIEW_NEW_KEY = 'mnemosyne.review.showNew'
+/** Rows a project shows before "▸ n more". */
+const GROUP_SHOW = 4
 const reviewHost: ReviewHost = {
-  project: owner => project(owner, 'project'),
+  project: owner => project(owner, 'project own'),
   open: id => openInMemories(id),
   retire: (id, replacedBy, done) => retireById(id, replacedBy, done),
   restore: (id, done) => restoreById(id, done),
@@ -1655,6 +1700,65 @@ const reviewHost: ReviewHost = {
     return row === undefined ? null : (row.lastRecalled ?? row.created)
   },
   now: () => Date.now(),
+  keep: id => keepMemory(id),
+}
+
+/** The text of a memory the page knows (the list, the candidates, Memories), for a done row. */
+const reviewTextOf = (id: string) => reviewView.data?.rows.find(row => row.id === id)?.text ?? reviewView.queue?.candidates.find(row => row.id === id)?.text ?? memories.rows.find(row => row.id === id)?.preview ?? id
+
+/** Keep: the memory leaves these queues for KEEP_DAYS (this browser), and the pass counts it. */
+function keepMemory(id: string) {
+  setKept(prefStorage(), id, true, Date.now())
+  reviewView.done = [...reviewView.done.filter(item => item.id !== id), { id, kind: 'kept', text: reviewTextOf(id) }]
+  reviewView.refocus = 0
+  drawReview()
+}
+
+/** Undo the last kept or retired memory of this pass (U, or the done row's button). */
+function undoDone(id: string, done: (error?: string) => void = () => {}) {
+  const item = reviewView.done.find(entry => entry.id === id)
+  if (item === undefined) return done()
+  if (item.kind === 'kept') {
+    setKept(prefStorage(), id, false, Date.now())
+    reviewView.done = reviewView.done.filter(entry => entry.id !== id)
+    drawReview()
+    return done()
+  }
+  restoreById(id, error => {
+    if (error === undefined) {
+      reviewView.done = reviewView.done.filter(entry => entry.id !== id)
+      drawReview()
+    }
+    done(error)
+  })
+}
+
+/** The rows of the four row filters a person sees: not kept, and new ones only with Show new ones. */
+function reviewRows(live: readonly ReviewMemory[], filter: RowFilter, now: number): ReviewMemory[] {
+  const kept = readKept(prefStorage(), now)
+  return reviewList(live, filter, now, reviewView.showNew ? 0 : GRACE_DAYS).filter(row => kept[row.id] === undefined)
+}
+
+/** Rows grouped by project when the list spans more than one: a heading, the first GROUP_SHOW rows, then "▸ n more". */
+function groupedReviewRows<T extends { owner: string; id: string }>(list: readonly T[], cols: number, row: (item: T, index: number) => HTMLElement, note: (items: readonly T[]) => string = () => ''): HTMLElement[] {
+  const groups = groupByOwner(list)
+  if (groups.length <= 1) return list.map(row)
+  const out: HTMLElement[] = []
+  let index = 0
+  for (const group of groups) {
+    out.push(groupHead(group.owner, group.items.length, cols, reviewHost, note(group.items)))
+    const all = reviewView.openGroups.has(group.owner)
+    const shown = all ? group.items : group.items.slice(0, GROUP_SHOW)
+    for (const item of shown) out.push(row(item, index++))
+    if (shown.length < group.items.length)
+      out.push(
+        moreRow(group.owner, group.items.length - shown.length, cols, () => {
+          reviewView.openGroups.add(group.owner)
+          drawReview()
+        }, ownerName),
+      )
+  }
+  return out
 }
 
 /** The sentence under the filters when the review queue is not there (yet): still loading, or why it failed. */
@@ -1706,7 +1810,10 @@ export function retireById(id: string, replacedBy: string | undefined, done: (er
       done(`Retire failed: ${body.error ?? `the server answered ${reply.status}`}`)
       return
     }
+    const text = reviewTextOf(id)
     applyRetired(id)
+    // 0.22.0: the pass counts it, and its done row offers Restore.
+    reviewView.done = [...reviewView.done.filter(item => item.id !== id), { id, kind: 'retired', text }]
     drawRows()
     setStatus(`Retired memory ${id}. Restore brings it back.`, 'ok')
     done()
@@ -1723,10 +1830,55 @@ export function restoreById(id: string, done: (error?: string) => void) {
       return
     }
     applyRestored(id)
+    reviewView.done = reviewView.done.filter(item => item.id !== id)
     drawRows()
     setStatus(`Restored memory ${id}.`, 'ok')
     done()
   })()
+}
+
+/** The banner: why the shown memories are listed, and what the grace period hides or shows. */
+function drawReviewWhy(filter: ReviewFilter, shown: number, live: readonly ReviewMemory[], now: number) {
+  const why = maybe('review-why')
+  if (why === null) return
+  why.replaceChildren()
+  if (shown > 0) why.append(el('strong', `Why ${shown === 1 ? 'this one is' : `these ${shown} are`} listed: `), document.createTextNode(`${WHY[filter]}.`))
+  const newBox = maybe('review-new-box')
+  if (newBox) newBox.hidden = filter !== 'never'
+  if (filter !== 'never') return
+  // The grace period: how many of the never-recalled are new, and when the newest returns.
+  const kept = readKept(prefStorage(), now)
+  const fresh = reviewList(live, 'never', now).filter(row => isNew(row, now) && kept[row.id] === undefined)
+  if (fresh.length === 0) return
+  const last = fresh.map(row => row.created).filter((t): t is string => t !== null).sort().at(-1) ?? null
+  why.append(
+    document.createTextNode(
+      reviewView.showNew
+        ? ` ${fresh.length === shown ? `All ${shown}` : fresh.length} ${fresh.length === 1 ? 'was' : 'were'} saved in the last ${GRACE_DAYS} days, so ${fresh.length === 1 ? 'it has' : 'they have'} had little chance yet.`
+        : ` ${fresh.length} saved in the last ${GRACE_DAYS} days ${fresh.length === 1 ? 'is' : 'are'} hidden; ${fresh.length === 1 ? 'it returns' : 'the last returns'} here on ${graceEnds(last, now)} if still unused.`,
+    ),
+  )
+}
+
+/** "This pass: n of m · kept a · retired b", with a bar; hidden before anything was done. */
+function drawReviewProgress(filter: ReviewFilter, remaining: number) {
+  const box = maybe('review-progress')
+  if (box === null) return
+  const kept = reviewView.done.filter(item => item.kind === 'kept').length
+  const retired = reviewView.done.filter(item => item.kind === 'retired').length
+  const doneCount = kept + retired
+  if (!reviewView.start.has(filter)) reviewView.start.set(filter, remaining + doneCount)
+  const total = Math.max(reviewView.start.get(filter)!, remaining + doneCount)
+  box.hidden = doneCount === 0
+  const bar = el('span', undefined, 'split rv-bar')
+  bar.append(el('span', undefined, `seg rv-kept w${total === 0 ? 0 : Math.round((kept / total) * 20)}`), el('span', undefined, `seg rv-retired w${total === 0 ? 0 : Math.round((retired / total) * 20)}`))
+  box.replaceChildren(el('span', 'This pass', 'muted small'), bar, el('strong', `${doneCount} of ${total}`), el('span', ` · kept ${kept} · retired ${retired}`, 'muted small'))
+  const doneBox = maybe('review-done-box')
+  const doneRows = maybe('review-done-rows')
+  if (doneBox && doneRows) {
+    doneBox.hidden = doneCount === 0
+    doneRows.replaceChildren(...[...reviewView.done].reverse().map(item => doneRow(item.kind, item.text, 1, done => undoDone(item.id, done))))
+  }
 }
 
 export function drawReview() {
@@ -1736,8 +1888,11 @@ export function drawReview() {
   const queue = reviewView.queue
   const live = liveRows(data.rows)
   const filter = reviewView.filter
+  const kept = readKept(prefStorage(), now)
+  const candidates = (queue?.candidates ?? []).filter(row => kept[row.id] === undefined)
+  const counts = reviewCounts(live.filter(row => kept[row.id] === undefined), now, { retire: candidates.length, notlive: queue?.notLive.length ?? 0 }, reviewView.showNew ? 0 : GRACE_DAYS)
   byId('review-filters').replaceChildren(
-    ...filterButtons(reviewCounts(live, now, { retire: queue?.candidates.length ?? 0, notlive: queue?.notLive.length ?? 0 }), filter, pick => {
+    ...filterButtons(counts, filter, pick => {
       reviewView.filter = pick
       drawReview()
     }),
@@ -1747,33 +1902,83 @@ export function drawReview() {
     drawReview()
   }
   let rows: HTMLElement[] = []
+  let shown = 0
   if (filter === 'retire') {
-    const list = queue?.candidates ?? []
-    byId('review-text').textContent = queue === null ? queueMissing() : queueText('retire', list.length, queue.candidateTotal)
-    rows = list.map((candidate, index) => candidateRow(candidate, reviewHost, again(index)))
+    byId('review-text').textContent = queue === null ? queueMissing() : queueText('retire', candidates.length, queue.candidateTotal)
+    rows = groupedReviewRows(candidates, 4, (candidate, index) => candidateRow(candidate, reviewHost, again(index)))
+    shown = candidates.length
     byId('review-candidate-rows').replaceChildren(...rows)
   } else if (filter === 'notlive') {
     const list = queue?.notLive ?? []
     byId('review-text').textContent = queue === null ? queueMissing() : queueText('notlive', list.length, queue.notLiveTotal)
     rows = list.map((row, index) => notLiveRow(row, reviewHost, again(index)))
+    shown = list.length
     byId('review-notlive-rows').replaceChildren(...rows)
   } else {
-    const list = reviewList(live, filter as RowFilter, now)
+    const list = reviewRows(live, filter as RowFilter, now)
     byId('review-text').textContent = reviewText(filter as RowFilter, list.length, data.rows.length, data.total)
-    rows = list.map((memory, index) => reviewRow(memory, reviewHost, again(index)))
+    const note = (items: readonly ReviewMemory[]) => (items.every(item => isNew(item, now)) ? `all saved in the last ${GRACE_DAYS} days` : '')
+    rows = groupedReviewRows(list, 5, (memory, index) => reviewRow(memory, reviewHost, again(index)), note)
+    shown = list.length
     byId('review-rows').replaceChildren(...rows)
   }
+  drawReviewWhy(filter, shown, live, now)
+  drawReviewProgress(filter, shown)
   byId('review-box').hidden = filter === 'retire' || filter === 'notlive' || rows.length === 0
   byId('review-candidates-box').hidden = filter !== 'retire' || rows.length === 0
   byId('review-notlive-box').hidden = filter !== 'notlive' || rows.length === 0
   tabStatus('review', '')
   byId('review-body').hidden = false
   // The redrawn list lost the focused button: the next row's Open (the new last row's when the
-  // last was retired or restored), else the tab's heading when the list is now empty.
+  // last was retired or restored), else the tab's heading when the list is now empty. Group headings are skipped.
   if (reviewView.refocus !== null) {
-    const row = rows[Math.min(reviewView.refocus, rows.length - 1)]
+    const memoryRows = rows.filter(row => row.dataset?.id !== undefined)
+    const row = memoryRows[Math.min(reviewView.refocus, memoryRows.length - 1)]
     reviewView.refocus = null
     ;(row?.querySelector<HTMLButtonElement>('button') ?? byId('review-title')).focus()
+  }
+}
+
+/** The tab's keys (0.22.0): J/K move over the rows, O opens, Space keeps, R opens the retire confirm (Enter retires, Esc cancels), U undoes the last. */
+export function reviewKey(event: KeyboardEvent) {
+  if (current !== 'review' || event.defaultPrevented || typing(event)) return
+  const key = event.key
+  if (key === 'u' || key === 'U') {
+    const last = reviewView.done.at(-1)
+    if (last === undefined) return
+    event.preventDefault()
+    undoDone(last.id)
+    return
+  }
+  const box = reviewView.filter === 'retire' ? 'review-candidate-rows' : reviewView.filter === 'notlive' ? 'review-notlive-rows' : 'review-rows'
+  const rows = (Array.from(byId(box).children) as HTMLElement[]).filter(row => row.dataset?.id)
+  if (rows.length === 0) return
+  const at = rows.findIndex(row => row.contains?.(document.activeElement))
+  if (key === 'j' || key === 'J' || key === 'k' || key === 'K') {
+    event.preventDefault()
+    const next = key.toLowerCase() === 'j' ? Math.min(rows.length - 1, at + 1) : Math.max(0, at === -1 ? 0 : at - 1)
+    const target = rows[next]!
+    target.querySelector<HTMLButtonElement>('button')?.focus()
+    target.scrollIntoView?.({ block: 'nearest' })
+    return
+  }
+  if (at === -1) return
+  const row = rows[at]!
+  const id = row.dataset.id!
+  const button = (label: string) => Array.from(row.querySelectorAll<HTMLButtonElement>('button')).find(b => b.textContent === label)
+  if (key === 'o' || key === 'O') {
+    event.preventDefault()
+    reviewHost.open(id)
+  } else if (key === ' ' && reviewView.filter !== 'notlive') {
+    event.preventDefault()
+    keepMemory(id)
+  } else if (key === 'r' || key === 'R') {
+    const ask = button('Retire…')
+    if (!ask) return
+    event.preventDefault()
+    ask.click()
+    // The "replaced by" box takes the keys: Enter retires, Esc cancels.
+    row.querySelector<HTMLInputElement>('input')?.focus()
   }
 }
 
@@ -1861,6 +2066,26 @@ export async function loadVocabulary(message = '') {
 /** The Try again buttons of the Knowledge, Review and Health status lines. */
 export function wireKnowledgeHealth() {
   byId('review-retry').addEventListener('click', () => void loadReview())
+  // 0.22.0: Show new ones (kept in this browser) and the Review keys; absent from older stand-in pages.
+  const showNew = maybe<HTMLInputElement>('review-new')
+  if (showNew) {
+    try {
+      reviewView.showNew = prefStorage()?.getItem(REVIEW_NEW_KEY) !== 'off'
+    } catch {
+      reviewView.showNew = true
+    }
+    showNew.checked = reviewView.showNew
+    showNew.addEventListener('change', () => {
+      reviewView.showNew = showNew.checked
+      try {
+        prefStorage()?.setItem(REVIEW_NEW_KEY, showNew.checked ? 'on' : 'off')
+      } catch {
+        // storage is a convenience only
+      }
+      drawReview()
+    })
+  }
+  document.addEventListener?.('keydown', reviewKey)
   byId('vocab-retry').addEventListener('click', () => void loadVocabulary())
   byId('know-retry').addEventListener('click', () => void loadKnowledge())
   byId('know-owner').addEventListener('change', () => {

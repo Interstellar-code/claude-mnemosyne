@@ -500,16 +500,20 @@ export function healthReport(config: Config, store: Store, _engine: string | und
       recalls: r.recalls,
     })
 
+    // 0.22.0: live memories only, the Review tab's rule (a retired or expired memory is not waiting to be recalled), so the
+    // two tabs give one number. A store without the lifespan columns has only live rows.
+    const liveOnly = wmCols.has('valid_until') && wmCols.has('superseded_by') ? ` AND ${LIVE_SQL}` : ''
+    const liveArgs = liveOnly === '' ? [] : [new Date().toISOString()]
     // The count and its list are read apart, so a list that fails never zeroes the count.
     try {
-      neverCount = (db.query(`SELECT COUNT(*) AS n FROM working_memory WHERE ${recallsSql} = 0`).get() as { n: number })?.n ?? 0
+      neverCount = (db.query(`SELECT COUNT(*) AS n FROM working_memory WHERE ${recallsSql} = 0${liveOnly}`).get(...liveArgs) as { n: number })?.n ?? 0
     } catch {
       neverCount = 0
     }
     try {
       const neverRows = db
-        .query(`${memorySql} WHERE ${recallsSql} = 0 ORDER BY ${col('timestamp')} DESC, id LIMIT ${NEVER_RECALLED_LIST}`)
-        .all() as MemoryRow[]
+        .query(`${memorySql} WHERE ${recallsSql} = 0${liveOnly} ORDER BY ${col('timestamp')} DESC, id LIMIT ${NEVER_RECALLED_LIST}`)
+        .all(...liveArgs) as MemoryRow[]
       neverList = neverRows.map(toMemory)
     } catch {
       neverList = []
