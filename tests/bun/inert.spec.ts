@@ -204,16 +204,18 @@ describe('VIEW.4: the real render helpers keep markup as text', () => {
     const row = app.memoryRow(memory, () => {}) as FakeElement
     expect(row.texts()).not.toContain(memory.id)
     expect(row.all().some(element => element.className === 'row-text')).toBe(true)
+    const recallCell = (node: FakeElement) => node.all().find(element => element.tagName === 'td' && element.className.includes('rc'))!
     const cells = row.all().filter(element => element.tagName === 'td')
-    const last = cells[cells.length - 1]!
-    expect(last.textContent).toBe('3')
-    expect(last.title).toBe('Last recalled: never')
+    // Kind glyph, text and tags, owner, reach, importance, recalls, saved.
+    expect(cells.length).toBe(7)
+    expect(recallCell(row).textContent).toBe('3')
+    expect(recallCell(row).title).toBe('Last recalled: never')
     const never = app.memoryRow({ ...memory, recall_count: 0 }, () => {}) as FakeElement
-    const quiet = never.all().filter(element => element.tagName === 'td').pop()!
+    const quiet = recallCell(never)
     expect(quiet.textContent).toBe('never')
     expect(quiet.className).toContain('muted')
     const recalled = app.memoryRow({ ...memory, last_recalled: '2026-10-23T10:00:00.000Z' }, () => {}) as FakeElement
-    expect(recalled.all().filter(element => element.tagName === 'td').pop()!.title).toMatch(/^Last recalled: .*\d/)
+    expect(recallCell(recalled).title).toMatch(/^Last recalled: .*\d/)
     // A preview the server cut short ends in an ellipsis.
     const cut = app.memoryRow({ ...memory, preview: 'start', truncated: true }, () => {}) as FakeElement
     expect(cut.texts()).toContain('start…')
@@ -304,6 +306,55 @@ describe('VIEW.4: the real render helpers keep markup as text', () => {
     expect(plain.all().some(element => element.tagName === 'button')).toBe(false)
     expect(app.tagsOfMemory({ metadata: { tags: ['m'] } })).toEqual(['m'])
     expect(app.tagsOfMemory({ metadata: { tags: ['m'] }, tags: ['s'] })).toEqual(['s'])
+  })
+
+  test('MEM 0.18: the row cues: kind glyph, reach, importance pips, recall bar, a bold lead, at most 3 tags', () => {
+    made.length = 0
+    // Reach: the global owner reaches all; a project memory with global scope is shared; else its project only.
+    expect(app.reachOf({ owner: 'global', scope: 'global' })).toBe('all')
+    expect(app.reachOf({ owner: 'project-x-1a2b', scope: 'global' })).toBe('shared')
+    expect(app.reachOf({ owner: 'project-x-1a2b', scope: 'channel' })).toBe('project')
+    expect(app.reachOf({ owner: 'project-x-1a2b', scope: null })).toBe('project')
+    // A kind outside the engine's list is unknown, and never becomes a class of its own choosing.
+    expect(app.kindGlyph('decision').className).toBe('kg k-decision')
+    expect(app.kindGlyph('x" onclick="1').className).toBe('kg k-unknown')
+    expect(app.kindGlyph(null).attributes.get('aria-label')).toBe('unknown')
+    // Importance: five pips, rounded; unknown lights none.
+    expect(app.importancePips(0.8).className).toBe('imp i4')
+    expect(app.importancePips(1).className).toBe('imp i5')
+    expect(app.importancePips(null).className).toBe('imp i0')
+    expect(app.importancePips(0.5).children.length).toBe(5)
+    // The recall bar grows with the log of the count, 1 to 5.
+    expect([1, 2, 4, 15, 1000].map(app.recallWidth)).toEqual([1, 2, 2, 3, 5])
+    // The lead is the words up to a colon early in the line.
+    expect(app.leadOf('NCE MCS return PO: a return PO')).toEqual({ lead: 'NCE MCS return PO:', rest: ' a return PO' })
+    expect(app.leadOf('no colon here')).toEqual({ lead: '', rest: 'no colon here' })
+    expect(app.leadOf(`${'x'.repeat(90)}: late`).lead).toBe('')
+    const row = app.memoryRow({ ...memory, preview: 'Lead: text', memory_type: 'fact', tags: ['a', 'b', 'c', 'd', 'e'] }, () => {}) as FakeElement
+    expect(row.all().find(element => element.className === 'lead')!.textContent).toBe('Lead:')
+    expect(row.all().filter(element => element.className === 'tag').map(element => element.textContent)).toEqual(['a', 'b', 'c'])
+    expect(row.all().find(element => element.className === 'tag-more')!.textContent).toBe('+2')
+    // The owner is a chip; the global owner's chip is gold.
+    expect(row.all().some(element => element.className === 'project own')).toBe(true)
+    const global = app.memoryRow({ ...memory, owner: 'global' }, () => {}) as FakeElement
+    expect(global.all().some(element => element.className === 'project own is-global')).toBe(true)
+    expect(global.all().some(element => element.className === 'reach r-all')).toBe(true)
+  })
+
+  test('MEM 0.18: saved times, day headings and day groups', () => {
+    const now = new Date(2026, 10, 7, 12, 0, 0)
+    const at = (y: number, m: number, d: number, h = 9) => new Date(y, m, d, h, 42).toISOString()
+    expect(app.savedLabel(at(2026, 10, 7), now)).toBe('09:42')
+    expect(app.savedLabel(at(2026, 9, 19), now)).toBe('19 Oct')
+    expect(app.savedLabel(at(2025, 9, 19), now)).toBe('2025-10-19')
+    expect(app.savedLabel(null, now)).toBe('')
+    expect(app.dayHeading(at(2026, 10, 7), now)).toBe('Today')
+    expect(app.dayHeading(at(2026, 10, 6), now)).toBe('Yesterday')
+    expect(app.dayHeading(at(2026, 9, 19), now)).toBe('19 Oct 2026')
+    const rows = [at(2026, 9, 21, 10), at(2026, 9, 21, 9), at(2026, 9, 19)].map((timestamp, i) => ({ ...memory, id: `m${i}`, timestamp }))
+    const grouped = app.withDays(rows, true) as ({ heading: string; count: number } | { id: string })[]
+    expect(grouped.map(item => ('id' in item ? item.id : `${item.heading}/${item.count}`))).toEqual(['21 Oct 2026/2', 'm0', 'm1', '19 Oct 2026/1', 'm2'])
+    expect(app.withDays(rows, false).length).toBe(3)
   })
 
   test('a Search hit, with the query words marked as text', () => {

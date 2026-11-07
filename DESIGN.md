@@ -1603,6 +1603,45 @@ C10.3: the engine's trigger `trim_validations_to_3` keeps only the newest 3 `mem
 
 On the solar-system map a plain folder (no git repo) with at least `map.stationMin` live memories is a space station and one with fewer a starship (default 50, range 2 to 1000, applies now). The galaxy reply carries the value. Git repos are always planets.
 
+### The Memories tab (0.18.0)
+
+Second step of the tab polish (design proposal `tabs-after/NOTES-memories-search-knowledge.md`, groundwork G1 to G3 and Memories items 1 to 12). Groundwork in `ui/app.ts`, for Search and Knowledge to reuse:
+- `project(owner, 'project own')` draws an owner chip, with `is-global` (gold) for the global owner.
+- `kindGlyph(kind)` is a `span.kg.k-<kind>` drawn by a CSS `mask-image` (an inline SVG data URL, allowed by the page's `img-src data:`); `kindOf` maps anything outside `KINDS` to `unknown`, so a stored value never becomes a class of its own choosing.
+- `reachOf(memory)` gives `all` (owner `global`), `shared` (scope `global` on a project) or `project`; `reachMark` draws it in the map's roles (gold dot, dashed `--role-shared` ring, ash ring).
+
+Two text tokens, `--gold-ink` and `--shared-ink`, keep gold and blue words readable on the light theme.
+
+The row:
+- seven cells: glyph, `.mem-cell` (`.l1` with `.lead` from `leadOf` and the not-live `state-mark` pill; `.l2` with at most `ROW_TAGS` 3 tags and "+n"), owner chip, reach, `importancePips` (`.imp.i0`–`i5`), recalls (`.rc`: "never", or a `.rc-bar` of width `recallWidth(n)` 1–5, about log2), and `savedLabel`;
+- not-live rows keep `row is-dim`, now in `--role-ash` throughout.
+
+The list:
+- `memories.state` (`live | gone | all`, stored as `mnemosyne.memories.state`; the old `showRetired = '1'` reads as `all`) filters client-side; the three segmented buttons are built by `wireStateView`.
+- `memories.reach` and `memories.kind` are sent as `reach=` and `kind=`.
+- `listMemories` in `ui/server.ts`:
+  - counts `facets.reach` (`REACH_CASE`) and `facets.kind` (`memory_type`, empty as `unknown`) under every filter except those two, so each chip shows what picking it gives;
+  - then applies `REACH_SQL[reach]` and the kind;
+  - also selects `memory_type`;
+  - `q` also matches an id prefix.
+- `drawRows`:
+  - inserts `tr.day-group` rows from `withDays` (not for "Most recalled"); the class is not `.day`, which the Health chart owns;
+  - fills the title counts `#mem-counts` from the loaded rows;
+  - draws `#mem-empty` when nothing shows, naming the active filters, with Clear project and Clear all filters (which also sets All).
+- Keys:
+  - `memoryKey` (on `document`, Memories only, ignored while typing or with a modifier) handles J and K (focus moves between `tr.row`), `/` (the filter box) and N (the new-memory form);
+  - Enter is the row's own and Esc the sheet's;
+  - Esc in the filter box clears it, then leaves it.
+
+The panel:
+- `openSheet` takes `side`. With `side` the sheet gets `.is-side`, which only at `min-width: 1200px` becomes a 440 px panel at the right, while the views pad right to make room; below that it is the bottom sheet as before.
+- `openMemory` sets `side` when the Memories tab is current.
+- `memoryDetail`:
+  - its head is the kind glyph and word, the owner chip, the reach and the id;
+  - a `.stats` strip (importance, recalls, saved, state) follows the text;
+  - `.reach-note` opens the side column;
+  - the facts, tags, Edit and Forget are unchanged.
+
 ### The dashboard shell and shared tokens (0.17.0)
 
 First step of the tab polish (design proposal `tabs-after/NOTES-shell-vocabulary-settings.md`, section A and the token list). Tokens in `ui/style.css` `:root`, the same in both themes: data roles as on the map only (`--role-gold`, `--role-shared`, `--role-bond`, `--role-slate`, `--role-ash`), `--warn` (amber: waiting or "later"), spacing `--space-1..6` (4 to 32), radii `--radius-1..3` and `--radius-pill`, type `--fs-h1/group/body/help/meta`. Teal `--accent` stays the UI accent. Shell: the active tab is a teal underline; `#summary` reads "N memories in M projects"; plugin and engine versions moved into `<details class="about">` (`#engine` kept); `.local` became `#conn[data-state=live|lost|expired]` with `#conn-text`, set by `setConnection` from the watch's `onChange` and from `expire()`. `setStatus` keeps its text and classes (the specs read them) but hides `#status` for the Connected line and sets `data-kind` (`lost` styles it as the top of an amber strip; `expired` hides it in favour of the `#expired` card: two steps, `/mnemosyne-ui` with a Copy button, "nothing was lost"). While lost, `#lost-extra` shows `Next check in N s` from the new `Watch.nextIn()` (refreshed every 500 ms) and a Try now button calling the new `Watch.retry()` (clears the wait and probes at once; the back-off continues), and every `.view` gets `.is-stale` (opacity 0.55). The watch now schedules the next check before it announces the loss, so a listener can read `nextIn()` at once.

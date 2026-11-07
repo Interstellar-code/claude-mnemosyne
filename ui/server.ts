@@ -650,9 +650,10 @@ type ListRow = {
   metadata_json: string | null
   valid_until: string | null
   superseded_by: string | null
+  memory_type: string | null
 }
 
-/** GET /api/memories?owner=&sort=newest|recalled|never&q=&tag=&untagged=1&limit= */
+/** GET /api/memories?owner=&sort=newest|recalled|never&q=&tag=&untagged=1&reach=all|shared|project&kind=&limit= */
 export function listMemories(db: Database | null, params: URLSearchParams): Answer {
   const owner = params.get('owner') ?? ''
   const sortName = params.get('sort') || 'newest'
@@ -677,8 +678,9 @@ export function listMemories(db: Database | null, params: URLSearchParams): Answ
     args.push(owner)
   }
   if (q) {
-    where.push("(instr(lower(content), lower(?)) > 0 OR instr(lower(COALESCE(metadata_json, '')), lower(?)) > 0)")
-    args.push(q, q)
+    // Text, tags (in the metadata) or the start of an id.
+    where.push("(instr(lower(content), lower(?)) > 0 OR instr(lower(COALESCE(metadata_json, '')), lower(?)) > 0 OR instr(lower(id), lower(?)) = 1)")
+    args.push(q, q, q)
   }
   // A tag named "untagged" is a tag like any other; only untagged=1 asks for rows with none.
   if (tag !== null) {
@@ -687,15 +689,31 @@ export function listMemories(db: Database | null, params: URLSearchParams): Answ
   }
   if (untaggedText !== null) where.push(untaggedSql())
   if (sort.where) where.push(sort.where)
+  // reach= and kind= narrow further; the facet counts below are taken without them, so each chip says what picking it gives.
+  const reach = params.get('reach')
+  const kindName = params.get('kind')
+  if (reach !== null && !Object.hasOwn(REACH_SQL, reach)) return { status: 400, body: { error: 'reach must be all, shared or project' } }
+  if (kindName !== null && (kindName === '' || kindName.length > 40)) return { status: 400, body: { error: 'kind must be 1 to 40 characters' } }
+  const columns = tableColumns(db, 'working_memory')
+  const kindColumn = columns.has('memory_type') ? "COALESCE(NULLIF(memory_type, ''), 'unknown')" : "'unknown'"
+  const base = where.join(' AND ')
+  const facets = {
+    reach: countBy(db, REACH_CASE, base, args),
+    kind: countBy(db, kindColumn, base, args),
+  }
+  if (reach !== null) where.push(REACH_SQL[reach]!)
+  if (kindName !== null) {
+    where.push(`${kindColumn} = ?`)
+    args.push(kindName)
+  }
   const clause = where.length > 0 ? `WHERE ${where.join(' AND ')}` : ''
   const total = (db.query(`SELECT COUNT(*) AS n FROM working_memory ${clause}`).get(...args) as { n: number }).n
   // valid_until and superseded_by come with the engine's migration: a store that never ran it reads NULL, and every row is live.
-  const columns = tableColumns(db, 'working_memory')
   const lifespan = `${columns.has('valid_until') ? 'valid_until' : 'NULL AS valid_until'}, ${columns.has('superseded_by') ? 'superseded_by' : 'NULL AS superseded_by'}`
   const rows = db
     .query(
       `SELECT id, substr(content, 1, ?) AS preview, length(content) AS length, session_id AS owner, importance,
-        recall_count, last_recalled, timestamp, scope, metadata_json, ${lifespan}
+        recall_count, last_recalled, timestamp, scope, metadata_json, ${lifespan}, ${columns.has('memory_type') ? 'memory_type' : 'NULL AS memory_type'}
        FROM working_memory ${clause} ORDER BY ${sort.order} LIMIT ?`,
     )
     .all(PREVIEW_CHARS, ...args, limit) as ListRow[]
@@ -708,7 +726,24 @@ export function listMemories(db: Database | null, params: URLSearchParams): Answ
     const state = memoryState({ valid_until, superseded_by }, trail.get(row.id) ?? [], now)
     return { ...row, recall_count: row.recall_count ?? 0, truncated: length > PREVIEW_CHARS, metadata, tags: tagsOf(metadata), state }
   })
-  return { status: 200, body: { total, count: memories.length, memories } }
+  return { status: 200, body: { total, count: memories.length, memories, facets } }
+}
+
+/**
+ * A memory's reach, as the map draws it: `all` (the global owner: every project reads it), `shared` (a project's memory
+ * with global scope: every project can recall it) or `project` (its own project only).
+ */
+const REACH_CASE = "CASE WHEN session_id = 'global' THEN 'all' WHEN scope = 'global' THEN 'shared' ELSE 'project' END"
+const REACH_SQL: Readonly<Record<string, string>> = {
+  all: "session_id = 'global'",
+  shared: "session_id <> 'global' AND scope = 'global'",
+  project: "session_id <> 'global' AND COALESCE(scope, '') <> 'global'",
+}
+
+/** How many rows fall on each value of `expr`, under the list's other filters. */
+function countBy(db: Database, expr: string, where: string, args: readonly (string | number)[]): Record<string, number> {
+  const rows = db.query(`SELECT ${expr} AS k, COUNT(*) AS n FROM working_memory ${where ? `WHERE ${where}` : ''} GROUP BY k`).all(...args) as { k: string; n: number }[]
+  return Object.fromEntries(rows.map(row => [row.k, row.n]))
 }
 
 /** GET /api/memories/<id>: one row in full, or 404. */
