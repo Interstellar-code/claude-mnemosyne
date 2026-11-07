@@ -17,6 +17,22 @@ Issue #43. A machine that runs Mnemosyne only through Claude Desktop (or another
 
 No engine or recall change. Tests: `tests/bun/update.spec.ts` covers the planning, the swap-failure message, the progress file, process sorting, the launcher and release staging with a fake runner and fetch (no network). `tests/bun/update-dashboard.spec.ts` covers the version comparison, the daily check, the handoff, the routes' token, origin and refusal checks, and the panel's states on a stand-in document.
 
+## 0.27.2 (fast meaning search across projects)
+
+A dashboard search in "Keyword + meaning" across every project took 20-30 s: each project ran in its own engine process, and each process loaded the embedding model again.
+
+1. **One warm engine.** The dashboard keeps one engine process with the model loaded and asks it for each project in turn. On the author's store: the first search about 3-4 s, later ones about 1 s, with results identical to before.
+2. **Every project is searched.** The old cap of 10 projects (the smallest were skipped) is now 100.
+3. **Safe by default.** The engine takes the project per call only when the dashboard starts it that way (engine change 21, build 18.12.3-mnemosyne.13); hooks and the MCP launcher clear it. With an older engine, or if the warm engine fails, search falls back to one process per project.
+4. The warm engine stops after 10 idle minutes, so an idle dashboard holds no model in memory.
+## 0.27.1 (Show on map selects the memory)
+
+"Map" on a Knowledge row (and on Search and Memories) opened the Map tab but selected nothing: the request reached only the older force-graph renderer, while the Galaxy layout is drawn by the solar scene.
+
+1. **The solar map takes the request.** It sets the memory level (breadcrumb, URL, card), flies to the memory's probe, and keeps a request that arrives before the map has loaded.
+2. **Global memories too.** A true global sits in the sun belt, which is not a planet, so its card used to fall back to the store overview. It now opens its own card under "Global (sun belt)", and the camera goes back to the overview where the belt is.
+3. A memory the map does not hold (retired, expired) says so in the status line.
+
 ## 0.27.0 (entity questions find what they ask about)
 
 Issue #56, part 1 (ranking; the entity card comes later). A question like "who is Rohit" or "tell me about X" returned the newest notes that mention the name, not the memories about it. Four general rules, in the engine (build 18.12.3-mnemosyne.12, change 20 in engine/UPSTREAM.md):

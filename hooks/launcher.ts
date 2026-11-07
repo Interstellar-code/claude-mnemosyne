@@ -39,6 +39,7 @@ ${WRAPPER_NOTE.replace(/^/gm, '# ')}
 export MNEMOPI_DATA_DIR=${shellQuote(store)}
 export MNEMOPI_SESSION_ID="\${MNEMOSYNE_OWNER:-global}"
 export MNEMOPI_CHANNEL_ID="$MNEMOPI_SESSION_ID"
+export MNEMOPI_OWNER_PER_CALL=
 ${embeddings ? 'unset MNEMOPI_NO_EMBEDDINGS' : 'export MNEMOPI_NO_EMBEDDINGS=1'}
 export MNEMOPI_MCP_BANK=default
 export MNEMOPI_LLM_BASE_URL=
@@ -75,6 +76,8 @@ export const cmdWrapper = ({ store, cli, proxy, activity, embeddings, guardMode,
     'if not defined MNEMOSYNE_OWNER set "MNEMOSYNE_OWNER=global"',
     'set "MNEMOPI_SESSION_ID=%MNEMOSYNE_OWNER%"',
     'set "MNEMOPI_CHANNEL_ID=%MNEMOSYNE_OWNER%"',
+    // 0.27.2: an MCP client never picks the owner per call (engine change 21).
+    'set "MNEMOPI_OWNER_PER_CALL="',
     embeddings ? 'set "MNEMOPI_NO_EMBEDDINGS="' : 'set "MNEMOPI_NO_EMBEDDINGS=1"',
     'set "MNEMOPI_MCP_BANK=default"',
     'set "MNEMOPI_LLM_BASE_URL="',

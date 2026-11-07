@@ -69,6 +69,7 @@ import { activityEntry, preview } from '../hooks/activity-log'
 import type { ActivityFields } from '../hooks/activity-log'
 import { buildRequests, engineEnv, parseReplies } from '../hooks/engine'
 import type { EngineRequest } from '../hooks/engine'
+import { createWarmEngine, supportsOwnerPerCall, type WarmEngine } from './warm-engine'
 import { admit, guardConfigOf, nearDuplicateFlags, nearDuplicateMessage, nearMatchesOf, NEAR_DUPLICATE_SCORE } from '../hooks/guard'
 import type { GuardHit, NearMatch } from '../hooks/guard'
 import { expiresInDaysProblem, isKind, KIND_LIST, validUntilFor } from '../hooks/kinds'
@@ -117,6 +118,8 @@ export const PREVIEW_CHARS = 240
 // across owners, at most this many owners (the largest), once each.
 export const SEARCH_LIMIT = 20
 export const SEARCH_OWNERS = 10
+// 0.27.2: with the warm engine one process serves every owner, so a meaning search covers up to this many.
+export const WARM_SEARCH_OWNERS = 100
 export const MAX_QUERY_CHARS = 500
 // A POST body past this is refused unread.
 export const MAX_BODY_BYTES = 4096
@@ -2297,6 +2300,8 @@ type Views = {
   run: (config: Pick<Config, 'cli' | 'store'>, requests: readonly EngineRequest[], owner: string, runOptions?: RunOptions) => Promise<(string | Error)[]>
   // True while a search runs: one at a time.
   searching: boolean
+  // 0.27.2: the one warm engine meaning searches use (null: one process per owner, as before).
+  warm: WarmEngine | null
   // Writes reach the engine one at a time (create, update, retire, restore and forget share this): two engine
   // processes writing at once can fail with "database is locked".
   writes: ReturnType<typeof limiter>
@@ -2344,7 +2349,8 @@ async function search(views: Views, text: string): Promise<Answer> {
   views.store.db ??= openStore(views.config.store)
   const all = storeOwners(views.store.db)
   if (owner !== undefined && !all.includes(owner)) return { status: 400, body: { error: 'no such owner in the store' } }
-  const owners = owner !== undefined ? [owner] : all.slice(0, SEARCH_OWNERS)
+  const warm = mode === 'hybrid' ? views.warm : null
+  const owners = owner !== undefined ? [owner] : all.slice(0, warm !== null ? WARM_SEARCH_OWNERS : SEARCH_OWNERS)
   // An empty store: nothing to search, no engine run, no activity line.
   if (owners.length === 0) return { status: 200, body: { query, owners, skipped: 0, count: 0, mode, embeddings, results: [] } }
   if (views.searching) return { status: 429, body: { error: 'A search is already running; try again when it ends.' } }
@@ -2352,7 +2358,14 @@ async function search(views: Views, text: string): Promise<Answer> {
   const started = performance.now()
   try {
     const request: EngineRequest = ['mnemopi_recall', { query, limit: SEARCH_LIMIT, update_recall_counts: false }]
-    const runs = await Promise.all(owners.map(async as => recallResults((await views.run(views.config, [request], as, { keywordOnly: mode === 'keyword' }))[0])))
+    const perProcess = () => Promise.all(owners.map(async as => recallResults((await views.run(views.config, [request], as, { keywordOnly: mode === 'keyword' }))[0])))
+    // 0.27.2: a meaning search asks the warm engine for each owner in turn (the model loads once); if it fails, one process per owner as before.
+    let runs: (Record<string, unknown>[] | Error)[]
+    if (warm !== null) {
+      runs = []
+      for (const as of owners) runs.push(recallResults(await warm.call(as, request)))
+      if (runs.some(run => run instanceof Error)) runs = await perProcess()
+    } else runs = await perProcess()
     const failed = runs.find((run): run is Error => run instanceof Error)
     // One owner: that owner. Across owners: the C3 default owner, and `owners` says how many were searched.
     const logged = { action: 'recall', origin: 'ui', owner: (owners.length === 1 ? owners[0] : undefined) ?? 'global', text: query } as const
@@ -2764,6 +2777,8 @@ export type ServerOptions = {
   settings?: SettingsDeps
   vendorDir?: string
   maxEngines?: number
+  // 0.27.2: the warm search engine; null turns it off (tests), undefined makes one when embeddings are on.
+  warm?: WarmEngine | null
   maxStreams?: number
   streamMaxMs?: number
   engineTimeoutMs?: number
@@ -2830,6 +2845,7 @@ export async function startServer(config: Config, options: ServerOptions = {}): 
     run: (cfg, requests, owner, runOptions) => engines.run(() => runEngine(cfg, requests, owner, process.env, engineTimeoutMs, runOptions)),
     searching: false,
     writes: limiter(1),
+    warm: options.warm !== undefined ? options.warm : embeddingsOn() && config.cli !== '' && supportsOwnerPerCall(engine) ? createWarmEngine({ cli: config.cli, store: config.store }) : null,
   }
   const settings = settingsRoutes(config, fields => log(fields, { client: 'dashboard' }), options.settings)
   const streams = new Set<() => void>()
@@ -3042,6 +3058,7 @@ export async function startServer(config: Config, options: ServerOptions = {}): 
     stop() {
       for (const finish of [...streams]) finish()
       meaning.stop()
+      views.warm?.stop()
       void server.stop(true)
       store.db?.close()
     },

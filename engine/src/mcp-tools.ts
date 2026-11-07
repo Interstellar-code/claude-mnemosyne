@@ -578,14 +578,27 @@ function bankDbPath(bank: string): string {
 	return new BankManager(dataDir()).getBankDbPath(bank);
 }
 
+/**
+ * Local patch (change 21): the owner of one call. A process started with MNEMOPI_OWNER_PER_CALL=1 (only the
+ * plugin's dashboard does, for its one warm search engine) takes `owner` from the call, so one process with
+ * the embedding model loaded can search every project; the owner then also stands for the channel, as one
+ * process per owner had it. Without the flag `owner` is ignored, so an MCP client cannot pick another owner.
+ */
+export function callOwner(args: ToolArguments, env: NodeJS.ProcessEnv = process.env): string | null {
+	if (env.MNEMOPI_OWNER_PER_CALL !== "1") return null;
+	const owner = args.owner;
+	return typeof owner === "string" && owner.length > 0 && owner.length <= 200 ? owner : null;
+}
+
 function createBeam(args: ToolArguments, bank = resolveBank(args)): BeamMemory {
-	const sessionId = process.env.MNEMOPI_SESSION_ID || `mcp_${bank}`;
+	const perCall = callOwner(args);
+	const sessionId = perCall ?? (process.env.MNEMOPI_SESSION_ID || `mcp_${bank}`);
 	return new BeamMemory({
 		sessionId,
 		dbPath: bankDbPath(bank),
 		authorId: optionalStringArg(args, "author_id") ?? (process.env.MNEMOPI_AUTHOR_ID ? process.env.MNEMOPI_AUTHOR_ID : null),
 		authorType: optionalStringArg(args, "author_type") ?? (process.env.MNEMOPI_AUTHOR_TYPE ? process.env.MNEMOPI_AUTHOR_TYPE : null),
-		channelId: optionalStringArg(args, "channel_id") ?? process.env.MNEMOPI_CHANNEL_ID ?? sessionId,
+		channelId: optionalStringArg(args, "channel_id") ?? (perCall ?? process.env.MNEMOPI_CHANNEL_ID ?? sessionId),
 	});
 }
 

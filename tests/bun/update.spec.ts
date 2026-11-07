@@ -259,6 +259,10 @@ describe('the launcher', () => {
       modelCacheDir: EMBEDDINGS_CACHE_DIR,
     })
   })
+  test('the rewrite uses the current templates (0.27.2 clears MNEMOPI_OWNER_PER_CALL)', () => {
+    expect(launcherText(launcherFor(layout, existing, false), true)).toContain('set "MNEMOPI_OWNER_PER_CALL="')
+    expect(launcherText(launcherFor(layout, existing, false), false)).toContain('export MNEMOPI_OWNER_PER_CALL=\n')
+  })
   test('no launcher yet: the default layout, embeddings from the marker', () => {
     expect(launcherFor(layout, undefined, true)).toMatchObject({ store: slashes(layout.store), activity: slashes(layout.activity), embeddings: true, guardMode: 'strict', root: slashes(layout.root) })
     expect(launcherFor(layout, undefined, false).embeddings).toBe(false)

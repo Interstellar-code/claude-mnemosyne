@@ -566,7 +566,7 @@ function moonModel(level: Extract<Target, { level: 'moon' }>, body: Body, galaxy
   }
 }
 
-function memoryModel(level: Extract<Target, { level: 'memory' }>, body: Body, bodies: readonly Body[], galaxy: SolarGalaxy, fetched: DetailFetch | null): PanelModel {
+function memoryModel(level: Extract<Target, { level: 'memory' }>, body: Pick<Body, 'label'>, bodies: readonly Body[], galaxy: SolarGalaxy, fetched: DetailFetch | null): PanelModel {
   const row = galaxy.memories.find(memory => memory.id === level.id) as Partial<SolarMemory> | undefined
   const detail = fetched !== null && typeof fetched === 'object' ? fetched : null
   const state = detail?.state ?? row?.state
@@ -622,6 +622,8 @@ function memoryModel(level: Extract<Target, { level: 'memory' }>, body: Body, bo
 /** The Details panel's content for a level; `fetched` is the memory's reply when the level is a memory. */
 export function panelModel(level: Target, bodies: readonly Body[], galaxy: SolarGalaxy, fetched: DetailFetch | null = null): PanelModel {
   const body = level.level === 'galaxy' ? undefined : bodies.find(candidate => candidate.owner === level.owner)
+  // 0.27.1: a true global lives in the sun belt, which is not a body: its own card, under the belt's name.
+  if (level.level === 'memory' && body === undefined && level.owner === 'global') return memoryModel(level, { label: GLOBAL_BELT }, bodies, galaxy, fetched)
   if (level.level === 'galaxy' || body === undefined) return storeModel(bodies, galaxy)
   if (level.level === 'planet') return planetModel(body, bodies, galaxy)
   if (level.level === 'moon') return moonModel(level, body, galaxy)
@@ -703,7 +705,15 @@ export function renderPanel(box: HTMLElement, model: PanelModel, on: { tag: (nam
   box.replaceChildren(...parts)
 }
 
-type SolarMount = { sync: (layout: string) => void; active: () => boolean; failed: () => boolean; simulate: (kind: 'recall' | 'write') => void }
+type SolarMount = { sync: (layout: string) => void; active: () => boolean; failed: () => boolean; simulate: (kind: 'recall' | 'write') => void; show: (memoryId: string) => void }
+
+export const GLOBAL_BELT = 'Global (sun belt)'
+
+/** 0.27.1: the solar level of one memory, or null when the map does not hold it. */
+export function memoryTarget(memories: readonly Pick<SolarMemory, 'id' | 'owner' | 'kind'>[], id: string): Target | null {
+  const memory = memories.find(m => m.id === id)
+  return memory === undefined ? null : { level: 'memory', owner: memory.owner, kind: memory.kind, id: memory.id }
+}
 
 /** What the solar page needs from the map around it: the library (null when there is no WebGL, and the stage has said so) and the stage message. */
 type SolarShell = { library: () => Promise<MapLib | null>; loaded: () => MapLib | null; notice: (text: string) => void; clear: () => void }
@@ -1052,6 +1062,23 @@ function mountSolarPage(host: MapHost, solar: SolarHost, shell: SolarShell, stor
     renderLevel()
   }
 
+  // 0.27.1: Show on map from another tab (Knowledge, Search, Memories) selects the memory's probe.
+  let pendingMemory: string | null = null
+  const notOnMap = () => host.status('That memory is not on the map: retired or expired memories show only with the outer belt on.', 'plain')
+  function showMemory(id: string) {
+    if (galaxy === null) {
+      pendingMemory = id
+      return
+    }
+    const target = memoryTarget(galaxy.memories, id)
+    if (target === null) return notOnMap()
+    // The scene has no body for the sun belt: for a global memory the camera goes home (where the belt is),
+    // which reports the galaxy level, and then the memory's own card opens over it.
+    if (target.level === 'memory' && target.owner === 'global') send(scene => scene.flyTo({ level: 'galaxy' }))
+    applyLevel(target)
+    if (target.level === 'memory' && target.owner !== 'global') send(scene => scene.flyTo(target))
+  }
+
   const emptyStore = () => galaxy !== null && galaxy.memories.length === 0
   const showCanvas = () => {
     canvas.hidden = !active || broken || emptyStore()
@@ -1115,6 +1142,13 @@ function mountSolarPage(host: MapHost, solar: SolarHost, shell: SolarShell, stor
       galaxy = { ...(body as unknown as SolarGalaxy), writers: Array.isArray(body.writers) ? (body.writers as SolarGalaxy['writers']) : [], globalLive: typeof body.globalLive === 'number' ? body.globalLive : 0 }
       bodies = buildBodies(galaxy, Date.now())
       page = setSolarLevel(page, resolveHash(levelFromHash(typeof location === 'undefined' ? '' : location.hash), bodies, galaxy.memories))
+      // 0.27.1: a "Show on map" that came before the data: its memory wins over the URL's level.
+      if (pendingMemory !== null) {
+        const target = memoryTarget(galaxy.memories, pendingMemory)
+        if (target === null) notOnMap()
+        else page = setSolarLevel(page, target)
+        pendingMemory = null
+      }
       writeHash()
       renderChips()
       renderLevel()
@@ -1185,6 +1219,7 @@ function mountSolarPage(host: MapHost, solar: SolarHost, shell: SolarShell, stor
   return {
     active: () => active,
     failed: () => broken,
+    show: showMemory,
     // The demo buttons (mockup and 0.6.0): a made-up event drawn by the scene; it never calls the server.
     simulate(kind) {
       if (!active || galaxy === null) return
@@ -3205,6 +3240,8 @@ export function createMap(host: MapHost): MapView {
       }
     },
     show(memoryId: string) {
+      // 0.27.1: the Galaxy layout is drawn by the solar scene when there is one: it selects the memory there.
+      if (solarWanted()) return solarPage!.show(memoryId)
       if (galaxy === null) {
         pending = memoryId
         return
