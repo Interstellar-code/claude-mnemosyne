@@ -4,6 +4,7 @@ import { DEFAULT_DB_FILENAME, dataDir } from "./config";
 import { BankManager } from "./core/banks";
 import { BeamMemory, type RecallOptions } from "./core/beam";
 import { embedQuery } from "./core/embeddings";
+import { classifyIntent } from "./core/query-intent";
 import { addTriple, queryTriples } from "./core/triples";
 
 export type JsonPrimitive = string | number | boolean | null;
@@ -757,7 +758,9 @@ async function handleRecall(args: ToolArguments): Promise<ToolResult> {
 			if (key in args) options[key.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase())] = args[key];
 		}
 		const results = (await beam.recall(query, topK, options)).map(row => ({ ...row, bank }));
-		return { status: "ok", query, count: results.length, results: serialize(results), bank };
+		// Local patch (change 23): an entity question ("who is X") also gets the extracted facts about X.
+		const entity = options.useIntent !== false && classifyIntent(query).category === "entity" ? beam.entityCard(query, options) : null;
+		return { status: "ok", query, count: results.length, results: serialize(results), ...(entity === null ? {} : { entity }), bank };
 	});
 }
 

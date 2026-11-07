@@ -48,7 +48,46 @@ type RecallOptionsInternal = RecallOptions & {
 	updateRecallCounts?: boolean;
 	/** Set by `recall()` when `useIntent` is on: the classified intent of the query (local patch, issue #56). */
 	intentCategory?: QueryIntentCategory;
+	/** Set by `recall()`: the memory kinds the query names ("preferences", "decisions"), local patch change 22. */
+	askedKinds?: string[];
 };
+
+/**
+ * Local patch (change 22): a query that names a kind of memory ("my preferences", "decisions", "user
+ * instructions") asks for the memories of that kind, whose text seldom contains the word. The kind word
+ * then matches memories of that kind, they are candidates even without a text or meaning hit, and an
+ * owner word next to it ("user", "my", "our") only says whose they are, so it is not searched. A query
+ * without a kind word is unchanged.
+ */
+const KIND_WORDS: Readonly<Record<string, string>> = {
+	preference: "preference",
+	preferences: "preference",
+	decision: "decision",
+	decisions: "decision",
+	instruction: "instruction",
+	instructions: "instruction",
+	fact: "fact",
+	facts: "fact",
+	event: "event",
+	events: "event",
+	error: "error",
+	errors: "error",
+};
+const OWNER_WORDS = new Set(["user", "users", "my", "mine", "our", "ours", "your", "yours"]);
+const KIND_CANDIDATES_MAX = 50;
+
+export function kindQuery(searchText: string): { kinds: string[]; text: string } {
+	const words = tokenize(searchText);
+	const kinds = [...new Set(words.map(word => KIND_WORDS[word]).filter((kind): kind is string => kind !== undefined))];
+	if (kinds.length === 0) return { kinds, text: searchText };
+	const kept = words.filter(word => !OWNER_WORDS.has(word));
+	return { kinds, text: kept.length > 0 ? kept.join(" ") : searchText };
+}
+
+/** The words that name `kind` ("preference preferences"), added to a memory of that kind for keyword matching. */
+export function kindWordsOf(kind: string): string[] {
+	return Object.keys(KIND_WORDS).filter(word => KIND_WORDS[word] === kind);
+}
 
 /**
  * Local patch (issue #56): how much recency moves a score. A question about who or what something is
@@ -743,7 +782,11 @@ function scoreCandidate(
 	options: RecallOptionsInternal,
 ): RecallResult | null {
 	const content = asString(candidate.row.content);
-	const searchableContent = asString(candidate.row.embed_text) || content;
+	const kind = asString(candidate.row.memory_type);
+	// A memory of a kind the query names matches the kind word (change 22).
+	const searchableContent =
+		(asString(candidate.row.embed_text) || content) +
+		(kind !== "" && options.askedKinds?.includes(kind) === true ? ` ${kindWordsOf(kind).join(" ")}` : "");
 	let lexical = lexicalGroupRelevance(queryGroups, searchableContent);
 	// An entity question: a memory whose subject is the thing asked about is a full match (issue #56).
 	if (options.intentCategory === "entity" && lexical > 0 && namesSubject(queryGroups, content)) lexical = 1;
@@ -965,6 +1008,14 @@ function collectMemoryCandidates(
 		}
 	}
 
+	// A query naming a memory kind: that kind's memories are candidates even without a text or meaning hit (change 22).
+	if (options.askedKinds !== undefined && options.askedKinds.length > 0 && options.includeWorking !== false) {
+		const kinded = options.askedKinds.flatMap(kind =>
+			allVisibleIds(beam, "working_memory", { ...options, memoryType: kind }).slice(0, KIND_CANDIDATES_MAX),
+		);
+		wmIds = [...new Set([...wmIds, ...kinded])];
+	}
+
 	const candidates: MemoryCandidate[] = [];
 	if (wmIds.length > 0) candidates.push(...fetchCandidates(beam, "working", wmIds, wmFts, wmVec, options));
 	else if (options.includeWorking !== false) candidates.push(...fallbackCandidates(beam, "working", options));
@@ -1009,7 +1060,9 @@ export async function recall(
 		}
 		const useSynonyms = options.useSynonyms !== false;
 		// Keyword search without the question's opening phrase (issue #56); intent and embedding use the whole query.
-		const searchText = searchTextOf(query);
+		const kindAsk = kindQuery(searchTextOf(query));
+		const searchText = kindAsk.text;
+		if (kindAsk.kinds.length > 0) temporalOptions.askedKinds = kindAsk.kinds;
 		const tokens = expandedTokens(searchText, useSynonyms);
 		const tokenGroups = expandedTokenGroups(searchText, useSynonyms);
 		const candidates = collectMemoryCandidates(beam, searchText, topK, temporalOptions);
@@ -1073,6 +1126,74 @@ const ENHANCED_RECALL_CACHE_MAX_ENTRIES = 256;
  * without any write, so a cached ranking is only trusted briefly.
  */
 const ENHANCED_RECALL_CACHE_TTL_SECONDS = 300;
+
+// ---- Local patch (change 23, issue #56 part 2): the entity card ----
+
+export type EntityFact = { predicate: string; object: string; source: string };
+export type EntityCard = { name: string; facts: EntityFact[] };
+export const ENTITY_CARD_MAX_FACTS = 12;
+const ENTITY_CARD_MIN_FACTS = 2;
+// "who is X", "what is X", "who's X": the rest is the name (searchTextOf already removed "tell me about" and the like).
+const NAME_LEAD = /^\s*(?:who|what)(?:\s+(?:is|are|was|were)|'s|s)\s+/i;
+
+/** The name an entity question asks about, as lowercase words (stop words out), or null when there is none or it is too long. */
+export function entityName(query: string): string[] | null {
+	const words = tokenize(searchTextOf(query).replace(NAME_LEAD, ""));
+	return words.length === 0 || words.length > 4 ? null : words;
+}
+
+/**
+ * Whether a knowledge subject names the entity: its words are all in the name ("Rohit" for "rohit sharma"),
+ * or the name's words are all in it with at most one more ("Rohit Sharma" for "rohit"). "Rohit's MRP
+ * enhancement" is about something else and does not match.
+ */
+export function subjectNames(subject: string, name: readonly string[]): boolean {
+	const words = tokenize(subject);
+	if (words.length === 0) return false;
+	if (words.every(word => name.includes(word))) return true;
+	return name.every(word => words.includes(word)) && words.length <= name.length + 1 && !words.includes("s");
+}
+
+/**
+ * The card for an entity question: the extracted subject-predicate-object rows about it, from memories the
+ * caller can see (live, the owner's own or shared), most confident first, then from the most important
+ * memories (a profile outranks a passing note), one per predicate and object.
+ * Null when the query names nothing, the knowledge table is missing, or fewer than two facts are known.
+ */
+export function entityCard(beam: BeamMemoryState, query: string, options: RecallOptionsInternal = {}): EntityCard | null {
+	const name = entityName(query);
+	if (name === null || !tableExists(beam, "memoria_kg")) return null;
+	const { where, params } = buildWhere(beam, "m", options);
+	let rows: Row[];
+	try {
+		rows = queryAll(
+			beam,
+			`SELECT k.subject, k.predicate, k.object, k.source_memory_id FROM memoria_kg k JOIN working_memory m ON m.id = k.source_memory_id
+			 WHERE lower(k.subject) LIKE ? AND ${where} ORDER BY k.confidence DESC, m.importance DESC, k.id`,
+			[`%${name[0]}%`, ...params],
+		);
+	} catch {
+		return null;
+	}
+	const facts: EntityFact[] = [];
+	const seen = new Set<string>();
+	const subjects = new Map<string, number>();
+	for (const row of rows) {
+		const subject = asString(row.subject);
+		if (!subjectNames(subject, name)) continue;
+		const predicate = asString(row.predicate).trim();
+		const object = asString(row.object).trim();
+		const key = `${predicate.toLowerCase()}\u0000${object.toLowerCase()}`;
+		if (predicate === "" || object === "" || seen.has(key)) continue;
+		seen.add(key);
+		subjects.set(subject, (subjects.get(subject) ?? 0) + 1);
+		if (facts.length < ENTITY_CARD_MAX_FACTS) facts.push({ predicate, object, source: asString(row.source_memory_id) });
+	}
+	if (facts.length < ENTITY_CARD_MIN_FACTS) return null;
+	// The fullest form of the name the knowledge uses ("Rohit Sharma" over "Rohit").
+	const shown = [...subjects.keys()].sort((a, b) => tokenize(b).length - tokenize(a).length || (subjects.get(b) ?? 0) - (subjects.get(a) ?? 0))[0]!;
+	return { name: shown, facts };
+}
 
 /**
  * Enhanced recall: linear hybrid recall with synonyms, intent weighting and MMR,

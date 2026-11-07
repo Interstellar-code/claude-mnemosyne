@@ -2291,6 +2291,38 @@ function recallResults(answer: string | Error | undefined): Record<string, unkno
   return body.results as Record<string, unknown>[]
 }
 
+/** 0.28.1: the engine's entity card (change 23) in one recall answer, checked field by field; null when there is none. */
+export type EntityCard = { name: string; facts: { predicate: string; object: string; source: string }[] }
+export function entityCardOf(answer: string | Error | undefined): EntityCard | null {
+  if (typeof answer !== 'string') return null
+  const card = parseMetadata(answer)?.entity as Record<string, unknown> | undefined
+  if (card === null || typeof card !== 'object' || typeof card.name !== 'string' || !Array.isArray(card.facts)) return null
+  const facts = card.facts
+    .filter((f): f is Record<string, unknown> => f !== null && typeof f === 'object')
+    .filter(f => typeof f.predicate === 'string' && typeof f.object === 'string')
+    .map(f => ({ predicate: f.predicate as string, object: f.object as string, source: typeof f.source === 'string' ? f.source : '' }))
+  return facts.length === 0 ? null : { name: card.name, facts }
+}
+
+/** One card across owners: the fullest name, each predicate and object once, in the order first seen, at most ENTITY_CARD_MAX. */
+export const ENTITY_CARD_MAX = 12
+export function mergeEntityCards(cards: readonly (EntityCard | null)[]): EntityCard | null {
+  const present = cards.filter((card): card is EntityCard => card !== null)
+  if (present.length === 0) return null
+  const name = present.map(card => card.name).sort((a, b) => b.split(/\s+/).length - a.split(/\s+/).length)[0]!
+  const seen = new Set<string>()
+  const facts: EntityCard['facts'] = []
+  for (const card of present) {
+    for (const fact of card.facts) {
+      const key = `${fact.predicate.toLowerCase()}\u0000${fact.object.toLowerCase()}`
+      if (seen.has(key) || facts.length >= ENTITY_CARD_MAX) continue
+      seen.add(key)
+      facts.push(fact)
+    }
+  }
+  return { name, facts }
+}
+
 type Views = {
   config: Config
   store: Store
@@ -2358,14 +2390,17 @@ async function search(views: Views, text: string): Promise<Answer> {
   const started = performance.now()
   try {
     const request: EngineRequest = ['mnemopi_recall', { query, limit: SEARCH_LIMIT, update_recall_counts: false }]
-    const perProcess = () => Promise.all(owners.map(async as => recallResults((await views.run(views.config, [request], as, { keywordOnly: mode === 'keyword' }))[0])))
+    // 0.28.1: each owner's raw answer is kept, for its entity card as well as its results.
+    const perProcess = () => Promise.all(owners.map(async as => (await views.run(views.config, [request], as, { keywordOnly: mode === 'keyword' }))[0]))
     // 0.27.2: a meaning search asks the warm engine for each owner in turn (the model loads once); if it fails, one process per owner as before.
-    let runs: (Record<string, unknown>[] | Error)[]
+    let answers: (string | Error | undefined)[]
     if (warm !== null) {
-      runs = []
-      for (const as of owners) runs.push(recallResults(await warm.call(as, request)))
-      if (runs.some(run => run instanceof Error)) runs = await perProcess()
-    } else runs = await perProcess()
+      answers = []
+      for (const as of owners) answers.push(await warm.call(as, request))
+      if (answers.some(answer => recallResults(answer) instanceof Error)) answers = await perProcess()
+    } else answers = await perProcess()
+    const runs = answers.map(recallResults)
+    const entity = mergeEntityCards(answers.map(entityCardOf))
     const failed = runs.find((run): run is Error => run instanceof Error)
     // One owner: that owner. Across owners: the C3 default owner, and `owners` says how many were searched.
     const logged = { action: 'recall', origin: 'ui', owner: (owners.length === 1 ? owners[0] : undefined) ?? 'global', text: query } as const
@@ -2377,7 +2412,7 @@ async function search(views: Views, text: string): Promise<Answer> {
     const hits = withKinds(views.store.db, mergeHits(runs as Record<string, unknown>[][]))
     views.log({ ...logged, ok: true, ids: hits.map(hit => hit.id), count: hits.length }, extra)
     const ms = Math.round(performance.now() - started)
-    return { status: 200, body: { query, owners, skipped: owner !== undefined ? 0 : all.length - owners.length, count: hits.length, mode, embeddings, ms, results: hits } }
+    return { status: 200, body: { query, owners, skipped: owner !== undefined ? 0 : all.length - owners.length, count: hits.length, mode, embeddings, ms, results: hits, ...(entity === null ? {} : { entity }) } }
   } finally {
     views.searching = false
   }

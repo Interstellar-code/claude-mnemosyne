@@ -128,8 +128,25 @@ export function countFacet(hits: readonly Facetable[], facet: HitFacet): [string
 
 /** The query words (2+ characters) found in a hit's text, in query order, for "Matched …". */
 export function matchedWords(text: string, query: string): string[] {
-  const lower = text.toLowerCase()
-  return [...new Set(query.toLowerCase().split(/\s+/).filter(word => word.length >= 2))].filter(word => lower.includes(word))
+  // 0.28.1: whole words only ("is" no longer matches inside "risks"), and not the small words the engine does not search.
+  const words = new Set(text.toLowerCase().match(/[\p{L}\p{N}_]+/gu) ?? [])
+  return [...new Set(query.toLowerCase().match(/[\p{L}\p{N}_]+/gu) ?? [])].filter(word => word.length >= 2 && !QUERY_STOP_WORDS.has(word) && words.has(word))
+}
+
+/** 0.28.1: words a query is phrased with that are not what it searches for (the engine's own stop words and question words). */
+export const QUERY_STOP_WORDS: ReadonlySet<string> = new Set(['a', 'an', 'and', 'are', 'as', 'at', 'be', 'by', 'do', 'does', 'for', 'from', 'how', 'in', 'is', 'it', 'me', 'of', 'on', 'or', 'tell', 'that', 'the', 'this', 'to', 'was', 'what', 'when', 'where', 'who', 'with', 'you', 'about', 'know'])
+
+/** 0.28.1: an entity card's facts as rows, one per predicate, its objects in order, opening the first fact's memory. */
+export type EntityRow = { predicate: string; objects: string[]; source: string }
+export function entityRows(facts: readonly { predicate: string; object: string; source: string }[]): EntityRow[] {
+  const rows = new Map<string, EntityRow>()
+  for (const fact of facts) {
+    const key = fact.predicate.toLowerCase()
+    const row = rows.get(key)
+    if (row === undefined) rows.set(key, { predicate: fact.predicate, objects: [fact.object], source: fact.source })
+    else if (!row.objects.includes(fact.object)) row.objects.push(fact.object)
+  }
+  return [...rows.values()]
 }
 
 /** The result header: "5 results for "q" · keyword + meaning · 38 ms". */

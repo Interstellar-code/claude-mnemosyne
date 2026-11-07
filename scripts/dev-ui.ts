@@ -24,7 +24,8 @@ const port = Number(process.env.MNEMOSYNE_UI_PORT ?? 47175)
 // One token for this run: every restart under --watch keeps it, so the tab's stored token stays good.
 const token = randomBytes(32).toString('base64url')
 
-const cli = join(BASE, 'engine', 'node_modules', '@oh-my-pi', 'pi-mnemopi', 'src', 'cli.ts')
+// MNEMOSYNE_DEV_ENGINE=repo runs this checkout's engine/src instead of the installed one (to try an engine change before installing it).
+const cli = process.env.MNEMOSYNE_DEV_ENGINE === 'repo' ? join(REPO, 'engine', 'src', 'cli.ts') : join(BASE, 'engine', 'node_modules', '@oh-my-pi', 'pi-mnemopi', 'src', 'cli.ts')
 if (!existsSync(cli)) {
   console.error(`No installed engine at ${cli}. Run /mnemosyne-setup once in Claude Code first.`)
   process.exit(1)

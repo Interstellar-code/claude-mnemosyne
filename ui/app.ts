@@ -116,6 +116,9 @@ import {
   matchLabel,
   MEANING_OFF_HINT,
   pushRecent,
+  QUERY_STOP_WORDS,
+  entityRows,
+  type EntityRow,
   readMode,
   readRecent,
   resultHead,
@@ -236,7 +239,8 @@ export function tagsOf(metadata: Record<string, unknown> | null | undefined): st
 
 /** The text cut into parts, `mark` where a query word (2+ characters) matches, case aside. */
 export function markParts(text: string, query: string): { text: string; mark: boolean }[] {
-  const words = [...new Set(query.toLowerCase().split(/\s+/).filter(word => word.length >= 2))]
+  // 0.28.1: not the small words the engine does not search ("is" was marked inside "risks").
+  const words = [...new Set(query.toLowerCase().split(/\s+/).filter(word => word.length >= 2 && !QUERY_STOP_WORDS.has(word)))]
   if (words.length === 0 || text === '') return [{ text, mark: false }]
   const pattern = new RegExp(`(${words.map(word => word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})`, 'gi')
   return text
@@ -840,6 +844,29 @@ export function activityItem(line: ActivityLine, pickSession: (session: string) 
     }
   }
   return item
+}
+
+/**
+ * 0.28.1: the entity card above the hits for a "who is X" search: what memory knows about X, from the
+ * knowledge extracted from the memories (engine change 23), one row per relation, each opening its memory.
+ */
+export function entityCardView(card: { name: string; rows: EntityRow[] }, open: (id: string, from?: HTMLElement) => void): HTMLElement[] {
+  const head = el('div', undefined, 'ec-head')
+  head.append(el('h2', card.name, 'ec-title'), el('span', 'from the knowledge extracted from your memories', 'muted small'))
+  const list = el('ul', undefined, 'ec-list')
+  for (const row of card.rows) {
+    const item = el('li', undefined, 'ec-row')
+    item.append(el('span', row.predicate, 'ec-pred muted'), el('span', row.objects.join(', '), 'ec-obj'))
+    if (row.source !== '') {
+      const button = el('button', 'Open', 'link ec-open')
+      button.type = 'button'
+      button.title = 'Open the memory this comes from'
+      button.addEventListener('click', () => open(row.source, button))
+      item.append(button)
+    }
+    list.append(item)
+  }
+  return [head, list]
 }
 
 /** The query words marked in `text`, appended to `into` as text and mark nodes. */
@@ -4057,6 +4084,25 @@ function wireSearch() {
 let noteMode: string | undefined
 let noteSkipped = 0
 
+/** 0.28.1: the entity card of a search reply, or nothing (fields checked: the reply is the server's, the text the store's). */
+function drawEntity(entity: { name?: unknown; facts?: unknown } | undefined) {
+  const box = maybe('search-entity')
+  if (box === null) return
+  const facts = Array.isArray(entity?.facts)
+    ? (entity.facts as unknown[])
+        .filter((f): f is Record<string, unknown> => f !== null && typeof f === 'object')
+        .filter(f => typeof f.predicate === 'string' && typeof f.object === 'string')
+        .map(f => ({ predicate: f.predicate as string, object: f.object as string, source: typeof f.source === 'string' ? f.source : '' }))
+    : []
+  if (typeof entity?.name !== 'string' || facts.length === 0) {
+    box.hidden = true
+    box.replaceChildren()
+    return
+  }
+  box.replaceChildren(...entityCardView({ name: entity.name, rows: entityRows(facts) }, (id, from) => void openMemory(id, from)))
+  box.hidden = false
+}
+
 async function runSearch() {
   // A submit while a search is pending is ignored (the button is disabled too).
   if (searching !== null) return
@@ -4076,6 +4122,7 @@ async function runSearch() {
   searchShown = 0
   searchFacet = null
   results.replaceChildren()
+  drawEntity(undefined)
   byId('search-more').hidden = true
   drawSearchHead()
   drawSearchAside()
@@ -4085,9 +4132,10 @@ async function runSearch() {
   drawRecent()
   try {
     const response = await api('/api/search', { method: 'POST', body: { query, ...(owner ? { owner } : {}), mode: searchMode }, signal: controller.signal })
-    const body = await readJson<{ results?: Hit[]; skipped?: number; mode?: string; embeddings?: boolean; ms?: number; error?: string }>(response)
+    const body = await readJson<{ results?: Hit[]; skipped?: number; mode?: string; embeddings?: boolean; ms?: number; error?: string; entity?: { name?: unknown; facts?: unknown } }>(response)
     if (!response.ok) throw new Error(body.error ?? `the server answered ${response.status}`)
     if (typeof body.embeddings === 'boolean') setEmbeddings(body.embeddings)
+    drawEntity(body.entity)
     searchHits = body.results ?? []
     searchQuery = query
     searchOwnerAsked = owner

@@ -2,6 +2,14 @@
 
 Newest first. Each release is tagged `vX.Y.Z` on GitHub; the README and DESIGN.md describe the contracts.
 
+## 0.28.1 (kind questions and the profile card)
+
+Issue #56 part 2, and the "user preferences" miss the recall answer key showed. Engine build 18.12.3-mnemosyne.14, changes 22 and 23 in engine/UPSTREAM.md.
+
+1. **Questions about a kind of memory.** "user preferences", "my decisions", "instructions" now find the memories of that kind, although their text seldom says the word. "user" or "my" next to a kind word means yours, so it is not searched. On the author's store "user preferences" went from no hit to all five expected memories in the top 10; MRR 0.798 to 0.828, and every labelled question now finds a right answer. Questions without a kind word are unchanged.
+2. **The profile card.** "who is X" and "tell me about X" also get what memory knows about X, from the knowledge extracted from your memories ("is CEO and solo owner of · Interstellar Consulting GmbH", "specialises in · SAP SD, SAP Inter-Company (IC), cutover management"). "Rohit" and "Rohit Sharma" count as the same; "Rohit's MRP enhancement" does not. Only facts from memories the asking project can see are used. Every MCP client gets it in the recall reply (`entity`); the dashboard's Search tab shows it above the results, each line opening its memory.
+3. **Matched words** in Search no longer list small question words ("Matched is, rohit" is now "Matched rohit"), and match whole words only.
+4. **Developers:** `MNEMOSYNE_DEV_ENGINE=repo bun run dev:ui` runs the checkout's engine.
 ## 0.28.0 (one-step update without Claude Code)
 
 Issue #43. A machine that runs Mnemosyne only through Claude Desktop (or another MCP client) has no `claude plugin update`, so the engine and the plugin copy behind `mnemosyne-mcp` stayed on whatever was copied by hand. New script `bin/update.ts`:

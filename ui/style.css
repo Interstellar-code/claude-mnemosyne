@@ -1926,3 +1926,12 @@ tr.exp td { padding: 0 var(--space-4) var(--space-3); background: var(--hover); 
   .set-row { grid-template-columns: minmax(0, 1fr); }
 }.set-danger:has(input) { flex-direction: column; align-items: stretch; }
 .set-danger:has(input) .set-field .input { max-width: 260px; }
+
+/* ---- Search: the entity card (0.28.1) ---- */
+.entity-card { margin: 0 0 12px; padding: 14px 16px; border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 12px; background: var(--surface); }
+.entity-card .ec-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+.entity-card .ec-title { margin: 0; font-size: 15px; font-weight: 600; }
+.entity-card .ec-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.entity-card .ec-row { display: grid; grid-template-columns: minmax(140px, 220px) 1fr auto; gap: 10px; align-items: baseline; font-size: 13px; }
+.entity-card .ec-open { white-space: nowrap; }
+@media (max-width: 700px) { .entity-card .ec-row { grid-template-columns: 1fr auto; } .entity-card .ec-pred { grid-column: 1 / -1; } }

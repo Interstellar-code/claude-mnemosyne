@@ -20,7 +20,7 @@ import {
 	sleep,
 	sleepAllSessions,
 } from "./consolidate";
-import { factRecall, formatContext, recall, recallEnhanced } from "./recall";
+import { type EntityCard, entityCard, factRecall, formatContext, recall, recallEnhanced } from "./recall";
 import { initBeam } from "./schema";
 import {
 	knowledgePrompt,
@@ -328,6 +328,11 @@ export class BeamMemory implements BeamMemoryState {
 
 	recallEnhanced(query: string, topK = 40, options: RecallEnhancedOptions = {}): Promise<RecallResult[]> {
 		return recallEnhanced(this, query, topK, options);
+	}
+
+	/** Local patch (change 23): the extracted facts about what an entity question names, or null. */
+	entityCard(query: string, options: RecallOptions = {}): EntityCard | null {
+		return entityCard(this, query, options);
 	}
 
 	formatContext(results: readonly RecallResult[], format = "bullet"): string {

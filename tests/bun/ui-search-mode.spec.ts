@@ -5,12 +5,13 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { Database } from 'bun:sqlite'
-import { classifyMatch, MATCH_EPSILON, mergeHits, SEARCH_LIMIT, startServer, withKinds } from '../../ui/server'
+import { classifyMatch, entityCardOf, MATCH_EPSILON, mergeEntityCards, mergeHits, SEARCH_LIMIT, startServer, withKinds } from '../../ui/server'
 import type { Started } from '../../ui/server'
 import {
   chooseMode,
   countFacet,
   countNote,
+  entityRows,
   matchedWords,
   matchLabel,
   MODE_KEY,
@@ -285,6 +286,40 @@ describe('SEARCH 0.19: the page helpers', () => {
     expect(matchedWords('Incoterm LOCATION check', 'incoterm location x of')).toEqual(['incoterm', 'location'])
     expect(resultHead(5, 'incoterm', 'hybrid', 38)).toBe('5 results for “incoterm” · keyword + meaning · 38 ms')
     expect(resultHead(1, 'q', undefined, undefined)).toBe('1 result for “q”')
+  })
+
+  test('0.28.1: matched words are whole words and never the small question words', () => {
+    expect(matchedWords('Protective communication: frame risks to protect Rohit', 'who is rohit')).toEqual(['rohit'])
+    expect(matchedWords('This is his risk', 'is risk')).toEqual(['risk'])
+    expect(matchedWords('Rohit runs the agency', 'tell me about Rohit')).toEqual(['rohit'])
+  })
+
+  test('0.28.1: the entity card, from each project\'s answer to one card, and as rows', () => {
+    const answer = (name: string, facts: unknown[]) => JSON.stringify({ status: 'ok', results: [], entity: { name, facts } })
+    const a = entityCardOf(answer('Rohit', [{ predicate: 'is based in', object: 'Germany', source: 'm1' }, { predicate: 'runs', object: 'an agency', source: 'm2' }, { bad: 1 }]))
+    expect(a).toEqual({ name: 'Rohit', facts: [{ predicate: 'is based in', object: 'Germany', source: 'm1' }, { predicate: 'runs', object: 'an agency', source: 'm2' }] })
+    const b = entityCardOf(answer('Rohit Sharma', [{ predicate: 'Is based in', object: 'germany', source: 'm1' }, { predicate: 'specialises in', object: 'SAP SD', source: 'm3' }]))
+    expect(entityCardOf(JSON.stringify({ status: 'ok', results: [] }))).toBeNull()
+    expect(entityCardOf(new Error('x'))).toBeNull()
+    expect(entityCardOf(answer('Rohit', []))).toBeNull()
+    // The fullest name; a fact seen twice (case aside) once.
+    expect(mergeEntityCards([null, a, b])).toEqual({
+      name: 'Rohit Sharma',
+      facts: [
+        { predicate: 'is based in', object: 'Germany', source: 'm1' },
+        { predicate: 'runs', object: 'an agency', source: 'm2' },
+        { predicate: 'specialises in', object: 'SAP SD', source: 'm3' },
+      ],
+    })
+    expect(mergeEntityCards([null, null])).toBeNull()
+    expect(entityRows([
+      { predicate: 'specialises in', object: 'SAP SD', source: 'm3' },
+      { predicate: 'is based in', object: 'Germany', source: 'm1' },
+      { predicate: 'Specialises in', object: 'cutover', source: 'm4' },
+    ])).toEqual([
+      { predicate: 'specialises in', objects: ['SAP SD', 'cutover'], source: 'm3' },
+      { predicate: 'is based in', objects: ['Germany'], source: 'm1' },
+    ])
   })
 
   test('withKinds adds each hit its memory_type from the store, null when unknown or without a store', () => {
