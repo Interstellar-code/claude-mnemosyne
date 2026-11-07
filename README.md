@@ -299,6 +299,12 @@ The header shows how many memories are in how many projects, and a connection pi
 
   A memory opens beside the list on a wide screen (1200 px and up), else in a panel from the bottom. The panel holds the kind, owner and reach, the text, four numbers (importance, recalls, saved, state), the reach in words, Edit, and a Forget button that asks before it deletes. Knowledge and Search open memories in the same panel. `GET /api/memories` takes `reach=all|shared|project` and `kind=`, and returns `facets` (the counts by reach and by kind under the other filters) and each row's `memory_type`.
 - **Activity:** the activity log, live, one plain sentence per call, with the app and the session that made it; click a line for its details (see [Activity log](#activity-log)).
+  - **Tiles:** recalls today (split into Claude, other apps and the dashboard), saves, updates, retires and failed calls, with a link to the newest failure.
+  - **Today by hour:** a small chart stacked by action; click an hour to jump to it.
+  - **Colours** follow the map's live trails: recall gold, save blue, update green, forget red, retire an ash ring.
+  - **Filters:** action chips with counts, From (Claude Code, other apps, dashboard), one app, and a project.
+  - **Grouping:** lines sit under day headings, the newest day open. Runs of the same call (three or more within a minute of each other) fold into one row, with the queries and projects. A script-paced burst can hide its app. Turn this off with Group bursts.
+  - **A failed line** shows its error, with Try again (for a recall) and Copy error.
 - **Search:** the same recall Claude uses, top 20, in rank order. Searching here does not change any memory's recall count.
   - **As seen from** a project shows what Claude would receive there: its own memories plus the shared and global ones. Every project searches each project as itself.
   - **Match by** Keyword, or Keyword + meaning when embeddings are on. Your last five queries show as chips.

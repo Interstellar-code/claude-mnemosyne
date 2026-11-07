@@ -402,7 +402,8 @@ describe('the dashboard views on a real store', () => {
       ['ui', 'this dashboard (search or forget)'],
       ['backfill', 'the one-time tagging run, /mnemosyne-tags'],
     ])
-    expect([...view.matchAll(/<option value="([^"]*)"/g)].map(m => m[1])).toEqual(['all', 'Claude Code', 'Codex', 'Cursor', 'Dashboard'])
+    const appSelect = view.slice(view.indexOf('id="act-app"'), view.indexOf('</select>', view.indexOf('id="act-app"')))
+    expect([...appSelect.matchAll(/<option value="([^"]*)"/g)].map(m => m[1])).toEqual(['all', 'Claude Code', 'Codex', 'Cursor', 'Dashboard'])
     expect(/<option value="all">All<\/option>/.test(view)).toBe(true)
     expect(view).toContain('id="act-session"')
     // One rule gives the header and the rows the same columns, and one rule inside one media query changes both.
@@ -1082,10 +1083,14 @@ describe('VIEWS R2: the Knowledge and Health glue in app.ts', () => {
     const t = new Date().toISOString()
     const recall = (origin: string, extra: Record<string, unknown> = {}) => ({ t, action: 'recall', origin, owner: 'global', text: 'q', ok: true, ...extra })
     app.feed.lines = [recall('hook'), recall('tool'), recall('external', { client: 'codex-mcp' }), recall('ui'), recall('ui'), recall('ui'), recall('ui'), recall('hook', { ok: false })]
+    // 0.21.0: the tile counts every recall today and splits it by who asked; Claude's own count (ui/recalls.ts) stays exact in the split.
+    app.feedView.bursts = false
     app.drawFeed()
-    expect(byId('tile-recall').textContent).toBe('2')
-    // The log lines themselves stay in the feed: the audit trail.
-    expect((byId('act-list').children as AppNode[]).length).toBe(8)
+    expect(byId('tile-recall').textContent).toBe('7')
+    expect(byId('tile-recall-note').textContent).toBe('Claude 2 · other apps 1 · dashboard 4')
+    // The log lines themselves stay in the feed: the audit trail (under today's heading).
+    expect((byId('act-list').children as AppNode[]).filter(row => !row.className.includes('day-head')).length).toBe(8)
+    app.feedView.bursts = true
     app.feed.lines = []
   })
 
@@ -1102,7 +1107,9 @@ describe('VIEWS R2: the Knowledge and Health glue in app.ts', () => {
       recall('hook', { client: 'claude-code', ok: false }),
     ]
     app.drawFeed()
-    expect(byId('tile-recall').textContent).toBe('9')
+    // 0.21.0: 15 recalls today, of which Claude's 9 (the same rule as the server's), other apps 2, the dashboard 4.
+    expect(byId('tile-recall').textContent).toBe('15')
+    expect(byId('tile-recall-note').textContent).toBe('Claude 9 · other apps 2 · dashboard 4')
     app.feed.lines = []
   })
 
@@ -1121,7 +1128,7 @@ describe('VIEWS R2: the Knowledge and Health glue in app.ts', () => {
     app.feed.lines = [external, own]
     app.drawFeed()
     expect(byId('act-app').children.map((option: AppNode | AppText) => option.textContent)).toEqual(['All', 'Claude Code', 'Codex', 'Cursor', 'Dashboard', 'Dashboard (external)'])
-    expect((byId('act-list').children[0] as AppNode).textContent).toContain('Dashboard (external)')
+    expect((byId('act-list').children as AppNode[]).find(row => !row.className.includes('day-head'))!.textContent).toContain('Dashboard (external)')
     app.feed.lines = []
   })
 
@@ -1522,8 +1529,10 @@ describe('QAPAGE R1: the page, read as a tree and a stylesheet', () => {
     expect(of('.know-table td.k-project .project')?.['line-height']).toBe('20px')
   })
 
-  test('items 5 and 7a: the Activity tile reads "Claude recalls today" and Health says "Claude recalls"', () => {
-    expect(html).toContain('<div class="tile-label">Claude recalls today</div>')
+  test('items 5 and 7a: the Activity tile reads "Recalls today" with the Claude split, and Health says "Claude recalls"', () => {
+    // 0.21.0: every recall today, split by who asked (Claude Code, other apps, dashboard) under the number.
+    expect(html).toContain('<span class="act-dot c-recall"></span>Recalls today</div>')
+    expect(html).toContain('id="tile-recall-note"')
     expect(html).toContain('Claude recalls per day, last 14 days')
     expect(html).toContain('Searching here does not count as a recall.')
   })

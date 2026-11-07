@@ -55,7 +55,7 @@ import { chartBars, chartText, coverageRows, dayBars, kpiTiles as healthKpiTiles
 import { candidateRow, filterButtons, liveRows, nearPartner, notLiveRow, parseQueue, parseReview, queueText, reviewCounts, reviewList, reviewRow, reviewText, type Queue, type ReviewData, type ReviewFilter, type ReviewHost, type RowFilter } from './review'
 import { buildForm, type FormMemory } from './form'
 import { candidateList, parseVocabulary, tagGroups, vocabularyText, type VocabData } from './vocabulary'
-import { isClaudeRecall } from './recalls'
+import { isClaudeRecall, isOtherAppsRecall } from './recalls'
 import { startTheme, type ThemeMode } from './theme'
 import { drawGroups, drawTop, newView, parseSettings, type BrowserPrefs, type SettingsData, type SettingsHost } from './settings'
 import { closeSheet, openSheet, wireSheet } from './sheet'
@@ -2439,17 +2439,151 @@ export function receiveChunk(feed: Feed, buffer: string, draw: () => void): stri
   return rest
 }
 
-/** The Activity filters; they combine: a line must pass all three. */
-export type FeedFilter = { action: string; app: string; session: string }
+/**
+ * The Activity filters; they combine: a line must pass all of them. 0.21.0 adds `from` (all, claude, other, ui),
+ * `owner` ('' for any), `hide` (an app key to leave out, from a burst's "Hide" chip) and the action 'failed'.
+ */
+export type FeedFilter = { action: string; app: string; session: string; from?: From | 'all'; owner?: string; hide?: string }
 
-export const newFilter = (): FeedFilter => ({ action: 'all', app: 'all', session: '' })
+export const newFilter = (): FeedFilter => ({ action: 'all', app: 'all', session: '', from: 'all', owner: '', hide: '' })
 
-/** Whether a line passes the action chip ('all', 'external' or an action), the App drop-down ('all' or an app) and the clicked session ('' for any). */
+/** Who asked, for the From filter and the tile split: Claude Code (hook, tool, trigger), other apps (external), the dashboard (ui); '' for the rest (backfill, import, session). */
+export type From = 'claude' | 'other' | 'ui'
+export function fromOf(line: ActivityLine): From | '' {
+  if (line.origin === 'hook' || line.origin === 'tool' || line.origin === 'trigger') return 'claude'
+  if (line.origin === 'external') return 'other'
+  if (line.origin === 'ui') return 'ui'
+  return ''
+}
+
+/** Whether a line passes the action chip ('all', 'external', 'failed' or an action), From, the App drop-down, the project, the hidden app and the clicked session. */
 export function showLine(line: ActivityLine, filter: FeedFilter): boolean {
-  if (filter.action === 'external' ? line.origin !== 'external' : filter.action !== 'all' && line.action !== filter.action) return false
+  if (filter.action === 'external' ? line.origin !== 'external' : filter.action === 'failed' ? line.ok !== false : filter.action !== 'all' && line.action !== filter.action) return false
+  if (filter.from && filter.from !== 'all' && fromOf(line) !== filter.from) return false
   if (filter.app !== 'all' && appKey(line) !== filter.app) return false
+  if (filter.owner && line.owner !== filter.owner) return false
+  if (filter.hide && appKey(line) === filter.hide) return false
   return filter.session === '' || textOf(line.session) === filter.session
 }
+
+// ---- 0.21.0: action colours, bursts, day groups and the hour strip ----
+
+/** The colour family of an action (the map's live trails): recall gold, save blue, update green, forget red, retire ash; the rest plain. */
+export type ActionColour = 'recall' | 'save' | 'update' | 'forget' | 'retire' | 'other'
+export function actionColour(action: string | undefined): ActionColour {
+  switch (action) {
+    case 'recall':
+      return 'recall'
+    case 'remember':
+    case 'import':
+      return 'save'
+    case 'update':
+    case 'restore':
+      return 'update'
+    case 'forget':
+      return 'forget'
+    case 'retire':
+    case 'expire':
+      return 'retire'
+    default:
+      return 'other'
+  }
+}
+
+export type FeedEntry = { kind: 'line'; line: ActivityLine } | { kind: 'burst'; key: string; lines: ActivityLine[] }
+
+/** A burst needs at least this many lines in a row. */
+export const BURST_MIN = 3
+
+/**
+ * Runs of lines (newest first) with the same action, origin and app, each within `gapMs` of the next, folded into
+ * one burst entry when the run has BURST_MIN lines or more. A failed line never folds: it stays on its own.
+ */
+export function foldBursts(lines: readonly ActivityLine[], gapMs = 60_000): FeedEntry[] {
+  const out: FeedEntry[] = []
+  let run: ActivityLine[] = []
+  const flush = () => {
+    if (run.length >= BURST_MIN) out.push({ kind: 'burst', key: `burst|${lineKey(run[0]!)}`, lines: run })
+    else for (const line of run) out.push({ kind: 'line', line })
+    run = []
+  }
+  const time = (line: ActivityLine) => Date.parse(line.t ?? '')
+  for (const line of lines) {
+    const last = run[run.length - 1]
+    const joins =
+      last !== undefined &&
+      line.ok !== false &&
+      line.action === last.action &&
+      line.origin === last.origin &&
+      appKey(line) === appKey(last) &&
+      Number.isFinite(time(line)) &&
+      Number.isFinite(time(last)) &&
+      Math.abs(time(last) - time(line)) <= gapMs
+    if (!joins) flush()
+    if (line.ok === false) out.push({ kind: 'line', line })
+    else run.push(line)
+  }
+  flush()
+  return out
+}
+
+export type BurstSummary = {
+  count: number
+  newest: string
+  oldest: string
+  spanMs: number
+  /** The texts asked (recalls), most first, with counts. */
+  queries: [string, number][]
+  /** The owners, most first, with counts; a line across several owners counts as "all projects (n)". */
+  owners: [string, number][]
+  /** 30 lines or more at one a second or faster: a script, not a person. */
+  scripted: boolean
+  /** The smallest and largest `count` (found, saved…), or null when no line has one. */
+  found: [number, number] | null
+}
+
+export function burstSummary(lines: readonly ActivityLine[]): BurstSummary {
+  const times = lines.map(line => Date.parse(line.t ?? '')).filter(Number.isFinite)
+  const spanMs = times.length > 1 ? Math.max(...times) - Math.min(...times) : 0
+  const tally = (values: string[]) => {
+    const counts = new Map<string, number>()
+    for (const value of values) if (value !== '') counts.set(value, (counts.get(value) ?? 0) + 1)
+    return [...counts].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+  }
+  const counts = lines.map(line => line.count).filter((n): n is number => typeof n === 'number')
+  return {
+    count: lines.length,
+    newest: lines[0]?.t ?? '',
+    oldest: lines[lines.length - 1]?.t ?? '',
+    spanMs,
+    queries: tally(lines.map(line => firstLine(textOf(line.text), 40))),
+    owners: tally(lines.map(line => (typeof line.owners === 'number' && line.owners > 1 ? `all projects (${line.owners})` : textOf(line.owner)))),
+    scripted: lines.length >= 30 && spanMs / Math.max(1, lines.length - 1) <= 1000,
+    found: counts.length === 0 ? null : [Math.min(...counts), Math.max(...counts)],
+  }
+}
+
+/** A span of time in words: "15 s", "5 min", "2 h". */
+export function spanText(ms: number): string {
+  if (ms < 60_000) return `${Math.max(1, Math.round(ms / 1000))} s`
+  if (ms < 3_600_000) return `${Math.round(ms / 60_000)} min`
+  return `${Math.round(ms / 3_600_000)} h`
+}
+
+/** Per local hour of `dayKey` (YYYY-MM-DD), how many lines of each colour. */
+export function hourCounts(lines: readonly ActivityLine[], dayKey: string): Record<ActionColour, number>[] {
+  const hours = Array.from({ length: 24 }, () => ({ recall: 0, save: 0, update: 0, forget: 0, retire: 0, other: 0 }) as Record<ActionColour, number>)
+  for (const line of lines) {
+    if (day(line.t) !== dayKey) continue
+    const hour = new Date(line.t ?? '').getHours()
+    if (Number.isFinite(hour)) hours[hour]![actionColour(line.action)]++
+  }
+  return hours
+}
+
+/** A count as one of 10 height steps against the busiest (0 for none, at least 1 for any). */
+// Square-root scale, so a 200-line burst does not flatten every other hour to nothing.
+export const heightStep = (n: number, most: number) => (n <= 0 || most <= 0 ? 0 : Math.max(1, Math.round(Math.sqrt(n / most) * 10)))
 
 const FIXED_APPS = ['Claude Code', 'Codex', 'Cursor', 'Dashboard']
 
@@ -2470,7 +2604,9 @@ export function externalName(name: string): string {
 export const appName = (key: string) => (key.startsWith('ext:') ? externalName(key.slice(4)) : key)
 
 export const feed = newFeed()
-export const feedView = { filter: newFilter(), started: false, live: 'Connecting', apps: '', open: '' }
+// 0.21.0: `days` holds the days opened or folded by hand; `bursts` groups bursts (kept in this browser); `burstAll` is the burst showing every line.
+export const feedView = { filter: newFilter(), started: false, live: 'Connecting', apps: '', open: '', days: new Map<string, boolean>(), bursts: true, burstAll: '' }
+const BURSTS_KEY = 'mnemosyne.activity.bursts'
 
 const isToday = (t: string | undefined) => day(t) === day(new Date().toISOString())
 
@@ -2505,22 +2641,315 @@ function drawApps() {
   select.value = feedView.filter.app
 }
 
+/** An element the page may lack (the tests' stand-in page has only the older ids): null then. */
+const maybe = <T extends HTMLElement = HTMLElement>(id: string) => (document.getElementById?.(id) ?? null) as T | null
+
+const ACTION_CHIPS: Record<string, string> = { all: 'All', recall: 'Recall', remember: 'Save', update: 'Update', retire: 'Retire', forget: 'Forget', failed: 'Failed', external: 'Outside agents' }
+
+/** The tiles: recalls today split by who asked (Claude Code, other apps, dashboard), saves, updates, retires (by project), failures (the newest, with a link to it). */
+function drawActivityTiles(today: readonly ActivityLine[]) {
+  const ok = (line: ActivityLine) => line.ok !== false
+  const recalls = today.filter(line => line.action === 'recall' && ok(line))
+  const by = { claude: recalls.filter(isClaudeRecall).length, other: recalls.filter(isOtherAppsRecall).length, ui: recalls.filter(line => line.origin === 'ui').length }
+  // 0.21.0: every recall today (was Claude's only), with the split; the Health tab keeps Claude's own count (ui/recalls.ts).
+  byId('tile-recall').textContent = String(recalls.length)
+  const bar = maybe('tile-recall-bar')
+  if (bar) {
+    const width = (n: number) => `w${recalls.length === 0 ? 0 : Math.round((n / recalls.length) * 20)}`
+    bar.replaceChildren(el('span', undefined, `seg f-claude ${width(by.claude)}`), el('span', undefined, `seg f-other ${width(by.other)}`), el('span', undefined, `seg f-ui ${width(by.ui)}`))
+  }
+  const note = maybe('tile-recall-note')
+  if (note) note.textContent = `Claude ${by.claude} · other apps ${by.other} · dashboard ${by.ui}`
+  const saves = today.filter(line => line.action === 'remember' && ok(line))
+  byId('tile-remember').textContent = String(saves.length)
+  const saveNote = maybe('tile-remember-note')
+  if (saveNote) {
+    const last = feed.lines.find(line => line.action === 'remember' && ok(line))
+    saveNote.textContent = saves.length > 0 ? '' : last ? `last save ${dayHeading(last.t).replace(/^(Today|Yesterday)$/, w => w.toLowerCase())} ${clock(last.t).slice(0, 5)}` : 'no save in the log yet'
+  }
+  const updates = today.filter(line => line.action === 'update' && ok(line))
+  byId('tile-update').textContent = String(updates.length)
+  const updateNote = maybe('tile-update-note')
+  if (updateNote) updateNote.textContent = updates.length === 0 ? '' : updates.every(line => line.origin === 'ui') ? 'from the dashboard' : updates.some(line => line.origin === 'ui') ? 'some from the dashboard' : ''
+  const retires = today.filter(line => (line.action === 'retire' || line.action === 'expire') && ok(line))
+  const retired = retires.reduce((sum, line) => sum + (typeof line.count === 'number' && line.count > 0 ? line.count : Math.max(1, (line.ids ?? []).length)), 0)
+  const retireTile = maybe('tile-retire')
+  if (retireTile) retireTile.textContent = String(retired)
+  const retireNote = maybe('tile-retire-note')
+  if (retireNote) {
+    const owners = burstSummary(retires).owners
+    retireNote.textContent = owners.map(([owner, n]) => `${n} ${ownerName(owner)}`).join(' · ')
+  }
+  const failed = today.filter(line => line.ok === false)
+  byId('tile-failed').textContent = String(failed.length)
+  const failNote = maybe('tile-failed-note')
+  if (failNote) failNote.textContent = failed[0] ? `${clock(failed[0].t).slice(0, 5)} · ${actionLabel(failed[0].action)}` : 'none today'
+  const show = maybe('tile-failed-show')
+  if (show) show.hidden = failed.length === 0
+}
+
+/** The hour strip: 24 columns of today, stacked by action colour; a column jumps to the first row of its hour. */
+function drawHours(today: readonly ActivityLine[]) {
+  const box = maybe('act-hours')
+  if (!box) return
+  const hours = hourCounts(today, day(new Date().toISOString()))
+  const totals = hours.map(hour => Object.values(hour).reduce((a, b) => a + b, 0))
+  const most = Math.max(0, ...totals)
+  const order: ActionColour[] = ['other', 'retire', 'forget', 'update', 'save', 'recall']
+  box.replaceChildren(
+    ...hours.map((hour, h) => {
+      const col = el('button', undefined, 'hour')
+      col.type = 'button'
+      const total = totals[h]!
+      col.disabled = total === 0
+      const words = order.filter(c => hour[c] > 0).map(c => `${hour[c]} ${c === 'save' ? 'saves' : c === 'other' ? 'other' : `${c}s`}`)
+      col.title = `${String(h).padStart(2, '0')}:00 · ${total === 0 ? 'nothing' : words.join(', ')}`
+      col.setAttribute('aria-label', col.title)
+      const stack = el('span', undefined, `stack h${heightStep(total, most)}`)
+      // Segments as shares of the column, in twentieths (the .w classes are widths; .p classes are heights).
+      for (const c of order) if (hour[c] > 0) stack.append(el('span', undefined, `seg c-${c} p${Math.max(1, Math.round((hour[c] / total) * 20))}`))
+      col.append(stack, el('span', h % 3 === 0 ? String(h).padStart(2, '0') : '', 'hour-n'))
+      col.addEventListener('click', () => jumpToHour(h))
+      return col
+    }),
+  )
+}
+
+/** Scrolls to the newest shown row of that hour today (opening today's group). */
+function jumpToHour(hour: number) {
+  const rows = Array.from(byId('act-list').children) as HTMLElement[]
+  const today = day(new Date().toISOString())
+  const target = rows.find(row => row.dataset?.day === today && row.dataset?.hour === String(hour))
+  target?.scrollIntoView?.({ block: 'center' })
+  target?.focus?.()
+}
+
+/** The counts on the action chips, under the other filters (From, app, project, session). */
+function drawActionCounts() {
+  const box = byId('act-filters')
+  const others = feed.lines.filter(line => showLine(line, { ...feedView.filter, action: 'all' }))
+  for (const chip of box.querySelectorAll<HTMLButtonElement>('button[data-filter]')) {
+    const name = chip.dataset.filter ?? 'all'
+    const label = ACTION_CHIPS[name] ?? name
+    const n = others.filter(line => showLine(line, { ...feedView.filter, action: name })).length
+    if (name !== 'all') chip.classList?.add?.(`ac-${name === 'remember' ? 'save' : name === 'failed' ? 'forget' : actionColour(name)}`)
+    chip.replaceChildren(el('span', label), ...(name === 'all' ? [] : [el('span', String(n), 'n mono')]))
+    chip.disabled = n === 0 && name !== 'all' && feedView.filter.action !== name
+  }
+}
+
+/** The project drop-down: the owners in the log, kept while picked. */
+function drawFeedProjects() {
+  const select = maybe<HTMLSelectElement>('act-project')
+  if (!select) return
+  const owners = [...new Set(feed.lines.map(line => textOf(line.owner)).filter(owner => owner !== ''))].sort((a, b) => (a === 'global' ? -1 : b === 'global' ? 1 : ownerName(a).localeCompare(ownerName(b))))
+  const key = owners.join('\n')
+  if (select.dataset.key === key) return
+  select.dataset.key = key
+  select.replaceChildren(Object.assign(el('option', 'All projects'), { value: '' }), ...owners.map(owner => Object.assign(el('option', ownerName(owner)), { value: owner, title: owner })))
+  select.value = feedView.filter.owner ?? ''
+}
+
+/** A day's heading: Today / Yesterday / a date, with that day's counts by colour; a click folds it. */
+function dayHead(key: string, lines: readonly ActivityLine[], open: boolean) {
+  const li = el('li', undefined, 'day-head')
+  li.dataset.day = key
+  li.tabIndex = 0
+  li.setAttribute('aria-expanded', String(open))
+  const sample = lines[0]?.t
+  const heading = dayHeading(sample)
+  const left = el('span', undefined, 'day-title')
+  left.append(el('strong', heading), el('span', heading === 'Today' || heading === 'Yesterday' ? longDay(sample) : '', 'muted'))
+  const counts = el('span', undefined, 'day-counts')
+  const by = new Map<ActionColour, number>()
+  for (const line of lines) by.set(actionColour(line.action), (by.get(actionColour(line.action)) ?? 0) + 1)
+  for (const c of ['recall', 'save', 'update', 'retire', 'forget'] as ActionColour[]) {
+    const n = by.get(c) ?? 0
+    if (n === 0) continue
+    const span = el('span', undefined, 'day-count')
+    span.title = `${n} ${c}`
+    span.append(el('span', undefined, `act-dot c-${c}`), el('span', String(n), 'mono'))
+    counts.append(span)
+  }
+  const failed = lines.filter(line => line.ok === false).length
+  if (failed > 0) counts.append(el('span', `${failed} failed`, 'day-failed'))
+  li.append(left, counts)
+  const flip = () => {
+    feedView.days.set(key, !open)
+    drawFeed()
+    ;(Array.from(byId('act-list').children) as HTMLElement[]).find(row => row.classList?.contains?.('day-head') && row.dataset.day === key)?.focus?.()
+  }
+  li.addEventListener('click', flip)
+  li.addEventListener('keydown', event => {
+    if (event.target !== li || (event.key !== 'Enter' && event.key !== ' ')) return
+    event.preventDefault?.()
+    flip()
+  })
+  return li
+}
+
+/** A burst: one row for many lines (×n, the span, the queries asked, the projects); open, it lists three, then all. */
+function burstItems(entry: { key: string; lines: ActivityLine[] }, ctx: (line: ActivityLine) => ActivityCtx): HTMLElement[] {
+  const s = burstSummary(entry.lines)
+  const first = entry.lines[0]!
+  const colour = actionColour(first.action)
+  const open = feedView.open === entry.key
+  const item = el('li', undefined, `event burst ev-${colour}${open ? ' is-open' : ''}`)
+  item.dataset.key = entry.key
+  item.dataset.day = day(first.t)
+  item.dataset.hour = String(new Date(first.t ?? '').getHours())
+  item.tabIndex = 0
+  item.setAttribute('aria-expanded', String(open))
+  const source = el('span', undefined, 'source')
+  source.append(el('span', sourceLabel(first), 'muted origin'))
+  const projects = s.owners.length === 1 ? project(s.owners[0]![0].startsWith('all projects') ? undefined : s.owners[0]![0], 'project owner-col', s.owners[0]![0].startsWith('all projects') ? s.owners[0]![0] : undefined) : project(undefined, 'project owner-col', `${s.owners.length} projects`)
+  const what = el('span', undefined, 'what burst-what')
+  const head = el('span', undefined, 'burst-head')
+  const verb = first.action === 'recall' ? (first.origin === 'ui' ? 'searches' : 'recalls') : first.action === 'retire' ? 'retired' : first.action === 'remember' ? 'saves' : `${actionLabel(first.action)}s`
+  head.append(el('span', undefined, `caret${open ? ' is-open' : ''}`), el('strong', `${s.count} ${verb} in ${spanText(s.spanMs)}`))
+  if (first.action === 'recall' && s.queries.length > 1) head.append(el('span', ` · ${s.queries.length} different queries`))
+  head.append(el('span', `${clock(s.oldest)} – ${clock(s.newest)}`, 'muted small burst-span'))
+  if (s.scripted) head.append(el('span', `script pace · ${Math.max(1, Math.round(s.count / Math.max(1, s.spanMs / 1000)))}/s`, 'pace'))
+  what.append(head)
+  const chipsRow = el('span', undefined, 'burst-chips')
+  if (first.action === 'recall') for (const [query, n] of s.queries.slice(0, 5)) chipsRow.append(el('span', n > 1 ? `${query} ×${n}` : query, 'tag'))
+  if (s.owners.length > 1) {
+    const strip = el('span', undefined, 'owner-strip')
+    for (const [owner, n] of s.owners.slice(0, 6)) strip.append(el('span', undefined, `seg ${dotClass(ownerColour(colours, owner.startsWith('all projects') ? undefined : owner))} w${Math.max(1, Math.round((n / s.count) * 20))}`))
+    chipsRow.append(strip, ...s.owners.slice(0, 3).map(([owner, n]) => el('span', `${owner.startsWith('all projects') ? owner : ownerName(owner)} ${Math.round((n / s.count) * 100)}%`, 'tag')))
+    if (s.owners.length > 3) chipsRow.append(el('span', `+${s.owners.length - 3} projects`, 'tag'))
+  }
+  // A script's flood: one click hides that app from the list.
+  const app = appKey(first)
+  if (s.scripted && app !== '') {
+    const hide = el('button', `Hide ${appName(app)}`, 'link small')
+    hide.type = 'button'
+    hide.addEventListener('click', event => {
+      event.stopPropagation?.()
+      setHide(app)
+    })
+    chipsRow.append(hide)
+  }
+  if (chipsRow.children.length > 0) what.append(chipsRow)
+  const result = el('span', s.found === null ? `${s.count}×` : s.found[0] === s.found[1] ? resultLabel(first) : `${s.found[0]}–${s.found[1]} found`, 'result')
+  item.append(el('span', clock(first.t), 'mono muted time'), el('span', `${actionLabel(first.action)} ×${s.count}`, `badge a-${/^[a-z]+$/.test(first.action ?? '') ? first.action : 'other'}`), source, projects, what, result)
+  const toggle = () => toggleRow(entry.key)
+  item.addEventListener('click', () => toggle())
+  item.addEventListener('keydown', event => {
+    if (event.target !== item || (event.key !== 'Enter' && event.key !== ' ')) return
+    event.preventDefault?.()
+    toggle()
+  })
+  if (!open) return [item]
+  const all = feedView.burstAll === entry.key
+  const shown = all ? entry.lines.slice(0, 200) : entry.lines.slice(0, 3)
+  const children = shown.map(line => {
+    const child = activityItem(line, setSessionFilter, ctx(line))
+    child.className = `${child.className} child ev-${actionColour(line.action)}`
+    return child
+  })
+  const rest = entry.lines.length - shown.length
+  if (rest > 0) {
+    const more = el('li', undefined, 'event more')
+    const button = el('button', `+ ${rest} more`, 'link small')
+    button.type = 'button'
+    button.addEventListener('click', () => {
+      feedView.burstAll = entry.key
+      drawFeed()
+    })
+    more.append(button)
+    children.push(more)
+  }
+  return [item, ...children]
+}
+
+/** Hides one app ('' shows it again), with a chip that undoes it. */
+function setHide(app: string) {
+  feedView.filter.hide = app
+  const chip = maybe('act-hide')
+  if (chip) {
+    chip.hidden = app === ''
+    chip.textContent = app === '' ? '' : `Hiding ${appName(app)} · Show`
+    chip.setAttribute('aria-label', app === '' ? 'Show every app' : `Show ${appName(app)} again`)
+  }
+  drawFeed()
+}
+
+/** A failed line: its error in the row, Try again (a recall's query goes to Search) and Copy error. */
+function failureExtras(item: HTMLElement, line: ActivityLine) {
+  item.className = `${item.className} ev-fail`
+  const what = (Array.from(item.children) as HTMLElement[]).find(child => child.className === 'what')
+  if (!what) return
+  const box = el('span', undefined, 'err-line')
+  box.append(el('span', textOf(line.error) || 'no reason given', 'err'))
+  const text = textOf(line.text)
+  if (line.action === 'recall' && text !== '') {
+    const again = el('button', 'Try again', 'btn small')
+    again.type = 'button'
+    again.title = 'Search for the same words on the Search tab'
+    again.addEventListener('click', event => {
+      event.stopPropagation?.()
+      show('search')
+      searchFor(text)
+    })
+    box.append(again)
+  }
+  if (textOf(line.error) !== '') {
+    const copy = el('button', 'Copy error', 'btn small')
+    copy.type = 'button'
+    copy.addEventListener('click', event => {
+      event.stopPropagation?.()
+      void navigator.clipboard?.writeText(textOf(line.error)).then(() => {
+        copy.textContent = 'Copied'
+      })
+    })
+    box.append(copy)
+  }
+  what.append(box)
+}
+
 export function drawFeed() {
   const today = feed.lines.filter(line => isToday(line.t))
-  const count = (test: (line: ActivityLine) => boolean) => String(today.filter(test).length)
-  // Claude's recalls only (ui/recalls.ts, the same rule as the Health tab): a dashboard search or another app's recall is not one.
-  byId('tile-recall').textContent = count(isClaudeRecall)
-  byId('tile-remember').textContent = count(line => line.action === 'remember' && line.ok !== false)
-  byId('tile-update').textContent = count(line => line.action === 'update' && line.ok !== false)
-  byId('tile-failed').textContent = count(line => line.ok === false)
+  drawActivityTiles(today)
+  drawHours(today)
   drawApps()
+  drawFeedProjects()
+  drawActionCounts()
   const list = feed.lines.filter(line => showLine(line, feedView.filter)).slice(0, FEED_SHOW)
   const none = feed.lines.length > 0 ? 'No activity matches these filters.' : 'No activity yet.'
   const ctx = (line: ActivityLine): ActivityCtx => {
     const key = lineKey(line)
     return { expanded: feedView.open === key, toggle: () => toggleRow(key), preview: id => previews.get(id), open: openInMemories }
   }
-  byId('act-list').replaceChildren(...(list.length > 0 ? list.map(line => activityItem(line, setSessionFilter, ctx(line))) : [el('li', none, 'event empty muted')]))
+  const lineItem = (line: ActivityLine) => {
+    const item = activityItem(line, setSessionFilter, ctx(line))
+    item.className = `${item.className} ev-${actionColour(line.action)}`
+    item.dataset.day = day(line.t)
+    item.dataset.hour = String(new Date(line.t ?? '').getHours())
+    if (line.ok === false) failureExtras(item, line)
+    return item
+  }
+  if (list.length === 0) {
+    byId('act-list').replaceChildren(el('li', none, 'event empty muted'))
+    return
+  }
+  // Day by day, newest first: the newest day open, older ones folded unless opened.
+  const days: [string, ActivityLine[]][] = []
+  for (const line of list) {
+    const key = day(line.t)
+    const last = days[days.length - 1]
+    if (last && last[0] === key) last[1].push(line)
+    else days.push([key, [line]])
+  }
+  const rows: HTMLElement[] = []
+  days.forEach(([key, lines], i) => {
+    const open = feedView.days.get(key) ?? i === 0
+    rows.push(dayHead(key, lines, open))
+    if (!open) return
+    const entries: FeedEntry[] = feedView.bursts ? foldBursts(lines) : lines.map(line => ({ kind: 'line', line }))
+    for (const entry of entries) rows.push(...(entry.kind === 'line' ? [lineItem(entry.line)] : burstItems(entry, ctx)))
+  })
+  byId('act-list').replaceChildren(...rows)
   void wantPreviews(list)
 }
 
@@ -2737,6 +3166,47 @@ export function wireActivity() {
     drawFeed()
   })
   byId('act-session').addEventListener('click', () => setSessionFilter(''))
+  // 0.21.0: From, the project, Group bursts, the hidden app and the Failed tile's link (absent from the tests' stand-in page).
+  const from = maybe('act-from')
+  const fromChips = Array.from(from?.querySelectorAll?.<HTMLButtonElement>('button[data-from]') ?? [])
+  for (const button of fromChips) {
+    button.addEventListener('click', () => {
+      feedView.filter.from = (button.dataset.from as From | 'all' | undefined) ?? 'all'
+      for (const other of fromChips) other.setAttribute('aria-pressed', String(other === button))
+      drawFeed()
+    })
+  }
+  maybe<HTMLSelectElement>('act-project')?.addEventListener('change', event => {
+    feedView.filter.owner = (event.target as HTMLSelectElement).value
+    drawFeed()
+  })
+  const bursts = maybe<HTMLInputElement>('act-bursts')
+  if (bursts) {
+    try {
+      feedView.bursts = prefStorage()?.getItem(BURSTS_KEY) !== 'off'
+    } catch {
+      feedView.bursts = true
+    }
+    bursts.checked = feedView.bursts
+    bursts.addEventListener('change', () => {
+      feedView.bursts = bursts.checked
+      try {
+        prefStorage()?.setItem(BURSTS_KEY, bursts.checked ? 'on' : 'off')
+      } catch {
+        // storage is a convenience only
+      }
+      drawFeed()
+    })
+  }
+  maybe('act-hide')?.addEventListener('click', () => setHide(''))
+  maybe('tile-failed-show')?.addEventListener('click', () => {
+    // Today's group open, then the newest failed row.
+    feedView.days.set(day(new Date().toISOString()), true)
+    drawFeed()
+    const row = (Array.from(byId('act-list').children) as HTMLElement[]).find(child => child.className.includes('ev-fail'))
+    row?.scrollIntoView?.({ block: 'center' })
+    row?.focus?.()
+  })
 }
 
 // ---- Search: one at a time ----

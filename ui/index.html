@@ -288,25 +288,40 @@
     <div class="titlebar">
       <h1>Activity</h1>
       <span id="live" class="live"><span class="live-dot"></span><span id="live-text">Connecting</span></span>
+      <span class="muted small">every recall, save, update and retire, newest first</span>
       <button id="pause" type="button" class="btn push-right">Pause</button>
     </div>
-    <div class="tiles">
-      <div class="tile"><div class="tile-label">Claude recalls today</div><div id="tile-recall" class="tile-value">0</div></div>
-      <div class="tile"><div class="tile-label">Saved today</div><div id="tile-remember" class="tile-value">0</div></div>
-      <div class="tile"><div class="tile-label">Updated today</div><div id="tile-update" class="tile-value">0</div></div>
-      <div class="tile"><div class="tile-label">Failed calls</div><div id="tile-failed" class="tile-value">0</div></div>
+    <div class="tiles act-tiles">
+      <div class="tile t-recall"><div class="tile-label"><span class="act-dot c-recall"></span>Recalls today</div><div id="tile-recall" class="tile-value">0</div><div id="tile-recall-bar" class="split" aria-hidden="true"></div><div id="tile-recall-note" class="tile-note muted small"></div></div>
+      <div class="tile t-save"><div class="tile-label"><span class="act-dot c-save"></span>Saved today</div><div id="tile-remember" class="tile-value">0</div><div id="tile-remember-note" class="tile-note muted small"></div></div>
+      <div class="tile t-update"><div class="tile-label"><span class="act-dot c-update"></span>Updated today</div><div id="tile-update" class="tile-value">0</div><div id="tile-update-note" class="tile-note muted small"></div></div>
+      <div class="tile t-retire"><div class="tile-label"><span class="act-dot c-retire"></span>Retired today</div><div id="tile-retire" class="tile-value">0</div><div id="tile-retire-note" class="tile-note muted small"></div></div>
+      <div class="tile t-failed"><div class="tile-label"><span class="act-dot c-forget"></span>Failed calls</div><div id="tile-failed" class="tile-value">0</div><div class="tile-note muted small"><span id="tile-failed-note"></span> <button id="tile-failed-show" type="button" class="link" hidden>show ↓</button></div></div>
+    </div>
+    <div class="act-hours-box">
+      <div class="act-hours-head muted small"><span>Today by hour · stacked by action</span><span id="act-hours-note">Click an hour to jump to it.</span></div>
+      <div id="act-hours" class="act-hours" role="group" aria-label="Today by hour"></div>
     </div>
     <div class="act-bar">
-      <div role="group" aria-label="Show" class="chips" id="act-filters">
+      <div role="group" aria-label="Action" class="act-group" id="act-filters">
+        <span class="facet-label">Action</span>
         <button type="button" class="chip-btn" data-filter="all" aria-pressed="true">All</button>
         <button type="button" class="chip-btn" data-filter="recall" aria-pressed="false">Recall</button>
-        <button type="button" class="chip-btn" data-filter="remember" aria-pressed="false">Remember</button>
+        <button type="button" class="chip-btn" data-filter="remember" aria-pressed="false">Save</button>
         <button type="button" class="chip-btn" data-filter="update" aria-pressed="false">Update</button>
+        <button type="button" class="chip-btn" data-filter="retire" aria-pressed="false">Retire</button>
         <button type="button" class="chip-btn" data-filter="forget" aria-pressed="false">Forget</button>
-        <button type="button" class="chip-btn" data-filter="external" aria-pressed="false">Outside agents</button>
+        <button type="button" class="chip-btn" data-filter="failed" aria-pressed="false">Failed</button>
       </div>
-      <label class="field">App
-        <select id="act-app" class="input">
+      <div role="group" aria-label="From" class="act-group" id="act-from">
+        <span class="facet-label">From</span>
+        <button type="button" class="chip-btn" data-from="all" aria-pressed="true">All</button>
+        <button type="button" class="chip-btn" data-from="claude" aria-pressed="false"><span class="from-mark f-claude"></span>Claude Code</button>
+        <button type="button" class="chip-btn" data-from="other" aria-pressed="false"><span class="from-mark f-other"></span>Other apps</button>
+        <button type="button" class="chip-btn" data-from="ui" aria-pressed="false"><span class="from-mark f-ui"></span>Dashboard</button>
+      </div>
+      <label class="field-inline"><span class="sr-only">App</span>
+        <select id="act-app" class="input" title="One app only">
           <option value="all">All</option>
           <option value="Claude Code">Claude Code</option>
           <option value="Codex">Codex</option>
@@ -314,7 +329,12 @@
           <option value="Dashboard">Dashboard</option>
         </select>
       </label>
+      <label class="field-inline"><span class="sr-only">Project</span>
+        <select id="act-project" class="input"><option value="">All projects</option></select>
+      </label>
+      <label class="switch push-right"><input id="act-bursts" type="checkbox" checked> <span>Group bursts</span></label>
       <button id="act-session" type="button" class="chip-btn session-banner" aria-label="Clear session filter" hidden></button>
+      <button id="act-hide" type="button" class="chip-btn session-banner" hidden></button>
     </div>
     <div class="feed-box">
       <div class="feed-head">

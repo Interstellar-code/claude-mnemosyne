@@ -1603,6 +1603,18 @@ C10.3: the engine's trigger `trim_validations_to_3` keeps only the newest 3 `mem
 
 On the solar-system map a plain folder (no git repo) with at least `map.stationMin` live memories is a space station and one with fewer a starship (default 50, range 2 to 1000, applies now). The galaxy reply carries the value. Git repos are always planets.
 
+### The Activity tab (0.21.0)
+
+Fifth step of the tab polish (design proposal `tabs-after/NOTES-activity-review-health.md`, Activity items 1 to 7). Page only: no server, setting or engine change.
+- **Colours.** `actionColour(action)` maps to recall, save (remember, import), update (update, restore), forget, retire (retire, expire) or other. Each row gets `ev-<colour>`, whose rail is a 3 px inset `box-shadow` in `--act-<colour>`. The five tokens are in the fallback block and in the `light-dark()` block. They paint rails, dots, bars and the hour strip only, never text, so the contrast checks do not apply to them.
+- **From.** `fromOf(line)` is `claude` (origin hook, tool or trigger), `other` (external) or `ui`. `FeedFilter` gains optional `from`, `owner`, `hide` (one app key left out) and the action `failed` (`ok === false`). An older filter without them still works.
+- **Bursts.** `foldBursts(lines, gapMs = 60 000)` walks the shown lines, newest first, and folds runs of `BURST_MIN` (3) or more with the same action, origin and `appKey`, each within `gapMs` of the next. A failed line ends a run and stays alone. `burstSummary` gives the count, span, queries and owners (most first, "all projects (n)" for a cross-owner search), the found range, and `scripted` (30 or more at one a second or faster). An open burst lists 3 lines, then "+ n more" lists up to 200. Group bursts is `mnemosyne.activity.bursts` in localStorage (on unless "off").
+- **Days.** `drawFeed` splits the shown lines by local `day()` and adds `li.day-head` with the counts per colour and the failures. The newest shown day is open, older ones folded; `feedView.days` remembers a day opened or folded by hand. Rows carry `data-day` and `data-hour` for the hour strip's jump.
+- **Tiles.** "Recalls today" counts every successful recall today. `tile-recall-note` splits it with `isClaudeRecall` and `isOtherAppsRecall` (ui/recalls.ts), plus origin `ui`, so Claude's own number is still the Health tab's rule. Retired today sums `count` (else the ids, else 1) of retire and expire lines, by owner.
+- **Hours.** `hourCounts(lines, dayKey)` counts per local hour and colour. `heightStep` puts a column's total on 10 steps of a square-root scale (`.stack.h1`–`.h10`); segments are shares in twentieths (`.seg.p1`–`.p20`).
+- **Failures.** `failureExtras` adds `ev-fail`, `span.err` (the logged error), Try again for a recall with text (Search tab, same words) and Copy error (clipboard).
+- **Optional elements.** The new ids are read through `maybe(id)`, so the feed tests' stand-in page, which has only the older ids, keeps working.
+
 ### The Knowledge tab (0.20.0)
 
 Fourth step of the tab polish (design proposal `tabs-after/NOTES-memories-search-knowledge.md`, Knowledge items 1 to 8), reusing the owner chip, `kindGlyph` and `reachMark`.

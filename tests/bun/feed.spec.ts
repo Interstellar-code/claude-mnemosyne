@@ -183,7 +183,8 @@ describe('ACT: the Activity list on real-shaped lines', () => {
     app.wireActivity()
   })
 
-  const rows = () => (els.get('act-list')!.children as Fake[]).filter(row => !row.className.includes('empty'))
+  // 0.21.0: the list opens with a day heading (li.day-head); the rows are the event lines under it.
+  const rows = () => (els.get('act-list')!.children as Fake[]).filter(row => !row.className.includes('empty') && !row.className.includes('day-head'))
   const shownTexts = () => rows().map(row => (row.children[4] as Fake).textContent + '|' + row.all().filter(e => e.className.includes('origin')).map(e => e.textContent).join('/'))
   const shownTimes = () => rows().map(row => (row.children[0] as Fake).textContent)
   const timesOf = (...names: (keyof typeof LINES)[]) => names.map(name => app.clock(LINES[name].t)).sort()
@@ -436,6 +437,75 @@ describe('ACT: the Activity list on real-shaped lines', () => {
     expect(f('external', 'Claude Code', '')).toEqual([])
     // A line with no session never matches a session filter.
     expect(f('all', 'all', 'nope')).toEqual([])
+  })
+})
+
+// ---- 0.21.0: action colours, From, bursts, the hour strip and the new filters ----
+
+describe('ACT 0.21: colours, bursts, hours and filters', () => {
+  let app: Record<string, any>
+  beforeAll(async () => {
+    app = await import(join(ROOT, 'ui', 'app.ts'))
+  })
+  const at = (s: number) => new Date(Date.UTC(2026, 10, 6, 14, 0, s)).toISOString()
+  const recall = (s: number, extra: Record<string, unknown> = {}) => ({ t: at(s), action: 'recall', origin: 'ui', owner: 'global', text: 'q', count: 2, ok: true, ...extra })
+
+  test('actionColour and fromOf: the map trail colours, and who asked', () => {
+    expect(['recall', 'remember', 'import', 'update', 'restore', 'forget', 'retire', 'expire', 'extract', undefined].map(a => app.actionColour(a))).toEqual(['recall', 'save', 'save', 'update', 'update', 'forget', 'retire', 'retire', 'other', 'other'])
+    expect(['hook', 'tool', 'trigger', 'external', 'ui', 'backfill', undefined].map(origin => app.fromOf({ origin }))).toEqual(['claude', 'claude', 'claude', 'other', 'ui', '', ''])
+  })
+
+  test('foldBursts: three or more alike within a minute fold; a gap, another app or a failure breaks the run', () => {
+    // Newest first, as the feed holds them.
+    const lines = [recall(50), recall(40), recall(30), recall(20, { origin: 'external', client: 'codex' }), recall(19), recall(18), recall(10, { ok: false }), recall(9), recall(8), recall(7, { action: 'retire' })]
+    const kinds = app.foldBursts(lines).map((e: { kind: string; lines?: unknown[] }) => (e.kind === 'burst' ? `burst${e.lines!.length}` : 'line'))
+    expect(kinds).toEqual(['burst3', 'line', 'line', 'line', 'line', 'line', 'line', 'line'])
+    // A gap over the limit splits a run.
+    expect(app.foldBursts([recall(200), recall(100), recall(0)], 60_000).map((e: { kind: string }) => e.kind)).toEqual(['line', 'line', 'line'])
+    expect(app.foldBursts([recall(200), recall(100), recall(0)], 100_000).map((e: { kind: string }) => e.kind)).toEqual(['burst'])
+    // A failed line never folds, and never joins the run around it.
+    expect(app.foldBursts([recall(3), recall(2, { ok: false }), recall(1), recall(0)]).map((e: { kind: string }) => e.kind)).toEqual(['line', 'line', 'line', 'line'])
+  })
+
+  test('burstSummary: span, queries, owners, found range and script pace', () => {
+    const s = app.burstSummary([recall(5, { text: 'return PO', count: 4 }), recall(4, { text: 'return PO' }), recall(0, { text: 'INCO2', owner: 'project-x-1a2b', count: 0 })])
+    expect(s.count).toBe(3)
+    expect(s.spanMs).toBe(5000)
+    expect(s.queries).toEqual([['return PO', 2], ['INCO2', 1]])
+    expect(s.owners).toEqual([['global', 2], ['project-x-1a2b', 1]])
+    expect(s.found).toEqual([0, 4])
+    expect(s.scripted).toBe(false)
+    expect(app.burstSummary([recall(0, { owners: 10 })]).owners).toEqual([['all projects (10)', 1]])
+    // 30 lines in 29 s is a script; 30 lines over 5 min is not.
+    expect(app.burstSummary(Array.from({ length: 30 }, (_, i) => recall(29 - i))).scripted).toBe(true)
+    expect(app.burstSummary(Array.from({ length: 30 }, (_, i) => ({ ...recall(0), t: new Date(Date.UTC(2026, 10, 6, 14, 0) + (29 - i) * 10_000).toISOString() }))).scripted).toBe(false)
+    expect([app.spanText(400), app.spanText(15_000), app.spanText(300_000), app.spanText(7_200_000)]).toEqual(['1 s', '15 s', '5 min', '2 h'])
+  })
+
+  test('hourCounts and heightStep: per local hour by colour, on a square-root scale', () => {
+    const local = (h: number, m = 0) => new Date(2026, 10, 6, h, m).toISOString()
+    const lines = [{ t: local(9), action: 'recall' }, { t: local(9, 5), action: 'remember' }, { t: local(14), action: 'retire' }, { t: new Date(2026, 10, 5, 9).toISOString(), action: 'recall' }]
+    const hours = app.hourCounts(lines, app.day(local(9)))
+    expect(hours).toHaveLength(24)
+    expect(hours[9]).toMatchObject({ recall: 1, save: 1 })
+    expect(hours[14]).toMatchObject({ retire: 1 })
+    expect(hours.reduce((n: number, h: Record<string, number>) => n + Object.values(h).reduce((a, b) => a + b, 0), 0)).toBe(3)
+    expect([app.heightStep(0, 10), app.heightStep(1, 100), app.heightStep(25, 100), app.heightStep(100, 100)]).toEqual([0, 1, 5, 10])
+  })
+
+  test('showLine: From, project, a hidden app and Failed combine with the older filters', () => {
+    const base = app.newFilter()
+    const lines = [recall(1, { origin: 'hook', client: 'claude-code' }), recall(2, { origin: 'external', client: 'codex', owner: 'project-x-1a2b' }), recall(3), recall(4, { ok: false })]
+    const pick = (f: object) => lines.filter(line => app.showLine(line, { ...base, ...f })).map(line => line.t)
+    expect(pick({ from: 'claude' })).toEqual([at(1)])
+    expect(pick({ from: 'other' })).toEqual([at(2)])
+    expect(pick({ from: 'ui' })).toEqual([at(3), at(4)])
+    expect(pick({ owner: 'project-x-1a2b' })).toEqual([at(2)])
+    expect(pick({ hide: 'Dashboard' })).toEqual([at(1), at(2)])
+    expect(pick({ action: 'failed' })).toEqual([at(4)])
+    expect(pick({ action: 'failed', from: 'claude' })).toEqual([])
+    // An older filter without the new keys still works.
+    expect(lines.filter(line => app.showLine(line, { action: 'all', app: 'all', session: '' }))).toHaveLength(4)
   })
 })
 

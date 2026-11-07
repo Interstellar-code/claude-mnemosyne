@@ -2,6 +2,24 @@
 
 Newest first. Each release is tagged `vX.Y.Z` on GitHub; the README and DESIGN.md describe the contracts.
 
+## 0.21.0 (Activity tab polish)
+
+The fifth step of the tab polish, following the design proposal's Activity notes.
+
+1. **Colour by action**, as on the map's live trails: recall gold, save blue, update green, forget red, retire an ash ring. Each row has a rail in its colour; the badges, chips and tiles follow. Five new tokens (`--act-recall`, `--act-save`, `--act-update`, `--act-forget`, `--act-retire`) are used for rails, dots and bars only, never for text.
+2. **Bursts fold:** three or more lines in a row with the same action, origin and app, each within a minute of the next, become one row. It shows the count, the span, the queries asked (with counts), the projects (a strip and percentages) and the found range. Opened, it lists three lines, then "+ n more". A burst of 30 or more at one a second or faster is marked "script pace" and offers "Hide <app>"; a chip undoes it. The **Group bursts** switch is kept in this browser. A failed line never folds.
+3. **Filters:**
+   - the action chips (All, Recall, Save, Update, Retire, Forget, Failed) show their counts under the other filters;
+   - **From** (All, Claude Code, Other apps, Dashboard) replaces "Outside agents";
+   - a **Project** drop-down;
+   - the App drop-down stays, for one app.
+4. **Day headings:** Today, Yesterday, then dates, each with its counts by action and failures. The newest day is open and older days are folded; a click opens one.
+5. **Failures in the row:** a failed line has a red rail, its error under the text, **Try again** (a recall's words go to the Search tab) and **Copy error**.
+6. **Tiles:** **Recalls today** now counts every recall (it was Claude's only) with a split bar and note: Claude, other apps, dashboard. Claude's own count, the same rule as the Health tab, is in the note. Saved today shows the last save when it is 0. A new **Retired today** tile counts by project. **Failed calls** names the newest failure and has a "show ↓" link to it.
+7. **Today by hour:** 24 columns stacked by action, on a square-root scale so one big burst does not flatten the rest. A column jumps to the first row of its hour.
+
+No server, setting or engine change.
+
 ## 0.20.0 (Knowledge tab polish)
 
 The fourth step of the tab polish, following the design proposal's Knowledge notes.
