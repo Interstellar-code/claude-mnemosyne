@@ -245,7 +245,10 @@ async function check(next: string, build: string, embeddings: boolean, modelCach
   }
 }
 
-export async function install(pluginRoot: string, engineDir: string, storeDir: string, embeddings = false, modelCacheDir = EMBEDDINGS_CACHE_DIR) {
+/** `beforeSwap` runs after the new engine passed its check and before the swap (bin/update.ts stops the dashboard there); a throw refuses the swap. */
+export type InstallHooks = { beforeSwap?: () => Promise<void> }
+
+export async function install(pluginRoot: string, engineDir: string, storeDir: string, embeddings = false, modelCacheDir = EMBEDDINGS_CACHE_DIR, hooks: InstallHooks = {}) {
   for (const [name, path] of [['plugin root', pluginRoot], ['engine dir', engineDir], ['store dir', storeDir]] as const) {
     if (!path || !isAbsolute(path)) throw new InstallError(`${name} must be an absolute path (got "${path}")`)
   }
@@ -304,6 +307,7 @@ export async function install(pluginRoot: string, engineDir: string, storeDir: s
       throw new InstallError(`bun install failed (exit ${installed.exitCode}): ${`${installed.stderr}\n${installed.stdout}`.trim().slice(-800)}`)
     }
     await check(next, build, embeddings, modelCacheDir)
+    await hooks.beforeSwap?.()
   } catch (error) {
     rmSync(next, { recursive: true, force: true })
     throw error

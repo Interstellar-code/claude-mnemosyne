@@ -77,6 +77,7 @@ import { tagRules, VOCAB_FILE } from '../hooks/vocab'
 import { CORE_SPREAD } from './map-layout'
 import { settingsRoutes } from './settings-routes'
 import type { SettingsDeps } from './settings-routes'
+import { takeHandoff, type UpdateDeps, updateRoutes } from './update-routes'
 import { countByDay, isClaudeRecall, isOtherAppsRecall } from './recalls'
 import type { MeaningPair, MeaningReply as MeaningWorkerReply, MeaningStarted } from './semantic-worker'
 
@@ -2770,6 +2771,8 @@ export type ServerOptions = {
   // or hand the route a worker that fails (review HIGH-1 to MEDIUM-2).
   meaningRunner?: MeaningRunner
   meaningWaitMs?: number
+  // 0.28.0: the Update button's network check and detached start, so a test never reaches GitHub or starts the updater.
+  update?: UpdateDeps
   // Dev mode (`bun run dev:ui`, never the plugin's launcher): the page, style and app are read and built
   // again on every request, /api/dev-stamp changes when a file in ui/ does, and the port and token are fixed
   // so a restart under `bun --watch` keeps the open tab working.
@@ -2833,6 +2836,8 @@ export async function startServer(config: Config, options: ServerOptions = {}): 
   // SEMX.1: the meaning layout's one Worker, started on the first galaxy request that needs it.
   const meaning = options.meaningRunner ?? new MeaningRunner()
   const meaningWaitMs = options.meaningWaitMs ?? MEANING_WAIT_MS
+  let boundPort = 0
+  const updates = updateRoutes({ root: config.root, pluginRoot: config.pluginRoot, plugin: plugin ?? null, engine: engine ?? null, port: () => boundPort, token }, options.update)
 
   // Every POST route: the page's own origin, JSON, a body within the route's cap (4096 bytes unless the route says more); then the handler.
   async function post(request: Request, handle: (views: Views, text: string) => Promise<Answer>, maxBytes = MAX_BODY_BYTES) {
@@ -2983,6 +2988,10 @@ export async function startServer(config: Config, options: ServerOptions = {}): 
       server.timeout(request, 0)
       return post(request, (_views, text) => settings.backup(text))
     }
+    // 0.28.0: the Update button (ui/update-routes.ts). The check waits on GitHub for at most 5 s, once a day.
+    if (path === '/api/update') return get(() => updates.info())
+    if (path === '/api/update/status') return get(() => updates.status())
+    if (path === '/api/update/start') return post(request, (_views, text) => updates.start(text))
     if (dev && path === '/api/dev-stamp') return get(() => ({ status: 200, body: { stamp: devStamp(startedAt) } }))
     return notFound()
   }
@@ -3025,6 +3034,7 @@ export async function startServer(config: Config, options: ServerOptions = {}): 
   })
   const port = server.port
   if (port === undefined) throw new Error('the server has no port')
+  boundPort = port
   host = `127.0.0.1:${port}`
   return {
     port,
@@ -3075,7 +3085,16 @@ function watchParent(gone: () => void) {
 
 async function serve() {
   const config = configFromEnv(process.env)
-  const started = await startServer(config, devOptions(process.env))
+  // After an update from the Update button: the old server's port and token, once, so its open page reloads into this one.
+  const handoff = process.env.MNEMOSYNE_UI_DEV === '1' ? undefined : takeHandoff(config.root)
+  let started: Started
+  try {
+    started = await startServer(config, handoff ?? devOptions(process.env))
+  } catch (error) {
+    if (handoff === undefined) throw error
+    // The port was taken meanwhile: a fresh port and token (the page then asks to be reopened).
+    started = await startServer(config, devOptions(process.env))
+  }
   let stopping = false
   const stop = (code = 0) => {
     if (stopping) return

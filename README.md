@@ -53,16 +53,18 @@ It downloads the newest `vX.Y.Z` release into `~/.claude/mnemosyne/update-stagin
 
 Your store, `config.json`, `vocabulary.json` and activity log are never touched. If any step fails, the old engine and plugin copy stay in place and the message says what is installed.
 
-**Close your chats first (Windows).** A running engine keeps its files locked, so while Claude Desktop has Mnemosyne connected the update stops, lists the processes (how many, which pids) and exits 2 without changing anything. Quit Claude Desktop and run it again, or:
+**Open chats (Windows).** The update runs while Claude Desktop has Mnemosyne connected; open chats keep the old engine until Claude Desktop restarts. A running engine can keep its files locked: if Windows refuses the swap, the update puts the old version back, lists the processes holding it (how many, which pids) and exits 2. Quit Claude Desktop and run it again, or:
 
-- `--wait 600` waits up to 10 minutes for them to end;
-- `--stop-engines` stops them now (open chats lose Mnemosyne until Claude Desktop is restarted). Nothing is stopped without this flag.
+- `--wait 600` waits up to 10 minutes for them to end before the swap;
+- `--stop-engines` stops them first (open chats lose Mnemosyne until Claude Desktop is restarted). Nothing is stopped without this flag.
 
 Other options: `--tag v0.28.0` installs that release, `--force` reinstalls the same version (or an older one, which is otherwise refused). Exit codes: 0 done or already up to date, 1 failed, 2 refused while engines run, 3 another install holds `engine.lock`.
 
 **Start Menu (Windows).** Each update writes **Update Mnemosyne** next to **Open Mnemosyne dashboard** (or run `bun bin/update.ts --install-shortcut`). It runs `~/.claude/mnemosyne/plugin/bin/update.ts` hidden and shows the result in a message box (full output in `~/.claude/mnemosyne-ui/update.log`). When chats are running it lists them and asks before stopping them. The shortcut needs a plugin copy of 0.28.0 or later, so the first update runs from a checkout.
 
 Restart Claude Desktop (and other MCP clients) afterwards to use the new version.
+
+**From the dashboard.** The Health tab's System panel shows the version and, once a day, checks GitHub for the latest release: "Mnemosyne v0.28.0 · v0.29.0 available" with an **Update…** button, or "up to date". The button appears only on this layout (the dashboard running from `~/.claude/mnemosyne/plugin`); a Claude Code install names the release and points to `claude plugin update`. The confirm lists the plugin version and engine build before and after, says that memories are not touched and that open Claude Desktop chats keep the old engine until it restarts; Cancel is the default. Update starts the same `bin/update.ts`, detached and windowless, and the panel shows its progress (`~/.claude/mnemosyne/update-status.json`, full output in `update.log`). When the dashboard comes back through its scheduled task it keeps its address, so the page reloads itself; otherwise the panel says to open it again from the Start Menu. If chats hold the files, the panel says so in plain words; it never stops them.
 
 ## Uninstall
 
@@ -218,6 +220,8 @@ The tagger is shown up to 150 admitted tags by namespace, asked for 2 to 5 tags 
 Nothing new leaves it in 0.8.0. The guard, the near-duplicate check, the vocabulary, the backup and the audit trail all run on your machine. Memory text goes to one place, as before: the `extractionModel` (Haiku by default), through Claude Code's own model channel, for the tag dry runs, the retag dry run and knowledge extraction. A retag dry run sends the text of every memory (a plain tag run sends only the untagged ones), so it costs one model call per memory. `extractionModel` set to `off` stops all of it.
 
 0.9.0 adds two more things that go to the same model (Haiku by default) and nothing else: `/mnemosyne-import session` sends the redacted conversation of the session you name, and, only when `sessionSummary` is `on`, the background summary of an ended session sends that session's redacted conversation. Both are described in [Importing documents and sessions](#importing-documents-and-sessions-mnemosyne-import) and [Session summaries and pinned memories](#session-summaries-and-pinned-memories). Everything else 0.9.0 adds (dashboard writes, the Review tab, the vocabulary tab, `/mnemosyne-import doc`, the expiry sweep and log pruning) runs on your machine and sends nothing.
+
+0.28.0: when the Health tab opens, the dashboard asks GitHub (api.github.com and raw.githubusercontent.com) for the latest release tag and its engine build, at most once a day, with no memory data. `bin/update.ts` downloads releases from github.com. Nothing else changes.
 
 ### Saves cannot move to another bank
 

@@ -17,6 +17,7 @@
 import { createMap, type MapView } from './map'
 import { fragmentAfterToken } from './map-state'
 import { createSolarScene } from './solar'
+import { isRunning, parseStatusBody, parseUpdateInfo, renderProgress, type UpdateStatus, versionCell } from './update'
 import {
   columnsOf,
   dotClass,
@@ -2372,7 +2373,12 @@ async function loadHealth() {
   const facts = byId('facts')
   facts.replaceChildren()
   const fact = (label: string, value: string) => facts.append(el('dt', label), el('dd', value))
-  if (health.plugin) fact('Version', `Mnemosyne v${health.plugin}`)
+  if (health.plugin) {
+    fact('Version', `Mnemosyne v${health.plugin}`)
+    // 0.28.0: the release check and the Update button fill this value later; a slow or failed check leaves it as is.
+    const value = facts.lastElementChild as HTMLElement | null
+    if (value) void loadUpdate(value)
+  }
   fact('Store', health.store)
   serverPid = health.pid
   fact('Server', serverText(watch.lost(), serverPid))
@@ -2382,6 +2388,76 @@ async function loadHealth() {
   if (health.dev) fact('Mode', 'dev: reloads when ui/ changes')
   byId('foot').hidden = false
   if (health.dev) watchDev()
+}
+
+// ---- The Update button (0.28.0; ui/update.ts, ui/update-routes.ts) ----
+
+const UPDATE_POLL_MS = 2000
+const RESTART_WAIT_MS = 180_000
+let followingUpdate = false
+
+async function loadUpdate(value: HTMLElement) {
+  try {
+    const info = parseUpdateInfo(await readJson<unknown>(await api('/api/update')))
+    if (info) value.replaceChildren(versionCell(info, { start: startUpdate, started: followUpdate }))
+  } catch {
+    // No check: the version stays as it is.
+  }
+}
+
+async function startUpdate(): Promise<string | undefined> {
+  const answer = await postJson('/api/update/start', {})
+  if (answer.status === 202) return undefined
+  const error = (answer.body as { error?: unknown } | null)?.error
+  return typeof error === 'string' ? error : `The server answered ${answer.status}.`
+}
+
+/** A GET with the token that never touches the connection watch: the server going away is expected here. */
+const quietGet = (path: string) => fetch(path, { headers: { Authorization: `Bearer ${token}` }, cache: 'no-store' })
+
+/** Polls the run's progress into `box` until it ends, or until the dashboard stops for the swap. */
+function followUpdate(box: HTMLElement) {
+  if (followingUpdate) return
+  followingUpdate = true
+  let last: UpdateStatus | null = null
+  const tick = async () => {
+    let reply: Response
+    try {
+      reply = await quietGet('/api/update/status')
+    } catch {
+      // The updater stopped this dashboard for the swap: wait for the restarted one.
+      return void waitForRestart(box, last)
+    }
+    if (reply.ok) {
+      last = parseStatusBody(await readJson<unknown>(reply))
+      renderProgress(box, last)
+      if (last !== null && !isRunning(last)) {
+        followingUpdate = false
+        if (last.state === 'done') renderProgress(box, last, 'This dashboard was not restarted by the update: restart it to use the new version.')
+        return
+      }
+    }
+    setTimeout(() => void tick(), UPDATE_POLL_MS)
+  }
+  void tick()
+}
+
+/** Waits for the restarted dashboard (it takes over this page's port and token) and reloads; says what to do when it does not come back here. */
+async function waitForRestart(box: HTMLElement, last: UpdateStatus | null) {
+  renderProgress(box, last, 'The dashboard is restarting with the new version; this page reloads when it is back…')
+  const deadline = Date.now() + RESTART_WAIT_MS
+  while (Date.now() < deadline) {
+    await new Promise(done => setTimeout(done, UPDATE_POLL_MS))
+    try {
+      const reply = await quietGet('/api/health')
+      if (reply.ok) return location.reload()
+      if (reply.status === 401) break
+    } catch {
+      // still restarting
+    }
+  }
+  followingUpdate = false
+  renderProgress(box, last, 'The dashboard did not come back at this address. Open it again from the Start Menu ("Open Mnemosyne dashboard"); the update log is ~/.claude/mnemosyne/update.log.')
 }
 
 // Dev mode: ask for the stamp of ui/ every second and reload when it changes (a restart under --watch changes it too).

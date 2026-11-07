@@ -10,7 +10,9 @@ import { cmdWrapper } from '../../hooks/launcher'
 import { slashes } from '../../hooks/owner'
 import { cliOf } from '../../bin/install-engine'
 import {
-  blockedMessage,
+  isSwapFailure,
+  lockedMessage,
+  nextStatus,
   classifyProcesses,
   compareVersions,
   EXIT,
@@ -161,16 +163,28 @@ describe('planUpdate', () => {
     expect(planUpdate({ ...base, source: { ...source, engineBuild: undefined } })).toMatchObject({ kind: 'refused', message: expect.stringContaining('not a claude-mnemosyne checkout') })
     expect(planUpdate({ ...base, source: { ...source, pluginVersion: undefined } })).toMatchObject({ kind: 'refused', message: expect.stringContaining('not a claude-mnemosyne checkout') })
   })
-  test('Windows: running chats refuse the update with exit 2, naming each and how many', () => {
+  test('Windows: running chats do not refuse the plan (the swap is tried; a running engine does not always lock it)', () => {
     const plan = planUpdate({ ...base, processes: classifyProcesses(processes(), layout) })
-    expect(plan).toMatchObject({ kind: 'refused', code: EXIT.blocked })
-    const message = (plan as { message: string }).message
-    expect(message).toContain('3 MCP connections are running')
+    expect(plan).toMatchObject({ kind: 'update', engine: true, plugin: true, stopChats: [] })
+    expect((plan as { notes: string[] }).notes[0]).toBe('3 running MCP connection(s) keep the old version until their app is restarted.')
+  })
+  test('a refused swap is reported with each connection, how many, and whether anything changed', () => {
+    const sorted = classifyProcesses(processes(), layout)
+    const message = lockedMessage(sorted, true)
+    expect(message).toContain('(3 MCP connections running)')
     expect(message).toContain('proxy pid 10 with engine pid 11')
     expect(message).toContain('proxy pid 20 with engine pid 21')
     expect(message).toContain('engine pid 40')
-    expect(message).toContain('--stop-engines')
-    expect(message).toContain('Nothing was changed.')
+    expect(message).toContain('Nothing was changed; the previous version keeps working.')
+    expect(message).toContain('Quit Claude Desktop')
+    expect(lockedMessage(sorted, false)).toContain('Part of the update is in place')
+    expect(lockedMessage({ chats: [{ engines: [{ pid: 9, ppid: 1, command: '' }] }], dashboard: [] }, true)).toContain('while a Claude chat uses them (1 MCP connection running)')
+  })
+  test('only a refused rename counts as a locked swap, not a failed build or check', () => {
+    expect(isSwapFailure(new Error('could not move the new engine into place: EBUSY'))).toBe(true)
+    expect(isSwapFailure(new Error('could not move the new plugin copy into place (the old one is kept): EPERM'))).toBe(true)
+    expect(isSwapFailure(new Error('bun install failed (exit 1)'))).toBe(false)
+    expect(isSwapFailure(undefined)).toBe(false)
   })
   test('Windows: --stop-engines stops the chats only; the dashboard is stopped for the swap', () => {
     const plan = planUpdate({ ...base, stopEngines: true, processes: classifyProcesses(processes(), layout) })
@@ -192,8 +206,30 @@ describe('planUpdate', () => {
     const plan = planUpdate({ ...base, installed: { pluginVersion: '0.28.0', engineBuild: source.engineBuild, launcherText: 'old' }, processes: classifyProcesses(processes(), layout) })
     expect(plan).toEqual({ kind: 'update', engine: false, plugin: false, launcher: true, stopChats: [], stopDashboard: [], notes: [] })
   })
-  test('blockedMessage says "a Claude chat" for one connection', () => {
-    expect(blockedMessage({ chats: [{ engines: [{ pid: 9, ppid: 1, command: '' }] }], dashboard: [] })).toContain('while a Claude chat uses it: 1 MCP connection is running')
+})
+
+describe('the progress file (--status)', () => {
+  const at = (iso: string) => new Date(iso)
+  test('lines append, the state moves to running, then to a final state with the exit code', () => {
+    const begun = nextStatus(undefined, { state: 'starting', lines: ['Starting'] }, at('2026-11-07T10:00:00Z'))!
+    expect(begun).toEqual({ state: 'starting', lines: ['Starting'], started: '2026-11-07T10:00:00.000Z', updated: '2026-11-07T10:00:00.000Z' })
+    const mid = nextStatus(begun, { lines: ['Installing'] }, at('2026-11-07T10:01:00Z'))!
+    expect(mid).toMatchObject({ state: 'running', lines: ['Starting', 'Installing'], started: '2026-11-07T10:00:00.000Z' })
+    expect(nextStatus(mid, { state: 'blocked', code: EXIT.blocked })).toMatchObject({ state: 'blocked', code: 2 })
+  })
+  test('a final state is not replaced by another (the staging parent keeps its child result)', () => {
+    const done = nextStatus(undefined, { state: 'done', code: 0 })!
+    expect(nextStatus(done, { state: 'failed', code: 1 })).toBeUndefined()
+    expect(nextStatus(done, { lines: ['late line'] })).toMatchObject({ state: 'done', lines: ['late line'] })
+  })
+  test('only the last 200 lines are kept', () => {
+    const many = Array.from({ length: 250 }, (_, i) => `line ${i}`)
+    const status = nextStatus(undefined, { lines: many })!
+    expect(status.lines).toHaveLength(200)
+    expect(status.lines[0]).toBe('line 50')
+  })
+  test('--status is an option', () => {
+    expect(parseArgs(['--status', '/x/update-status.json']).status).toBe('/x/update-status.json')
   })
 })
 

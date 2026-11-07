@@ -61,6 +61,8 @@ export type UpdateOptions = {
   force: boolean
   home?: string
   installShortcut: boolean
+  /** A JSON progress file (the dashboard's Update button reads it): state and the lines printed so far. */
+  status?: string
 }
 
 export function parseArgs(argv: readonly string[]): UpdateOptions {
@@ -82,10 +84,11 @@ export function parseArgs(argv: readonly string[]): UpdateOptions {
       if (!Number.isFinite(seconds) || seconds < 0) throw new UpdateError('--wait needs a number of seconds (0 or more)')
       options.waitSeconds = seconds
     } else if (arg === '--home') options.home = value()
+    else if (arg === '--status') options.status = value()
     else if (arg === '--stop-engines') options.stopEngines = true
     else if (arg === '--force') options.force = true
     else if (arg === '--install-shortcut') options.installShortcut = true
-    else throw new UpdateError(`unknown argument "${arg}" (usage: [--from <checkout>] [--tag vX.Y.Z] [--wait <s>] [--stop-engines] [--force] [--install-shortcut])`)
+    else throw new UpdateError(`unknown argument "${arg}" (usage: [--from <checkout>] [--tag vX.Y.Z] [--wait <s>] [--stop-engines] [--force] [--status <file>] [--install-shortcut])`)
   }
   if (options.from !== undefined && options.tag !== undefined) throw new UpdateError('--from and --tag cannot be used together')
   return options
@@ -299,8 +302,12 @@ export function classifyProcesses(processes: readonly Proc[], layout: Layout, wi
 
 export const chatPids = (classified: Classified) => classified.chats.flatMap(chat => [...(chat.proxy ? [chat.proxy.pid] : []), ...chat.engines.map(e => e.pid)])
 
-/** The refusal text for running chats: which and how many, and the three ways out. */
-export function blockedMessage(classified: Classified) {
+/**
+ * The text for a swap Windows refused while chats run: which and how many, what
+ * is installed now, and the ways out. A running engine does not always lock its
+ * folder, so this is said after a swap failed, never predicted.
+ */
+export function lockedMessage(classified: Classified, unchanged: boolean) {
   const n = classified.chats.length
   const lines = classified.chats.map(chat => {
     const engines = chat.engines.map(e => e.pid).join(', ')
@@ -308,13 +315,16 @@ export function blockedMessage(classified: Classified) {
     return `  engine pid ${engines}`
   })
   return [
-    `Mnemosyne cannot update while ${n === 1 ? 'a Claude chat uses' : 'Claude chats use'} it: ${n} MCP connection${n === 1 ? ' is' : 's are'} running, and Windows keeps their files locked.`,
+    `Windows would not let the update replace Mnemosyne's files while ${n === 1 ? 'a Claude chat uses' : 'Claude chats use'} them (${n} MCP connection${n === 1 ? '' : 's'} running):`,
     ...lines,
-    'Quit Claude Desktop (and any other app using Mnemosyne), then run the update again.',
-    'Or run it with --wait 600 to wait up to 10 minutes for them to end, or with --stop-engines to stop them now (open chats lose Mnemosyne until the app is restarted).',
-    'Nothing was changed.',
+    unchanged ? 'Nothing was changed; the previous version keeps working.' : 'Part of the update is in place; see the versions below.',
+    'Quit Claude Desktop (and any other app using Mnemosyne), then update again.',
+    'From a terminal, --wait 600 waits up to 10 minutes for them to end, and --stop-engines stops them first (open chats lose Mnemosyne until the app is restarted).',
   ].join('\n')
 }
+
+/** True for the error of a swap that a running process prevented (a rename refused), not for a failed build or check. */
+export const isSwapFailure = (error: unknown) => /could not move the new (engine|plugin copy) into place/.test((error as Error)?.message ?? '')
 
 // ---------------------------------------------------------------- the plan
 
@@ -347,8 +357,9 @@ export function planUpdate(input: {
   const swaps = engine || plugin
   const notes: string[] = []
   let stopChats: number[] = []
+  // Running chats never refuse the plan: a running engine does not always lock its folder on Windows,
+  // so the swap is tried and a refused one is reported (lockedMessage). Processes are stopped only with --stop-engines.
   if (swaps && processes.chats.length > 0) {
-    if (windows && !input.stopEngines) return { kind: 'refused', code: EXIT.blocked, message: blockedMessage(processes) }
     if (input.stopEngines) stopChats = chatPids(processes)
     else notes.push(`${processes.chats.length} running MCP connection(s) keep the old version until their app is restarted.`)
   }
@@ -472,6 +483,44 @@ async function installShortcut(layout: Layout, run: Runner) {
   const done = await run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', ps])
   if (done.exitCode !== 0) throw new UpdateError(`could not write the Start Menu shortcut: ${done.stderr.trim()}`)
   return link
+}
+
+// ---------------------------------------------------------------- the progress file
+
+export type UpdateState = 'starting' | 'running' | 'done' | 'failed' | 'blocked'
+export type UpdateStatus = { state: UpdateState; lines: string[]; code?: number; started: string; updated: string }
+export const FINAL_STATES: readonly UpdateState[] = ['done', 'failed', 'blocked']
+const MAX_STATUS_LINES = 200
+const isFinal = (state: UpdateState | undefined) => state !== undefined && FINAL_STATES.includes(state)
+
+export function readStatus(file: string): UpdateStatus | undefined {
+  const value = readJson(file) as UpdateStatus | undefined
+  return value && typeof value.state === 'string' && Array.isArray(value.lines) ? value : undefined
+}
+
+/**
+ * The next progress file: lines appended (the last 200 kept), the state moved on.
+ * A final state is never replaced by another final one, so the staging parent
+ * keeps the result its child (the release's own updater) wrote.
+ */
+export function nextStatus(current: UpdateStatus | undefined, change: { state?: UpdateState; lines?: readonly string[]; code?: number }, now = new Date()): UpdateStatus | undefined {
+  if (isFinal(current?.state) && isFinal(change.state)) return undefined
+  const stamp = now.toISOString()
+  const lines = [...(current?.lines ?? []), ...(change.lines ?? [])].slice(-MAX_STATUS_LINES)
+  const state: UpdateState = change.state ?? (current === undefined || !isFinal(current.state) ? 'running' : current.state)
+  return { state, lines, ...(change.code === undefined ? {} : { code: change.code }), started: current?.started ?? stamp, updated: stamp }
+}
+
+export function writeStatus(file: string, change: { state?: UpdateState; lines?: readonly string[]; code?: number }) {
+  try {
+    const next = nextStatus(readStatus(file), change)
+    if (next === undefined) return
+    const temp = `${file}.${process.pid}.tmp`
+    writeFileSync(temp, `${JSON.stringify(next)}\n`, { mode: 0o600 })
+    renameSync(temp, file)
+  } catch {
+    // Progress is a convenience: the update goes on without it.
+  }
 }
 
 // ---------------------------------------------------------------- side effects
@@ -649,16 +698,16 @@ export async function main(argv: readonly string[], log: (line: string) => void 
       }
       const expectedLauncher = launcherText(launcher, windows)
       const deadline = Date.now() + options.waitSeconds * 1000
-      let plan: Plan
-      let waited = false
-      for (;;) {
-        const processes = classifyProcesses(await listProcesses(run), layout, windows)
-        plan = planUpdate({ installed: before, source, expectedLauncher, processes, windows, force: options.force, stopEngines: options.stopEngines })
-        if (plan.kind !== 'refused' || plan.code !== EXIT.blocked || Date.now() >= deadline) break
-        if (!waited) log(`${processes.chats.length} Mnemosyne MCP connection(s) running; waiting up to ${options.waitSeconds} s for them to end ...`)
-        waited = true
-        await Bun.sleep(3000)
+      let processes = classifyProcesses(await listProcesses(run), layout, windows)
+      // --wait: give running chats time to end before the swap is tried (it may well succeed while they run).
+      if (options.waitSeconds > 0 && processes.chats.length > 0 && !options.stopEngines) {
+        log(`${processes.chats.length} Mnemosyne MCP connection(s) running; waiting up to ${options.waitSeconds} s for them to end ...`)
+        while (processes.chats.length > 0 && Date.now() < deadline) {
+          await Bun.sleep(3000)
+          processes = classifyProcesses(await listProcesses(run), layout, windows)
+        }
       }
+      const plan = planUpdate({ installed: before, source, expectedLauncher, processes, windows, force: options.force, stopEngines: options.stopEngines })
       if (plan.kind === 'refused') throw new UpdateError(plan.message, plan.code)
       if (plan.kind === 'up-to-date') {
         log(plan.message)
@@ -671,18 +720,27 @@ export async function main(argv: readonly string[], log: (line: string) => void 
         await stopProcesses(plan.stopChats, run)
       }
       if (plan.plugin) stagePlugin(sourceDir, layout)
-      const dashboardWasRunning = plan.stopDashboard.length > 0
+      let dashboardStopped = false
+      // The dashboard is stopped as late as possible (after the new engine passed its check), so an
+      // update started from its Update button keeps showing progress through the long build.
+      const stopDashboard = async () => {
+        if (dashboardStopped || plan.stopDashboard.length === 0) return
+        dashboardStopped = true
+        log('Stopping the dashboard for the swap ...')
+        await stopProcesses(plan.stopDashboard.map(p => p.pid), run)
+      }
       const messages: string[] = []
       try {
-        if (dashboardWasRunning) {
-          log('Stopping the dashboard for the update ...')
-          await stopProcesses(plan.stopDashboard.map(p => p.pid), run)
-        }
         if (plan.engine) {
           log(`Installing engine ${source.engineBuild} (this takes a few minutes) ...`)
-          await install(sourceDir, layout.engine, store, launcher.embeddings)
+          await install(sourceDir, layout.engine, store, launcher.embeddings, undefined, { beforeSwap: stopDashboard })
+          log(`Engine ${source.engineBuild} is in place.`)
         }
-        if (plan.plugin) swapPlugin(layout)
+        if (plan.plugin) {
+          await stopDashboard()
+          swapPlugin(layout)
+          log(`Plugin copy ${source.pluginVersion} is in place.`)
+        }
         if (plan.launcher) {
           mkdirSync(dirname(layout.launcher), { recursive: true })
           writeFileSync(layout.launcher, expectedLauncher, { mode: 0o700 })
@@ -690,12 +748,18 @@ export async function main(argv: readonly string[], log: (line: string) => void 
       } catch (error) {
         rmSync(`${layout.plugin}.next`, { recursive: true, force: true })
         const after = readInstalled(layout)
+        const unchanged = after.pluginVersion === before.pluginVersion && after.engineBuild === before.engineBuild
         const state = `Installed now: plugin ${after.pluginVersion ?? 'none'}, engine ${after.engineBuild ?? 'none'}.`
+        if (windows && isSwapFailure(error)) {
+          // Detected, not predicted: which chats hold the files is said only after Windows refused the swap.
+          const holding = classifyProcesses(await listProcesses(run).catch(() => []), layout, windows)
+          if (holding.chats.length > 0) throw new UpdateError(`${lockedMessage(holding, unchanged)}\n${state}`, EXIT.blocked)
+        }
         throw new UpdateError(`update failed: ${(error as Error).message}\n${state}`)
       } finally {
         if (windows && (plan.engine || plan.plugin)) {
-          const restarted = await restartDashboard(layout, run, dashboardWasRunning)
-          if (restarted) messages.push(restarted)
+          const restarted = await restartDashboard(layout, run, dashboardStopped)
+          if (restarted) log(restarted)
         }
       }
       if (windows) {
@@ -715,12 +779,23 @@ export async function main(argv: readonly string[], log: (line: string) => void 
 }
 
 if (import.meta.main) {
+  const argv = process.argv.slice(2)
+  // --status is read before the full parse, so even a bad argument reaches the progress file.
+  const at = argv.indexOf('--status')
+  const status = at >= 0 ? argv[at + 1] : undefined
+  const log = (line: string) => {
+    console.log(line)
+    if (status) writeStatus(status, { lines: line.split('\n') })
+  }
   try {
-    process.exit(await main(process.argv.slice(2)))
+    const code = await main(argv, log)
+    if (status) writeStatus(status, { state: code === EXIT.ok ? 'done' : code === EXIT.blocked ? 'blocked' : 'failed', code })
+    process.exit(code)
   } catch (error) {
     const code = error instanceof LockBusy ? EXIT.busy : error instanceof UpdateError ? error.code : EXIT.failed
-    console.error(`update: ${(error as Error).message}`)
-    if (code === EXIT.failed) console.error('The previous install is unchanged unless the lines above say otherwise.')
+    const lines = [`update: ${(error as Error).message}`, ...(code === EXIT.failed ? ['The previous install is unchanged unless the lines above say otherwise.'] : [])]
+    for (const line of lines) console.error(line)
+    if (status) writeStatus(status, { state: code === EXIT.blocked ? 'blocked' : 'failed', code, lines: lines.join('\n').split('\n') })
     process.exit(code)
   }
 }
