@@ -107,6 +107,8 @@ export type UpdateHost = {
   start: () => Promise<string | undefined>
   /** Called once the run started (app.ts polls the progress from here). */
   started: (box: HTMLElement) => void
+  /** 0.28.2: "Check now": asks the server for a new release check and redraws the cell. */
+  check?: () => void
 }
 
 /**
@@ -117,6 +119,19 @@ export type UpdateHost = {
 export function versionCell(info: UpdateInfo, host: UpdateHost): HTMLElement {
   const cell = el('div', undefined, 'update-cell')
   cell.append(el('span', versionText(info)))
+  // 0.28.2: a new release check on request, unless a run is under way (the daily check can be a day behind a release).
+  if (host.check && !isRunning(info.status)) {
+    const check = el('button', 'Check now', 'link small update-check')
+    check.type = 'button'
+    check.title = 'Ask GitHub for the newest release now'
+    const run = host.check
+    check.addEventListener('click', () => {
+      check.disabled = true
+      check.textContent = 'Checking…'
+      run()
+    })
+    cell.append(check)
+  }
   const progress = el('div', undefined, 'update-progress')
   progress.setAttribute('aria-live', 'polite')
   const recent = info.status !== null && (isRunning(info.status) || Date.now() - Date.parse(info.status.updated) < 24 * 60 * 60 * 1000)

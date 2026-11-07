@@ -1935,3 +1935,5 @@ tr.exp td { padding: 0 var(--space-4) var(--space-3); background: var(--hover); 
 .entity-card .ec-row { display: grid; grid-template-columns: minmax(140px, 220px) 1fr auto; gap: 10px; align-items: baseline; font-size: 13px; }
 .entity-card .ec-open { white-space: nowrap; }
 @media (max-width: 700px) { .entity-card .ec-row { grid-template-columns: 1fr auto; } .entity-card .ec-pred { grid-column: 1 / -1; } }
+/* 0.28.2: Check now, beside the version line */
+.update-cell .update-check { margin-left: 8px; }

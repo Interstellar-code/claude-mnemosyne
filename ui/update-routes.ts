@@ -3,7 +3,8 @@
 // the POST also behind its origin and JSON checks.
 //
 //   GET  /api/update         installed versions, the latest release (cached, at
-//                            most one GitHub check a day, a failure is silent),
+//                            most one GitHub check a day, a failure is silent;
+//                            ?check=now asks again, at most once a minute),
 //                            whether an update is offered, and the last run's progress
 //   POST /api/update/start   starts bin/update.ts detached and windowless, then 202
 //   GET  /api/update/status  the progress file the updater writes
@@ -94,13 +95,29 @@ export async function fetchLatest(fetcher: typeof fetch = fetch): Promise<Latest
   }
 }
 
-/** The cached check when it is younger than a day, else one new check (a failure is cached too, so GitHub is asked at most once a day). */
-export async function latestRelease(root: string, deps: UpdateDeps = {}): Promise<Latest | null> {
+// 0.28.2: "Check now" asks GitHub again, but not more often than this.
+export const CHECK_NOW_MIN_MS = 60 * 1000
+
+/**
+ * Whether the cached check still holds: younger than a day, and (0.28.2) not older than what runs here (a cache
+ * naming a release below the installed plugin is from before an update, so it says nothing about newer ones).
+ * `force` ("Check now") lets it hold only for CHECK_NOW_MIN_MS.
+ */
+export function cacheHolds(cached: CheckCache | undefined, now: number, current: string | null = null, force = false): boolean {
+  if (cached === undefined) return false
+  const age = now - Date.parse(cached.checked)
+  if (!(age >= 0)) return false
+  if (age >= (force ? CHECK_NOW_MIN_MS : CHECK_EVERY_MS)) return false
+  if (cached.latest && current !== null && compareVersions(cached.latest.plugin, current) < 0) return false
+  return true
+}
+
+/** The cached check when it still holds (cacheHolds), else one new check (a failure is cached too, so GitHub is asked at most once a day). */
+export async function latestRelease(root: string, deps: UpdateDeps = {}, ask: { current?: string | null; force?: boolean } = {}): Promise<Latest | null> {
   const now = deps.now?.() ?? Date.now()
   const file = join(root, UPDATE_CHECK_FILE)
   const cached = readJson(file) as CheckCache | undefined
-  const age = cached ? now - Date.parse(cached.checked) : Infinity
-  if (cached && age >= 0 && age < CHECK_EVERY_MS) return cached.latest ?? null
+  if (cacheHolds(cached, now, ask.current ?? null, ask.force === true)) return cached!.latest ?? null
   const latest = (await fetchLatest(deps.fetcher)) ?? null
   try {
     writePrivate(file, { checked: new Date(now).toISOString(), latest } satisfies CheckCache)
@@ -224,8 +241,9 @@ export function updateRoutes(input: { root: string; pluginRoot: string; plugin: 
     return status
   }
 
-  async function info(): Promise<Answer> {
-    const latest = await latestRelease(root, deps)
+  /** `force`: "Check now" (0.28.2), a new GitHub check unless one ran in the last minute. */
+  async function info(force = false): Promise<Answer> {
+    const latest = await latestRelease(root, deps, { current: input.plugin, force })
     const status = current()
     const body: UpdateInfo = { current: { plugin: input.plugin, engine: input.engine }, latest, available: updateAvailable(input.plugin, latest), updatable: home() !== undefined, status }
     return { status: 200, body }
@@ -246,7 +264,7 @@ export function updateRoutes(input: { root: string; pluginRoot: string; plugin: 
     const updaterHomeDir = home()
     if (updaterHomeDir === undefined) return { status: 409, body: { error: 'This dashboard is not the Claude Desktop install under ~/.claude/mnemosyne/plugin; update it with `claude plugin update` instead.' } }
     if (running(readStatus(statusFile), now(), deps.alive)) return { status: 409, body: { error: 'An update is already running.' } }
-    const latest = await latestRelease(root, deps)
+    const latest = await latestRelease(root, deps, { current: input.plugin })
     if (!updateAvailable(input.plugin, latest) || latest === null) return { status: 409, body: { error: 'There is no newer release to install.' } }
     const begun = nextStatus(undefined, { state: 'starting', lines: [`Starting the update to ${latest.tag} ...`] }, new Date(now()))!
     writePrivate(statusFile, begun)

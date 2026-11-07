@@ -7,7 +7,9 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'no
 import { join } from 'node:path'
 import { pluginVersion, startServer, type Started } from '../../ui/server'
 import {
+  cacheHolds,
   CHECK_EVERY_MS,
+  CHECK_NOW_MIN_MS,
   fetchLatest,
   HANDOFF_FILE,
   type LaunchCommand,
@@ -79,6 +81,36 @@ describe('the release check', () => {
     expect(await latestRelease(dir, { fetcher: down.fetcher, now: () => now + 60_000 })).toBeNull()
     expect(down.calls).toHaveLength(1)
     expect(JSON.parse(readFileSync(join(dir, UPDATE_CHECK_FILE), 'utf8'))).toMatchObject({ latest: null })
+  })
+  test('0.28.2: a cache older than what runs is asked again; Check now asks again, at most once a minute', async () => {
+    const { dir } = tempDir('update-check-now')
+    let now = Date.UTC(2026, 10, 8, 9)
+    // Last night's check named v0.27.2; this install already runs 0.28.0 (it was updated since).
+    writeFileSync(join(dir, UPDATE_CHECK_FILE), JSON.stringify({ checked: new Date(now - 10 * 60_000).toISOString(), latest: { tag: 'v0.27.2', plugin: '0.27.2', engine: null } }))
+    const gh = fakeGitHub(['v0.28.1'])
+    expect(await latestRelease(dir, { fetcher: gh.fetcher, now: () => now }, { current: '0.28.0' })).toMatchObject({ tag: 'v0.28.1' })
+    expect(gh.calls.filter(url => url.includes('/tags?'))).toHaveLength(1)
+    // The fresh cache holds again, for the same version.
+    expect(await latestRelease(dir, { fetcher: gh.fetcher, now: () => now }, { current: '0.28.0' })).toMatchObject({ tag: 'v0.28.1' })
+    expect(gh.calls.filter(url => url.includes('/tags?'))).toHaveLength(1)
+    // Check now within the minute: the cache; after it: GitHub again.
+    now += CHECK_NOW_MIN_MS - 1000
+    await latestRelease(dir, { fetcher: gh.fetcher, now: () => now }, { current: '0.28.0', force: true })
+    expect(gh.calls.filter(url => url.includes('/tags?'))).toHaveLength(1)
+    now += 2000
+    await latestRelease(dir, { fetcher: gh.fetcher, now: () => now }, { current: '0.28.0', force: true })
+    expect(gh.calls.filter(url => url.includes('/tags?'))).toHaveLength(2)
+    // cacheHolds by itself.
+    const at = Date.UTC(2026, 10, 8, 9)
+    const cache = (latest: string | null, agoMs: number) => ({ checked: new Date(at - agoMs).toISOString(), latest: latest === null ? null : { tag: `v${latest}`, plugin: latest, engine: null } })
+    expect(cacheHolds(cache('0.28.1', 3600_000), at, '0.28.0')).toBe(true)
+    expect(cacheHolds(cache('0.28.0', 3600_000), at, '0.28.0')).toBe(true)
+    expect(cacheHolds(cache('0.27.2', 3600_000), at, '0.28.0')).toBe(false)
+    expect(cacheHolds(cache(null, 3600_000), at, '0.28.0')).toBe(true)
+    expect(cacheHolds(cache('0.28.1', CHECK_EVERY_MS), at, '0.28.0')).toBe(false)
+    expect(cacheHolds(cache('0.28.1', 30_000), at, '0.28.0', true)).toBe(true)
+    expect(cacheHolds(cache('0.28.1', CHECK_NOW_MIN_MS), at, '0.28.0', true)).toBe(false)
+    expect(cacheHolds(undefined, at)).toBe(false)
   })
 })
 
@@ -396,6 +428,23 @@ describe('the Version cell on a stand-in document', () => {
       confirm.fire('keydown', { key: 'Escape' })
       expect(confirm.hidden).toBe(true)
       expect(h.calls.start).toBe(0)
+    })
+  })
+
+  test('0.28.2: Check now asks for a new check and says it is checking; not while a run is under way', async () => {
+    await withDocument(() => {
+      let checks = 0
+      const base = host().host
+      const cell = view.versionCell(info({ available: false, latest: { tag: 'v0.27.0', plugin: '0.27.0', engine: null } }), { ...base, check: () => void checks++ }) as FakeNode
+      const check = cell.button('Check now')!
+      expect(check).toBeDefined()
+      check.fire('click')
+      expect(checks).toBe(1)
+      expect(check.textContent).toBe('Checking…')
+      // Without the host's check, or with a run under way, there is no link.
+      expect((view.versionCell(info(), base) as FakeNode).button('Check now')).toBeUndefined()
+      const running = { state: 'running' as const, lines: [], started: new Date().toISOString(), updated: new Date().toISOString() }
+      expect((view.versionCell(info({ status: running }), { ...base, check: () => {} }) as FakeNode).button('Check now')).toBeUndefined()
     })
   })
 

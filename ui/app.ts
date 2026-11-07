@@ -2423,10 +2423,11 @@ const UPDATE_POLL_MS = 2000
 const RESTART_WAIT_MS = 180_000
 let followingUpdate = false
 
-async function loadUpdate(value: HTMLElement) {
+async function loadUpdate(value: HTMLElement, checkNow = false) {
   try {
-    const info = parseUpdateInfo(await readJson<unknown>(await api('/api/update')))
-    if (info) value.replaceChildren(versionCell(info, { start: startUpdate, started: followUpdate }))
+    const info = parseUpdateInfo(await readJson<unknown>(await api(checkNow ? '/api/update?check=now' : '/api/update')))
+    // 0.28.2: "Check now" asks the server to check GitHub again and redraws this cell.
+    if (info) value.replaceChildren(versionCell(info, { start: startUpdate, started: followUpdate, check: () => void loadUpdate(value, true) }))
   } catch {
     // No check: the version stays as it is.
   }

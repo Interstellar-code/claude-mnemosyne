@@ -2,6 +2,12 @@
 
 Newest first. Each release is tagged `vX.Y.Z` on GitHub; the README and DESIGN.md describe the contracts.
 
+## 0.28.2 (the Update button finds a new release at once)
+
+The dashboard checks GitHub for a new release at most once a day and keeps the answer, so right after a release the Update button could stay hidden for up to a day (it did for v0.28.1).
+
+1. **A stale answer is not kept.** When the remembered release is older than the version the dashboard runs (it was checked before the last update), the dashboard asks GitHub again.
+2. **Check now.** The Health tab's System panel has a "Check now" link beside the version; it asks GitHub again (at most once a minute) and shows the Update button when a newer release exists.
 ## 0.28.1 (kind questions and the profile card)
 
 Issue #56 part 2, and the "user preferences" miss the recall answer key showed. Engine build 18.12.3-mnemosyne.14, changes 22 and 23 in engine/UPSTREAM.md.

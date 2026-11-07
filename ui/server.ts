@@ -3040,7 +3040,8 @@ export async function startServer(config: Config, options: ServerOptions = {}): 
       return post(request, (_views, text) => settings.backup(text))
     }
     // 0.28.0: the Update button (ui/update-routes.ts). The check waits on GitHub for at most 5 s, once a day.
-    if (path === '/api/update') return get(() => updates.info())
+    // 0.28.2: ?check=now is the System panel's "Check now" (at most one GitHub check a minute).
+    if (path === '/api/update') return get(() => updates.info(url.searchParams.get('check') === 'now'))
     if (path === '/api/update/status') return get(() => updates.status())
     if (path === '/api/update/start') return post(request, (_views, text) => updates.start(text))
     if (dev && path === '/api/dev-stamp') return get(() => ({ status: 200, body: { stamp: devStamp(startedAt) } }))
