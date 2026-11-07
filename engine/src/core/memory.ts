@@ -224,7 +224,7 @@ function resolveRuntimeOptions(options: MnemopiOptions): ResolvedMnemopiRuntimeO
 		const llmModel = nestedLlm?.model ?? options.llmModel;
 		const llmEnabled = hasOwn(options, "llmEnabled")
 			? options.llmEnabled
-			: (nestedLlm?.enabled ??
+			: nestedLlm?.enabled ??
 				  (nestedLlm?.baseUrl !== undefined ||
 						nestedLlm?.apiKey !== undefined ||
 						nestedLlm?.maxTokens !== undefined ||
@@ -232,9 +232,9 @@ function resolveRuntimeOptions(options: MnemopiOptions): ResolvedMnemopiRuntimeO
 						llmModel !== undefined ||
 						hasOwn(options, "llmBaseUrl") ||
 						hasOwn(options, "llmApiKey") ||
-						hasOwn(options, "llmModel")))
-				? true
-				: undefined;
+						hasOwn(options, "llmModel")
+						? true
+						: undefined);
 		const llmBaseUrl = options.llmBaseUrl ?? nestedLlm?.baseUrl;
 		const llmApiKey = options.llmApiKey ?? nestedLlm?.apiKey;
 		const llmMaxTokens = nestedLlm?.maxTokens;

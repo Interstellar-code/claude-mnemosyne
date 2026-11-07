@@ -9,6 +9,7 @@ export declare const DEFAULT_MODEL_FILE: string;
 export declare function buildPrompt(memories: readonly string[], source?: string): string;
 export declare function callConfiguredCompletion(prompt: string, temperature: number, opts?: MnemopiLlmCompleteOptions): Promise<string | null>;
 export declare function buildHostPrompt(memories: readonly string[], source?: string): string;
+export declare function hostBackendWillHandleCall(): boolean;
 export declare function configuredLlmWillHandleCall(): boolean;
 export declare function cleanOutput(text: string): string;
 export declare function chunkMemoriesByBudget(memories: readonly string[], source?: string): string[][];
