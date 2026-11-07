@@ -18,6 +18,82 @@ const CLI = join(ROOT, 'engine', 'src', 'cli.ts')
 const MARKUP = '<img src=x onerror=alert(1)>'
 const DAY = 86_400_000
 
+describe('HEALTH 0.23: findings, levels, the stacked days, projects and storage chips', () => {
+  const now = Date.UTC(2026, 10, 7, 12)
+  const date = (back: number) => new Date(now - back * DAY).toISOString().slice(0, 10)
+  const base = parseHealth({
+    total: 10,
+    global: 2,
+    owners: [
+      { owner: 'global', count: 2 },
+      { owner: 'p-a', count: 5 },
+      { owner: 'p-b', count: 3 },
+    ],
+    neverRecalledCount: 4,
+    recallsPerDay: [],
+    otherRecallsPerDay: [{ date: date(0), count: 6 }],
+    uiRecallsPerDay: [{ date: date(0), count: 2 }, { date: date(1), count: 1 }],
+    daysCovered: 12,
+    tables: { working_memory: 10, gists: 0, facts: 0, memoria_facts: 3 },
+    unusedByDesign: { gists: 'not written by this plugin' },
+    coverage: { tagged: 10, knowledge: 7, embeddings: 10, provenance: 3 },
+  })
+
+  test('findings: no Claude recall over the logged days is the one to act on, then the watches; the verdict counts them', () => {
+    const list = health.findings(base, true)
+    expect(list.map((f: { level: string }) => f.level)).toEqual(['act', 'watch', 'watch', 'ok', 'ok'])
+    expect(list[0]).toMatchObject({ title: 'Claude has not recalled anything in 12 days', action: 'settings', actionLabel: 'Open Settings' })
+    expect(list[0].detail).toContain('All 9 recalls in the log came from other apps or the dashboard.')
+    expect(list[1]).toMatchObject({ title: '3 memories have no knowledge extracted', action: 'knowledge' })
+    expect(list[2]).toMatchObject({ title: '4 live memories have never been recalled', action: 'review' })
+    expect(health.verdict(list)).toBe('Running, with 1 thing to act on')
+    // With Claude recalling, nothing to act on; with nothing to watch, all good.
+    const fine = { ...base, recallsPerDay: [{ date: date(0), count: 3 }], neverCount: 0, coverage: { ...base.coverage, knowledge: 10 } }
+    expect(health.verdict(health.findings(fine, true))).toBe('All good')
+    expect(health.findings(fine, true)[0]).toMatchObject({ level: 'ok', title: 'Claude recalled 3 times in 12 days' })
+    // No log at all: watch, and nothing claims Claude is silent.
+    expect(health.findings({ ...base, daysCovered: 0 }, true)[0]).toMatchObject({ level: 'watch', title: 'The activity log is empty or off' })
+    // Meaning search off is information, not a fault.
+    const noVectors = { ...fine, coverage: { ...fine.coverage, embeddings: 0 } }
+    expect(health.findings(noVectors, false).find((f: { title: string }) => f.title.startsWith('Meaning'))).toMatchObject({ level: 'info' })
+  })
+
+  test('levels: the tiles, and the feature rows with provenance by design', () => {
+    expect(kpis(base).map((k: { level: string }) => k.level)).toEqual(['ok', 'info', 'act', 'info', 'ok'])
+    expect(kpis({ ...base, daysCovered: 0 })[2].level).toBe('info')
+    const rows = health.coverageLevels(base, true)
+    expect(rows.map((r: { label: string; level: string; byDesign: boolean }) => `${r.label.split(' ')[0]}:${r.level}${r.byDesign ? ':design' : ''}`)).toEqual(['Topic:ok', 'Knowledge:watch', 'Embeddings:ok', 'Who:ok:design', 'Recalled:ok'])
+    withDocumentSync(() => {
+      const drawn = coverageRows(base, true) as FakeNode[]
+      expect(drawn.map(r => r.className)).toEqual(['cov-row cov-ok', 'cov-row cov-watch', 'cov-row cov-ok', 'cov-row cov-design', 'cov-row cov-ok'])
+      expect(drawn[3]!.texts().join('|')).toContain('By design: 3 memories record who wrote them. Only saves since provenance began carry it.')
+    })
+  })
+
+  test('the days stack Claude, other apps and the dashboard; the height follows the whole stack', () => {
+    const days = dayBars(base, now)
+    expect(days.at(-1)).toMatchObject({ count: 0, other: 6, ui: 2, height: 'h20', parts: { claude: 0, other: 15, ui: 5 } })
+    expect(days.at(-2)).toMatchObject({ ui: 1, height: 'h3' })
+    withDocumentSync(() => {
+      const today = (chartBars(days) as FakeNode[]).at(-1)!
+      expect(today.all().filter(n => n.className.startsWith('dseg')).map(n => n.className)).toEqual(['dseg f-ui p5', 'dseg f-other p15'])
+      // The number under a bar stays Claude's.
+      expect(today.texts()).toEqual(['0', 'today'])
+    })
+  })
+
+  test('projects: bars against the largest, global gold, a limit keeps the largest; storage chips', () => {
+    withDocumentSync(() => {
+      const host = { project: (o: string) => Object.assign(fakeDocument.createElement('span'), { textContent: o }), openReview: () => {} }
+      const two = projectRows(base, host, 2) as FakeNode[]
+      expect(two.map(r => r.texts().join('|'))).toEqual(['global|2 memories', 'p-a|5 memories'])
+      expect(two[0]!.all().some(n => n.className.includes('bar-fill is-global'))).toBe(true)
+      expect(two[1]!.all().some(n => n.className === 'bar-fill w20')).toBe(true)
+    })
+    expect(health.storageChips(base)).toEqual({ empty: 1, byDesign: 1, withData: 2 })
+  })
+})
+
 // ---- A DOM-free stand-in document (only the network edge and the DOM are faked) ----
 
 class FakeText {
@@ -299,10 +375,13 @@ describe('VIEWS.2: the Health tab on a real store', () => {
       const tiles = kpiTiles(data, () => calls.push('review')) as FakeNode[]
       expect(tiles.map(t => t.tagName)).toEqual(['div', 'button', 'div', 'div', 'div'])
       const never = tiles[1]!
-      expect(never.className).toBe('tile tile-link')
+      // 0.23.0: each tile carries its level (the Never recalled tile is information) and a state mark in its label.
+      expect(never.className).toBe('tile tile-link tile-info')
       expect(never.type).toBe('button')
       // Only spans inside the button (a div inside one is not valid HTML); same words as the plain tile.
-      expect(never.all().slice(1).map(n => n.tagName)).toEqual(['span', 'span', 'span'])
+      expect(never.all().slice(1).every(n => n.tagName === 'span')).toBe(true)
+      expect(never.all().some(n => n.className === 'lvl lvl-info')).toBe(true)
+      expect((kpiTiles(data) as FakeNode[]).map(t => t.className)).toEqual(['tile tile-ok', 'tile tile-info', `tile tile-${kpis(data)[2].level}`, 'tile tile-info', 'tile tile-ok'])
       expect(never.texts()).toEqual(['Never recalled', '2', '40% of all memories'])
       never.fire('click')
       expect(calls).toEqual(['review'])
@@ -424,9 +503,10 @@ describe('VIEWS.2: the Health tab on a real store', () => {
     // Phone width: the cards stack and the table scrolls in its box.
     const css = readFileSync(join(ROOT, 'ui', 'style.css'), 'utf8')
     expect(css).toMatch(/@media \(max-width: 760px\) \{\s*\.health-grid \{ grid-template-columns: minmax\(0, 1fr\); \}/)
-    expect(html.slice(html.indexOf('id="view-health"'), html.indexOf('<footer'))).not.toMatch(/\sstyle=|<script|\son\w+=/)
-    // Storage is a collapsed <details> with a summary, a filter group and a scrolling list.
-    expect(html).toMatch(/<details id="health-storage-box">\s*<summary id="health-storage-summary"[^>]*>/)
+    // 0.23.0: the system facts moved into the Health view (an aside), so the check runs to the next view.
+    expect(html.slice(html.indexOf('id="view-health"'), html.indexOf('id="view-vocabulary"'))).not.toMatch(/\sstyle=|<script|\son\w+=/)
+    // Storage is a collapsed <details> with a summary (0.23.0: its words and its chips), a filter group and a scrolling list.
+    expect(html).toMatch(/<details id="health-storage-box">\s*<summary class="storage-summary"><span id="health-storage-summary">/)
     expect(html).not.toMatch(/<details id="health-storage-box"[^>]*\sopen/)
     expect(html).toMatch(/id="health-storage-filter" class="segmented" role="group"/)
     expect(css).toMatch(/\.storage-list \{[^}]*max-height: 320px; overflow-y: auto/)

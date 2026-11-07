@@ -401,6 +401,8 @@ export function healthReport(config: Config, store: Store, _engine: string | und
       .map(date => ({ date, count: days[date] }))
   const recallsPerDay = perDay(recallsByDay)
   const otherRecallsPerDay = perDay(otherRecallsByDay)
+  // 0.23.0: the dashboard's own searches per day (a recall with origin ui), for the chart stacked by who asked; never counted as Claude's.
+  const uiRecallsPerDay = perDay(countByDay(logLines, line => line.action === 'recall' && line.origin === 'ui' && line.ok !== false))
 
   if (db === null) {
     return {
@@ -418,6 +420,7 @@ export function healthReport(config: Config, store: Store, _engine: string | und
         recallsPerDay,
         recallsByDay,
         otherRecallsPerDay,
+        uiRecallsPerDay,
         daysCovered,
         sizes: { store: storeSize, log: logSize },
         tables: {},
@@ -453,6 +456,7 @@ export function healthReport(config: Config, store: Store, _engine: string | und
   let owners: { owner: string; label: string; count: number }[] = []
   let projects: { owner: string; label: string; count: number }[] = []
   let neverCount = 0
+  let liveTotal = 0
   let neverList: { id: string; owner: string; created: string | null; lastRecalled: string | null; label: string; tags: string[]; recalls: number }[] = []
   let mostRecalled: { id: string; owner: string; created: string | null; lastRecalled: string | null; label: string; tags: string[]; recalls: number }[] = []
   let tagged = 0
@@ -509,6 +513,12 @@ export function healthReport(config: Config, store: Store, _engine: string | und
       neverCount = (db.query(`SELECT COUNT(*) AS n FROM working_memory WHERE ${recallsSql} = 0${liveOnly}`).get(...liveArgs) as { n: number })?.n ?? 0
     } catch {
       neverCount = 0
+    }
+    // 0.23.0: the live memories, so "recalled at least once" is a share of the same set the never-recalled count comes from.
+    try {
+      liveTotal = (db.query(`SELECT COUNT(*) AS n FROM working_memory WHERE 1 = 1${liveOnly}`).get(...liveArgs) as { n: number })?.n ?? total
+    } catch {
+      liveTotal = total
     }
     try {
       const neverRows = db
@@ -586,11 +596,13 @@ export function healthReport(config: Config, store: Store, _engine: string | und
       owners,
       neverRecalled: { count: neverCount, list: neverList },
       neverRecalledCount: neverCount,
+      liveTotal,
       neverRecalledList: neverList,
       mostRecalled,
       recallsPerDay,
       recallsByDay,
       otherRecallsPerDay,
+      uiRecallsPerDay,
       daysCovered,
       sizes: { store: storeSize, log: logSize },
       tables,

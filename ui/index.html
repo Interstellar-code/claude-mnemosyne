@@ -530,30 +530,46 @@
   <main id="view-health" class="main view column wide" hidden>
     <div class="titlebar">
       <h1 id="health-title" tabindex="-1">Memory health</h1>
-      <span class="muted small">How much of your memory is used, how much is going stale, and which engine features are switched on.</span>
+      <span class="muted small">What needs you first, then how the store is doing.</span>
+      <span class="push-right muted small"><span id="health-checked"></span> · <button id="health-refresh" type="button" class="link small">refresh</button></span>
     </div>
     <div class="status-row">
       <p id="health-status" class="notice-line small muted" role="status">Loading…</p>
       <button id="health-retry" class="btn" type="button" hidden>Try again</button>
     </div>
+    <div class="health-top">
+      <section id="health-board" class="card board" aria-labelledby="health-verdict" hidden>
+        <div class="board-head">
+          <h2 id="health-verdict" class="board-verdict"></h2>
+          <span id="health-counts" class="board-counts"></span>
+        </div>
+        <ol id="health-findings" class="findings"></ol>
+      </section>
+      <aside id="foot" class="card foot system" aria-labelledby="health-system-title" hidden>
+        <h2 id="health-system-title" class="sys-title">System</h2>
+        <dl id="facts" class="facts"></dl>
+      </aside>
+    </div>
     <div id="health-body" hidden>
       <div id="health-kpis" class="tiles"></div>
       <div class="health-grid">
         <section class="card" aria-labelledby="health-cov-title">
-          <h2 id="health-cov-title" class="card-title">Engine features in use</h2>
+          <h2 id="health-cov-title" class="card-title">Engine features <span class="muted small">status · coverage</span></h2>
           <div id="health-coverage" class="cov"></div>
         </section>
         <section class="card" aria-labelledby="health-days-title">
-          <h2 id="health-days-title" class="card-title">Claude recalls per day, last 14 days</h2>
+          <h2 id="health-days-title" class="card-title">Recalls per day, last 14 days <span class="muted small">stacked by who asked</span></h2>
           <div id="health-chart" class="days" role="img" aria-label="Bar chart of recalls per day"></div>
+          <p class="chart-legend small"><span class="from-mark f-claude"></span>Claude Code <span class="from-mark f-other"></span>other apps <span class="from-mark f-ui"></span>dashboard <span class="muted">· hatched: before the log began</span></p>
           <p id="health-chart-text" class="muted small"></p>
-          <h2 class="card-title">Projects</h2>
+          <h2 class="card-title">Projects <span class="muted small">memories · gold = global</span></h2>
           <div id="health-projects" class="list"></div>
+          <button id="health-projects-more" type="button" class="link small" hidden></button>
         </section>
       </div>
       <section class="card" aria-label="Storage">
         <details id="health-storage-box">
-          <summary id="health-storage-summary" class="storage-summary">Storage</summary>
+          <summary class="storage-summary"><span id="health-storage-summary">Storage</span> <span id="health-storage-chips" class="storage-chips"></span></summary>
           <div class="storage-body">
             <div id="health-storage-filter" class="segmented" role="group" aria-label="Show tables"></div>
             <div id="health-storage" class="list storage-list"></div>
@@ -561,9 +577,6 @@
         </details>
       </section>
     </div>
-    <footer id="foot" class="foot" hidden>
-      <dl id="facts" class="facts"></dl>
-    </footer>
   </main>
 
   <main id="view-vocabulary" class="main view column wide" hidden>

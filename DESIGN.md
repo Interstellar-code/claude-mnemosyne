@@ -1603,6 +1603,19 @@ C10.3: the engine's trigger `trim_validations_to_3` keeps only the newest 3 `mem
 
 On the solar-system map a plain folder (no git repo) with at least `map.stationMin` live memories is a space station and one with fewer a starship (default 50, range 2 to 1000, applies now). The galaxy reply carries the value. Git repos are always planets.
 
+### The Health tab (0.23.0)
+
+Seventh step of the tab polish (design proposal `tabs-after/NOTES-activity-review-health.md`, Health items 1 to 6), and the second data mismatch the notes list.
+- **One project rule.** Global is not a project. The header's summary counts the owners other than global and adds "+ global" when there is one; the Health tile already counted that way.
+- **Live total.** `/api/health-report` adds `liveTotal`, the memories that pass `LIVE_SQL` (the total on a store without the lifespan columns). "Recalled at least once" is `liveTotal − neverRecalledCount` of `liveTotal`, the same set as the never-recalled count (0.22.0). The value reads "n of m live" when the two totals differ.
+- **Dashboard searches per day.** The report adds `uiRecallsPerDay` (successful recalls with origin `ui`), beside `recallsPerDay` (Claude's, `isClaudeRecall`) and `otherRecallsPerDay`. The three never overlap.
+- **Levels.** `Level` is ok, act, watch or info. `kpis` gives each tile one: Claude recalls in the log is act when it is 0 over more than one logged day, and info with no log. `levelMark` draws a span whose shape carries it (a check in a circle, a clipped triangle, a dot, an i) with an `aria-label`. `kpiTiles` adds `tile-<level>`.
+- **Findings.** `findings(data, meaning)` returns `{level, title, detail, action, actionLabel}`, sorted act, watch, info, ok (stable). The checks: Claude's recalls against the log, knowledge coverage, never recalled, tags and meaning search. `verdict` words the head line. The board shows the first three that are not ok; the page maps `action` to Settings, Knowledge or Review.
+- **Feature rows.** `coverageLevels` adds `level` and `byDesign` (provenance with some coverage: only saves since it began carry it). `coverageRows` adds the mark, `cov-<level>` or `cov-design` (slate), and the "By design:" note.
+- **The chart.** `dayBars` keeps `count` (Claude's, the number under each day) and adds `other`, `ui`, `parts` (each segment's share of the stack, in twentieths) and a height from the whole stack. `chartBars` draws `.dseg.f-ui/.f-other/.f-claude.p<n>` inside `.day-bar`. A day before the log is hatched.
+- **Projects and storage.** `projectRows(data, host, limit)` adds a bar against the largest (`is-global` gold); the page shows 5, then "▸ n more, a–b each". `storageChips` counts empty (not by design), with data and unused by design.
+- **System.** The facts list moved from the page footer into `aside#foot.system` beside the board; same ids, one mark per line.
+
 ### The Review tab (0.22.0)
 
 Sixth step of the tab polish (design proposal `tabs-after/NOTES-activity-review-health.md`, Review items 1 to 6), and the data mismatch the notes list first.

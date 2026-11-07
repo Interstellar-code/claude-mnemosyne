@@ -2,6 +2,23 @@
 
 Newest first. Each release is tagged `vX.Y.Z` on GitHub; the README and DESIGN.md describe the contracts.
 
+## 0.23.0 (Health tab polish, one project count)
+
+The seventh step of the tab polish, following the design proposal's Health notes.
+
+1. **What needs action first:** a board at the top gives a verdict ("Running, with 1 thing to act on"), counts by state (▲ act, ● watch, ✓ ok) and up to three findings, each with one button (Open Settings, Open Knowledge, Open Review). The findings, worst first:
+   - Claude has not recalled anything over the days the log covers (act: check that Claude Code has the memory tools on);
+   - memories without extracted knowledge, never recalled live memories, untagged memories (watch);
+   - the activity log off (watch);
+   - meaning search off (information).
+2. **Every tile shows its state** with a coloured top edge and a mark whose shape carries the meaning (a check in a circle, a triangle, an i), so it still reads in greyscale. Claude recalls in the log is "act" when it is 0 over more than a day of log.
+3. **System panel up top:** the version, store, server, activity log and mode moved from the bottom of the page into a panel beside the board, one status mark per line. The page shows "checked HH:MM · refresh".
+4. **Feature rows with state:** each has a mark. Provenance reads **By design** (only saves since provenance began carry it) with a slate bar; knowledge still missing is a blue "watch" bar. **Recalled at least once** now counts against the live memories ("81 of 95 live"), the same set as never recalled.
+5. **Recalls per day, stacked by who asked:** Claude Code, other apps and the dashboard, with a legend. Days before the log began are hatched. The number under each day stays Claude's.
+6. **Projects as bars** against the largest (global in gold): the five largest, then "▸ n more, 1–4 each". **Storage** shows chips: empty, with data, unused by design.
+7. **One project count:** the header said 14 projects (counting global) where Health said 13. Global is not a project anywhere now: the header reads "117 memories in 13 projects + global".
+8. **Server:** `/api/health-report` adds `uiRecallsPerDay` (the dashboard's searches, never counted as Claude's) and `liveTotal`. No setting or engine change.
+
 ## 0.22.0 (Review tab polish, one never-recalled count)
 
 The sixth step of the tab polish, following the design proposal's Review notes.

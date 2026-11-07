@@ -1534,7 +1534,8 @@ describe('QAPAGE R1: the page, read as a tree and a stylesheet', () => {
     // 0.21.0: every recall today, split by who asked (Claude Code, other apps, dashboard) under the number.
     expect(html).toContain('<span class="act-dot c-recall"></span>Recalls today</div>')
     expect(html).toContain('id="tile-recall-note"')
-    expect(html).toContain('Claude recalls per day, last 14 days')
+    // 0.23.0: the Health chart shows every recall stacked by who asked, so its title says so; Claude's count stays in its words.
+    expect(html).toContain('Recalls per day, last 14 days <span class="muted small">stacked by who asked</span>')
     expect(html).toContain('Searching here does not count as a recall.')
   })
 })

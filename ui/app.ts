@@ -51,7 +51,25 @@ import {
   type KnowledgeSort,
   type QuickState,
 } from './knowledge'
-import { chartBars, chartText, coverageRows, dayBars, kpiTiles as healthKpiTiles, parseHealth, projectRows as healthProjectRows, storageList, storageSummary, tableFilterButtons, type HealthData, type HealthHost, type TableFilter } from './health'
+import {
+  chartBars,
+  chartText,
+  coverageRows,
+  dayBars,
+  findings as healthFindings,
+  kpiTiles as healthKpiTiles,
+  levelMark as healthLevelMark,
+  parseHealth,
+  projectRows as healthProjectRows,
+  storageChips as healthStorageChips,
+  storageList,
+  storageSummary,
+  tableFilterButtons,
+  verdict as healthVerdict,
+  type HealthData,
+  type HealthHost,
+  type TableFilter,
+} from './health'
 import {
   candidateRow,
   doneRow,
@@ -1539,24 +1557,86 @@ export function forgetById(id: string, done: (error?: string) => void) {
   })()
 }
 
-const healthView = { data: null as HealthData | null, tables: 'all' as TableFilter }
-const healthHost: HealthHost = { project: owner => project(owner, 'project'), openReview: () => show('review') }
+// 0.23.0: `allProjects` shows every project row (else the 5 largest); `checked` is when the report was read.
+const healthView = { data: null as HealthData | null, tables: 'all' as TableFilter, allProjects: false, checked: 0 }
+const healthHost: HealthHost = {
+  project: owner => project(owner, 'project own'),
+  openReview: () => show('review'),
+  openSettings: () => show('settings'),
+  openKnowledge: () => show('knowledge'),
+}
+/** Projects shown before "▸ n more". */
+const HEALTH_PROJECTS = 5
+
+/** The board: the verdict, the counts by level, and the first three findings that are not ok, each with its one button. */
+function drawHealthBoard(data: HealthData) {
+  const board = maybe('health-board')
+  if (board === null) return
+  const list = healthFindings(data, embeddingsOn)
+  byId('health-verdict').replaceChildren(healthLevelMark(list.some(f => f.level === 'act') ? 'act' : list.some(f => f.level === 'watch') ? 'watch' : 'ok'), el('span', healthVerdict(list)))
+  const counts = byId('health-counts')
+  counts.replaceChildren()
+  const words: Record<string, string> = { act: 'act', watch: 'watch', ok: 'ok', info: 'note' }
+  for (const level of ['act', 'watch', 'info', 'ok'] as const) {
+    const n = list.filter(f => f.level === level).length
+    if (n === 0) continue
+    const chip = el('span', undefined, `board-count c-${level}`)
+    chip.append(healthLevelMark(level), el('span', `${n} ${words[level]}`))
+    counts.append(chip)
+  }
+  const open: Record<string, (() => void) | undefined> = { settings: healthHost.openSettings, review: healthHost.openReview, knowledge: healthHost.openKnowledge }
+  const rows = list.filter(f => f.level !== 'ok').slice(0, 3)
+  byId('health-findings').replaceChildren(
+    ...(rows.length === 0 ? [el('li', 'Nothing needs you right now.', 'finding muted')] : []),
+    ...rows.map((finding, i) => {
+      const li = el('li', undefined, `finding f-${finding.level}`)
+      const text = el('div', undefined, 'finding-text')
+      text.append(el('p', finding.title, 'finding-title'), ...(finding.detail ? [el('p', finding.detail, 'muted small')] : []))
+      li.append(el('span', String(i + 1), 'finding-n mono muted'), healthLevelMark(finding.level), text)
+      const act = finding.action === '' ? undefined : open[finding.action]
+      if (act) {
+        const button = el('button', finding.actionLabel, finding.level === 'act' ? 'btn primary small' : 'btn small')
+        button.type = 'button'
+        button.addEventListener('click', act)
+        li.append(button)
+      }
+      return li
+    }),
+  )
+  board.hidden = false
+}
 
 export function drawHealth() {
   const data = healthView.data
   if (data === null) return
   const now = Date.now()
+  drawHealthBoard(data)
+  const checked = maybe('health-checked')
+  if (checked) checked.textContent = `checked ${clock(new Date(healthView.checked || now).toISOString()).slice(0, 5)}`
   byId('health-kpis').replaceChildren(...healthKpiTiles(data, healthHost.openReview))
-  byId('health-coverage').replaceChildren(...coverageRows(data))
+  byId('health-coverage').replaceChildren(...coverageRows(data, embeddingsOn))
   const days = dayBars(data, now)
   const words = chartText(days, data)
   const chart = byId('health-chart')
   chart.setAttribute('aria-label', words.label)
   chart.replaceChildren(...chartBars(days))
   byId('health-chart-text').textContent = words.summary
-  byId('health-projects').replaceChildren(...healthProjectRows(data, healthHost))
+  // The largest projects first, then "▸ n more" (the rest, 1 to n each).
+  const limit = healthView.allProjects ? Infinity : HEALTH_PROJECTS
+  byId('health-projects').replaceChildren(...healthProjectRows(data, healthHost, limit))
+  const more = maybe<HTMLButtonElement>('health-projects-more')
+  if (more) {
+    const rest = [...data.owners].sort((a, b) => b.count - a.count).slice(HEALTH_PROJECTS)
+    more.hidden = healthView.allProjects || rest.length === 0
+    more.textContent = rest.length === 0 ? '' : `▸ ${rest.length} more, ${Math.min(...rest.map(r => r.count))}–${Math.max(...rest.map(r => r.count))} each`
+  }
   // Storage is a collapsed <details>; its filter redraws only the list, so the open state stays.
   byId('health-storage-summary').textContent = storageSummary(data)
+  const chips = maybe('health-storage-chips')
+  if (chips) {
+    const c = healthStorageChips(data)
+    chips.replaceChildren(el('span', `${c.empty} empty`, c.empty > 0 ? 'chip is-warn' : 'chip'), el('span', `${c.withData} with data`, 'chip'), el('span', `unused by design ${c.byDesign}`, 'chip muted'))
+  }
   drawStorage()
   tabStatus('health', '')
   byId('health-body').hidden = false
@@ -1582,6 +1662,7 @@ export async function loadHealthReport() {
     const data = parseHealth(await readJson<unknown>(response))
     if (data === null) throw new Error('the reply was not a health report')
     healthView.data = data
+    healthView.checked = Date.now()
     drawHealth()
   } catch (err) {
     if (err instanceof Expired) return
@@ -2114,6 +2195,12 @@ export function wireKnowledgeHealth() {
   // Optional call: the test stand-in document has no listeners.
   document.addEventListener?.('keydown', knowledgeKey)
   byId('health-retry').addEventListener('click', () => void loadHealthReport())
+  // 0.23.0: refresh, and "▸ n more" projects (absent from older stand-in pages).
+  maybe('health-refresh')?.addEventListener('click', () => void loadHealthReport())
+  maybe('health-projects-more')?.addEventListener('click', () => {
+    healthView.allProjects = true
+    drawHealth()
+  })
   byId('settings-retry').addEventListener('click', () => void loadSettings())
   byId<HTMLInputElement>('settings-filter').addEventListener('input', () => {
     settingsView.filter = byId<HTMLInputElement>('settings-filter').value
@@ -2130,8 +2217,10 @@ async function loadHealth() {
   owners = health.owners ?? []
   useOwners(owners.map(row => row.owner))
   setEmbeddings(health.embeddings === true)
-  const projects = owners.length
-  byId('summary').textContent = `${health.total} ${health.total === 1 ? 'memory' : 'memories'} in ${projects} ${projects === 1 ? 'project' : 'projects'}`
+  // 0.23.0: one project rule everywhere: global is not a project (Health said 13 where this said 14).
+  const projects = owners.filter(row => row.owner !== 'global').length
+  const hasGlobal = owners.some(row => row.owner === 'global')
+  byId('summary').textContent = `${health.total} ${health.total === 1 ? 'memory' : 'memories'} in ${projects} ${projects === 1 ? 'project' : 'projects'}${hasGlobal ? ' + global' : ''}`
   // The plugin and engine versions live in the About popover (0.17.0; the footer with the rest is on Health).
   byId('engine').textContent = [health.plugin ? `plugin v${health.plugin}` : '', health.engine ? `engine ${health.engine}` : ''].filter(Boolean).join(' · ')
   for (const id of ['mem-owner', 'search-owner']) {

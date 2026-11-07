@@ -285,7 +285,7 @@ That is a dry run: it counts the memories with no vector. Then `/mnemosyne-embed
 
 Starts a small local web page for your memories and opens it in your default browser. The reply shows the full link, with its key after `#`, and the link is on the clipboard too, so you can open it in another browser.
 
-The header shows how many memories are in how many projects, and a connection pill: teal "Local · live" while the server answers, amber "Reconnecting…" when it has stopped (an amber strip under the header counts down to the next check, offers Try now, and the page's data is dimmed as out of date), and "Link expired" when the server was restarted (a card then says how to get a fresh link with `/mnemosyne-ui`, with a Copy button; nothing is lost). The plugin and engine versions are behind the ⓘ button. The page has nine tabs and opens on Map:
+The header shows how many memories are in how many projects (global is counted apart: "in 13 projects + global"), and a connection pill: teal "Local · live" while the server answers, amber "Reconnecting…" when it has stopped (an amber strip under the header counts down to the next check, offers Try now, and the page's data is dimmed as out of date), and "Link expired" when the server was restarted (a card then says how to get a fresh link with `/mnemosyne-ui`, with a Copy button; nothing is lost). The plugin and engine versions are behind the ⓘ button. The page has nine tabs and opens on Map:
 
 - **Map:** the solar-system Galaxy view: the sun and writer nodules, planets and crafts with their styles, land, moons, asteroids, belts, black holes, satellites, comets and beams, clouds and ice cap (see [The galaxy](#the-galaxy)). Arrange by, Find, the Bodies strip, the Details panel, and the live events; Timeline and Meaning unchanged. Two new files in the Mnemosyne root: `activity-daily.json` (counts only) and `projects.json` (project names and the remote's host only); a project is recorded the next time a Claude session starts in it.
 - **Memories:** every memory, one line each:
@@ -324,6 +324,11 @@ The header shows how many memories are in how many projects, and a connection pi
   - **Grouping:** rows are grouped by project when a queue spans several.
   - **Keys:** J, K, O, Space (keep), R (retire, then Enter), U (undo).
 - **Health:** how much of your memory is used, how much has never been recalled, and which features are switched on.
+  - **What needs action first:** a verdict, counts by state, and up to three findings with one button each (for example, Claude has not recalled anything over the days the log covers: check that the memory tools are on).
+  - **System:** the version, store, server, activity log and mode, beside the board.
+  - **Tiles and feature rows** show their state by a mark whose shape carries the meaning; provenance is marked "by design".
+  - **The recalls chart** stacks Claude Code, other apps and the dashboard per day.
+  - **Projects** show as bars (global in gold), and storage as chips. Never recalled and recalled at least once both count live memories, and global is never counted as a project (the header reads "in 13 projects + global").
 - **Vocabulary:** the shared tags by namespace with counts, and the candidates to Admit or Alias.
 - **Settings:** every setting of the memory system with its value and default, where you change, reset and back up (see [Settings](#settings)). It writes to `~/.claude/mnemosyne/config.json` and, through the `claude` command, to the plugin options.
 

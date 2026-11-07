@@ -299,6 +299,8 @@ describe('KAPI.2: GET /api/health and /api/health-report', () => {
       const sum = (days: { count: number }[]) => days.reduce((total, day) => total + day.count, 0)
       expect(sum(report.recallsPerDay)).toBe(9)
       expect(sum(report.otherRecallsPerDay)).toBe(2)
+      // 0.23.0: the dashboard's 4 searches are their own series (the chart stacks it), never added to Claude's.
+      expect(sum((report as unknown as { uiRecallsPerDay: { count: number }[] }).uiRecallsPerDay)).toBe(4)
       expect(Object.values(report.recallsByDay).reduce((total, n) => total + n, 0)).toBe(9)
     } finally {
       mixStarted.stop()
@@ -358,6 +360,8 @@ describe('KAPI.2: GET /api/health and /api/health-report', () => {
       db.run("INSERT INTO working_memory (id, session_id, content, timestamp, valid_until) VALUES ('old', 'p1', 'd', '2026-10-04', '2020-01-01T00:00:00Z'), ('later', 'p1', 'e', '2026-10-05', '2999-01-01T00:00:00Z')")
     })
     expect(report.total).toBe(5)
+    // 0.23.0: the live total the Health tab measures "recalled at least once" against.
+    expect((report as unknown as { liveTotal: number }).liveTotal).toBe(3)
     expect(report.neverRecalled.count).toBe(3)
     expect(report.neverRecalled.list.map(m => m.id)).toEqual(['later', 'live2', 'live1'])
   })
