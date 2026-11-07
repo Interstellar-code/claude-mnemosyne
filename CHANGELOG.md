@@ -2,6 +2,16 @@
 
 Newest first. Each release is tagged `vX.Y.Z` on GitHub; the README and DESIGN.md describe the contracts.
 
+## 0.27.0 (entity questions find what they ask about)
+
+Issue #56, part 1 (ranking; the entity card comes later). A question like "who is Rohit" or "tell me about X" returned the newest notes that mention the name, not the memories about it. Four general rules, in the engine (build 18.12.3-mnemosyne.12, change 20 in engine/UPSTREAM.md):
+
+1. **Intent is on.** Recall reads what kind of question it is (who/what is, how to, when) by default. `use_intent: false` on `mnemopi_recall` gives the old ranking.
+2. **"Who is X" is a question about X.** It used to count as a plain fact question.
+3. **The question's opening is not searched.** "tell me about", "what do you know about", "do you remember" are dropped before the keyword search, so memories that merely contain "tell" or "know" stop matching. The same words inside a question ("known issues") are still searched.
+4. **About X beats mentions X.** For these questions, a memory that names X as its subject counts as a full match, and recency only breaks near-ties.
+
+**Measured** with `bin/eval.ts` on the author's store (112 queries, 33 with answers, 6 of them new "who is" questions): the right memory in the top 5 went from 76.8% to 86.9%, MRR from 0.759 to 0.798. 98% of all queries keep the same top hit, and no labelled non-entity question changed rank. New engine tests use a made-up store.
 ## 0.26.1 (Health counts other agents' recalls)
 
 The Health tab warned "Claude has not recalled anything in n days" when the memory was in daily use through other MCP agents (Codex, Claude Desktop). Now:

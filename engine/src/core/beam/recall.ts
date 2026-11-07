@@ -18,7 +18,7 @@ import { mmrRerank } from "../mmr";
 import { type OrchestratedRecallResult, orchestrateRecall } from "../orchestrator";
 import { POLYPHONIC_MAX_COMBINED_SCORE } from "../polyphonic-recall";
 import { isQueryCacheEnabled, QueryCache } from "../query-cache";
-import { adjustWeights, classifyIntent } from "../query-intent";
+import { adjustWeights, classifyIntent, type QueryIntentCategory } from "../query-intent";
 import { getSynonyms, STOP_WORDS as QUERY_STOP_WORDS } from "../synonyms";
 import { extractTemporal } from "../temporal-parser";
 import { cosineSimilarity } from "../vector-math";
@@ -46,7 +46,19 @@ type RecallOptionsInternal = RecallOptions & {
 	ignoreSessionScope?: boolean;
 	currentSensitive?: boolean;
 	updateRecallCounts?: boolean;
+	/** Set by `recall()` when `useIntent` is on: the classified intent of the query (local patch, issue #56). */
+	intentCategory?: QueryIntentCategory;
 };
+
+/**
+ * Local patch (issue #56): how much recency moves a score. A question about who or what something is
+ * (entity, factual) asks for what is true, not what is newest, so recency only breaks near-ties there;
+ * every other query, and any query that asks for the current state or a time, keeps the full effect.
+ */
+export function recencyFactor(decay: number, intent: QueryIntentCategory | undefined, timeAware: boolean): number {
+	if (!timeAware && (intent === "entity" || intent === "factual")) return 0.9 + 0.1 * decay;
+	return 0.7 + 0.3 * decay;
+}
 
 type CandidateSignals = {
 	fts: number;
@@ -216,6 +228,21 @@ function clamp01(value: number): number {
 	return value;
 }
 
+/**
+ * Local patch (issue #56): the opening phrase of a question ("tell me about", "what do you know about",
+ * "do you remember", "remind me of") says how the question is asked, not what it is about. Left in, its
+ * words ("tell", "know", "remember") count as search words and any memory containing them scores as a
+ * partial match. Only a leading phrase is removed, so the same words stay searchable inside a question
+ * ("known issues", "remember to …"). The meaning search and the intent still see the whole question.
+ */
+const QUESTION_FRAME =
+	/^\s*(?:(?:please|hey|ok(?:ay)?)[\s,]+)*(?:(?:can|could|would|will)\s+you\s+)?(?:tell\s+me\s+(?:more\s+|everything\s+|anything\s+)?about|what\s+(?:do|can)\s+you\s+(?:know|remember|recall|tell\s+me)\s+about|what\s+do\s+we\s+know\s+about|do\s+you\s+(?:know|remember|recall)(?:\s+anything)?(?:\s+about)?|remind\s+me\s+(?:about|of)|(?:give\s+me\s+)?(?:info(?:rmation)?|details)\s+(?:on|about))\s+/i;
+
+export function searchTextOf(query: string): string {
+	const stripped = query.replace(QUESTION_FRAME, "").replace(/[?!.\s]+$/, "");
+	return stripped.trim().length > 0 ? stripped : query;
+}
+
 function tokenize(text: string): string[] {
 	const lowered = text.toLowerCase();
 	const matches = lowered.match(/[\p{L}\p{N}_]+/gu) ?? [];
@@ -332,6 +359,18 @@ function lexicalGroupRelevance(queryGroups: readonly (readonly string[])[], cont
 		}
 	}
 	return clamp01(0.7 + Math.min(Math.max(count - 1, 0), 3) * 0.1);
+}
+
+/**
+ * Local patch (issue #56): whether the memory names what the query asks about as its subject, that is
+ * every query word group within its opening words ("Rohit is CEO of …", "Raj: lead developer …").
+ * For an entity question ("who is X", "tell me about X") that is what makes a memory about X rather
+ * than one that mentions X in passing, however often (a name inside a file path counts every time).
+ */
+export function namesSubject(queryGroups: readonly (readonly string[])[], content: string): boolean {
+	if (queryGroups.length === 0 || queryGroups.length > 4) return false;
+	const opening = tokenize(content).slice(0, queryGroups.length + 2);
+	return queryGroups.every(group => group.some(token => opening.includes(token)));
 }
 
 function queryAsksCurrent(query: string): boolean {
@@ -705,7 +744,9 @@ function scoreCandidate(
 ): RecallResult | null {
 	const content = asString(candidate.row.content);
 	const searchableContent = asString(candidate.row.embed_text) || content;
-	const lexical = lexicalGroupRelevance(queryGroups, searchableContent);
+	let lexical = lexicalGroupRelevance(queryGroups, searchableContent);
+	// An entity question: a memory whose subject is the thing asked about is a full match (issue #56).
+	if (options.intentCategory === "entity" && lexical > 0 && namesSubject(queryGroups, content)) lexical = 1;
 	const minRel = minimumRelevance(queryTokens);
 	if (lexical < minRel && candidate.signals.dense < 0.65) return null;
 	const [vecWeight, ftsWeight, importanceWeight] = weights;
@@ -726,7 +767,8 @@ function scoreCandidate(
 		baseScore = keyword * kwShare + importance * importanceWeight + keyword * keyword * 0.08;
 		if (candidate.signals.dense > 0) baseScore = baseScore * 0.8 + candidate.signals.dense * 0.2;
 	}
-	let score = baseScore * (0.7 + 0.3 * decay);
+	let score =
+		baseScore * recencyFactor(decay, options.intentCategory, options.queryTime != null || options.currentSensitive === true);
 	const temporalWeight = options.temporalWeight ?? 0;
 	let temporalScore = 0;
 	if (temporalWeight > 0) {
@@ -963,11 +1005,14 @@ export async function recall(
 		if (options.useIntent === true) {
 			const intent = classifyIntent(query);
 			weights = adjustWeights(weights[0], weights[1], weights[2], intent);
+			temporalOptions.intentCategory = intent.category;
 		}
 		const useSynonyms = options.useSynonyms !== false;
-		const tokens = expandedTokens(query, useSynonyms);
-		const tokenGroups = expandedTokenGroups(query, useSynonyms);
-		const candidates = collectMemoryCandidates(beam, query, topK, temporalOptions);
+		// Keyword search without the question's opening phrase (issue #56); intent and embedding use the whole query.
+		const searchText = searchTextOf(query);
+		const tokens = expandedTokens(searchText, useSynonyms);
+		const tokenGroups = expandedTokenGroups(searchText, useSynonyms);
+		const candidates = collectMemoryCandidates(beam, searchText, topK, temporalOptions);
 		const trust = resolveTrustWeights();
 		const scored: RecallResult[] = [];
 		for (const candidate of candidates) {

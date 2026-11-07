@@ -97,6 +97,11 @@ export const RECALL_SCHEMA = {
 			description: "Bump recall_count and last_recalled on the returned memories. false leaves them as they are.",
 			default: true,
 		},
+		use_intent: {
+			type: "boolean",
+			description: "Rank by the question's intent (who/what is, how to, when). false gives the plain ranking.",
+			default: true,
+		},
 	},
 	required: ["query"],
 } as const;
@@ -731,6 +736,9 @@ async function handleRecall(args: ToolArguments): Promise<ToolResult> {
 			authorType: optionalStringArg(args, "author_type"),
 			channelId: optionalStringArg(args, "channel_id"),
 			updateRecallCounts: booleanArg(args, "update_recall_counts", true),
+			// Local patch (issue #56): read the question's intent (who/what is, how to, when) by default;
+			// `use_intent: false` gives the old ranking.
+			useIntent: booleanArg(args, "use_intent", true),
 		};
 		for (const key of ["vec_weight", "fts_weight", "importance_weight"] as const) {
 			if (key in args) options[key.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase())] = args[key];

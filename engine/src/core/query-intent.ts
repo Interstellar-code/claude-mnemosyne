@@ -92,7 +92,9 @@ export function classifyIntent(query: string): QueryIntent {
 
 		if (matches > 0) {
 			const score = Math.min(0.3 + matches * 0.15, 1.0);
-			if (score > bestScore) {
+			// Local patch (issue #56): "who is X" matches both factual and entity once each. A question that
+			// names something is about that thing, so entity wins a tie with factual instead of losing on order.
+			if (score > bestScore || (score === bestScore && category === "entity" && bestIntent === "factual")) {
 				bestScore = score;
 				bestIntent = category;
 			}
