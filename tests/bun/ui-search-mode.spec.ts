@@ -4,9 +4,29 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { classifyMatch, MATCH_EPSILON, mergeHits, SEARCH_LIMIT, startServer } from '../../ui/server'
+import { Database } from 'bun:sqlite'
+import { classifyMatch, MATCH_EPSILON, mergeHits, SEARCH_LIMIT, startServer, withKinds } from '../../ui/server'
 import type { Started } from '../../ui/server'
-import { chooseMode, countNote, matchLabel, MODE_KEY, modeLabel, readMode, saveMode, SHOW_FIRST } from '../../ui/search-mode'
+import {
+  chooseMode,
+  countFacet,
+  countNote,
+  matchedWords,
+  matchLabel,
+  MODE_KEY,
+  modeLabel,
+  pushRecent,
+  readMode,
+  readRecent,
+  RECENT_KEY,
+  RECENT_MAX,
+  resultHead,
+  ringClass,
+  ringText,
+  saveMode,
+  SHOW_FIRST,
+  sortHits,
+} from '../../ui/search-mode'
 import { body, engineCall, ROOT, tempDir, toolCall } from './helpers'
 
 const CLI = join(ROOT, 'engine', 'src', 'cli.ts')
@@ -208,5 +228,74 @@ describe('the page helpers', () => {
     expect(countNote(0, 0, 'keyword', 2)).toBe('Nothing found by keyword. The 2 smallest projects were not searched.')
     expect(countNote(3, 3, undefined)).toBe('3 memories found.')
     expect(SHOW_FIRST).toBe(10)
+  })
+})
+
+describe('SEARCH 0.19: the page helpers', () => {
+  const store = () => {
+    const map = new Map<string, string>()
+    return { getItem: (key: string) => map.get(key) ?? null, setItem: (key: string, value: string) => void map.set(key, value), map }
+  }
+
+  test('recent queries: newest first, once each (case ignored), at most RECENT_MAX, and storage failures ignored', () => {
+    const s = store()
+    expect(readRecent(s)).toEqual([])
+    pushRecent(s, 'incoterm')
+    pushRecent(s, 'return PO')
+    expect(pushRecent(s, '  INCOTERM ')).toEqual(['INCOTERM', 'return PO'])
+    for (const q of ['a1', 'a2', 'a3', 'a4', 'a5']) pushRecent(s, q)
+    expect(readRecent(s)).toEqual(['a5', 'a4', 'a3', 'a2', 'a1'])
+    expect(readRecent(s).length).toBe(RECENT_MAX)
+    expect(pushRecent(s, '   ')).toEqual(['a5', 'a4', 'a3', 'a2', 'a1'])
+    s.map.set(RECENT_KEY, '{not json')
+    expect(readRecent(s)).toEqual([])
+    s.map.set(RECENT_KEY, JSON.stringify(['ok', 3, '', null]))
+    expect(readRecent(s)).toEqual(['ok'])
+    const broken = { getItem: () => { throw new Error('blocked') }, setItem: () => { throw new Error('blocked') } }
+    // Blocked storage: the query is still listed for this page, just not kept.
+    expect(pushRecent(broken, 'x')).toEqual(['x'])
+    expect(readRecent(undefined)).toEqual([])
+  })
+
+  test('the score ring: tenths, clamped, and its text', () => {
+    expect(ringClass(0.91)).toBe('s9')
+    expect(ringClass(0.95)).toBe('s10')
+    expect(ringClass(-1)).toBe('s0')
+    expect(ringClass(7)).toBe('s10')
+    expect(ringClass(Number.NaN)).toBe('s0')
+    expect(ringText(0.912)).toBe('.91')
+    expect(ringText(0.05)).toBe('.05')
+    expect(ringText(1.2)).toBe('1.0')
+  })
+
+  test('sort without a new search, facet counts, matched words and the result header', () => {
+    const hits = [
+      { id: 'a', owner: 'p1', score: 0.9, timestamp: '2026-10-01', recall_count: 1, memory_type: 'fact', matched: 'both' },
+      { id: 'b', owner: 'p2', score: 0.6, timestamp: '2026-11-01', recall_count: 0, memory_type: null, matched: 'meaning' },
+      { id: 'c', owner: 'p1', score: 0.3, timestamp: null, recall_count: 9, memory_type: 'fact', matched: 'keyword' },
+    ]
+    expect(sortHits(hits, 'rank').map(h => h.id)).toEqual(['a', 'b', 'c'])
+    expect(sortHits(hits, 'newest').map(h => h.id)).toEqual(['b', 'a', 'c'])
+    expect(sortHits(hits, 'recalled').map(h => h.id)).toEqual(['c', 'a', 'b'])
+    expect(hits.map(h => h.id)).toEqual(['a', 'b', 'c'])
+    expect(countFacet(hits, 'owner')).toEqual([['p1', 2], ['p2', 1]])
+    expect(countFacet(hits, 'kind')).toEqual([['fact', 2], ['unknown', 1]])
+    expect(countFacet([{ owner: 'x' }], 'matched')).toEqual([['keyword', 1]])
+    // One-letter words are left out; "of" is not in the text.
+    expect(matchedWords('Incoterm LOCATION check', 'incoterm location x of')).toEqual(['incoterm', 'location'])
+    expect(resultHead(5, 'incoterm', 'hybrid', 38)).toBe('5 results for “incoterm” · keyword + meaning · 38 ms')
+    expect(resultHead(1, 'q', undefined, undefined)).toBe('1 result for “q”')
+  })
+
+  test('withKinds adds each hit its memory_type from the store, null when unknown or without a store', () => {
+    const db = new Database(':memory:')
+    db.run('CREATE TABLE working_memory (id TEXT PRIMARY KEY, memory_type TEXT)')
+    db.run("INSERT INTO working_memory VALUES ('a', 'decision'), ('b', ''), ('c', NULL)")
+    const hits = mergeHits([[{ id: 'a', score: 0.5 }, { id: 'b', score: 0.4 }, { id: 'c', score: 0.3 }, { id: 'gone', score: 0.2 }]])
+    expect(withKinds(db, hits).map(hit => hit.memory_type)).toEqual(['decision', null, null, null])
+    expect(withKinds(undefined, hits).every(hit => hit.memory_type === null)).toBe(true)
+    const old = new Database(':memory:')
+    old.run('CREATE TABLE working_memory (id TEXT PRIMARY KEY)')
+    expect(withKinds(old, hits).every(hit => hit.memory_type === null)).toBe(true)
   })
 })

@@ -359,12 +359,31 @@ describe('VIEW.4: the real render helpers keep markup as text', () => {
 
   test('a Search hit, with the query words marked as text', () => {
     made.length = 0
-    const hit = app.searchHit({ ...memory, content: MARKUP, score: 0.42 }, 1, 'script onerror', () => {}) as FakeElement
-    expectInert(hit, '0.42', '#1')
+    const hit = app.searchHit({ ...memory, content: MARKUP, score: 0.42 }, 1, 'script onerror', () => {}, () => {}) as FakeElement
+    expectInert(hit, '.42', '1', 'Open', 'Map')
     expect(hit.all().filter(element => element.tagName === 'mark').map(element => element.textContent)).toEqual(['script', 'script', 'onerror'])
     // The marked parts and the text between them give back the memory exactly.
     const paragraph = hit.all().find(element => element.tagName === 'p')!
     expect(paragraph.textContent).toBe(MARKUP)
+  })
+
+  test('SEARCH 0.19: the hit head shows the kind, owner chip, reach and date; the lead is bold and still marked', () => {
+    made.length = 0
+    const content = 'Incoterm rule: INCO2 must be a TVKN node'
+    const hit = app.searchHit({ ...memory, owner: 'global', scope: 'global', memory_type: 'decision', content, score: 0.91, matched: 'both', recall_count: 0, timestamp: '2026-11-06T10:00:00Z' }, 3, 'incoterm node', () => {}) as FakeElement
+    expectInert(hit, 'Decision', '.91', 'keyword + meaning', 'never recalled', 'Matched ')
+    const classes = hit.all().map(element => element.className)
+    expect(classes).toContain('kg k-decision')
+    expect(classes).toContain('project own is-global')
+    expect(classes).toContain('reach r-all')
+    expect(classes).toContain('ring s9')
+    expect(hit.all().find(element => element.tagName === 'p')!.textContent).toBe(content)
+    const lead = hit.all().find(element => element.className === 'lead')!
+    expect(lead.textContent).toBe('Incoterm rule:')
+    expect(lead.all().filter(element => element.tagName === 'mark').map(element => element.textContent)).toEqual(['Incoterm'])
+    // Without onMap there is no Map button.
+    expect(hit.all().some(element => element.tagName === 'button' && element.textContent === 'Map')).toBe(false)
+    expect(app.hitWhen({ timestamp: '2026-10-19T08:00:00Z', recall_count: 1 })).toBe('19 Oct 2026 · 1 recall')
   })
 
   test('markParts gives back the text exactly, and a query of regex characters is taken as text', () => {

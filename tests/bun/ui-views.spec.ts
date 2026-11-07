@@ -1467,13 +1467,18 @@ describe('QAPAGE R1: the page, read as a tree and a stylesheet', () => {
     expect([fields(264), fields(252), fields(204)]).toEqual([2, 2, 1])
   })
 
-  test('QAPAGE R2 item 2: the content is centred up to 1280px, and the Health project cell keeps its name whole (no wrap, ellipsis when long)', () => {
+  test('QAPAGE R2 item 2: the content is centred up to 1440px, and the Health project cell keeps its name whole (no wrap, ellipsis when long)', () => {
     const wide = rules.find(rule => rule.selector === '.wide')!.decls
-    expect(wide['max-width']).toBe('1280px')
+    // 0.19.0: one width for every tab (was 1280px; Memories had none and Search 960px).
+    expect(wide['max-width']).toBe('1440px')
     expect(wide['margin-left']).toBe('auto')
     expect(wide['margin-right']).toBe('auto')
-    // Real numbers: at 1440px the 1280px column leaves 80px each side instead of ~240px on the right.
-    expect((1440 - 1280) / 2).toBe(80)
+    // Every tab but the Map uses it, so switching tabs never moves the content edges.
+    for (const view of ['memories', 'activity', 'search', 'knowledge', 'review', 'health', 'vocabulary', 'settings']) {
+      const main = allNodes(tree).find(node => node.id === `view-${view}`)
+      expect(main?.classes.includes('wide')).toBe(true)
+      expect(main?.classes.includes('narrow')).toBe(false)
+    }
     const never = allNodes(tree).find(node => node.tag === 'table' && node.classes.includes('compact'))!
     expect(hasAncestor(never, node => node.classes.includes('wide'))).toBe(true)
     expect(rules.find(rule => rule.selector === '.table.compact .project')?.decls['white-space']).toBe('nowrap')

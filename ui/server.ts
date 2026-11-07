@@ -2222,6 +2222,20 @@ export function mergeHits(runs: readonly (readonly Record<string, unknown>[])[],
   return [...best.values()].sort((a, b) => b.score - a.score || a.id.localeCompare(b.id)).slice(0, limit)
 }
 
+/** Each hit with its kind (the store's memory_type, null when unknown), for the Search tab's glyph and kind facet (0.19.0). */
+export function withKinds(db: Database | null | undefined, hits: Hit[]): (Hit & { memory_type: string | null })[] {
+  const kinds = new Map<string, string | null>()
+  if (db && hits.length > 0) {
+    try {
+      const rows = db.query(`SELECT id, memory_type FROM working_memory WHERE id IN (${hits.map(() => '?').join(',')})`).all(...hits.map(hit => hit.id)) as { id: string; memory_type: string | null }[]
+      for (const row of rows) kinds.set(row.id, typeof row.memory_type === 'string' && row.memory_type !== '' ? row.memory_type : null)
+    } catch {
+      // An older store without the column: no kinds.
+    }
+  }
+  return hits.map(hit => ({ ...hit, memory_type: kinds.get(hit.id) ?? null }))
+}
+
 // The engine reply's results, or the reason it failed.
 function recallResults(answer: string | Error | undefined): Record<string, unknown>[] | Error {
   if (answer === undefined) return new Error('the engine gave no reply')
@@ -2294,6 +2308,7 @@ async function search(views: Views, text: string): Promise<Answer> {
   if (owners.length === 0) return { status: 200, body: { query, owners, skipped: 0, count: 0, mode, embeddings, results: [] } }
   if (views.searching) return { status: 429, body: { error: 'A search is already running; try again when it ends.' } }
   views.searching = true
+  const started = performance.now()
   try {
     const request: EngineRequest = ['mnemopi_recall', { query, limit: SEARCH_LIMIT, update_recall_counts: false }]
     const runs = await Promise.all(owners.map(async as => recallResults((await views.run(views.config, [request], as, { keywordOnly: mode === 'keyword' }))[0])))
@@ -2305,9 +2320,10 @@ async function search(views: Views, text: string): Promise<Answer> {
       views.log({ ...logged, ok: false, error: failed.message }, extra)
       return { status: 502, body: { error: ENGINE_FAILED } }
     }
-    const hits = mergeHits(runs as Record<string, unknown>[][])
+    const hits = withKinds(views.store.db, mergeHits(runs as Record<string, unknown>[][]))
     views.log({ ...logged, ok: true, ids: hits.map(hit => hit.id), count: hits.length }, extra)
-    return { status: 200, body: { query, owners, skipped: owner !== undefined ? 0 : all.length - owners.length, count: hits.length, mode, embeddings, results: hits } }
+    const ms = Math.round(performance.now() - started)
+    return { status: 200, body: { query, owners, skipped: owner !== undefined ? 0 : all.length - owners.length, count: hits.length, mode, embeddings, ms, results: hits } }
   } finally {
     views.searching = false
   }

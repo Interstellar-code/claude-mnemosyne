@@ -233,7 +233,7 @@
     <button id="map-back" type="button" class="btn back-to-map" hidden>Back to the map</button>
   </main>
 
-  <main id="view-memories" class="main view" hidden>
+  <main id="view-memories" class="main view column wide" hidden>
     <section class="list mem-list" aria-label="All memories">
       <div class="mem-title">
         <h1 class="title-left">Memories</h1>
@@ -341,30 +341,59 @@
     <p class="muted small">From the activity log on this machine. Text previews are cut short and secrets are masked.</p>
   </main>
 
-  <main id="view-search" class="main view column narrow" hidden>
-    <h1>Ask memory what Claude would see</h1>
-    <form id="search-form" class="search-form">
-      <label class="field grow">Query
-        <input id="search-query" class="input big query" type="search" maxlength="500" required>
-      </label>
-      <label class="field">Project
-        <select id="search-owner" class="input big"><option value="">All projects</option></select>
-      </label>
-      <div class="field">Match by
+  <main id="view-search" class="main view column wide" hidden>
+    <section class="sq-card" aria-label="Search">
+      <h1>Ask memory what Claude would see</h1>
+      <p class="sq-sub muted small">Same engine recall Claude uses, top 20, in rank order. Searching here does not count as a recall.</p>
+      <form id="search-form" class="search-form sq-form">
+        <label class="sq-q">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path></svg>
+          <span class="sr-only">Query</span>
+          <input id="search-query" class="sq-input query" type="search" maxlength="500" required placeholder="Ask in your own words">
+          <kbd aria-hidden="true">Enter</kbd>
+        </label>
+        <label class="sq-owner" title="Search the memories Claude would receive in that project: its own, plus the shared and global ones. Every project searches each project as itself.">
+          <span class="sq-owner-label">As seen from</span>
+          <select id="search-owner" class="sq-select"><option value="">Every project</option></select>
+        </label>
         <div id="search-mode" class="segmented" role="group" aria-label="Match by">
           <button type="button" class="seg-btn" data-mode="keyword" aria-pressed="true">Keyword</button>
           <button type="button" class="seg-btn" data-mode="hybrid" aria-pressed="false">Keyword + meaning</button>
         </div>
+        <button type="submit" class="btn primary sq-go">Search</button>
+      </form>
+      <div class="sq-under">
+        <span id="search-seen" class="muted small"></span>
+        <div id="search-recent" class="sq-recent" aria-label="Recent searches"></div>
       </div>
-      <button type="submit" class="btn primary big">Search</button>
-    </form>
-    <p class="notes">
-      <span>Same engine recall Claude uses, top 20.</span>
-      <span>Searching here does not count as a recall.</span>
-    </p>
-    <p id="search-note" class="muted small" hidden></p>
-    <ol id="search-results" class="hits"></ol>
-    <button id="search-more" type="button" class="btn" hidden>Show more</button>
+    </section>
+    <div class="sr-layout">
+      <section class="sr-main" aria-label="Results">
+        <div id="search-head" class="rhead" hidden>
+          <p id="search-note" class="rhead-text small" role="status" hidden></p>
+          <div id="search-sort" class="segmented sm" role="group" aria-label="Sort results"></div>
+        </div>
+        <div id="search-state" class="st-wrap"></div>
+        <ol id="search-results" class="hits sr-hits"></ol>
+        <button id="search-more" type="button" class="btn" hidden>Show more</button>
+      </section>
+      <aside id="search-aside" class="sr-aside" aria-label="Where the results come from" hidden>
+        <div class="sr-box">
+          <h2 class="sr-h">Where the results come from</h2>
+          <div id="search-facet-owner" class="sr-owners"></div>
+          <h2 class="sr-h">By kind</h2>
+          <div id="search-facet-kind" class="chips"></div>
+          <h2 class="sr-h">How they matched</h2>
+          <div id="search-facet-matched" class="chips"></div>
+          <button id="search-facet-clear" type="button" class="link small" hidden>Clear filter</button>
+        </div>
+        <div class="sr-box">
+          <h2 class="sr-h">Reading the score</h2>
+          <p class="small muted">The ring is the engine's score (0 to 1). <mark>Marked</mark> words matched the query; "meaning" hits share no word with it. Below 0.50 is a weak match that Claude still receives.</p>
+          <p class="small muted sr-keys"><kbd>/</kbd> query · <kbd>J</kbd> <kbd>K</kbd> move · <kbd>Enter</kbd> open · <kbd>M</kbd> map</p>
+        </div>
+      </aside>
+    </div>
   </main>
 
   <main id="view-knowledge" class="main view column wide" hidden>

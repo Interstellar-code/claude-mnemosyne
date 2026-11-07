@@ -2,6 +2,27 @@
 
 Newest first. Each release is tagged `vX.Y.Z` on GitHub; the README and DESIGN.md describe the contracts.
 
+## 0.19.0 (Search tab polish, one width for every tab)
+
+The third step of the tab polish, following the design proposal's Search notes.
+
+1. **One width:** every tab but the Map now shares one content width (centred up to 1440 px). Before, Memories had no limit, Search stopped at 960 px and the other tabs at 1280 px, so the edges moved when switching tabs.
+2. **The query card:**
+   - a big query box with a focus ring;
+   - "As seen from" (was "Project"): one project searches what Claude would receive there, its own memories plus the shared and global ones, and a line under the box says so; "Every project" searches each project as itself;
+   - the last five queries as chips, kept in this browser only.
+3. **Each hit:**
+   - the rank over a score ring (0 to 1) instead of the edge bar;
+   - a head with the kind glyph and word, the owner chip, the reach, how it matched, and the date and recalls;
+   - the lead in bold with the query words marked, then "Matched incoterm, location" (or "close in meaning"), up to three tags, Open and Map.
+4. **The weak-match line:** in rank order, a dashed line marks where scores drop under 0.50, the matches Claude still receives but that are weak.
+5. **Result header:** the count, query, mode and time, with Rank / Newest / Most recalled sorting that needs no new search.
+6. **Where the results come from:** a side panel counts hits by project (with bars), kind and how they matched. A click filters the list; a second click, or Clear filter, undoes it.
+7. **States:** before a search (example queries, or your recent ones), nothing found (with Switch to Keyword + meaning and Every project when they apply), searching (skeleton lines) and a failure.
+8. **Keys:** `/` on Activity, Knowledge, Review, Health, Vocabulary and Settings opens Search; on Search, J and K move through the hits, Enter opens, M shows the hit on the map.
+9. A hit opens in the same side panel as Memories on screens 1200 px and wider.
+10. **Server:** `POST /api/search` adds each hit's `memory_type` (read from the store) and `ms`, the time the search took. The page now waits 120 s (was 60 s) before it stops a search: a cold Keyword + meaning search of every project took longer than 60 s on a 117-memory store. No setting or engine change.
+
 ## 0.18.0 (Memories tab polish)
 
 The second step of the tab polish, following the design proposal's Memories notes.

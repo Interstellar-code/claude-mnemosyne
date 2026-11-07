@@ -26,7 +26,28 @@ import { isClaudeRecall } from './recalls'
 import { startTheme, type ThemeMode } from './theme'
 import { drawGroups, drawTop, newView, parseSettings, type BrowserPrefs, type SettingsData, type SettingsHost } from './settings'
 import { closeSheet, openSheet, wireSheet } from './sheet'
-import { chooseMode, countNote, matchLabel, MEANING_OFF_HINT, readMode, saveMode, SHOW_FIRST, type SearchMode } from './search-mode'
+import {
+  chooseMode,
+  countFacet,
+  countNote,
+  facetValue,
+  matchedWords,
+  matchLabel,
+  MEANING_OFF_HINT,
+  pushRecent,
+  readMode,
+  readRecent,
+  resultHead,
+  ringClass,
+  ringText,
+  saveMode,
+  SHOW_FIRST,
+  sortHits,
+  WEAK_SCORE,
+  type HitFacet,
+  type HitSort,
+  type SearchMode,
+} from './search-mode'
 import { createWatch, type ProbeResult } from './connection'
 import { createStream, type StreamApi, type StreamHandle, type StreamListener, type StreamStatus } from './stream'
 
@@ -286,7 +307,6 @@ export function resultLabel(line: ActivityLine): string {
 export const actionLabel = (action: string | undefined) => (action === 'rearm' ? 're-arm' : action === 'extract' ? 'learn' : (action ?? ''))
 
 // The bar's width, in twentieths (style.css has .w0 … .w20).
-const barClass = (score: number) => `w${Math.round(Math.min(1, Math.max(0, score)) * 20)}`
 
 // ---- Elements: createElement and textContent only ----
 
@@ -741,32 +761,79 @@ export function activityItem(line: ActivityLine, pickSession: (session: string) 
   return item
 }
 
-/** One Search hit: rank, project, score, text with the query words marked, tags and Open. */
-export function searchHit(hit: Hit, rank: number, query: string, open: (id: string, from?: HTMLElement) => void) {
-  const item = el('li', undefined, 'hit')
+/** The query words marked in `text`, appended to `into` as text and mark nodes. */
+function appendMarked(into: HTMLElement, text: string, query: string) {
+  for (const part of markParts(text, query)) into.append(part.mark ? el('mark', part.text) : document.createTextNode(part.text))
+}
+
+/** "6 Nov 2026 · never recalled" / "· 1 recall" / "· 14 recalls". */
+export function hitWhen(hit: Pick<Memory, 'timestamp' | 'recall_count'>): string {
+  const recalls = hit.recall_count > 0 ? `${hit.recall_count} ${hit.recall_count === 1 ? 'recall' : 'recalls'}` : 'never recalled'
+  return [longDay(hit.timestamp), recalls].filter(Boolean).join(' · ')
+}
+
+/**
+ * One Search hit (0.19.0): the rank over a score ring; a head with the kind, the owner chip, the reach, how it
+ * matched, and the date and recalls; the text with its lead and the query words marked; a foot saying what matched,
+ * the tags, Open and Map.
+ */
+export function searchHit(hit: Hit, rank: number, query: string, open: (id: string, from?: HTMLElement) => void, onMap?: (id: string) => void) {
+  const item = el('li', undefined, 'hit sh')
+  item.dataset.id = hit.id
+  item.setAttribute('tabindex', '0')
+  const side = el('div', undefined, 'sh-side')
+  const ring = el('span', undefined, `ring ${ringClass(hit.score)}`)
+  ring.title = `Score ${hit.score.toFixed(2)}`
+  ring.append(el('span', ringText(hit.score), 'ring-n mono'))
+  side.append(el('span', String(rank), 'sh-rank mono'), ring)
+  const body = el('div', undefined, 'sh-body')
   const head = el('div', undefined, 'hit-head')
-  const score = el('span', 'score ', 'score push-right muted small')
-  const bar = el('span', undefined, 'bar')
-  bar.append(el('span', undefined, `bar-fill ${barClass(hit.score)}`))
-  score.append(bar, el('span', hit.score.toFixed(2), 'mono'))
-  head.append(el('span', `#${rank}`, 'mono muted small'), project(hit.owner))
+  const kind = kindOf(hit.memory_type)
+  head.append(kindGlyph(hit.memory_type), el('span', kind === 'unknown' ? 'Memory' : kind[0]!.toUpperCase() + kind.slice(1), 'sh-kind'), project(hit.owner, 'project own'), reachMark(reachOf(hit)))
   const how = matchLabel(hit.matched)
   if (how !== '') head.append(el('span', how, `match-badge m-${hit.matched}`))
-  head.append(score)
+  head.append(el('span', hitWhen(hit), 'sh-when muted small'))
   const text = el('p', undefined, 'hit-text')
-  for (const part of markParts(hit.content, query)) text.append(part.mark ? el('mark', part.text) : document.createTextNode(part.text))
+  const { lead, rest } = leadOf(hit.content)
+  if (lead !== '') {
+    const strong = el('span', undefined, 'lead')
+    appendMarked(strong, lead, query)
+    text.append(strong)
+  }
+  appendMarked(text, rest, query)
   if (hit.truncated) text.append(el('span', ' …', 'muted'))
   const foot = el('div', undefined, 'hit-foot')
-  const openButton = el('button', 'Open', 'link push-right')
+  const words = matchedWords(hit.content, query)
+  const why = el('span', undefined, 'sh-why muted small')
+  if (words.length > 0) {
+    why.append(document.createTextNode('Matched '))
+    words.forEach((word, i) => {
+      if (i > 0) why.append(document.createTextNode(', '))
+      why.append(el('span', word, 'sh-word'))
+    })
+    if (hit.matched === 'both') why.append(document.createTextNode(' · and by meaning'))
+  } else why.append(document.createTextNode(hit.matched === 'meaning' ? 'No word match; close in meaning' : 'Matched by keyword'))
+  const openButton = el('button', 'Open', 'btn small')
   openButton.type = 'button'
   openButton.addEventListener('click', () => open(hit.id, openButton))
-  // The whole card opens the memory too; its tag chips keep their own job.
+  foot.append(why, chips(tagsOfMemory(hit).slice(0, ROW_TAGS)))
+  const actions = el('span', undefined, 'sh-actions')
+  actions.append(openButton)
+  if (onMap) {
+    const mapButton = el('button', 'Map', 'btn small')
+    mapButton.type = 'button'
+    mapButton.title = 'Show this memory on the map'
+    mapButton.addEventListener('click', () => onMap(hit.id))
+    actions.append(mapButton)
+  }
+  foot.append(actions)
+  // The whole card opens the memory too; its buttons keep their own job.
   item.addEventListener('click', event => {
     if ((event.target as HTMLElement | null)?.closest?.('button')) return
     open(hit.id, openButton)
   })
-  foot.append(chips(tagsOfMemory(hit)), el('span', `${hit.recall_count} recalls`, 'muted small'), openButton)
-  item.append(head, text, foot)
+  body.append(head, text, foot)
+  item.append(side, body)
   return item
 }
 
@@ -1134,6 +1201,7 @@ export function forgetById(id: string, done: (error?: string) => void) {
       // Search: the forgotten hit leaves the list.
       if (searchHits.some(hit => hit.id === id)) {
         searchHits = searchHits.filter(hit => hit.id !== id)
+        drawSearchAside()
         drawHits(false)
       }
       done()
@@ -1537,7 +1605,7 @@ async function loadHealth() {
   for (const id of ['mem-owner', 'search-owner']) {
     const select = byId<HTMLSelectElement>(id)
     const chosen = select.value
-    select.replaceChildren(el('option', 'All projects'))
+    select.replaceChildren(el('option', id === 'search-owner' ? 'Every project' : 'All projects'))
     select.options[0]!.value = ''
     for (const { owner, count } of owners) {
       const option = el('option', `${ownerName(owner)} (${count})`)
@@ -1846,7 +1914,7 @@ async function openMemory(id: string, from?: HTMLElement) {
   const sheet = {
     title: 'Memory',
     // On the Memories tab it opens beside the list on a wide screen, so the list stays in view.
-    side: current === 'memories',
+    side: current === 'memories' || current === 'search',
     returnFocus: from ?? (() => [...byId('mem-rows').querySelectorAll<HTMLElement>('tr.row')].find(row => row.dataset.id === id) ?? null),
     onClose: () => {
       if (memories.selected === id) memories.selected = ''
@@ -2366,7 +2434,9 @@ export function wireActivity() {
 
 // ---- Search: one at a time ----
 
-const SEARCH_TIMEOUT_MS = 60_000
+// 0.19.0: 120 s (was 60). A cold Keyword + meaning search of every project loads the model once per project and
+// took over 60 s on a 117-memory store; the page stopped it before the engine answered.
+const SEARCH_TIMEOUT_MS = 120_000
 let searching: AbortController | null = null
 
 // The match mode: the server's capability (from /api/health, refreshed by each search reply),
@@ -2406,17 +2476,250 @@ function setEmbeddings(on: boolean) {
   if (document.getElementById('search-mode') !== null) drawMode()
 }
 
+// 0.19.0: the sort and the facet filter (both on the page, no new search), the reply's time and the owner searched.
+let searchSort: HitSort = 'rank'
+let searchFacet: { facet: HitFacet; value: string } | null = null
+let searchMs: number | undefined
+let searchOwnerAsked = ''
+let searchRecent: string[] = []
+
+/** The hits as shown: the facet filter, then the sort. */
+function visibleHits(): Hit[] {
+  const filtered = searchFacet === null ? searchHits : searchHits.filter(hit => facetValue(hit, searchFacet!.facet) === searchFacet!.value)
+  return sortHits(filtered, searchSort)
+}
+
+/** The line before the first weak hit (rank order only). */
+function weakCut() {
+  const cut = el('li', undefined, 'cut')
+  cut.setAttribute('role', 'separator')
+  cut.append(el('span', `below ${WEAK_SCORE.toFixed(2)}: weak matches Claude still receives`))
+  return cut
+}
+
 // The first SHOW_FIRST hits, then SHOW_FIRST more for each press of Show more.
 function drawHits(more: boolean) {
   const results = byId('search-results')
-  // A hit opens in the bottom sheet, on this tab.
+  // A hit opens on this tab: beside the list on a wide screen, else in the bottom sheet.
   const open = (id: string, from?: HTMLElement) => void openMemory(id, from)
+  const list = visibleHits()
+  const rank = new Map(searchHits.map((hit, i) => [hit.id, i + 1]))
   const from = more ? searchShown : 0
-  searchShown = Math.min(searchHits.length, more ? searchShown + SHOW_FIRST : SHOW_FIRST)
-  const rows = searchHits.slice(from, searchShown).map((hit, i) => searchHit(hit, from + i + 1, searchQuery, open))
+  searchShown = Math.min(list.length, more ? searchShown + SHOW_FIRST : SHOW_FIRST)
+  const rows: HTMLElement[] = []
+  list.slice(from, searchShown).forEach((hit, i) => {
+    const at = from + i
+    const before = list[at - 1]
+    if (searchSort === 'rank' && hit.score < WEAK_SCORE && (at === 0 ? false : before !== undefined && before.score >= WEAK_SCORE)) rows.push(weakCut())
+    rows.push(searchHit(hit, rank.get(hit.id) ?? at + 1, searchQuery, open, showOnMap))
+  })
   if (more) results.append(...rows)
   else results.replaceChildren(...rows)
-  byId('search-more').hidden = searchShown >= searchHits.length
+  byId('search-more').hidden = searchShown >= list.length
+  drawSearchHead()
+}
+
+/** The result header: count, query, mode and time, and the three sort buttons. */
+function drawSearchHead() {
+  const head = byId('search-head')
+  const note = byId('search-note')
+  head.hidden = searchHits.length === 0
+  note.hidden = searchHits.length === 0
+  if (searchHits.length === 0) return
+  const list = visibleHits()
+  let text = resultHead(searchHits.length, searchQuery, noteMode, searchMs)
+  if (searchFacet !== null) text += ` · ${list.length} shown`
+  else if (searchShown < list.length) text += ` · showing ${searchShown}`
+  if (noteSkipped > 0) text += ` · the ${noteSkipped} smallest projects were not searched`
+  note.textContent = text
+  const box = byId('search-sort')
+  const sorts: [HitSort, string][] = [
+    ['rank', 'Rank'],
+    ['newest', 'Newest'],
+    ['recalled', 'Most recalled'],
+  ]
+  box.replaceChildren(
+    ...sorts.map(([sort, label]) => {
+      const button = el('button', label, 'seg-btn')
+      button.type = 'button'
+      button.setAttribute('aria-pressed', String(sort === searchSort))
+      button.addEventListener('click', () => {
+        searchSort = sort
+        drawHits(false)
+      })
+      return button
+    }),
+  )
+}
+
+const KIND_WORD = (kind: string) => (kind === 'unknown' ? 'Unknown' : kind[0]!.toUpperCase() + kind.slice(1))
+
+/** The aside: hits counted by project, kind and how they matched; a click filters the list (a second click clears). */
+function drawSearchAside() {
+  const aside = byId('search-aside')
+  aside.hidden = searchHits.length === 0
+  if (searchHits.length === 0) return
+  const pick = (facet: HitFacet, value: string) => () => {
+    searchFacet = searchFacet?.facet === facet && searchFacet.value === value ? null : { facet, value }
+    drawSearchAside()
+    drawHits(false)
+  }
+  const on = (facet: HitFacet, value: string) => searchFacet?.facet === facet && searchFacet.value === value
+  const owners = countFacet(searchHits, 'owner')
+  const most = owners[0]?.[1] ?? 1
+  byId('search-facet-owner').replaceChildren(
+    ...owners.map(([owner, count]) => {
+      const row = facetChip(project(owner, 'project own'), count, on('owner', owner), pick('owner', owner), 'sr-owner')
+      const bar = el('span', undefined, 'sr-bar')
+      bar.append(el('span', undefined, `sr-fill w${Math.max(1, Math.round((count / most) * 10))}`))
+      row.insertBefore(bar, row.lastChild)
+      return row
+    }),
+  )
+  byId('search-facet-kind').replaceChildren(
+    ...countFacet(searchHits, 'kind').map(([kind, count]) => {
+      const label = el('span', undefined, 'facet-kind')
+      label.append(kindGlyph(kind), el('span', KIND_WORD(kind)))
+      return facetChip(label, count, on('kind', kind), pick('kind', kind), 'k')
+    }),
+  )
+  const matched = new Map(countFacet(searchHits, 'matched'))
+  byId('search-facet-matched').replaceChildren(
+    ...(['both', 'meaning', 'keyword'] as const).map(how => facetChip(matchLabel(how), matched.get(how) ?? 0, on('matched', how), pick('matched', how), 'm')),
+  )
+  byId('search-facet-clear').hidden = searchFacet === null
+}
+
+/** The Search tab's states: before a search, nothing found, searching, or a failure. '' clears it. */
+function drawSearchState(state: '' | 'before' | 'none' | 'loading' | 'error', message = '') {
+  const box = byId('search-state')
+  if (state === '') {
+    box.replaceChildren()
+    return
+  }
+  const card = el('div', undefined, `st st-${state}`)
+  const button = (label: string, act: () => void, primary = false) => {
+    const b = el('button', label, primary ? 'btn primary small' : 'btn small')
+    b.type = 'button'
+    b.addEventListener('click', act)
+    return b
+  }
+  if (state === 'before') {
+    card.append(el('p', 'Ask in your own words', 'st-title'))
+    card.append(el('p', 'Pick a project under "As seen from" to see what Claude would receive there, or search every project.', 'muted small'))
+    const tries = searchRecent.length > 0 ? searchRecent : ['decisions about the setup', 'writing style', 'what is the project about']
+    const row = el('div', undefined, 'chips')
+    for (const query of tries) row.append(button(query, () => searchFor(query)))
+    card.append(row)
+  } else if (state === 'none') {
+    const where = searchOwnerAsked ? ownerName(searchOwnerAsked) : 'every project'
+    card.append(el('p', `Nothing for “${searchQuery}” in ${where}`, 'st-title'))
+    const hints: string[] = []
+    if (searchMode === 'keyword') hints.push(embeddingsOn ? 'Keyword mode found no word match. Try Keyword + meaning.' : 'Keyword mode found no word match. Try other words.')
+    if (searchOwnerAsked) hints.push('Or search every project.')
+    if (noteSkipped > 0) hints.push(`The ${noteSkipped} smallest projects were not searched; pick one under "As seen from".`)
+    if (hints.length > 0) card.append(el('p', hints.join(' '), 'muted small'))
+    const row = el('div', undefined, 'chips')
+    if (searchMode === 'keyword' && embeddingsOn)
+      row.append(
+        button(
+          'Switch to Keyword + meaning',
+          () => {
+            searchMode = 'hybrid'
+            saveMode(prefStorage(), 'hybrid')
+            drawMode()
+            searchFor(searchQuery)
+          },
+          true,
+        ),
+      )
+    if (searchOwnerAsked)
+      row.append(
+        button('Every project', () => {
+          byId<HTMLSelectElement>('search-owner').value = ''
+          drawSeen()
+          searchFor(searchQuery)
+        }),
+      )
+    if (row.children.length > 0) card.append(row)
+  } else if (state === 'loading') {
+    card.setAttribute('aria-busy', 'true')
+    card.append(el('p', 'Asking the engine…', 'st-title'), el('p', searchMode === 'hybrid' ? 'Meaning search loads its model on the first query, which can take a while.' : 'Searching each project as itself.', 'muted small'))
+    for (const width of ['w9', 'w7', 'w8']) card.append(el('div', undefined, `skel ${width}`))
+  } else {
+    card.append(el('p', message, 'st-title is-error'))
+  }
+  box.replaceChildren(card)
+}
+
+/** The line under the query: what "As seen from" means for the project picked. */
+function drawSeen() {
+  const owner = byId<HTMLSelectElement>('search-owner').value
+  byId('search-seen').textContent = owner
+    ? `What Claude would receive in ${ownerName(owner)}: its own memories, plus the shared and global ones.`
+    : 'Every project: each project searched as itself, the best hits merged.'
+}
+
+/** The recent-query chips beside the line. */
+function drawRecent() {
+  const box = byId('search-recent')
+  if (searchRecent.length === 0) {
+    box.replaceChildren()
+    return
+  }
+  box.replaceChildren(
+    el('span', 'Recent:', 'muted small'),
+    ...searchRecent.map(query => {
+      const chip = el('button', query, 'chip-btn')
+      chip.type = 'button'
+      chip.addEventListener('click', () => searchFor(query))
+      return chip
+    }),
+  )
+}
+
+/** Puts `query` in the box and searches. */
+function searchFor(query: string) {
+  byId<HTMLInputElement>('search-query').value = query
+  void runSearch()
+}
+
+/** J/K move through the hits, Enter opens (the card's own key), M shows the focused one on the map; `/` on a tab with no find box of its own opens Search. */
+export function searchKey(event: KeyboardEvent) {
+  if (event.defaultPrevented || typing(event)) return
+  const key = event.key
+  if (key === '/' && current !== 'search' && current !== 'memories' && current !== 'map') {
+    event.preventDefault()
+    show('search')
+    byId<HTMLInputElement>('search-query').focus()
+    return
+  }
+  if (current !== 'search') return
+  if (key === '/') {
+    event.preventDefault()
+    byId<HTMLInputElement>('search-query').focus()
+    return
+  }
+  const cards = [...byId('search-results').querySelectorAll<HTMLElement>('li.sh')]
+  if (cards.length === 0) return
+  const at = cards.findIndex(card => card === document.activeElement)
+  if (key === 'j' || key === 'J' || key === 'k' || key === 'K') {
+    event.preventDefault()
+    const next = key.toLowerCase() === 'j' ? Math.min(cards.length - 1, at + 1) : Math.max(0, at === -1 ? 0 : at - 1)
+    cards[next]!.focus()
+    cards[next]!.scrollIntoView?.({ block: 'nearest' })
+    return
+  }
+  if (at === -1) return
+  const id = cards[at]!.dataset.id
+  if (!id) return
+  if (key === 'Enter') {
+    event.preventDefault()
+    void openMemory(id, cards[at])
+  } else if (key === 'm' || key === 'M') {
+    event.preventDefault()
+    showOnMap(id)
+  }
 }
 
 function wireSearch() {
@@ -2435,12 +2738,19 @@ function wireSearch() {
       drawMode()
     })
   }
-  byId('search-more').addEventListener('click', () => {
-    drawHits(true)
-    const total = searchHits.length
-    byId('search-note').textContent = countNote(searchShown, total, noteMode, noteSkipped)
+  byId('search-more').addEventListener('click', () => drawHits(true))
+  byId('search-owner').addEventListener('change', drawSeen)
+  byId('search-facet-clear').addEventListener('click', () => {
+    searchFacet = null
+    drawSearchAside()
+    drawHits(false)
   })
+  searchRecent = readRecent(prefStorage())
   drawMode()
+  drawSeen()
+  drawRecent()
+  drawSearchState('before')
+  document.addEventListener('keydown', searchKey)
 }
 
 // The mode and skipped count of the last reply, for the note that Show more rewrites.
@@ -2461,26 +2771,43 @@ async function runSearch() {
   // A search that hangs frees the form after a while.
   const timer = setTimeout(() => controller.abort(), SEARCH_TIMEOUT_MS)
   if (button) button.disabled = true
-  note.hidden = false
+  // The old hits go while the engine works; skeleton rows say it is busy.
+  searchHits = []
+  searchShown = 0
+  searchFacet = null
+  results.replaceChildren()
+  byId('search-more').hidden = true
+  drawSearchHead()
+  drawSearchAside()
+  drawSearchState('loading')
   note.textContent = 'Searching…'
+  searchRecent = pushRecent(prefStorage(), query)
+  drawRecent()
   try {
     const response = await api('/api/search', { method: 'POST', body: { query, ...(owner ? { owner } : {}), mode: searchMode }, signal: controller.signal })
-    const body = await readJson<{ results?: Hit[]; skipped?: number; mode?: string; embeddings?: boolean; error?: string }>(response)
+    const body = await readJson<{ results?: Hit[]; skipped?: number; mode?: string; embeddings?: boolean; ms?: number; error?: string }>(response)
     if (!response.ok) throw new Error(body.error ?? `the server answered ${response.status}`)
     if (typeof body.embeddings === 'boolean') setEmbeddings(body.embeddings)
     searchHits = body.results ?? []
     searchQuery = query
+    searchOwnerAsked = owner
     noteMode = body.mode
     noteSkipped = body.skipped ?? 0
+    searchMs = typeof body.ms === 'number' ? body.ms : undefined
+    drawSearchState(searchHits.length === 0 ? 'none' : '')
+    drawSearchAside()
     drawHits(false)
-    note.textContent = countNote(searchShown, searchHits.length, noteMode, noteSkipped)
+    // Screen readers hear the count (the header is the live region).
+    if (searchHits.length === 0) note.textContent = countNote(0, 0, noteMode, noteSkipped)
   } catch (err) {
     if (err instanceof Expired) return
     searchHits = []
     searchShown = 0
     byId('search-more').hidden = true
     results.replaceChildren()
-    note.textContent = controller.signal.aborted ? 'Search took too long and was stopped.' : `Search failed: ${failure(err)}`
+    drawSearchHead()
+    drawSearchAside()
+    drawSearchState('error', controller.signal.aborted ? 'Search took too long and was stopped.' : `Search failed: ${failure(err)}`)
   } finally {
     clearTimeout(timer)
     searching = null

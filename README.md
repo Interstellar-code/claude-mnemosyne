@@ -299,7 +299,14 @@ The header shows how many memories are in how many projects, and a connection pi
 
   A memory opens beside the list on a wide screen (1200 px and up), else in a panel from the bottom. The panel holds the kind, owner and reach, the text, four numbers (importance, recalls, saved, state), the reach in words, Edit, and a Forget button that asks before it deletes. Knowledge and Search open memories in the same panel. `GET /api/memories` takes `reach=all|shared|project` and `kind=`, and returns `facets` (the counts by reach and by kind under the other filters) and each row's `memory_type`.
 - **Activity:** the activity log, live, one plain sentence per call, with the app and the session that made it; click a line for its details (see [Activity log](#activity-log)).
-- **Search:** the same recall Claude uses, with scores and the top 20 results. Match by Keyword, or Keyword + meaning when embeddings are on; each result says whether it matched on words, meaning or both. Searching here does not change any memory's recall count.
+- **Search:** the same recall Claude uses, top 20, in rank order. Searching here does not change any memory's recall count.
+  - **As seen from** a project shows what Claude would receive there: its own memories plus the shared and global ones. Every project searches each project as itself.
+  - **Match by** Keyword, or Keyword + meaning when embeddings are on. Your last five queries show as chips.
+  - **Each hit** shows its rank and score ring, the kind, project chip and reach, whether it matched on words, meaning or both, the date and recalls, the text with the query words marked, and Open and Map. A dashed line marks where scores drop under 0.50.
+  - **Sort** by rank, newest or most recalled, and filter by project, kind or match type from the side panel, without searching again.
+  - **Keys:** `/` on most tabs opens Search; J and K move, Enter opens, M shows the hit on the map.
+
+Every tab but the Map shares one content width.
 - **Knowledge:** the facts, preferences, instructions, dated events and relations that extraction pulled out of your memories (see [The Knowledge and Health tabs](#the-knowledge-and-health-tabs)).
 - **Review:** memories to look at again: never recalled, no tags, not recalled in 30 days, or low importance, then Retire candidates with their reasons and a Not live list with Restore. Each row has Open and a one-at-a-time Retire; Forget is not here.
 - **Health:** how much of your memory is used, how much has never been recalled, and which features are switched on.

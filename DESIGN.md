@@ -1603,6 +1603,17 @@ C10.3: the engine's trigger `trim_validations_to_3` keeps only the newest 3 `mem
 
 On the solar-system map a plain folder (no git repo) with at least `map.stationMin` live memories is a space station and one with fewer a starship (default 50, range 2 to 1000, applies now). The galaxy reply carries the value. Git repos are always planets.
 
+### The Search tab (0.19.0)
+
+Third step of the tab polish (design proposal `tabs-after/NOTES-memories-search-knowledge.md`, Search items 1 to 7), reusing the 0.18.0 groundwork (owner chip, `kindGlyph`, `reachMark`).
+- **Width.** `.wide` is the one content width (max 1440 px, centred) on every tab but the Map; `.narrow` is no longer used by a tab.
+- **Owner semantics, checked.** `POST /api/search` with `owner` runs the engine's recall as that owner, which returns that owner's memories plus the shared (scope `global`) and global-owner ones: what Claude in that project would receive. So the picker is labelled "As seen from", and no "Include global" switch is needed. Without `owner` the server searches up to `SEARCH_OWNERS` (10) owners, each as itself, and merges the hits (`skipped` counts the rest).
+- **Kinds.** `withKinds(db, hits)` adds `memory_type` from `working_memory` for the hit ids (one query; null when unknown, and an older store without the column gives null). The reply also carries `ms`.
+- **Page helpers** (`ui/search-mode.ts`, tested without a page): `readRecent` / `pushRecent` (`mnemosyne.search.recent`, at most 5, newest first, case-insensitive once; blocked storage keeps the query for the page only), `ringClass` (`s0`–`s10`, the score in tenths; each class is a `conic-gradient` in `style.css`), `ringText`, `sortHits` (rank, newest, recalled; a copy, the engine order kept), `countFacet` / `facetValue` (owner, kind with `unknown`, matched with `keyword` for older servers), `matchedWords` and `resultHead`. `WEAK_SCORE` is 0.50; `drawHits` puts `li.cut` before the first hit under it, in rank order only.
+- **States.** `drawSearchState` draws `.st` cards for before, none (switch to Keyword + meaning when embeddings are on; Every project when a project was picked), loading (three `.skel` lines, still under reduced motion) and error. The sort and facet filter redraw from the hits in memory; a forget elsewhere removes the hit and recounts the panel.
+- **Keys.** `searchKey` on `document`: `/` from a tab without its own find box (not Map, not Memories) shows Search and focuses the query; on Search, `/` focuses the query, J/K move focus over `li.sh`, Enter opens and M calls `showOnMap`. Typing and modifier keys are ignored.
+- **Timeout.** `SEARCH_TIMEOUT_MS` is 120 s (was 60 s). The server's own engine time limit still applies: a meaning search of every project that waits behind other engine calls can end with "The engine failed" (exit 143), which is engine speed, not the page.
+
 ### The Memories tab (0.18.0)
 
 Second step of the tab polish (design proposal `tabs-after/NOTES-memories-search-knowledge.md`, groundwork G1 to G3 and Memories items 1 to 12). Groundwork in `ui/app.ts`, for Search and Knowledge to reuse:
