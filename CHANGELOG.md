@@ -2,6 +2,20 @@
 
 Newest first. Each release is tagged `vX.Y.Z` on GitHub; the README and DESIGN.md describe the contracts.
 
+## 0.20.0 (Knowledge tab polish)
+
+The fourth step of the tab polish, following the design proposal's Knowledge notes.
+
+1. **Four tiles:** Items (and how many memories they came from, with a count per kind), Recalled this week, Gone quiet (amber when not 0) and Never used. The design's weekly spark is left out: the server keeps no weekly series.
+2. **Kind tabs** with the memory-kind glyphs and an underline, instead of a fifth set of colours; keys 1 to 5 switch kind.
+3. **Quick states:** All / Gone quiet / Never used, with counts under the other filters, replace the lone "Never used" toggle. Gone quiet means the source memory was recalled, but not in the last 30 days.
+4. **Grouped by project › topic** by default. A project row shows the owner chip, the reach (every project for global, shared when its memories are shared), the count, the recall range and how recently it was used, and its topics when folded. A topic row follows, then the items. Click, Enter or ←/→ folds a project; the first three are open. **Flat** keeps the table as before; the choice is kept in this browser.
+5. **Top topics** as chips with counts; a click filters to that topic.
+6. **A row opens its source:** a click or Enter shows the memory the item was mined from (kind, project, reach, saved date, its text), the other items mined from it, and Open memory and Show on map. Open and Map stay in the row. O opens the memory, M the map, J and K move, `/` finds, Esc closes the source.
+7. **"Used" is now "Source recalls"**, since it counts the source memory's recalls; the bar is scaled to the most in the list.
+8. **Shapes:** a relation reads as subject, link and object, with its confidence as five pips (the number stays for screen readers); an instruction's state is an Active or Retired pill. A project with nothing of the kind says so and offers its memories.
+9. **Server:** `GET /api/knowledge` adds each item's source `scope`, and a relation's `subject`, `predicate` and `object`. No setting or engine change.
+
 ## 0.19.0 (Search tab polish, one width for every tab)
 
 The third step of the tab polish, following the design proposal's Search notes.

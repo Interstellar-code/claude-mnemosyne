@@ -17,7 +17,40 @@
 import { createMap, type MapView } from './map'
 import { fragmentAfterToken } from './map-state'
 import { createSolarScene } from './solar'
-import { extractionState, hasStatus, itemHead, NO_FILTER, neverUsedText, ownersOf, summaryLine, kindTabs, notice as knowledgeNotice, dotClass, ownerColour, ownerColours, parseKnowledge, tableRows, total as knowledgeTotal, type KnowledgeData, type KnowledgeFilter, type KnowledgeSort, type KnowledgeHost, type KnowledgeKind } from './knowledge'
+import {
+  columnsOf,
+  dotClass,
+  extractionState,
+  groupedRows,
+  groupRows,
+  hasStatus,
+  itemHead,
+  kindCount,
+  KINDS as KNOWLEDGE_KINDS,
+  kindTabs,
+  kpiTiles,
+  NO_FILTER,
+  notice as knowledgeNotice,
+  ownerColour,
+  ownerColours,
+  ownersOf,
+  parseKnowledge,
+  quickCounts,
+  rowsOf,
+  sourcePanel,
+  STALE_DAYS,
+  stateOf,
+  tableRows,
+  topTopics,
+  total as knowledgeTotal,
+  withState,
+  type KnowledgeData,
+  type KnowledgeFilter,
+  type KnowledgeHost,
+  type KnowledgeKind,
+  type KnowledgeSort,
+  type QuickState,
+} from './knowledge'
 import { chartBars, chartText, coverageRows, dayBars, kpiTiles as healthKpiTiles, parseHealth, projectRows as healthProjectRows, storageList, storageSummary, tableFilterButtons, type HealthData, type HealthHost, type TableFilter } from './health'
 import { candidateRow, filterButtons, liveRows, nearPartner, notLiveRow, parseQueue, parseReview, queueText, reviewCounts, reviewList, reviewRow, reviewText, type Queue, type ReviewData, type ReviewFilter, type ReviewHost, type RowFilter } from './review'
 import { buildForm, type FormMemory } from './form'
@@ -1116,12 +1149,240 @@ function tabStatus(name: 'know' | 'review' | 'vocab' | 'health' | 'settings', te
   line.hidden = text === ''
   byId(`${name}-retry`).hidden = !error
 }
-const knowledgeHost: KnowledgeHost = { project: owner => project(owner, 'project'), showOnMap, open: (id, row) => void openMemory(id, row), now: () => Date.now() }
+// 0.20.0: the rows grouped by project › topic (the default) or flat, kept in this browser; the folded projects per
+// kind (first seen: all but the first three folded); the item whose source panel is open, and the source memories read.
+export type KnowledgeGroup = 'project' | 'flat'
 
-/** Only the table body: the find box redraws it per keystroke. */
+/** A value for an attribute selector: CSS.escape where the page has it, else quotes and backslashes escaped. */
+const cssValue = (value: string) => (typeof CSS !== 'undefined' && typeof CSS.escape === 'function' ? CSS.escape(value) : value.replace(/["\\]/g, '\\$&'))
+const KNOW_GROUP_KEY = 'mnemosyne.knowledge.group'
+const knowledgeUi = {
+  group: 'project' as KnowledgeGroup,
+  folded: new Map<KnowledgeKind, Set<string>>(),
+  expanded: '',
+  sources: new Map<string, Memory | null | 'loading' | 'error'>(),
+}
+
+function readKnowledgeGroup(): KnowledgeGroup {
+  try {
+    return prefStorage()?.getItem(KNOW_GROUP_KEY) === 'flat' ? 'flat' : 'project'
+  } catch {
+    return 'project'
+  }
+}
+
+/** The source memory of an expanded row: read once, then from the cache; the panel redraws when it arrives. */
+function knowledgeSource(id: string): Memory | null | 'loading' | 'error' {
+  const known = knowledgeUi.sources.get(id)
+  if (known !== undefined) return known
+  knowledgeUi.sources.set(id, 'loading')
+  void (async () => {
+    try {
+      const response = await api(`/api/memories/${encodeURIComponent(id)}`)
+      knowledgeUi.sources.set(id, response.status === 404 ? null : response.ok ? await readJson<Memory>(response) : 'error')
+    } catch (err) {
+      if (err instanceof Expired) return
+      knowledgeUi.sources.set(id, 'error')
+    }
+    if (current === 'knowledge') drawKnowledgeRows()
+  })()
+  return 'loading'
+}
+
+const knowledgeHost: KnowledgeHost & { reachOf: (owner: string, scope: string | null) => HTMLElement | null; saved: (value: string | null | undefined) => string } = {
+  project: owner => project(owner, 'project own'),
+  showOnMap,
+  open: (id, row) => void openMemory(id, row),
+  now: () => Date.now(),
+  glyph: kind => kindGlyph(kind),
+  reach: reach => reachMark(reach),
+  reachOf: (owner, scope) => (owner === 'global' ? reachMark('all') : scope === 'global' ? reachMark('shared') : null),
+  saved: value => longDay(value),
+  toggle: id => {
+    knowledgeUi.expanded = knowledgeUi.expanded === id ? '' : id
+    drawKnowledgeRows()
+    // Keep the keyboard on the row that was toggled.
+    const row = byId('know-rows').querySelector?.<HTMLElement>(`tr.row[data-id="${cssValue(id)}"]`)
+    row?.focus?.()
+  },
+  expanded: () => knowledgeUi.expanded,
+  detail: row => {
+    const data = knowledgeView.data!
+    const source = knowledgeSource(row.memory)
+    return sourcePanel(row, data, source, knowledgeHost, () => byId('know-rows').querySelector?.<HTMLElement>(`tr.row[data-id="${cssValue(row.id)}"]`) ?? undefined)
+  },
+}
+
+/** The folded projects of the current kind; the first time, every group after the first three. */
+function foldedOf(data: KnowledgeData): Set<string> {
+  let set = knowledgeUi.folded.get(knowledgeView.kind)
+  if (set === undefined) {
+    const owners = groupRows(rowsOf(data, knowledgeView.kind, Date.now(), knowledgeView.filter)).map(group => group.owner)
+    set = new Set(owners.slice(3))
+    knowledgeUi.folded.set(knowledgeView.kind, set)
+  }
+  return set
+}
+
+/** The table body, the footer count and the empty state; the find box redraws only this, so it keeps focus. */
 function drawKnowledgeRows() {
   const data = knowledgeView.data
-  if (data !== null) byId('know-rows').replaceChildren(...tableRows(data, knowledgeView.kind, knowledgeHost, knowledgeView.filter))
+  if (data === null) return
+  const kind = knowledgeView.kind
+  const filter = knowledgeView.filter
+  const grouped = knowledgeUi.group === 'project'
+  const rows = grouped
+    ? groupedRows(data, kind, knowledgeHost, filter, foldedOf(data), owner => {
+        const set = foldedOf(data)
+        if (set.has(owner)) set.delete(owner)
+        else set.add(owner)
+        drawKnowledgeRows()
+        byId('know-rows').querySelector?.<HTMLElement>(`tr.grp[data-owner="${cssValue(owner)}"]`)?.focus?.()
+      })
+    : tableRows(data, kind, knowledgeHost, filter)
+  // A project picked that has nothing of this kind: say so, and offer its memories.
+  const shown = rowsOf(data, kind, Date.now(), filter).length
+  if (shown === 0 && filter.owner !== '' && data.items[kind].every(item => item.owner !== filter.owner)) {
+    const card = el('div', undefined, 'know-empty')
+    card.append(el('p', `Nothing mined yet for ${ownerName(filter.owner)}`, 'st-title'))
+    card.append(el('p', `Knowledge is mined when a memory is saved. ${ownerName(filter.owner)} has no ${KINDS_OF[kind]} yet.`, 'muted small'))
+    const go = el('button', `Show memories in ${ownerName(filter.owner)}`, 'btn small')
+    go.type = 'button'
+    go.addEventListener('click', () => {
+      show('memories')
+      byId<HTMLSelectElement>('mem-owner').value = filter.owner
+      void loadMemories()
+    })
+    card.append(go)
+    const tr = el('tr')
+    const td = el('td')
+    td.colSpan = columnsOf(kind)
+    td.append(card)
+    tr.append(td)
+    byId('know-rows').replaceChildren(tr)
+  } else byId('know-rows').replaceChildren(...rows)
+  const table = byId('know-table')
+  table.className = grouped ? 'table know-table kt-grouped' : 'table know-table'
+  byId('know-topic-head').hidden = grouped
+  byId('know-project-head').hidden = grouped
+  const owners = new Set(rowsOf(data, kind, Date.now(), filter).map(row => row.owner)).size
+  byId('know-foot').textContent = `${kindCount(kind, shown)} in ${owners} ${owners === 1 ? 'project' : 'projects'}${shown < data.items[kind].length ? ` (of ${data.items[kind].length})` : ''}`
+  drawKnowledgeStates(data)
+}
+
+const KINDS_OF: Record<KnowledgeKind, string> = { fact: 'facts', preference: 'preferences', instruction: 'instructions', timeline: 'events', relation: 'relations' }
+
+/** The All / Gone quiet / Never used control with counts under the other filters. */
+function drawKnowledgeStates(data: KnowledgeData) {
+  const counts = quickCounts(data.items[knowledgeView.kind], knowledgeView.filter, Date.now())
+  const now = stateOf(knowledgeView.filter)
+  const states: [QuickState, string, string][] = [
+    ['all', 'All', 'Every item'],
+    ['quiet', 'Gone quiet', `Items whose memory was recalled, but not in the last ${STALE_DAYS} days`],
+    ['never', 'Never used', 'Items whose memory was never recalled'],
+  ]
+  byId('know-never').replaceChildren(
+    ...states.map(([state, label, title]) => {
+      const button = el('button', undefined, 'seg-btn')
+      button.type = 'button'
+      button.title = title
+      button.setAttribute('aria-pressed', String(state === now))
+      button.append(el('span', label), el('span', ` ${counts[state]}`, 'n'))
+      button.addEventListener('click', () => {
+        knowledgeView.filter = withState(knowledgeView.filter, state)
+        knowledgeUi.expanded = ''
+        drawKnowledgeRows()
+      })
+      return button
+    }),
+  )
+}
+
+/** The four tiles: items, recalled this week, gone quiet (amber), never used. */
+function drawKnowledgeTiles(data: KnowledgeData) {
+  const t = kpiTiles(data, Date.now())
+  const tile = (label: string, value: string, words: string, help: string, className = '') => {
+    const box = el('div', undefined, `kpi ${className}`.trim())
+    box.append(el('div', label, 'kpi-label'))
+    const line = el('div', undefined, 'kpi-line')
+    line.append(el('span', value, 'kpi-n'), el('span', words, 'kpi-words'))
+    box.append(line, el('div', help, 'kpi-help'))
+    return box
+  }
+  byId('know-summary').replaceChildren(
+    tile('Items', t.items, `from ${t.memories} ${t.memories === 1 ? 'memory' : 'memories'}`, t.perKind),
+    tile('Recalled this week', String(t.week), 'items whose memory was recalled', 'In the last 7 days.'),
+    tile('Gone quiet', String(t.quiet), `last used ${STALE_DAYS}+ days ago`, 'Recalled before, not lately.', t.quiet > 0 ? 'is-warn' : ''),
+    tile('Never used', String(t.never), 'memory never recalled', 'Pick Never used to list them.'),
+  )
+}
+
+/** The top topics of this kind (under the project filter) as chips; a click filters by that topic. */
+function drawKnowledgeTopics(data: KnowledgeData) {
+  const box = byId('know-topics')
+  const topics = topTopics(data.items[knowledgeView.kind], knowledgeView.filter.owner)
+  const picked = knowledgeView.filter.topic ?? ''
+  if (topics.length === 0) {
+    box.replaceChildren()
+    return
+  }
+  const chip = (topic: string, count: number) => {
+    const button = el('button', undefined, 'chip-btn facet')
+    button.type = 'button'
+    button.setAttribute('aria-pressed', String(topic === picked))
+    button.append(el('span', topic), el('span', String(count), 'n'))
+    button.addEventListener('click', () => {
+      knowledgeView.filter.topic = picked === topic ? '' : topic
+      drawKnowledgeTopics(data)
+      drawKnowledgeRows()
+    })
+    return button
+  }
+  const shown = topics.slice(0, 7)
+  // A topic picked from further down stays visible.
+  if (picked !== '' && !shown.some(([topic]) => topic === picked)) {
+    const at = topics.find(([topic]) => topic === picked)
+    if (at) shown.push(at)
+  }
+  box.replaceChildren(
+    el('span', 'Top topics', 'facet-label'),
+    ...shown.map(([topic, count]) => chip(topic, count)),
+    ...(topics.length > shown.length ? [el('span', `+ ${topics.length - shown.length} more (use Find)`, 'muted small')] : []),
+  )
+}
+
+/** The Project › topic / Flat control. */
+function drawKnowledgeGroup() {
+  const choices: [KnowledgeGroup, string][] = [
+    ['project', 'Project › topic'],
+    ['flat', 'Flat'],
+  ]
+  byId('know-group').replaceChildren(
+    ...choices.map(([group, label]) => {
+      const button = el('button', label, 'seg-btn')
+      button.type = 'button'
+      button.setAttribute('aria-pressed', String(group === knowledgeUi.group))
+      button.addEventListener('click', () => {
+        knowledgeUi.group = group
+        try {
+          prefStorage()?.setItem(KNOW_GROUP_KEY, group)
+        } catch {
+          // storage is a convenience only
+        }
+        drawKnowledgeGroup()
+        drawKnowledgeRows()
+      })
+      return button
+    }),
+  )
+}
+
+/** Switches the kind (tabs and keys 1 to 5). */
+function pickKnowledgeKind(kind: KnowledgeKind) {
+  knowledgeView.kind = kind
+  knowledgeView.filter.topic = ''
+  knowledgeUi.expanded = ''
+  drawKnowledge()
 }
 
 export function drawKnowledge() {
@@ -1134,14 +1395,8 @@ export function drawKnowledge() {
   const box = byId('know-notice')
   box.hidden = note === null
   box.replaceChildren(...(note === null ? [] : [el('strong', note.title), el('span', note.body)]))
-  byId('know-tabs').replaceChildren(
-    ...kindTabs(data, knowledgeView.kind, kind => {
-      knowledgeView.kind = kind
-      drawKnowledge()
-    }),
-  )
-  byId('know-summary').replaceChildren(...summaryLine(data, Date.now()))
-  byId('know-never').textContent = neverUsedText(data, Date.now())
+  byId('know-tabs').replaceChildren(...kindTabs(data, knowledgeView.kind, pickKnowledgeKind, kind => kindGlyph(kind)))
+  drawKnowledgeTiles(data)
   // The toolbar: the project select lists the owners present (the choice is kept while it is still there).
   const filter = knowledgeView.filter
   const ownerSelect = byId<HTMLSelectElement>('know-owner')
@@ -1151,11 +1406,55 @@ export function drawKnowledge() {
   ownerSelect.value = filter.owner
   byId<HTMLSelectElement>('know-sort').value = filter.sort
   byId<HTMLInputElement>('know-find').value = filter.text
-  byId('know-never').setAttribute('aria-pressed', String(filter.neverUsed))
   byId('know-item-head').textContent = itemHead(knowledgeView.kind)
   byId('know-status-head').hidden = !hasStatus(knowledgeView.kind)
-  byId('know-rows').replaceChildren(...tableRows(data, knowledgeView.kind, knowledgeHost, filter))
+  drawKnowledgeGroup()
+  drawKnowledgeTopics(data)
+  drawKnowledgeRows()
   byId('know-body').hidden = false
+}
+
+/** The tab's keys: 1 to 5 switch kind, `/` finds, J/K move over rows and groups, O opens the memory, M the map, Esc closes the source. */
+export function knowledgeKey(event: KeyboardEvent) {
+  if (current !== 'knowledge' || event.defaultPrevented || typing(event) || knowledgeView.data === null) return
+  const key = event.key
+  if (/^[1-5]$/.test(key)) {
+    event.preventDefault()
+    pickKnowledgeKind(KNOWLEDGE_KINDS[Number(key) - 1]!.kind)
+    return
+  }
+  if (key === '/') {
+    event.preventDefault()
+    byId<HTMLInputElement>('know-find').focus()
+    return
+  }
+  if (key === 'Escape' && knowledgeUi.expanded !== '') {
+    const id = knowledgeUi.expanded
+    knowledgeUi.expanded = ''
+    drawKnowledgeRows()
+    byId('know-rows').querySelector?.<HTMLElement>(`tr.row[data-id="${cssValue(id)}"]`)?.focus?.()
+    return
+  }
+  const rows = [...byId('know-rows').querySelectorAll<HTMLElement>('tr.row, tr.grp')]
+  if (rows.length === 0) return
+  const at = rows.findIndex(row => row === document.activeElement)
+  if (key === 'j' || key === 'J' || key === 'k' || key === 'K') {
+    event.preventDefault()
+    const next = key.toLowerCase() === 'j' ? Math.min(rows.length - 1, at + 1) : Math.max(0, at === -1 ? 0 : at - 1)
+    rows[next]!.focus()
+    rows[next]!.scrollIntoView?.({ block: 'nearest' })
+    return
+  }
+  const row = at === -1 ? undefined : rows[at]
+  const item = row?.dataset.id ? KNOWLEDGE_KINDS.flatMap(({ kind }) => knowledgeView.data!.items[kind]).find(entry => entry.id === row.dataset.id) : undefined
+  if (!item || item.memory === '') return
+  if (key === 'o' || key === 'O') {
+    event.preventDefault()
+    void openMemory(item.memory, row)
+  } else if (key === 'm' || key === 'M') {
+    event.preventDefault()
+    showOnMap(item.memory)
+  }
 }
 
 export async function loadKnowledge() {
@@ -1577,10 +1876,18 @@ export function wireKnowledgeHealth() {
     // Redraw only the table, so the find box keeps focus while typing.
     drawKnowledgeRows()
   })
-  byId('know-never').addEventListener('click', () => {
-    knowledgeView.filter.neverUsed = !knowledgeView.filter.neverUsed
-    drawKnowledge()
+  byId('know-find').addEventListener('keydown', event => {
+    if ((event as KeyboardEvent).key !== 'Escape') return
+    const input = byId<HTMLInputElement>('know-find')
+    if (input.value !== '') {
+      input.value = ''
+      knowledgeView.filter.text = ''
+      drawKnowledgeRows()
+    } else input.blur()
   })
+  knowledgeUi.group = readKnowledgeGroup()
+  // Optional call: the test stand-in document has no listeners.
+  document.addEventListener?.('keydown', knowledgeKey)
   byId('health-retry').addEventListener('click', () => void loadHealthReport())
   byId('settings-retry').addEventListener('click', () => void loadSettings())
   byId<HTMLInputElement>('settings-filter').addEventListener('input', () => {

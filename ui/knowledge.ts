@@ -11,13 +11,20 @@ import { buildGalaxy, GLOBAL_COLOUR, projectColour } from './map-state'
 
 export type KnowledgeKind = 'fact' | 'preference' | 'instruction' | 'timeline' | 'relation'
 
-export const KINDS: readonly { kind: KnowledgeKind; list: 'facts' | 'preferences' | 'instructions' | 'timelines' | 'relations'; label: string; head: string; colour: string }[] = [
-  { kind: 'fact', list: 'facts', label: 'Facts', head: 'Fact', colour: '#5DA9F5' },
-  { kind: 'preference', list: 'preferences', label: 'Preferences', head: 'Preference', colour: '#E86AA0' },
-  { kind: 'instruction', list: 'instructions', label: 'Instructions', head: 'Instruction', colour: '#3FAE59' },
-  { kind: 'timeline', list: 'timelines', label: 'Timeline', head: 'Event', colour: '#D99A1E' },
-  { kind: 'relation', list: 'relations', label: 'Relations', head: 'Relation', colour: '#9168E0' },
+// 0.20.0: no colour of their own (a fifth palette); each kind shows the memory-kind glyph of the same shape (`glyph`).
+export const KINDS: readonly { kind: KnowledgeKind; list: 'facts' | 'preferences' | 'instructions' | 'timelines' | 'relations'; label: string; head: string; glyph: string; one: string; many: string }[] = [
+  { kind: 'fact', list: 'facts', label: 'Facts', head: 'Fact', glyph: 'fact', one: 'fact', many: 'facts' },
+  { kind: 'preference', list: 'preferences', label: 'Preferences', head: 'Preference', glyph: 'preference', one: 'preference', many: 'preferences' },
+  { kind: 'instruction', list: 'instructions', label: 'Instructions', head: 'Instruction', glyph: 'instruction', one: 'instruction', many: 'instructions' },
+  { kind: 'timeline', list: 'timelines', label: 'Timeline', head: 'Event', glyph: 'event', one: 'event', many: 'events' },
+  { kind: 'relation', list: 'relations', label: 'Relations', head: 'Relation', glyph: 'relation', one: 'relation', many: 'relations' },
 ]
+
+/** "3 facts", "1 event". */
+export const kindCount = (kind: KnowledgeKind, n: number) => {
+  const k = KINDS.find(entry => entry.kind === kind)!
+  return `${n} ${n === 1 ? k.one : k.many}`
+}
 
 export type KnowledgeItem = {
   /** '<kind>:<rowid>' (C6). */
@@ -35,6 +42,10 @@ export type KnowledgeItem = {
   active: boolean | null
   /** A relation's confidence, when the reply carries one. */
   confidence: number | null
+  /** The source memory's scope (0.20.0; null from older servers or when unknown). */
+  scope: string | null
+  /** A relation's subject, link and object (0.20.0; null for other kinds and older servers). */
+  parts: { subject: string; predicate: string; object: string } | null
 }
 
 /** `totals` per kind: how many the store holds; the server sends at most 2000 a kind (`items` holds those). */
@@ -70,6 +81,11 @@ export function parseKnowledge(body: unknown): KnowledgeData | null {
         lastRecalled: typeof r.lastRecalled === 'string' ? r.lastRecalled : typeof usage.lastRecalled === 'string' ? usage.lastRecalled : null,
         active: typeof r.active === 'boolean' ? r.active : typeof r.active === 'number' ? r.active !== 0 : null,
         confidence: typeof r.confidence === 'number' && Number.isFinite(r.confidence) ? r.confidence : null,
+        scope: typeof r.scope === 'string' && r.scope !== '' ? r.scope : null,
+        parts:
+          kind === 'relation' && text(r.subject) !== '' && text(r.object) !== ''
+            ? { subject: plainLabel(text(r.subject), 60), predicate: plainLabel(text(r.predicate), 60), object: plainLabel(text(r.object), 60) }
+            : null,
       })
     }
   }
@@ -175,7 +191,101 @@ export type Row = {
   used: string
   last: string
   stale: boolean
+  /** The item itself (0.20.0): a relation's parts, an instruction's state, a relation's confidence. */
+  item?: KnowledgeItem
 }
+
+// ---- 0.20.0: KPI tiles, quick states, top topics, project › topic groups, siblings ----
+
+export type Tiles = { items: string; memories: number; perKind: string; week: number; quiet: number; never: number }
+
+/** The four tiles: items (from how many memories, and per kind), recalled this week, gone quiet, never used (all items, any filter aside). */
+export function kpiTiles(data: KnowledgeData, now: number): Tiles {
+  const all = KINDS.flatMap(({ kind }) => data.items[kind])
+  return {
+    items: countText(all.length, storeTotal(data)),
+    memories: new Set(all.map(item => item.memory).filter(id => id !== '')).size,
+    perKind: KINDS.filter(({ kind }) => data.totals[kind] > 0)
+      .map(({ kind }) => kindCount(kind, data.totals[kind]))
+      .join(' · '),
+    week: all.filter(item => {
+      const days = daysAgo(item.lastRecalled, now)
+      return days !== null && days <= 7
+    }).length,
+    quiet: all.filter(item => isQuiet(item, now)).length,
+    never: all.filter(item => item.recalls === 0).length,
+  }
+}
+
+export type QuickState = 'all' | 'quiet' | 'never'
+export const stateOf = (filter: KnowledgeFilter): QuickState => (filter.neverUsed ? 'never' : filter.quiet ? 'quiet' : 'all')
+export const withState = (filter: KnowledgeFilter, state: QuickState): KnowledgeFilter => ({ ...filter, neverUsed: state === 'never', quiet: state === 'quiet' })
+
+/** The counts on All / Gone quiet / Never used: this kind under the other filters (project, topic, text). */
+export function quickCounts(items: readonly KnowledgeItem[], filter: KnowledgeFilter, now: number): Record<QuickState, number> {
+  const base = filterItems(items, { ...filter, neverUsed: false, quiet: false }, now)
+  return { all: base.length, quiet: base.filter(item => isQuiet(item, now)).length, never: base.filter(item => item.recalls === 0).length }
+}
+
+/** The topics of these items (under the project filter only), most first, then by name. */
+export function topTopics(items: readonly KnowledgeItem[], owner: string): [string, number][] {
+  const counts = new Map<string, number>()
+  for (const item of items) if (item.topic && (owner === '' || item.owner === owner)) counts.set(item.topic, (counts.get(item.topic) ?? 0) + 1)
+  return [...counts].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+}
+
+export const NO_TOPIC = 'no topic'
+
+export type TopicGroup = { topic: string; rows: Row[] }
+export type ProjectGroup = {
+  owner: string
+  count: number
+  /** How many of its items came from a memory shared with every project (scope global). */
+  shared: number
+  topics: TopicGroup[]
+  /** The fewest and most recalls of its source memories, and the newest recall. */
+  minRecalls: number
+  maxRecalls: number
+  lastRecalled: string | null
+}
+
+/** The rows grouped by project, then topic: global first, then the larger groups; topics by size; rows keep the sort. */
+export function groupRows(rows: readonly Row[]): ProjectGroup[] {
+  const groups = new Map<string, Row[]>()
+  for (const row of rows) groups.set(row.owner, [...(groups.get(row.owner) ?? []), row])
+  return [...groups]
+    .map(([owner, list]) => {
+      const topics = new Map<string, Row[]>()
+      for (const row of list) topics.set(row.topic || NO_TOPIC, [...(topics.get(row.topic || NO_TOPIC) ?? []), row])
+      const recalls = list.map(row => row.recalls)
+      const times = list.map(row => row.item?.lastRecalled ?? null).filter((t): t is string => t !== null)
+      return {
+        owner,
+        count: list.length,
+        shared: list.filter(row => row.item?.scope === 'global').length,
+        topics: [...topics].map(([topic, items]) => ({ topic, rows: items })).sort((a, b) => b.rows.length - a.rows.length || (a.topic === NO_TOPIC ? 1 : b.topic === NO_TOPIC ? -1 : a.topic.localeCompare(b.topic))),
+        minRecalls: Math.min(...recalls),
+        maxRecalls: Math.max(...recalls),
+        lastRecalled: times.length === 0 ? null : times.reduce((a, b) => (Date.parse(a) >= Date.parse(b) ? a : b)),
+      }
+    })
+    .sort((a, b) => (a.owner === 'global' ? -1 : b.owner === 'global' ? 1 : b.count - a.count || a.owner.localeCompare(b.owner)))
+}
+
+/** "recalled 15×", "recalled 1–4×", "never recalled". */
+export function recallRange(min: number, max: number): string {
+  if (max === 0) return 'never recalled'
+  return min === max ? `recalled ${max}×` : `recalled ${min}–${max}×`
+}
+
+/** The other items mined from the same memory, any kind. */
+export function siblings(data: KnowledgeData, memory: string, except: string): KnowledgeItem[] {
+  if (memory === '') return []
+  return KINDS.flatMap(({ kind }) => data.items[kind]).filter(item => item.memory === memory && item.id !== except)
+}
+
+/** A relation's confidence as 0 to 5 lit pips (null: none). */
+export const confidenceLit = (confidence: number | null) => (confidence === null ? 0 : Math.max(0, Math.min(5, Math.round(confidence * 5))))
 
 /** The status cell: an instruction is active or retired, a relation shows its confidence; else blank. */
 export function statusOf(item: KnowledgeItem): string {
@@ -197,15 +307,27 @@ export const hasStatus = (kind: KnowledgeKind) => kind === 'instruction' || kind
 export const usedBar = (recalls: number, most: number) => `w${most <= 0 ? 0 : Math.round(Math.min(1, Math.max(0, recalls / most)) * 20)}`
 
 export type KnowledgeSort = 'newest' | 'most' | 'least' | 'last'
-export type KnowledgeFilter = { owner: string; neverUsed: boolean; text: string; sort: KnowledgeSort }
-export const NO_FILTER: KnowledgeFilter = { owner: '', neverUsed: false, text: '', sort: 'newest' }
+/**
+ * The filter. `neverUsed`: only items whose memory was never recalled. `quiet` (0.20.0): only items whose memory was
+ * recalled, but not in the last STALE_DAYS days ("gone quiet"). `topic` (0.20.0): one topic, exactly.
+ */
+export type KnowledgeFilter = { owner: string; neverUsed: boolean; quiet?: boolean; topic?: string; text: string; sort: KnowledgeSort }
+export const NO_FILTER: KnowledgeFilter = { owner: '', neverUsed: false, quiet: false, topic: '', text: '', sort: 'newest' }
+
+/** Gone quiet: recalled once, but not in the last STALE_DAYS days. */
+export function isQuiet(item: Pick<KnowledgeItem, 'lastRecalled'>, now: number): boolean {
+  const days = daysAgo(item.lastRecalled, now)
+  return days !== null && days > STALE_DAYS
+}
 
 /** The items that pass the filter, in the chosen order. 'newest' keeps the reply's order (the server sends newest first); the other sorts are stable. */
-export function filterItems(items: readonly KnowledgeItem[], filter: KnowledgeFilter): KnowledgeItem[] {
+export function filterItems(items: readonly KnowledgeItem[], filter: KnowledgeFilter, now = Date.now()): KnowledgeItem[] {
   const needle = filter.text.trim().toLowerCase()
   const kept = items.filter(item => {
     if (filter.owner !== '' && item.owner !== filter.owner) return false
     if (filter.neverUsed && item.recalls !== 0) return false
+    if (filter.quiet && !isQuiet(item, now)) return false
+    if (filter.topic && (item.topic ?? '') !== filter.topic) return false
     return needle === '' || item.text.toLowerCase().includes(needle) || (item.topic ?? '').toLowerCase().includes(needle)
   })
   const time = (item: KnowledgeItem) => (item.lastRecalled === null ? Number.NaN : Date.parse(item.lastRecalled))
@@ -229,7 +351,7 @@ export const ownersOf = (data: KnowledgeData): string[] => [...new Set(KINDS.fla
 
 /** The rows of one kind, filtered and sorted (the reply's order by default): item, topic, project, source memory, status, used, last used (stale over 30 days). */
 export function rowsOf(data: KnowledgeData, kind: KnowledgeKind, now: number, filter: KnowledgeFilter = NO_FILTER): Row[] {
-  return filterItems(data.items[kind], filter).map(item => {
+  return filterItems(data.items[kind], filter, now).map(item => {
     const days = daysAgo(item.lastRecalled, now)
     return {
       id: item.id,
@@ -242,6 +364,7 @@ export function rowsOf(data: KnowledgeData, kind: KnowledgeKind, now: number, fi
       used: usedText(item.recalls),
       last: item.lastRecalled === null ? 'never' : agoText(item.lastRecalled, now) || 'never',
       stale: days !== null && days > STALE_DAYS,
+      item,
     }
   })
 }
@@ -263,24 +386,32 @@ export type KnowledgeHost = {
   /** A row picked: its source memory in the bottom sheet; focus goes back to the row on close. */
   open: (memoryId: string, row: HTMLElement) => void
   now: () => number
+  /** 0.20.0, optional: a kind glyph (the memory kinds' shapes), and the reach marker of a group. */
+  glyph?: (kind: string) => HTMLElement
+  reach?: (reach: 'all' | 'shared') => HTMLElement
+  /**
+   * 0.20.0, optional: a row click toggles its source panel instead of opening the memory. `expanded` is the open
+   * row's item id; `detail` builds the panel. Without `toggle` a click opens the memory, as before.
+   */
+  toggle?: (itemId: string) => void
+  expanded?: () => string
+  detail?: (row: Row) => HTMLElement
 }
 
-/** The kind tabs with their counts: plain toggle buttons (aria-pressed), not ARIA tabs. */
-export function kindTabs(data: KnowledgeData, selected: KnowledgeKind, pick: (kind: KnowledgeKind) => void): HTMLElement[] {
-  return KINDS.map(({ kind, label, colour }) => {
-    const button = el('button', undefined, 'chip-btn know-tab')
+/** The kind tabs with their counts: plain toggle buttons (aria-pressed), not ARIA tabs; a glyph (0.20.0) instead of a coloured dot. */
+export function kindTabs(data: KnowledgeData, selected: KnowledgeKind, pick: (kind: KnowledgeKind) => void, glyph?: (kind: string) => HTMLElement): HTMLElement[] {
+  return KINDS.map(({ kind, label, glyph: shape }, index) => {
+    const button = el('button', undefined, 'know-tab')
     button.type = 'button'
     button.setAttribute('aria-pressed', String(kind === selected))
     button.dataset.kind = kind
-    const dotNode = el('span', undefined, 'lg-dot')
-    dotNode.setAttribute('aria-hidden', 'true')
-    dotNode.style.backgroundColor = colour
-    button.append(dotNode, el('span', label), el('span', countText(data.items[kind].length, data.totals[kind]), 'mono muted'))
+    button.title = `${label} (key ${index + 1})`
+    if (glyph) button.append(glyph(shape))
+    button.append(el('span', label), el('span', countText(data.items[kind].length, data.totals[kind]), 'know-tab-n mono'))
     button.addEventListener('click', () => pick(kind))
     return button
   })
 }
-
 /** The summary as stats: '257 items', '193 recalled this week'; the never-used count rides on the Never used toggle (neverUsedText). */
 export function summaryLine(data: KnowledgeData, now: number): HTMLElement[] {
   const [all, recent] = kpis(data, now)
@@ -299,70 +430,230 @@ export function summaryLine(data: KnowledgeData, now: number): HTMLElement[] {
 /** The Never used toggle's words, with its count: 'Never used · 64'. */
 export const neverUsedText = (data: KnowledgeData, now: number) => `Never used · ${kpis(data, now)[2]!.value}`
 
+/** The column count of a kind's table (the Status column only for instructions and relations). */
+export const columnsOf = (kind: KnowledgeKind) => (hasStatus(kind) ? 7 : 6)
+
+/** One full-width row: a note, a group or topic heading, or a source panel. */
+function wideRow(kind: KnowledgeKind, className: string, ...content: (HTMLElement | Text)[]) {
+  const tr = el('tr', undefined, className)
+  const td = el('td')
+  td.colSpan = columnsOf(kind)
+  td.append(...content)
+  tr.append(td)
+  return tr
+}
+
 /** The table rows of one kind; an empty kind (or a filter that matches nothing) says so in one row. */
 export function tableRows(data: KnowledgeData, kind: KnowledgeKind, host: KnowledgeHost, filter: KnowledgeFilter = NO_FILTER): HTMLElement[] {
   const rows = rowsOf(data, kind, host.now(), filter)
-  const status = hasStatus(kind)
-  if (rows.length === 0) {
-    const tr = el('tr')
-    const td = el('td', data.items[kind].length === 0 ? 'Nothing of this kind yet.' : 'Nothing matches these filters.', 'muted')
-    td.colSpan = status ? 7 : 6
-    tr.append(td)
-    return [tr]
-  }
-  const head = itemHead(kind)
+  if (rows.length === 0) return [emptyRow(data, kind)]
   const most = Math.max(...rows.map(row => row.recalls))
-  return rows.map(row => {
-    const tr = el('tr')
-    // The whole row opens its source memory; the Map link inside it keeps its own job.
-    if (row.memory !== '') {
-      tr.className = 'row'
-      tr.tabIndex = 0
-      tr.title = 'Open the memory this item came from'
-      tr.addEventListener('click', event => {
-        if ((event.target as HTMLElement | null)?.closest?.('button')) return
-        host.open(row.memory, tr)
-      })
-      tr.addEventListener('keydown', event => {
-        if (event.target === tr && (event.key === 'Enter' || event.key === ' ')) {
-          event.preventDefault()
-          host.open(row.memory, tr)
-        }
-      })
-    }
-    const open = el('button', 'Map \u2197', 'link')
+  return rows.flatMap(row => itemRows(row, kind, host, most))
+}
+
+function emptyRow(data: KnowledgeData, kind: KnowledgeKind) {
+  const tr = el('tr')
+  const td = el('td', data.items[kind].length === 0 ? 'Nothing of this kind yet.' : 'Nothing matches these filters.', 'muted')
+  td.colSpan = columnsOf(kind)
+  tr.append(td)
+  return tr
+}
+
+/** An item's row, then its source panel when it is the expanded one. */
+function itemRows(row: Row, kind: KnowledgeKind, host: KnowledgeHost, most: number): HTMLElement[] {
+  const tr = itemRow(row, kind, host, most)
+  if (host.toggle && host.expanded?.() === row.id && host.detail) {
+    tr.classList?.add?.('is-open')
+    const panel = wideRow(kind, 'exp', host.detail(row))
+    return [tr, panel]
+  }
+  return [tr]
+}
+
+/** The item cell: plain text, or a relation as subject, link and object (0.20.0). */
+function itemCell(row: Row, head: string) {
+  const td = cell('td', undefined, 'know-text k-text', head)
+  const parts = row.item?.parts
+  if (parts) {
+    td.append(el('span', parts.subject, 'node'), document.createTextNode(' '), el('span', parts.predicate, 'pred'), document.createTextNode(' '), el('span', parts.object, 'node'))
+  } else td.textContent = row.text
+  return td
+}
+
+/** The status cell: an instruction's state as a pill, a relation's confidence as five pips with the number as text. */
+function statusCell(row: Row) {
+  const td = cell('td', undefined, 'muted k-status', 'Status')
+  const item = row.item
+  if (item?.kind === 'instruction' && row.status !== '') td.append(el('span', row.status, `state-pill ${item.active ? 'is-active' : 'is-retired'}`))
+  else if (item?.kind === 'relation' && item.confidence !== null) {
+    const lit = confidenceLit(item.confidence)
+    const pips = el('span', undefined, `imp i${lit}`)
+    pips.setAttribute('aria-hidden', 'true')
+    for (let i = 0; i < 5; i++) pips.append(el('span'))
+    pips.title = row.status
+    td.append(pips, el('span', row.status, 'sr-only'))
+  } else td.textContent = row.status
+  return td
+}
+
+function itemRow(row: Row, kind: KnowledgeKind, host: KnowledgeHost, most: number) {
+  const status = hasStatus(kind)
+  const head = itemHead(kind)
+  const tr = el('tr')
+  tr.dataset.id = row.id
+  // The whole row opens its source memory (or, with host.toggle, its source panel); the buttons inside keep their own jobs.
+  if (row.memory !== '') {
+    tr.className = 'row'
+    tr.tabIndex = 0
+    const act = () => (host.toggle ? host.toggle(row.id) : host.open(row.memory, tr))
+    tr.title = host.toggle ? 'Show the memory this item came from' : 'Open the memory this item came from'
+    if (host.toggle) tr.setAttribute('aria-expanded', String(host.expanded?.() === row.id))
+    tr.addEventListener('click', event => {
+      if ((event.target as HTMLElement | null)?.closest?.('button')) return
+      act()
+    })
+    tr.addEventListener('keydown', event => {
+      if (event.target === tr && (event.key === 'Enter' || event.key === ' ')) {
+        event.preventDefault()
+        act()
+      }
+    })
+  }
+  const map = el('button', 'Map \u2197', 'link')
+  map.type = 'button'
+  map.title = 'Show on map: select the star of the memory this item came from'
+  map.setAttribute('aria-label', 'Show on map')
+  map.disabled = row.memory === ''
+  map.addEventListener('click', () => host.showOnMap(row.memory))
+  const project = cell('td', undefined, 'k-project')
+  project.append(host.project(row.owner))
+  const fromMemory = cell('td', undefined, 'k-from')
+  if (host.toggle) {
+    const open = el('button', 'Open', 'link')
     open.type = 'button'
-    open.title = 'Show on map: select the star of the memory this item came from'
-    open.setAttribute('aria-label', 'Show on map')
+    open.title = 'Open the memory this item came from'
     open.disabled = row.memory === ''
-    open.addEventListener('click', () => host.showOnMap(row.memory))
-    const project = cell('td', undefined, 'k-project')
-    project.append(host.project(row.owner))
-    const fromMemory = cell('td', undefined, 'k-from')
-    fromMemory.append(open)
-    // Used: the number with a small bar; 'never' alone, muted.
-    const used = cell('td', undefined, row.recalls === 0 ? 'small muted k-used' : 'small k-used', 'Used')
-    if (row.recalls === 0) used.append(el('span', row.used))
-    else {
-      const bar = el('span', undefined, 'bar k-bar')
-      bar.setAttribute('aria-hidden', 'true')
-      bar.append(el('span', undefined, `bar-fill ${usedBar(row.recalls, most)}`))
-      used.append(el('span', row.used, 'k-count'), bar)
+    open.addEventListener('click', () => host.open(row.memory, tr))
+    fromMemory.append(open, document.createTextNode(' '))
+  }
+  fromMemory.append(map)
+  // Source recalls: the number with a bar scaled to the most in the list; 'never' alone, muted.
+  const used = cell('td', undefined, row.recalls === 0 ? 'small muted k-used' : 'small k-used', 'Source recalls')
+  if (row.recalls === 0) used.append(el('span', row.used))
+  else {
+    const bar = el('span', undefined, 'bar k-bar')
+    bar.setAttribute('aria-hidden', 'true')
+    bar.append(el('span', undefined, `bar-fill ${usedBar(row.recalls, most)}`))
+    used.append(el('span', row.used, 'k-count'), bar)
+  }
+  // On a phone each row is a card (ui/style.css): data-label names a cell there, the kind first, then the item.
+  tr.append(
+    itemCell(row, head),
+    cell('td', row.topic, 'muted k-topic'),
+    project,
+    fromMemory,
+    ...(status ? [statusCell(row)] : []),
+    used,
+    cell('td', row.last, row.stale ? 'small is-stale k-last' : 'small k-last', 'Last used'),
+  )
+  return tr
+}
+
+/**
+ * The rows grouped (0.20.0): a project row (owner chip, reach, count, its topics when folded, recall range and
+ * freshness), then per topic a topic row and its items. `folded` holds the owners shown closed; `fold` flips one.
+ */
+export function groupedRows(data: KnowledgeData, kind: KnowledgeKind, host: KnowledgeHost, filter: KnowledgeFilter, folded: ReadonlySet<string>, fold: (owner: string) => void): HTMLElement[] {
+  const now = host.now()
+  const rows = rowsOf(data, kind, now, filter)
+  if (rows.length === 0) return [emptyRow(data, kind)]
+  const most = Math.max(...rows.map(row => row.recalls))
+  return groupRows(rows).flatMap(group => {
+    const closed = folded.has(group.owner)
+    const toggle = el('button', undefined, 'grp-fold')
+    toggle.type = 'button'
+    toggle.setAttribute('aria-expanded', String(!closed))
+    toggle.setAttribute('aria-label', `${closed ? 'Show' : 'Hide'} the ${kindCount(kind, group.count)} of ${group.owner}`)
+    toggle.addEventListener('click', () => fold(group.owner))
+    const left = el('span', undefined, 'grp-left')
+    left.append(toggle, host.project(group.owner))
+    if (group.owner === 'global' && host.reach) left.append(host.reach('all'))
+    else if (group.shared > 0 && host.reach) left.append(host.reach('shared'))
+    left.append(el('span', kindCount(kind, group.count), 'grp-n mono'))
+    if (closed) left.append(el('span', group.topics.map(t => t.topic).slice(0, 6).join(' · ') + (group.topics.length > 6 ? ` · +${group.topics.length - 6}` : ''), 'grp-topics muted small'))
+    const right = el('span', recallRange(group.minRecalls, group.maxRecalls), 'grp-right muted small')
+    const ago = agoText(group.lastRecalled, now)
+    if (ago !== '') {
+      const days = daysAgo(group.lastRecalled, now)
+      right.append(document.createTextNode(' · '), el('span', ago, days !== null && days > STALE_DAYS ? 'is-stale' : ''))
     }
-    // On a phone each row is a card (ui/style.css): data-label names a cell there, the kind first, then the item.
-    tr.append(
-      cell('td', row.text, 'know-text k-text', head),
-      cell('td', row.topic, 'muted k-topic'),
-      project,
-      fromMemory,
-      ...(status ? [cell('td', row.status, 'muted k-status', 'Status')] : []),
-      used,
-      cell('td', row.last, row.stale ? 'small is-stale k-last' : 'small k-last', 'Last used'),
-    )
-    return tr
+    const head = wideRow(kind, 'grp', left, right)
+    head.dataset.owner = group.owner
+    head.tabIndex = 0
+    head.setAttribute('aria-expanded', String(!closed))
+    head.addEventListener('click', event => {
+      if ((event.target as HTMLElement | null)?.closest?.('button')) return
+      fold(group.owner)
+    })
+    head.addEventListener('keydown', event => {
+      if (event.target !== head) return
+      const key = (event as KeyboardEvent).key
+      if ((key === 'ArrowLeft' && !closed) || (key === 'ArrowRight' && closed) || key === 'Enter' || key === ' ') {
+        event.preventDefault()
+        fold(group.owner)
+      }
+    })
+    if (closed) return [head]
+    return [
+      head,
+      ...group.topics.flatMap(topic => {
+        const label = el('span', undefined, 'topic-label')
+        label.append(el('span', topic.topic, topic.topic === NO_TOPIC ? 'topic-name muted' : 'topic-name mono'), el('span', ` · ${topic.rows.length}`, 'muted'))
+        return [wideRow(kind, 'topic', label), ...topic.rows.flatMap(row => itemRows(row, kind, host, most))]
+      }),
+    ]
   })
 }
 
+/** The source panel of an expanded row: where it came from, the memory's text when loaded, Open and Map, and its siblings. */
+export function sourcePanel(
+  row: Row,
+  data: KnowledgeData,
+  memory: { content?: string; memory_type?: string | null; timestamp?: string | null } | null | 'loading' | 'error',
+  host: KnowledgeHost & { reachOf?: (owner: string, scope: string | null) => HTMLElement | null; saved?: (value: string | null | undefined) => string },
+  tr: () => HTMLElement | undefined,
+): HTMLElement {
+  const box = el('div', undefined, 'src')
+  const main = el('div', undefined, 'src-main')
+  const meta = el('p', undefined, 'src-meta')
+  if (memory !== null && typeof memory === 'object' && host.glyph) meta.append(host.glyph(memory.memory_type ?? 'unknown'))
+  meta.append(el('span', 'Mined from'))
+  if (memory !== null && typeof memory === 'object' && memory.memory_type) meta.append(el('span', ` · ${memory.memory_type}`))
+  meta.append(document.createTextNode(' · '), host.project(row.owner))
+  const reach = host.reachOf?.(row.owner, row.item?.scope ?? null)
+  if (reach) meta.append(document.createTextNode(' '), reach)
+  if (memory !== null && typeof memory === 'object' && memory.timestamp && host.saved) meta.append(el('span', ` · saved ${host.saved(memory.timestamp)}`))
+  main.append(meta)
+  if (memory === 'loading') main.append(el('p', 'Loading the memory…', 'muted small'))
+  else if (memory === 'error' || memory === null) main.append(el('p', memory === null ? 'That memory is gone.' : 'Could not load the memory.', 'muted small'))
+  else main.append(el('p', `“${plainLabel(memory.content ?? '', 360)}”`, 'src-text'))
+  const others = siblings(data, row.memory, row.id)
+  if (others.length > 0) {
+    const line = el('p', `${others.length} more ${others.length === 1 ? 'item came' : 'items came'} from this memory: `, 'muted small src-sib')
+    line.append(document.createTextNode(others.slice(0, 3).map(item => `“${plainLabel(item.text, 50)}”`).join(' · ') + (others.length > 3 ? ' …' : '')))
+    main.append(line)
+  }
+  const actions = el('div', undefined, 'src-actions')
+  const open = el('button', 'Open memory', 'btn small')
+  open.type = 'button'
+  open.addEventListener('click', () => host.open(row.memory, tr() ?? open))
+  const map = el('button', 'Show on map', 'btn small')
+  map.type = 'button'
+  map.addEventListener('click', () => host.showOnMap(row.memory))
+  actions.append(open, map)
+  box.append(main, actions)
+  return box
+}
 /** A table cell with its class names and, for the phone card, the label shown before its text. */
 function cell(tag: 'td', content: string | undefined, className: string, label?: string) {
   const td = el(tag, content, className)

@@ -1603,6 +1603,18 @@ C10.3: the engine's trigger `trim_validations_to_3` keeps only the newest 3 `mem
 
 On the solar-system map a plain folder (no git repo) with at least `map.stationMin` live memories is a space station and one with fewer a starship (default 50, range 2 to 1000, applies now). The galaxy reply carries the value. Git repos are always planets.
 
+### The Knowledge tab (0.20.0)
+
+Fourth step of the tab polish (design proposal `tabs-after/NOTES-memories-search-knowledge.md`, Knowledge items 1 to 8), reusing the owner chip, `kindGlyph` and `reachMark`.
+- **Server.** `knowledgeList` adds each item's `scope` (the source memory's `working_memory.scope`, null when unknown) and, for `memoria_kg` rows, `subject`, `predicate` and `object`, each through `knowledgeText`. `text` is unchanged.
+- **Kinds.** `KINDS` drops `colour` (inline styles were refused by the CSP anyway) and gains `glyph` (the memory kind of the same shape: a timeline item uses `event`) and the singular and plural words for `kindCount`.
+- **Filter.** `KnowledgeFilter` gains `quiet` and `topic` (both optional, so older callers keep working). `isQuiet` is "recalled, but more than `STALE_DAYS` (30) days ago". `stateOf` / `withState` map the All / Gone quiet / Never used control onto `neverUsed` and `quiet`, and `quickCounts` counts them under the other filters.
+- **Groups.** `groupRows` groups the filtered rows by owner (global first, then by size), then topic (by size, "no topic" last). Each group has its count, shared count (items whose source scope is global), recall range and newest recall. `groupedRows` draws `tr.grp` (with `aria-expanded`, a fold button, Enter / Space / ←/→), `tr.topic` and the item rows. The page keeps folded owners per kind; the first time a kind is drawn, all groups after the first three are folded. The grouped table gets `kt-grouped`, which hides the Topic and Project columns (the `.know-table` phone-card rules stay inside their media query, as a test requires).
+- **Source panel.** With `host.toggle`, a row click or Enter toggles `tr.exp` under it; without it (older hosts, the tests' default) a click still opens the memory. `sourcePanel` shows the memory read from `GET /api/memories/<id>` (cached per page; "That memory is gone." on 404), `siblings` (the other items with the same `source_memory_id`), Open memory and Show on map.
+- **Rows.** A relation with parts draws `.node` `.pred` `.node` with spaces between, so the cell text equals the old `text`. A relation's confidence is `.imp` pips (`confidenceLit`) plus an `sr-only` "confidence 0.7". An instruction's state is `.state-pill.is-active` / `.is-retired`. The heading and phone label "Used" read "Source recalls".
+- **Keys.** `knowledgeKey` on `document`: 1 to 5, `/`, J/K over `tr.row` and `tr.grp`, O, M, and Esc to close the source panel. Typing and modifiers are ignored. In the find box, Esc clears it, then blurs.
+- **Not built:** the tiles' weekly spark (no weekly series in the API).
+
 ### The Search tab (0.19.0)
 
 Third step of the tab polish (design proposal `tabs-after/NOTES-memories-search-knowledge.md`, Search items 1 to 7), reusing the 0.18.0 groundwork (owner chip, `kindGlyph`, `reachMark`).

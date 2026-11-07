@@ -891,10 +891,13 @@ describe('VIEWS R2: the Knowledge and Health glue in app.ts', () => {
     const tabs = byId('know-tabs').children as AppNode[]
     expect(tabs.map(tab => tab.attributes.get('aria-pressed'))).toEqual(['true', 'false', 'false', 'false', 'false'])
     expect(tabs.map(tab => tab.textContent)).toEqual(['Facts1', 'Preferences0', 'Instructions1', 'Timeline0', 'Relations1'])
-    expect((byId('know-rows').children[0] as AppNode).textContent).toContain('Glue fact')
+    // 0.20.0: grouped by project › topic by default: a project row, a topic row, then the items.
+    const rows = () => byId('know-rows').children as AppNode[]
+    expect(rows().map(row => row.className)).toEqual(['grp', 'topic', 'row'])
+    expect(rows()[2]!.textContent).toContain('Glue fact')
     tabs[2]!.fire('click')
     expect(byId('know-item-head').textContent).toBe('Instruction')
-    const row = byId('know-rows').children[0] as AppNode
+    const row = rows().find(r => r.className === 'row')!
     expect((row.children[4] as AppNode).textContent).toBe('active')
     expect((byId('know-tabs').children as AppNode[]).map(tab => tab.attributes.get('aria-pressed'))).toEqual(['false', 'false', 'true', 'false', 'false'])
   })
@@ -1065,7 +1068,7 @@ describe('VIEWS R2: the Knowledge and Health glue in app.ts', () => {
     expect(dotOf('project-atlas-1a2b')).toBe('dot c1')
     // The tabs draw through the same function.
     await app.loadKnowledge()
-    const knowledgeRow = byId('know-rows').children[0] as AppNode
+    const knowledgeRow = (byId('know-rows').children as AppNode[]).find(row => row.className === 'row')!
     expect(((knowledgeRow.children[2] as AppNode).children[0] as AppNode).children[0]).toMatchObject({ className: expected('project-glue-1a2b') })
     await app.loadReview()
     const neverRow = byId('review-rows').children[0] as AppNode

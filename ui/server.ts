@@ -1875,6 +1875,12 @@ export type KnowledgeItem = {
   active?: boolean | null
   // Relations only: memoria_kg.confidence (null when a legacy table lacks the column).
   confidence?: number | null
+  // 0.20.0: the source memory's scope (null when unknown), for the reach of a project group.
+  scope?: string | null
+  // 0.20.0, relations only: the three parts, each cleaned as the text is.
+  subject?: string
+  predicate?: string
+  object?: string
 }
 
 type KnowledgeList = 'facts' | 'preferences' | 'instructions' | 'timelines' | 'relations'
@@ -1939,15 +1945,31 @@ export function knowledgeList(db: Database | null, limit = GALAXY_LIMIT): Answer
       continue
     }
     const state = KNOWLEDGE_STATE[list]
+    const isRelation = source.kind === 'relation'
     // The newest `limit` rows first, then their source memories; the inner query keeps the text's bare column names unambiguous.
     const query = `SELECT t.rid AS rid, t.text AS text, t.owner AS owner, t.source_memory_id AS source_memory_id, t.state AS state,
-                          ${recallsSql} AS recalls, ${wm('last_recalled')} AS lastRecalled, ${wm('metadata_json')} AS metadata_json
+                          ${isRelation ? 't.subject AS subject, t.predicate AS predicate, t.object AS object,' : ''}
+                          ${recallsSql} AS recalls, ${wm('last_recalled')} AS lastRecalled, ${wm('metadata_json')} AS metadata_json, ${wm('scope')} AS scope
                    FROM (SELECT ${source.id} AS rid, ${source.text} AS text, ${columns.has('session_id') ? 'session_id' : 'NULL'} AS owner, source_memory_id,
+                                ${isRelation ? 'subject, predicate, object,' : ''}
                                 ${state && columns.has(state) ? state : 'NULL'} AS state
                          FROM ${source.table} ORDER BY ${source.id} DESC LIMIT ?) t
                    ${joined ? 'LEFT JOIN working_memory wm ON wm.id = t.source_memory_id' : ''}
                    ORDER BY t.rid DESC`
-    let rows: { rid: number; text: string | null; owner: string | null; source_memory_id: string | null; state: unknown; recalls: number | null; lastRecalled: string | null; metadata_json: string | null }[]
+    let rows: {
+      rid: number
+      text: string | null
+      owner: string | null
+      source_memory_id: string | null
+      state: unknown
+      recalls: number | null
+      lastRecalled: string | null
+      metadata_json: string | null
+      scope: string | null
+      subject?: unknown
+      predicate?: unknown
+      object?: unknown
+    }[]
     try {
       rows = db.query(query).all(limit) as typeof rows
     } catch {
@@ -1968,6 +1990,8 @@ export function knowledgeList(db: Database | null, limit = GALAXY_LIMIT): Answer
         lastRecalled: r.lastRecalled ?? null,
         ...(state === 'active' ? { active: known === null ? null : known !== 0 } : {}),
         ...(state === 'confidence' ? { confidence: known } : {}),
+        scope: typeof r.scope === 'string' && r.scope !== '' ? r.scope : null,
+        ...(isRelation ? { subject: knowledgeText(r.subject), predicate: knowledgeText(r.predicate), object: knowledgeText(r.object) } : {}),
       })
     }
     shown[list] = result[list].length

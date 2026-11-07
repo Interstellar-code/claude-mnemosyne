@@ -90,6 +90,7 @@ async function withDocument<T>(body: () => Promise<T> | T): Promise<T> {
 }
 
 const iso = (ms: number) => new Date(ms).toISOString()
+const NO_FILTER_OF = (k: Record<string, any>) => ({ ...k.NO_FILTER })
 
 describe('VIEWS.1: the Knowledge tab on a real store', () => {
   const temp = tempDir('knowledge-view')
@@ -246,7 +247,8 @@ describe('VIEWS.1: the Knowledge tab on a real store', () => {
         const cells = row.children as FakeNode[]
         expect(cells.map(cell => cell.className.split(' ').find(name => name.startsWith('k-')))).toEqual(kind === 'fact' ? ['k-text', 'k-topic', 'k-project', 'k-from', 'k-used', 'k-last'] : ['k-text', 'k-topic', 'k-project', 'k-from', 'k-status', 'k-used', 'k-last'])
         // The card reads: the kind above the text, then Status / Used / Last used each with its label.
-        expect(cells.map(cell => cell.dataset.label ?? null)).toEqual(kind === 'fact' ? [head, null, null, null, 'Used', 'Last used'] : [head, null, null, null, 'Status', 'Used', 'Last used'])
+        // 0.20.0: "Used" reads "Source recalls" (it counts the source memory's recalls, not the item's).
+        expect(cells.map(cell => cell.dataset.label ?? null)).toEqual(kind === 'fact' ? [head, null, null, null, 'Source recalls', 'Last used'] : [head, null, null, null, 'Status', 'Source recalls', 'Last used'])
       }
       // A stale item keeps both classes: the amber and the card placement.
       const old = (tableRows(data, 'timeline', host()) as unknown as FakeNode[])[0]!
@@ -408,6 +410,87 @@ describe('VIEWS.1: the Knowledge tab on a real store', () => {
     })
   })
 
+  test('KNOW 0.20: the reply carries scope and the parts of a relation; tiles, quick states, topics, groups, siblings and pips', async () => {
+    const k = (await import(join(ROOT, 'ui', 'knowledge.ts'))) as Record<string, any>
+    const data = await knowledge(started, 'unknown')
+    // The server: a relation's subject, link and object, and every item's source scope.
+    expect(data.items.relation[0]!.parts).toEqual({ subject: 'Antigravity', predicate: 'powers', object: 'Mnemosyne' })
+    expect(data.items.fact[0]!.parts).toBeNull()
+    expect(data.items.fact.every((item: { scope: string | null }) => item.scope === null || typeof item.scope === 'string')).toBe(true)
+    // Tiles over every item: 6 items from 2 memories; m1's 4 items recalled 2 days ago, m2's 2 items 40 days ago (gone quiet).
+    expect(k.kpiTiles(data, now)).toEqual({ items: '6', memories: 2, perKind: '2 facts · 1 preference · 1 instruction · 1 event · 1 relation', week: 4, quiet: 2, never: 0 })
+    expect(k.kindCount('timeline', 1)).toBe('1 event')
+    expect(k.kindCount('fact', 3)).toBe('3 facts')
+    // Quick states: counts under the other filters, and the filter they set.
+    const all = [...data.items.fact, ...data.items.timeline]
+    expect(k.quickCounts(all, NO_FILTER_OF(k), now)).toEqual({ all: 3, quiet: 1, never: 0 })
+    expect(k.stateOf(k.withState(NO_FILTER_OF(k), 'quiet'))).toBe('quiet')
+    expect(k.filterItems(all, k.withState(NO_FILTER_OF(k), 'quiet'), now).map((i: { kind: string }) => i.kind)).toEqual(['timeline'])
+    expect(k.isQuiet({ lastRecalled: null }, now)).toBe(false)
+    // Topics and the exact topic filter.
+    expect(k.topTopics(data.items.fact, '')).toEqual([['standards', 2]])
+    expect(k.topTopics(data.items.fact, 'nobody')).toEqual([])
+    expect(k.filterItems(data.items.fact, { ...NO_FILTER_OF(k), topic: 'standard' }, now)).toEqual([])
+    expect(k.filterItems(data.items.fact, { ...NO_FILTER_OF(k), topic: 'standards' }, now)).toHaveLength(2)
+    // Groups: global first, then by size; topics by size, "no topic" last; recall range and freshness.
+    const row = (owner: string, topic: string, recalls: number, lastRecalled: string | null) => ({ id: `${owner}${topic}${recalls}`, owner, topic, recalls, item: { lastRecalled, scope: owner === 'b' ? 'global' : null } })
+    const groups = k.groupRows([row('a', 'x', 1, iso(now - 5 * DAY)), row('b', '', 4, null), row('b', 'y', 2, iso(now - DAY)), row('global', 'z', 9, null), row('b', 'y', 0, null)])
+    expect(groups.map((g: { owner: string; count: number }) => `${g.owner}:${g.count}`)).toEqual(['global:1', 'b:3', 'a:1'])
+    expect(groups[1].topics.map((t: { topic: string }) => t.topic)).toEqual(['y', 'no topic'])
+    expect([groups[1].minRecalls, groups[1].maxRecalls, groups[1].shared, groups[1].lastRecalled]).toEqual([0, 4, 3, iso(now - DAY)])
+    expect([k.recallRange(0, 0), k.recallRange(3, 3), k.recallRange(1, 4)]).toEqual(['never recalled', 'recalled 3×', 'recalled 1–4×'])
+    // Siblings: the other items of the same memory, any kind.
+    const fact = data.items.fact[0]!
+    expect(k.siblings(data, fact.memory, fact.id).map((i: { kind: string }) => i.kind).sort()).toEqual(['fact', 'instruction', 'preference'])
+    expect(k.siblings(data, '', fact.id)).toEqual([])
+    expect([k.confidenceLit(null), k.confidenceLit(0.7), k.confidenceLit(2)]).toEqual([0, 4, 5])
+    await withDocument(() => {
+      // A relation is drawn as node, link, node; its text reads the same as before.
+      const relation = (tableRows(data, 'relation', host()) as unknown as FakeNode[])[0]!
+      const text = relation.children[0] as FakeNode
+      expect(text.all().map(n => n.className).filter(Boolean)).toEqual(['know-text k-text', 'node', 'pred', 'node'])
+      expect(text.textContent).toBe('Antigravity powers Mnemosyne')
+      // An instruction's state is a pill.
+      const instruction = (tableRows(data, 'instruction', host()) as unknown as FakeNode[])[0]!
+      expect((instruction.children[4] as FakeNode).all().some(n => n.className === 'state-pill is-active')).toBe(true)
+      // With host.toggle a click toggles the source panel instead of opening; Open still opens.
+      const toggled: string[] = []
+      const opened: string[] = []
+      let expanded = ''
+      const panelHost = { ...host([], opened), toggle: (id: string) => void toggled.push(id), expanded: () => expanded, detail: () => fakeDocument.createElement('div') }
+      const first = (tableRows(data, 'fact', panelHost) as unknown as FakeNode[])[0]!
+      first.fire('click', { target: first })
+      expect(toggled).toEqual([first.dataset.id!])
+      expect(opened).toEqual([])
+      const open = first.all().find(n => n.tagName === 'button' && n.textContent === 'Open')!
+      open.fire('click')
+      expect(opened).toEqual([fact.memory])
+      expanded = first.dataset.id!
+      const withPanel = tableRows(data, 'fact', panelHost) as unknown as FakeNode[]
+      expect(withPanel.map(r => r.className)).toEqual(['row', 'exp', 'row'])
+      expect((withPanel[1]!.children[0] as FakeNode).colSpan).toBe(6)
+      // Grouped: a project row, a topic row, then the items; a folded project shows only its row and topics.
+      const folds: string[] = []
+      const grouped = k.groupedRows(data, 'fact', host(), NO_FILTER_OF(k), new Set(), (owner: string) => void folds.push(owner)) as FakeNode[]
+      expect(grouped.map(r => r.className)).toEqual(['grp', 'topic', 'row', 'row'])
+      expect(grouped[0]!.attributes.get('aria-expanded')).toBe('true')
+      grouped[0]!.fire('keydown', { target: grouped[0], key: 'ArrowLeft', preventDefault() {} })
+      expect(folds).toEqual(['project-alpha-1a2b'])
+      const closed = k.groupedRows(data, 'fact', host(), NO_FILTER_OF(k), new Set(['project-alpha-1a2b']), () => {}) as FakeNode[]
+      expect(closed.map(r => r.className)).toEqual(['grp'])
+      expect(closed[0]!.texts().join(' ')).toContain('standards')
+      // The source panel: where it came from, the memory text, the siblings, Open memory and Show on map.
+      const shown: string[] = []
+      const panelOpened: string[] = []
+      const panel = k.sourcePanel(k.rowsOf(data, 'fact', now)[0], data, { content: 'Alpha code standards.', memory_type: 'fact', timestamp: iso(now) }, host(shown, panelOpened), () => undefined) as FakeNode
+      expect(panel.texts().join('')).toContain('“Alpha code standards.”')
+      expect(panel.texts().join('')).toContain('3 more items came from this memory')
+      for (const button of panel.all().filter(n => n.tagName === 'button')) button.fire('click')
+      expect([panelOpened, shown]).toEqual([[fact.memory], [fact.memory]])
+      expect((k.sourcePanel(k.rowsOf(data, 'fact', now)[0], data, null, host(), () => undefined) as FakeNode).texts().join('')).toContain('That memory is gone.')
+    })
+  })
+
   test('VIEWS.1.a4: the page has the Knowledge tab, its markup, and tsc covers the new files', () => {
     const app = readFileSync(join(ROOT, 'ui', 'app.ts'), 'utf8')
     const html = readFileSync(join(ROOT, 'ui', 'index.html'), 'utf8')
@@ -415,7 +498,7 @@ describe('VIEWS.1: the Knowledge tab on a real store', () => {
     expect(app).toMatch(/knowledge: 'Knowledge', review: 'Review', health: 'Health', vocabulary: 'Vocabulary', settings: 'Settings'/)
     for (const id of ['view-knowledge', 'view-review', 'review-status', 'review-retry', 'review-title', 'review-body', 'view-health', 'know-status', 'know-notice', 'know-tabs', 'know-summary', 'know-owner', 'know-sort', 'know-find', 'know-never', 'know-status-head', 'know-rows', 'know-item-head', 'know-body', 'know-retry', 'health-status', 'health-retry', 'health-title']) expect(html).toContain(`id="${id}"`)
     // Plain toggle buttons in a labelled group: no tablist without tabpanels and arrow keys.
-    expect(html).toContain('<div id="know-tabs" class="chips" role="group" aria-label="Knowledge kind">')
+    expect(html).toContain('<div id="know-tabs" class="know-tabs" role="group" aria-label="Knowledge kind">')
     expect(html).not.toMatch(/role="tab(list)?"/)
     // Every id the Knowledge and Health code looks up is in the markup.
     const wanted = [...app.matchAll(/byId(?:<[^>]*>)?\('((?:know|health|review)-[^']+)'\)/g)].map(m => m[1]!)
@@ -423,7 +506,7 @@ describe('VIEWS.1: the Knowledge tab on a real store', () => {
     const have = new Set([...html.matchAll(/\bid="([^"]+)"/g)].map(m => m[1]!))
     expect(wanted.filter(id => !have.has(id))).toEqual([])
     // Phone width: the table scrolls in its box; no inline style or script.
-    expect(html).toMatch(/<div class="table-wrap">\s*<table class="table know-table">\s*<thead>\s*<tr><th id="know-item-head">/)
+    expect(html).toMatch(/<div class="table-wrap know-card">\s*<table id="know-table" class="table know-table">\s*<thead>\s*<tr><th id="know-item-head">/)
     expect(html.slice(html.indexOf('id="view-knowledge"'), html.indexOf('<footer'))).not.toMatch(/\sstyle=|<script|\son\w+=/)
     const tsconfig = JSON.parse(readFileSync(join(ROOT, 'ui', 'tsconfig.json'), 'utf8')) as { include: string[] }
     expect(tsconfig.include).toEqual(expect.arrayContaining(['knowledge.ts', 'health.ts', 'review.ts']))

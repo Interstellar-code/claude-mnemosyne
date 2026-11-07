@@ -399,44 +399,55 @@
   <main id="view-knowledge" class="main view column wide" hidden>
     <div class="titlebar">
       <h1>Knowledge</h1>
-      <span class="muted small">Facts, preferences and instructions the engine mined from your memories, and whether they are used and kept up to date.</span>
+      <span class="muted small">Facts, preferences, instructions, events and relations the engine mined from your memories, and whether their memories are still recalled.</span>
     </div>
     <div class="status-row">
       <p id="know-status" class="notice-line small muted" role="status">Loading…</p>
       <button id="know-retry" class="btn" type="button" hidden>Try again</button>
     </div>
     <div id="know-notice" class="notice" role="status" hidden></div>
-    <div id="know-body" hidden>
-      <div id="know-tabs" class="chips" role="group" aria-label="Knowledge kind"></div>
+    <div id="know-body" class="know-body" hidden>
+      <div id="know-summary" class="kpis"></div>
+      <div class="know-tabline">
+        <div id="know-tabs" class="know-tabs" role="group" aria-label="Knowledge kind"></div>
+        <span class="muted small know-tabkeys"><kbd>1</kbd>–<kbd>5</kbd> switch kind</span>
+      </div>
       <div class="know-bar">
-      <p id="know-summary" class="know-summary"></p>
-      <div class="toolbar know-toolbar">
-        <label class="field"><span class="sr-only">Project</span>
+        <label class="mem-find know-find">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path></svg>
+          <span class="sr-only">Find</span>
+          <input id="know-find" class="mem-find-input" type="search" placeholder="Find text or topic" maxlength="200" autocomplete="off">
+          <kbd aria-hidden="true">/</kbd>
+        </label>
+        <label class="field-inline"><span class="sr-only">Project</span>
           <select id="know-owner" class="input"><option value="">All projects</option></select>
         </label>
-        <label class="field"><span class="sr-only">Sort</span>
+        <span class="facet-label">Group</span>
+        <div id="know-group" class="segmented" role="group" aria-label="Group rows"></div>
+        <label class="field-inline"><span class="sr-only">Sort</span>
           <select id="know-sort" class="input">
             <option value="newest">Newest</option>
-            <option value="most">Most used</option>
-            <option value="least">Least used</option>
+            <option value="most">Most recalled source</option>
+            <option value="least">Least recalled source</option>
             <option value="last">Last used</option>
           </select>
         </label>
-        <label class="field"><span class="sr-only">Find</span>
-          <input id="know-find" class="input filter" type="search" placeholder="Find text or topic" maxlength="200" autocomplete="off">
-        </label>
-        <button id="know-never" type="button" class="chip-btn" aria-pressed="false" title="Show only the items whose memory was never recalled">Never used</button>
+        <div id="know-never" class="segmented know-state" role="group" aria-label="Show"></div>
       </div>
-      </div>
-      <div class="table-wrap">
-        <table class="table know-table">
+      <div id="know-topics" class="know-topics" aria-label="Top topics"></div>
+      <div class="table-wrap know-card">
+        <table id="know-table" class="table know-table">
           <thead>
-            <tr><th id="know-item-head">Fact</th><th>Topic</th><th>Project</th><th>From memory</th><th id="know-status-head">Status</th><th title="How many times the memory this item came from was recalled (all time). The engine keeps no usage count of its own for these items.">Used</th><th>Last used</th></tr>
+            <tr><th id="know-item-head">Fact</th><th id="know-topic-head">Topic</th><th id="know-project-head">Project</th><th>From memory</th><th id="know-status-head">Status</th><th title="How many times the memory this item came from was recalled (all time). The engine keeps no usage count of its own for these items.">Source recalls</th><th>Last used</th></tr>
           </thead>
           <tbody id="know-rows"></tbody>
         </table>
+        <div class="mem-foot">
+          <span id="know-foot" class="muted small"></span>
+          <span class="muted small mem-keys"><kbd>J</kbd> <kbd>K</kbd> move · <kbd>Enter</kbd> show source · <kbd>O</kbd> open memory · <kbd>M</kbd> map · <kbd>←</kbd> <kbd>→</kbd> fold group</span>
+        </div>
       </div>
-      <p class="muted small">Hover Used for what it counts. Status: an instruction is active or retired, a relation shows its confidence. Last used turns amber after 30 days. Map opens the source star.</p>
+      <p class="muted small">Source recalls: how many times the memory an item came from was recalled; the bar is scaled to the most in the list. Last used turns amber after 30 days. An instruction is active or retired; a relation shows its confidence as five pips.</p>
     </div>
   </main>
 

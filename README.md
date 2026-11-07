@@ -305,13 +305,18 @@ The header shows how many memories are in how many projects, and a connection pi
   - **Each hit** shows its rank and score ring, the kind, project chip and reach, whether it matched on words, meaning or both, the date and recalls, the text with the query words marked, and Open and Map. A dashed line marks where scores drop under 0.50.
   - **Sort** by rank, newest or most recalled, and filter by project, kind or match type from the side panel, without searching again.
   - **Keys:** `/` on most tabs opens Search; J and K move, Enter opens, M shows the hit on the map.
-
-Every tab but the Map shares one content width.
 - **Knowledge:** the facts, preferences, instructions, dated events and relations that extraction pulled out of your memories (see [The Knowledge and Health tabs](#the-knowledge-and-health-tabs)).
+  - **Tiles** count the items (and the memories they came from), those recalled this week, those gone quiet (30+ days) and those never used.
+  - **Kinds** are tabs with the memory-kind shapes; keys 1 to 5 switch.
+  - **Rows** are grouped by project, then topic (or Flat). A project row folds; it shows the reach, the count, the recall range and how recently it was used. Top topics filter with one click, and All / Gone quiet / Never used narrow the list.
+  - **A row opens its source:** the memory it was mined from, the other items from that memory, Open memory and Show on map.
+  - **Source recalls** is how often the memory an item came from was recalled. A relation reads as subject, link and object with five confidence pips; an instruction shows Active or Retired.
 - **Review:** memories to look at again: never recalled, no tags, not recalled in 30 days, or low importance, then Retire candidates with their reasons and a Not live list with Restore. Each row has Open and a one-at-a-time Retire; Forget is not here.
 - **Health:** how much of your memory is used, how much has never been recalled, and which features are switched on.
 - **Vocabulary:** the shared tags by namespace with counts, and the candidates to Admit or Alias.
 - **Settings:** every setting of the memory system with its value and default, where you change, reset and back up (see [Settings](#settings)). It writes to `~/.claude/mnemosyne/config.json` and, through the `claude` command, to the plugin options.
+
+Every tab but the Map shares one content width.
 
 The Theme button in the header switches the whole dashboard between Auto (follows your system), Light and Dark, and remembers your choice. The header shows the plugin version the dashboard runs (for example `v0.8.0`) beside the engine's. The block at the bottom of the Health tab shows the store, the server process and whether the activity log is on.
 
