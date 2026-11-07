@@ -2,6 +2,16 @@
 
 Newest first. Each release is tagged `vX.Y.Z` on GitHub; the README and DESIGN.md describe the contracts.
 
+## 0.17.0 (dashboard shell and shared design tokens)
+
+First step of the tab polish: the header every tab shares, and the design tokens the next tabs build on.
+
+1. Shared tokens in `ui/style.css`: the map's data-role colours (gold, shared blue, bond violet, slate, ash), amber for waiting, and a spacing, radius and type scale.
+2. The active tab is a teal underline instead of a filled pill. The header says "117 memories in 14 projects"; the plugin and engine versions moved behind an ⓘ About button.
+3. One connection pill replaces "local only": "Local · live" (teal), "Reconnecting…" (amber) or "Link expired" (red ring). The standing "Connected to the local Mnemosyne server." line is gone.
+4. When the server stops, an amber strip says so, counts down to the next check ("Next check in 8 s"), and has a Try now button; the page's data is dimmed as out of date. When the link expired (the server restarted), a recovery card replaces the red sentence: run `/mnemosyne-ui` (with a Copy button), open the new link, and nothing was lost.
+5. The server watch gained `nextIn()` and `retry()`. No server, setting or engine change.
+
 ## 0.16.0 (calm motion, folding tethers, focus)
 
 1. Calmer motion: everything on the map turns at half the earlier speed (orbits, planet rings, moons and their swarms, probes, the sun belt, the camera's auto-rotate). While a tooltip is open, and for 2 seconds after it closes, nothing turns, so a hovered memory stays under the pointer long enough to read (before, only the orbits slowed to 15% and the dots kept moving). The planet tooltip's "one orbit every N min" follows the new speed.

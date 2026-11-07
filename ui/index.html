@@ -18,13 +18,30 @@
     <nav class="tabs" aria-label="Dashboard" id="tabs"></nav>
     <div class="meta">
       <span id="summary"></span>
-      <span id="engine" class="mono"></span>
+      <span id="conn" class="conn" data-state="live" title="This dashboard talks only to the Mnemosyne server on this computer"><span class="conn-dot" aria-hidden="true"></span><span id="conn-text">Local · live</span></span>
       <button id="theme" type="button" class="theme-btn">Theme: Auto</button>
-      <span class="local">local only</span>
+      <details class="about">
+        <summary class="about-btn" aria-label="About this dashboard" title="About">i</summary>
+        <div class="about-pop">
+          <p class="about-title">Mnemosyne dashboard</p>
+          <p id="engine" class="mono"></p>
+          <p class="about-note">Runs on this computer only; nothing is sent anywhere.</p>
+        </div>
+      </details>
     </div>
   </header>
 
   <p id="status" class="status" role="status">Loading…</p>
+  <p id="lost-extra" class="lost-extra" hidden><span id="lost-next"></span> <button id="lost-retry" type="button" class="btn small">Try now</button></p>
+  <section id="expired" class="expired-card" aria-labelledby="expired-title" hidden>
+    <h1 id="expired-title" class="expired-title">This link no longer works</h1>
+    <p class="expired-lead">The Mnemosyne server was restarted, so it now answers to a new link.</p>
+    <ol class="expired-steps">
+      <li>In Claude Code, run <code class="mono">/mnemosyne-ui</code> <button id="expired-copy" type="button" class="btn small">Copy</button></li>
+      <li>Open the link it prints (it is also on the clipboard), or use the "Open Mnemosyne dashboard" shortcut if you have one.</li>
+    </ol>
+    <p class="expired-note">Nothing was lost: your memories are in the store, not in this page. A change you had not saved here was not sent.</p>
+  </section>
 
   <main id="view-map" class="main view map-view" hidden>
     <h1 class="sr-only">Memory map</h1>

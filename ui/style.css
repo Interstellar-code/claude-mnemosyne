@@ -79,6 +79,32 @@
   --legend-core-bg: #FFFFFF;
   --legend-core-line: #9AA0A6;
   --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* 0.17.0 shared design tokens (design proposal, tabs-after/NOTES-shell-vocabulary-settings.md).
+     Data roles, as on the galaxy map only: gold = belongs to every project, shared blue = a project's memory
+     shared with every project, bond violet = a link between two projects, slate = structure, ash = not live / unused.
+     Teal (--accent) stays the UI accent for active, live, changed and primary; amber means waiting or "later". */
+  --role-gold: #F2C14E;
+  --role-shared: #9EC4FF;
+  --role-bond: #E8B8FF;
+  --role-slate: #4A5872;
+  --role-ash: #6F7787;
+  --warn: #E3B341;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --radius-1: 4px;
+  --radius-2: 8px;
+  --radius-3: 12px;
+  --radius-pill: 999px;
+  --fs-h1: 22px;
+  --fs-group: 16px;
+  --fs-body: 13.5px;
+  --fs-help: 12.5px;
+  --fs-meta: 12px;
   color-scheme: light;
 }
 
@@ -167,7 +193,9 @@ a:hover { color: var(--accent-dark); }
   font: inherit;
   cursor: pointer;
 }
-.tab[aria-current='page'] { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+/* 0.17.0: the active tab is a teal underline, not a filled pill (which read like a button). */
+.tab[aria-current='page'] { background: none; border-radius: 0; box-shadow: inset 0 -2px 0 var(--accent); color: var(--text); font-weight: 600; }
+.tab:hover:not([aria-current='page']) { color: var(--text); }
 .tab:disabled { cursor: default; opacity: 0.6; }
 .tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
@@ -204,6 +232,43 @@ a:hover { color: var(--accent-dark); }
 .status { margin: 0 0 16px; color: var(--muted); }
 .status.is-ok { color: var(--accent); }
 .status.is-error { color: var(--danger); }
+.status[hidden] { display: none; }
+
+/* 0.17.0 shell: one connection pill (live teal, lost amber, expired a hollow red ring) replaces "local only". */
+.conn { display: inline-flex; align-items: center; gap: var(--space-2); padding: var(--space-1) 10px; border: 1px solid var(--accent-line); border-radius: var(--radius-pill); color: var(--accent); font-size: var(--fs-meta); font-weight: 500; }
+.conn-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+.conn[data-state='lost'] { border-color: var(--warn); color: var(--amber-ink); }
+.conn[data-state='lost'] .conn-dot { background: var(--warn); }
+.conn[data-state='expired'] { border-color: var(--danger-line); color: var(--danger); }
+.conn[data-state='expired'] .conn-dot { background: none; box-shadow: inset 0 0 0 2px var(--danger); }
+
+/* The About popover: plugin and engine versions, out of the header line. */
+.about { position: relative; }
+.about-btn { display: inline-grid; place-items: center; width: 24px; height: 24px; border: 1px solid var(--line-strong); border-radius: 50%; color: var(--muted); font-size: 12px; font-weight: 700; font-style: italic; cursor: pointer; list-style: none; }
+.about-btn::-webkit-details-marker { display: none; }
+.about-btn:hover { color: var(--text); background: var(--hover); }
+.about-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.about-pop { position: absolute; right: 0; top: calc(100% + var(--space-2)); z-index: 20; width: 300px; padding: var(--space-3) var(--space-4); border: 1px solid var(--line-strong); border-radius: var(--radius-3); background: var(--surface); box-shadow: 0 8px 24px var(--ring-shadow); }
+.about-pop p { margin: 0 0 var(--space-2); }
+.about-pop p:last-child { margin-bottom: 0; }
+.about-title { color: var(--text); font-weight: 600; }
+.about-note { color: var(--muted); font-size: var(--fs-help); }
+
+/* Lost: the status line becomes an amber strip, with the countdown and Try now under it; the view's data is dimmed. */
+.status[data-kind='lost'] { margin: 0 32px; padding: var(--space-2) var(--space-4); border: 1px solid var(--warn); border-bottom: 0; border-radius: var(--radius-2) var(--radius-2) 0 0; background: var(--amber-soft); color: var(--amber-ink); }
+.lost-extra { display: flex; align-items: center; gap: var(--space-3); margin: 0 32px 16px; padding: var(--space-2) var(--space-4); border: 1px solid var(--warn); border-top: 0; border-radius: 0 0 var(--radius-2) var(--radius-2); background: var(--amber-soft); color: var(--amber-ink); font-size: var(--fs-help); }
+.lost-extra[hidden] { display: none; }
+.view.is-stale { opacity: 0.55; }
+
+/* Expired: a recovery card instead of one red sentence. */
+.status[data-kind='expired'] { display: none; }
+.expired-card { max-width: 640px; margin: var(--space-6) auto; padding: var(--space-5) var(--space-6); border: 1px solid var(--danger-line); border-radius: var(--radius-3); background: var(--surface); }
+.expired-card[hidden] { display: none; }
+.expired-title { margin: 0 0 var(--space-2); font-size: var(--fs-h1); font-weight: 600; }
+.expired-lead { margin: 0 0 var(--space-4); color: var(--muted); }
+.expired-steps { margin: 0 0 var(--space-4); padding-left: 20px; line-height: 1.8; }
+.expired-steps code { padding: 2px 6px; border-radius: var(--radius-1); background: var(--fill); }
+.expired-note { margin: 0; padding: var(--space-3) var(--space-4); border-radius: var(--radius-2); background: var(--surface-2); color: var(--muted); font-size: var(--fs-help); }
 
 .facts { display: grid; grid-template-columns: max-content 1fr; gap: 8px 24px; margin: 0; }
 .facts dt { color: var(--muted); }

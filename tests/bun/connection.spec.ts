@@ -47,6 +47,49 @@ function setup(answers: ProbeResult[] | (() => ProbeResult)) {
   return { watch, clock, calls, changes }
 }
 
+describe('0.17.0 nextIn and retry: the lost strip\'s countdown and its Try now button', () => {
+  test('nextIn counts down to the waiting check; null when not lost', async () => {
+    const clock = fakeTimers()
+    let t = 10_000
+    const watch = createWatch({ probe: async () => 'down', onChange: () => {}, timers: clock.timers, now: () => t })
+    expect(watch.nextIn()).toBeNull()
+    watch.suspect()
+    await Bun.sleep(0)
+    expect(watch.lost()).toBe(true)
+    expect(watch.nextIn()).toBe(1000)
+    t += 400
+    expect(watch.nextIn()).toBe(600)
+    t += 5000
+    expect(watch.nextIn()).toBe(0)
+  })
+
+  test('retry asks at once instead of waiting, and the back-off goes on from there; an answer ends the loss', async () => {
+    const clock = fakeTimers()
+    const answers: ProbeResult[] = ['down', 'down', 'up']
+    const changes: boolean[] = []
+    let calls = 0
+    const watch = createWatch({ probe: async () => (calls++, answers.shift() ?? 'down'), onChange: lost => changes.push(lost), timers: clock.timers })
+    watch.suspect()
+    await Bun.sleep(0)
+    expect(calls).toBe(1)
+    // Try now: the 1 s wait is cleared and a probe goes out at once; it finds nothing, so the next wait is 2 s
+    watch.retry()
+    await Bun.sleep(0)
+    expect(calls).toBe(2)
+    expect(clock.waits[0]!.cleared).toBe(true)
+    expect(clock.waits.map(w => w.ms)).toEqual([1000, 2000])
+    watch.retry()
+    await Bun.sleep(0)
+    expect(calls).toBe(3)
+    expect(watch.lost()).toBe(false)
+    expect(changes).toEqual([true, false])
+    // not lost: retry does nothing
+    watch.retry()
+    await Bun.sleep(0)
+    expect(calls).toBe(3)
+  })
+})
+
 describe('the watch on the server', () => {
   test('a failed request that finds the server up changes nothing and asks no more', async () => {
     const { watch, clock, calls, changes } = setup(['up'])
@@ -294,6 +337,27 @@ describe('the page when the server stops', () => {
     await fire()
     expect(box('status').textContent).toBe('Connected to the local Mnemosyne server.')
     expect(box('status').className).toBe('status is-ok')
+    // 0.17.0: the Connected line itself is not shown; the header pill says live, and the strip is gone
+    expect(box('status').hidden).toBe(true)
+    expect(box('conn').dataset).toMatchObject({ state: 'live' })
+    expect(box('conn-text').textContent).toBe('Local · live')
+    expect(box('lost-extra').hidden).toBe(true)
+  })
+
+  test('0.17.0 while lost: the pill says reconnecting, the strip counts down, and Try now is wired', async () => {
+    answer = 'refuse'
+    await app.loadHealthReport()
+    await Bun.sleep(20)
+    expect(box('status').dataset).toMatchObject({ kind: 'lost' })
+    expect(box('status').hidden).toBe(false)
+    expect(box('conn').dataset).toMatchObject({ state: 'lost' })
+    expect(box('conn-text').textContent).toBe('Reconnecting…')
+    expect(box('lost-extra').hidden).toBe(false)
+    expect(box('lost-next').textContent).toMatch(/^Next check in \d+ s\.$|^Checking now…$/)
+    expect(listeners('lost-retry')).toBe(1)
+    answer = 'ok'
+    await fire()
+    expect(box('conn').dataset).toMatchObject({ state: 'live' })
   })
 
   test('a new server (the link answers 401) while the server is lost replaces the banner with the link message', async () => {
@@ -306,5 +370,11 @@ describe('the page when the server stops', () => {
     expect(box('status').textContent).toContain('This link no longer works')
     expect(box('status').className).toBe('status is-error')
     expect(waits).toEqual([])
+    // 0.17.0: the recovery card shows, with its Copy button wired; the pill says the link expired
+    expect(box('expired').hidden).toBe(false)
+    expect(listeners('expired-copy')).toBe(1)
+    expect(box('conn').dataset).toMatchObject({ state: 'expired' })
+    expect(box('conn-text').textContent).toBe('Link expired')
+    expect(box('lost-extra').hidden).toBe(true)
   })
 })
