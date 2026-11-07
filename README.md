@@ -339,7 +339,7 @@ The header shows how many memories are in how many projects (global is counted a
   - **Grouping:** rows are grouped by project when a queue spans several.
   - **Keys:** J, K, O, Space (keep), R (retire, then Enter), U (undo).
 - **Health:** how much of your memory is used, how much has never been recalled, and which features are switched on.
-  - **What needs action first:** a verdict, counts by state, and up to three findings with one button each (for example, Claude has not recalled anything over the days the log covers: check that the memory tools are on).
+  - **What needs action first:** a verdict, counts by state, and up to three findings with one button each (for example, no agent has recalled anything over the days the log covers: check that the memory tools are on). Recalls from other MCP agents such as Codex count as use, so working in another agent is not flagged.
   - **System:** the version, store, server, activity log and mode, beside the board.
   - **Tiles and feature rows** show their state by a mark whose shape carries the meaning; provenance is marked "by design".
   - **The recalls chart** stacks Claude Code, other apps and the dashboard per day.

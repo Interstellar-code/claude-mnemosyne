@@ -2,6 +2,17 @@
 
 Newest first. Each release is tagged `vX.Y.Z` on GitHub; the README and DESIGN.md describe the contracts.
 
+## 0.26.1 (Health counts other agents' recalls)
+
+The Health tab warned "Claude has not recalled anything in n days" when the memory was in daily use through other MCP agents (Codex, Claude Desktop). Now:
+
+1. **Other agents count as use.** If Claude Code made no recall but other agents did, the finding is ok: "Other agents recalled n times in n days", with a note that this is fine if you work in other agents.
+2. **Act only when no agent recalls.** The act finding is now "No agent has recalled anything in n days". Dashboard searches alone still do not count as use.
+3. **When both recall**, the ok finding reads "Agents recalled n times in n days" and splits Claude Code and other agents.
+4. **Tiles:** "Other apps' recalls" is now "Other agents' recalls", ok when above 0. The Claude tile is only act when no agent recalls.
+
+No engine or recall change.
+
 ## 0.26.0 (recall evaluation harness)
 
 The first step of the gbrain learnings: measure recall before any ranking change. New script `bin/eval.ts`:

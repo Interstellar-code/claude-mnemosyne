@@ -92,9 +92,9 @@ export function kpis(data: HealthData): Kpi[] {
   return [
     { label: 'Memories', value: String(data.total), note: `${plural(projects, 'project', 'projects')}, ${data.global} global`, level: 'ok' },
     { label: 'Never recalled', value: String(data.neverCount), note: `${percent(data.neverCount, data.total)}% of all memories`, level: 'info' },
-    // No Claude recall over the days the log covers is the one number to act on: the plugin's recall may be off.
-    { label: 'Claude recalls in the log', value: String(recalls), note: data.daysCovered > 0 ? `over ${plural(data.daysCovered, 'day', 'days')} of activity log, without dashboard searches` : 'the activity log has no days yet', level: data.daysCovered > 1 && recalls === 0 ? 'act' : data.daysCovered === 0 ? 'info' : 'ok' },
-    { label: "Other apps' recalls", value: String(others), note: 'from other MCP clients, not counted as Claude recalls', level: 'info' },
+    // 0.26.1: no recall from any agent over the days the log covers is the one number to act on; other agents' recalls are use too.
+    { label: 'Claude recalls in the log', value: String(recalls), note: data.daysCovered > 0 ? `over ${plural(data.daysCovered, 'day', 'days')} of activity log, without dashboard searches` : 'the activity log has no days yet', level: data.daysCovered === 0 ? 'info' : recalls > 0 ? 'ok' : others > 0 ? 'info' : data.daysCovered > 1 ? 'act' : 'ok' },
+    { label: "Other agents' recalls", value: String(others), note: 'from other MCP clients such as Codex or Claude Desktop', level: others > 0 ? 'ok' : 'info' },
     { label: 'Store size', value: bytes(data.storeSize + data.logSize), note: `database ${bytes(data.storeSize)}, log ${bytes(data.logSize)}`, level: 'ok' },
   ]
 }
@@ -108,17 +108,23 @@ export type Finding = { level: Level; title: string; detail: string; action: 'se
 export function findings(data: HealthData, meaning = false): Finding[] {
   const out: Finding[] = []
   const claude = sum(data.recallsPerDay)
-  const others = sum(data.otherRecallsPerDay) + sum(data.uiRecallsPerDay)
+  // 0.26.1: other agents (Codex, Claude Desktop, any MCP client) use the memory too, so their recalls count as healthy.
+  // Only a log where no agent recalls at all is one to act on; dashboard searches alone do not count as use.
+  const agents = sum(data.otherRecallsPerDay)
+  const dashboard = sum(data.uiRecallsPerDay)
+  const days = plural(data.daysCovered, 'day', 'days')
   if (data.daysCovered === 0) out.push({ level: 'watch', title: 'The activity log is empty or off', detail: 'Recalls cannot be counted without it. Turn on activityLog in Settings.', action: 'settings', actionLabel: 'Open Settings' })
-  else if (claude === 0 && data.daysCovered > 1)
+  else if (claude === 0 && agents === 0 && data.daysCovered > 1)
     out.push({
       level: 'act',
-      title: `Claude has not recalled anything in ${plural(data.daysCovered, 'day', 'days')}`,
-      detail: others > 0 ? `All ${plural(others, 'recall', 'recalls')} in the log came from other apps or the dashboard. Check that Claude Code has the Mnemosyne memory tools switched on.` : 'Nothing in the log recalled a memory. Check that Claude Code has the Mnemosyne memory tools switched on.',
+      title: `No agent has recalled anything in ${days}`,
+      detail: dashboard > 0 ? `The only ${plural(dashboard, 'recall', 'recalls')} in the log came from dashboard searches. Check that your agents have the Mnemosyne memory tools switched on.` : 'Nothing in the log recalled a memory. Check that your agents have the Mnemosyne memory tools switched on.',
       action: 'settings',
       actionLabel: 'Open Settings',
     })
-  else out.push({ level: 'ok', title: `Claude recalled ${plural(claude, 'time', 'times')} in ${plural(data.daysCovered, 'day', 'days')}`, detail: '', action: '', actionLabel: '' })
+  else if (claude === 0 && agents > 0)
+    out.push({ level: 'ok', title: `Other agents recalled ${plural(agents, 'time', 'times')} in ${days}`, detail: 'Claude Code made none. That is fine if you work in other agents; if you expect Claude Code to recall, check its memory tools.', action: '', actionLabel: '' })
+  else out.push({ level: 'ok', title: `Agents recalled ${plural(claude + agents, 'time', 'times')} in ${days}`, detail: agents > 0 ? `Claude Code ${claude}, other agents ${agents}.` : '', action: '', actionLabel: '' })
   const total = data.total
   const missingKnowledge = Math.max(0, total - data.coverage.knowledge)
   if (total > 0 && missingKnowledge > 0)
@@ -225,7 +231,7 @@ export const CHART_DAYS = 14
 const DAY_MS = 86_400_000
 
 /**
- * `count` is Claude's recalls that day. 0.23.0: `other` (other apps) and `ui` (the dashboard's searches) stack on top;
+ * `count` is Claude's recalls that day. 0.23.0: `other` (other agents) and `ui` (the dashboard's searches) stack on top;
  * `height` is the whole stack's against the tallest day, and `parts` are each segment's share of its stack in twentieths.
  */
 export type Day = {
@@ -269,12 +275,17 @@ const shortDate = (date: string) => `${Number(date.slice(8, 10))} ${MONTHS[Numbe
 
 /** The chart's words: the numbers in text, and the day the activity log starts when that is inside the 14 days. */
 export function chartText(days: readonly Day[], data: HealthData): { label: string; summary: string } {
-  const sum = days.reduce((a, day) => a + day.count, 0)
+  // 0.26.1: every recall counts, split by who asked when more than Claude Code did.
+  const claude = days.reduce((a, day) => a + day.count, 0)
+  const other = days.reduce((a, day) => a + day.other, 0)
+  const ui = days.reduce((a, day) => a + day.ui, 0)
+  const sum = claude + other + ui
+  const split = other + ui > 0 ? `: Claude Code ${claude}, other agents ${other}, dashboard ${ui}` : ''
   const first = days.find(day => day.covered)
   const starts = first !== undefined && first !== days[0] ? ` The activity log starts on ${shortDate(first.date)}; earlier days are greyed out because nothing was logged then.` : ''
   return {
-    label: `Bar chart of recalls per day for the last ${CHART_DAYS} days, oldest first: ${days.map(day => `${day.label} ${day.covered ? day.count : 'not logged'}`).join(', ')}.`,
-    summary: data.daysCovered === 0 ? 'The activity log is empty or off, so there are no recalls to count.' : `${plural(sum, 'recall', 'recalls')} in the last ${CHART_DAYS} days.${starts}`,
+    label: `Bar chart of recalls per day for the last ${CHART_DAYS} days, oldest first: ${days.map(day => `${day.label} ${day.covered ? day.count + day.other + day.ui : 'not logged'}`).join(', ')}.`,
+    summary: data.daysCovered === 0 ? 'The activity log is empty or off, so there are no recalls to count.' : `${plural(sum, 'recall', 'recalls')} in the last ${CHART_DAYS} days${split}.${starts}`,
   }
 }
 
@@ -383,14 +394,15 @@ export function chartBars(days: readonly Day[]): HTMLElement[] {
   return days.map(day => {
     const column = el('div', undefined, day.covered ? 'day' : 'day is-off')
     const bar = el('div', undefined, `day-bar ${day.height}`)
-    // 0.23.0: stacked by who asked (Claude Code, other apps, the dashboard), each a share of the stack.
+    // 0.23.0: stacked by who asked (Claude Code, other agents, the dashboard), each a share of the stack.
     if (day.covered) {
       if (day.parts.ui > 0) bar.append(el('span', undefined, `dseg f-ui p${day.parts.ui}`))
       if (day.parts.other > 0) bar.append(el('span', undefined, `dseg f-other p${day.parts.other}`))
       if (day.parts.claude > 0) bar.append(el('span', undefined, `dseg f-claude p${day.parts.claude}`))
     }
-    column.title = day.covered ? `${day.date}: Claude ${day.count}, other apps ${day.other}, dashboard ${day.ui}` : `${day.date}: before the activity log began`
-    column.append(el('span', day.covered ? String(day.count) : '', 'day-count mono'), bar, el('span', day.label, 'day-label muted'))
+    column.title = day.covered ? `${day.date}: Claude Code ${day.count}, other agents ${day.other}, dashboard ${day.ui}` : `${day.date}: before the activity log began`
+    // 0.26.1: the number over a bar is the whole stack, so a tall bar never reads 0.
+    column.append(el('span', day.covered ? String(day.count + day.other + day.ui) : '', 'day-count mono'), bar, el('span', day.label, 'day-label muted'))
     return column
   })
 }

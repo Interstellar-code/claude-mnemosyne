@@ -39,18 +39,24 @@ describe('HEALTH 0.23: findings, levels, the stacked days, projects and storage 
     coverage: { tagged: 10, knowledge: 7, embeddings: 10, provenance: 3 },
   })
 
-  test('findings: no Claude recall over the logged days is the one to act on, then the watches; the verdict counts them', () => {
+  test('findings: no agent recalling over the logged days is the one to act on, then the watches; the verdict counts them', () => {
+    // 0.26.1: other agents recalling while Claude Code does not is healthy use, not a fault.
     const list = health.findings(base, true)
-    expect(list.map((f: { level: string }) => f.level)).toEqual(['act', 'watch', 'watch', 'ok', 'ok'])
-    expect(list[0]).toMatchObject({ title: 'Claude has not recalled anything in 12 days', action: 'settings', actionLabel: 'Open Settings' })
-    expect(list[0].detail).toContain('All 9 recalls in the log came from other apps or the dashboard.')
-    expect(list[1]).toMatchObject({ title: '3 memories have no knowledge extracted', action: 'knowledge' })
-    expect(list[2]).toMatchObject({ title: '4 live memories have never been recalled', action: 'review' })
-    expect(health.verdict(list)).toBe('Running, with 1 thing to act on')
+    expect(list.map((f: { level: string }) => f.level)).toEqual(['watch', 'watch', 'ok', 'ok', 'ok'])
+    expect(list[0]).toMatchObject({ title: '3 memories have no knowledge extracted', action: 'knowledge' })
+    expect(list[1]).toMatchObject({ title: '4 live memories have never been recalled', action: 'review' })
+    expect(list[2]).toMatchObject({ level: 'ok', title: 'Other agents recalled 6 times in 12 days', action: '' })
+    expect(list[2].detail).toContain('Claude Code made none')
+    expect(health.verdict(list)).toBe('Running, 2 things to watch')
+    // No agent at all, only dashboard searches: act.
+    const silent = health.findings({ ...base, otherRecallsPerDay: [] }, true)
+    expect(silent[0]).toMatchObject({ level: 'act', title: 'No agent has recalled anything in 12 days', action: 'settings', actionLabel: 'Open Settings' })
+    expect(silent[0].detail).toContain('The only 3 recalls in the log came from dashboard searches.')
+    expect(health.verdict(silent)).toBe('Running, with 1 thing to act on')
     // With Claude recalling, nothing to act on; with nothing to watch, all good.
     const fine = { ...base, recallsPerDay: [{ date: date(0), count: 3 }], neverCount: 0, coverage: { ...base.coverage, knowledge: 10 } }
     expect(health.verdict(health.findings(fine, true))).toBe('All good')
-    expect(health.findings(fine, true)[0]).toMatchObject({ level: 'ok', title: 'Claude recalled 3 times in 12 days' })
+    expect(health.findings(fine, true)[0]).toMatchObject({ level: 'ok', title: 'Agents recalled 9 times in 12 days', detail: 'Claude Code 3, other agents 6.' })
     // No log at all: watch, and nothing claims Claude is silent.
     expect(health.findings({ ...base, daysCovered: 0 }, true)[0]).toMatchObject({ level: 'watch', title: 'The activity log is empty or off' })
     // Meaning search off is information, not a fault.
@@ -59,7 +65,8 @@ describe('HEALTH 0.23: findings, levels, the stacked days, projects and storage 
   })
 
   test('levels: the tiles, and the feature rows with provenance by design', () => {
-    expect(kpis(base).map((k: { level: string }) => k.level)).toEqual(['ok', 'info', 'act', 'info', 'ok'])
+    expect(kpis(base).map((k: { level: string }) => k.level)).toEqual(['ok', 'info', 'info', 'ok', 'ok'])
+    expect(kpis({ ...base, otherRecallsPerDay: [] }).map((k: { level: string }) => k.level)).toEqual(['ok', 'info', 'act', 'info', 'ok'])
     expect(kpis({ ...base, daysCovered: 0 })[2].level).toBe('info')
     const rows = health.coverageLevels(base, true)
     expect(rows.map((r: { label: string; level: string; byDesign: boolean }) => `${r.label.split(' ')[0]}:${r.level}${r.byDesign ? ':design' : ''}`)).toEqual(['Topic:ok', 'Knowledge:watch', 'Embeddings:ok', 'Who:ok:design', 'Recalled:ok'])
@@ -77,9 +84,11 @@ describe('HEALTH 0.23: findings, levels, the stacked days, projects and storage 
     withDocumentSync(() => {
       const today = (chartBars(days) as FakeNode[]).at(-1)!
       expect(today.all().filter(n => n.className.startsWith('dseg')).map(n => n.className)).toEqual(['dseg f-ui p5', 'dseg f-other p15'])
-      // The number under a bar stays Claude's.
-      expect(today.texts()).toEqual(['0', 'today'])
+      // 0.26.1: the number over a bar is the whole stack, so a tall bar never reads 0.
+      expect(today.texts()).toEqual(['8', 'today'])
+      expect(today.title).toBe(`${days.at(-1)!.date}: Claude Code 0, other agents 6, dashboard 2`)
     })
+    expect(chartText(days, base).summary).toBe('9 recalls in the last 14 days: Claude Code 0, other agents 6, dashboard 3. The activity log starts on 27 Oct; earlier days are greyed out because nothing was logged then.')
   })
 
   test('projects: bars against the largest, global gold, a limit keeps the largest; storage chips', () => {
@@ -236,7 +245,7 @@ describe('VIEWS.2: the Health tab on a real store', () => {
       ['Memories', '5'],
       ['Never recalled', '2'],
       ['Claude recalls in the log', '6'],
-      ["Other apps' recalls", '0'],
+      ["Other agents' recalls", '0'],
       ['Store size', bytes(data.storeSize + data.logSize)],
     ])
     expect(kpis(data)[0]!.note).toBe('2 projects, 1 global')
@@ -326,20 +335,21 @@ describe('VIEWS.2: the Health tab on a real store', () => {
     expect(heightClass(0, 0)).toBe('h0')
     const words = chartText(days, data)
     expect(words.label).toContain('last 14 days')
-    expect(words.label).toContain('today 3')
+    // 0.26.1: the label counts every recall that day (today: Claude 3 and the rest).
+    expect(words.label).toContain('today 6')
     expect(words.label).toContain('2d 1')
     // The log covers 6 days (today and the 5 before): the 8 earlier days are not covered, and the caption says where the log starts.
     expect(days.map((d: { covered: boolean }) => d.covered)).toEqual([...Array(8).fill(false), ...Array(6).fill(true)])
     const startsOn = new Date(now - 5 * DAY)
     const startText = `${startsOn.getUTCDate()} ${['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][startsOn.getUTCMonth()]}`
-    expect(words.summary).toBe(`6 recalls in the last 14 days. The activity log starts on ${startText}; earlier days are greyed out because nothing was logged then.`)
+    expect(words.summary).toBe(`10 recalls in the last 14 days: Claude Code 6, other agents 0, dashboard 4. The activity log starts on ${startText}; earlier days are greyed out because nothing was logged then.`)
     expect(words.label).toContain('13d not logged')
     expect(words.label).toContain('4d 0')
     expect(days[7]).toMatchObject({ covered: false, count: 0, height: 'h0' })
     withDocumentSync(() => {
       const bars = chartBars(days) as FakeNode[]
       expect(bars).toHaveLength(14)
-      expect(bars.at(-1)!.texts()).toEqual(['3', 'today'])
+      expect(bars.at(-1)!.texts()).toEqual(['6', 'today'])
       expect(bars.at(-1)!.all().some(n => n.className.includes('day-bar h20'))).toBe(true)
       // A covered day with no recall says 0; a day before the log has no number and is muted.
       expect(bars.at(-3)!.texts()[0]).toBe('1')
@@ -351,7 +361,7 @@ describe('VIEWS.2: the Health tab on a real store', () => {
     // A log that covers the whole window says nothing about where it starts.
     const full = dayBars({ ...data, daysCovered: 30 }, now)
     expect(full.every((d: { covered: boolean }) => d.covered)).toBe(true)
-    expect(chartText(full, { ...data, daysCovered: 30 }).summary).toBe('6 recalls in the last 14 days.')
+    expect(chartText(full, { ...data, daysCovered: 30 }).summary).toBe('10 recalls in the last 14 days: Claude Code 6, other agents 0, dashboard 4.')
     // The empty store: no log, nothing to chart.
     const empty = dayBars(emptyData, now)
     expect(empty.every((d: { count: number }) => d.count === 0)).toBe(true)
@@ -475,10 +485,10 @@ describe('VIEWS.2: the Health tab on a real store', () => {
     const mixed = parseHealth({ recallsPerDay: days, otherRecallsPerDay: other, daysCovered: 1 })
     expect(kpis(mixed).filter((k: { label: string }) => k.label.includes('recalls')).map((k: { label: string; value: string }) => [k.label, k.value])).toEqual([
       ['Claude recalls in the log', '9'],
-      ["Other apps' recalls", '2'],
+      ["Other agents' recalls", '2'],
     ])
     // A reply without the field (an older server) reads 0, not an error.
-    expect(kpis(parseHealth({ recallsPerDay: days }))[3]).toMatchObject({ label: "Other apps' recalls", value: '0' })
+    expect(kpis(parseHealth({ recallsPerDay: days }))[3]).toMatchObject({ label: "Other agents' recalls", value: '0' })
   })
 
   test('VIEWS.2: an empty store reads as zeros', () => {

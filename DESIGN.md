@@ -1603,6 +1603,10 @@ C10.3: the engine's trigger `trim_validations_to_3` keeps only the newest 3 `mem
 
 On the solar-system map a plain folder (no git repo) with at least `map.stationMin` live memories is a space station and one with fewer a starship (default 50, range 2 to 1000, applies now). The galaxy reply carries the value. Git repos are always planets.
 
+### Health counts other agents' recalls (0.26.1)
+
+The memory is meant for any MCP agent, so the Health tab treats a recall from another agent (`otherRecallsPerDay`, origin external) as use. `findings`: no log is watch, as before; no Claude and no external recall over more than one logged day is act ("No agent has recalled anything in n days"; dashboard searches, `uiRecallsPerDay`, do not count as use and only change the detail); external recalls without Claude are ok ("Other agents recalled n times"); otherwise ok "Agents recalled n times", with the Claude Code and other-agent split when both are present. `kpis`: the Claude tile is info when it is 0 but other agents recalled, and act only when no agent did; the tile "Other agents' recalls" is ok when above 0.
+
 ### The recall evaluation harness (0.26.0)
 
 First of the gbrain learnings (`mnemosyne-design/gbrain-research.md` §5.1 and §10): no ranking change ships unless this shows it helps. Script only (`bin/eval.ts`); no setting, engine or recall change.
