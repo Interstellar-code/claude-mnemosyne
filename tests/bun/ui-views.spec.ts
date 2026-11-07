@@ -106,6 +106,30 @@ describe('the dashboard views on a real store', () => {
     expect(rows.filter(row => row.recall_count > 0).length).toBe(1)
   })
 
+  test('MEM 0.18: /api/memories counts reach and kind under the other filters, and filters by them; q matches an id prefix', async () => {
+    type List = { total: number; memories: { id: string; owner: string; scope: string | null; memory_type: string | null }[]; facets: { reach: Record<string, number>; kind: Record<string, number> } }
+    const all = (await (await get('/api/memories')).json()) as List
+    const sum = (counts: Record<string, number>) => Object.values(counts).reduce((a, b) => a + b, 0)
+    expect(sum(all.facets.reach)).toBe(all.total)
+    expect(sum(all.facets.kind)).toBe(all.total)
+    const reachOf = (m: List['memories'][number]) => (m.owner === 'global' ? 'all' : m.scope === 'global' ? 'shared' : 'project')
+    for (const reach of ['all', 'shared', 'project']) {
+      const list = (await (await get(`/api/memories?reach=${reach}`)).json()) as List
+      expect(list.total).toBe(all.facets.reach[reach] ?? 0)
+      expect(list.memories.every(m => reachOf(m) === reach)).toBe(true)
+      // The reach counts stay those of the list without reach=, so every chip still says what it gives.
+      expect(list.facets.reach).toEqual(all.facets.reach)
+    }
+    const [kind, count] = Object.entries(all.facets.kind)[0]!
+    const byKind = (await (await get(`/api/memories?kind=${encodeURIComponent(kind)}`)).json()) as List
+    expect(byKind.total).toBe(count)
+    expect((await get('/api/memories?reach=everyone')).status).toBe(400)
+    expect((await get('/api/memories?kind=')).status).toBe(400)
+    const prefix = ids.globalApple!.slice(0, 8)
+    const found = (await (await get(`/api/memories?q=${prefix}`)).json()) as List
+    expect(found.memories.map(m => m.id)).toContain(ids.globalApple)
+  })
+
   test('VIEW.1.a1: GET /api/memories returns id, preview, owner, importance, recall_count, last_recalled, timestamp, scope and metadata', async () => {
     const response = await get('/api/memories')
     expect(response.status).toBe(200)
@@ -114,7 +138,7 @@ describe('the dashboard views on a real store', () => {
     expect(list.total).toBe(7)
     expect(list.count).toBe(7)
     for (const memory of list.memories) {
-      expect(Object.keys(memory).sort()).toEqual(['id', 'importance', 'last_recalled', 'metadata', 'owner', 'preview', 'recall_count', 'scope', 'state', 'tags', 'timestamp', 'truncated'])
+      expect(Object.keys(memory).sort()).toEqual(['id', 'importance', 'last_recalled', 'memory_type', 'metadata', 'owner', 'preview', 'recall_count', 'scope', 'state', 'tags', 'timestamp', 'truncated'])
     }
     const apple = list.memories.find(memory => memory.id === ids.globalApple)!
     expect(apple).toMatchObject({ owner: 'global', preview: 'apple pie recipe from grandma', importance: 0.7, recall_count: 0, last_recalled: null, scope: 'global', metadata: null, truncated: false })
@@ -1116,7 +1140,7 @@ describe('VIEWS R2: the Knowledge and Health glue in app.ts', () => {
     expect(byId('status').textContent).toBe('something on search')
   })
 
-  test('CRUD.2: the Memories tab hides retired rows by default; Show retired shows them dimmed with their state; the toggle is this viewer\'s setting', async () => {
+  test('CRUD.2: the Memories tab shows live rows by default; Not live and All show the others in ash with their state; the choice is this viewer\'s setting', async () => {
     const made = body((await engineCall(CLI, store, 'project-glue-1a2b', [toolCall(1, 'mnemopi_remember', { content: 'retired for the toggle test' })])).get(1)) as { memory_id: string }
     const retired = await realFetch(`http://127.0.0.1:${server.port}/api/memory/retire`, {
       method: 'POST',
@@ -1130,37 +1154,38 @@ describe('VIEWS R2: the Knowledge and Health glue in app.ts', () => {
     const savedStorage = g.localStorage
     g.localStorage = { getItem: (key: string) => stored.get(key) ?? null, setItem: (key: string, value: string) => void stored.set(key, value) }
     try {
-      app.wireShowRetired()
-      expect((byId('mem-retired') as AppNode).checked).toBe(false)
+      app.wireStateView()
+      const seg = (state: string) => (byId('mem-state').children as AppNode[]).find(button => button.dataset.state === state)!
+      expect(seg('live').attributes.get('aria-pressed')).toBe('true')
       await app.loadMemories()
-      const shown = () => (byId('mem-rows').children as AppNode[]).map(row => row.dataset.id)
+      const shown = () => (byId('mem-rows').children as AppNode[]).filter(row => row.className.startsWith('row')).map(row => row.dataset.id)
       expect(shown()).not.toContain(made.memory_id)
-      expect(byId('mem-count').textContent).toMatch(/^Showing \d+ of \d+ \(\d+ not live, hidden: turn on Show retired to see (it|them)\)$/)
-      // On: the row shows, dimmed, with its state in words in front of its text.
-      const toggle = byId('mem-retired') as AppNode
-      toggle.checked = true
-      toggle.fire('change')
+      expect(byId('mem-count').textContent).toMatch(/^Showing \d+ of \d+ · live \(\d+ not live, hidden: pick Not live or All to see (it|them)\)$/)
+      // All: the row shows, in ash, with its state in words in front of its text.
+      seg('all').fire('click')
+      expect(seg('all').attributes.get('aria-pressed')).toBe('true')
       expect(shown()).toContain(made.memory_id)
       const row = (byId('mem-rows').children as AppNode[]).find(node => node.dataset.id === made.memory_id)!
       expect(row.className).toBe('row is-dim')
-      expect((row.children[0] as AppNode).textContent).toStartWith('retired retired for the toggle test')
+      expect((row.children[1] as AppNode).textContent).toStartWith('retired retired for the toggle test')
       expect(byId('mem-count').textContent).not.toContain('hidden')
-      expect(stored.get('mnemosyne.memories.showRetired')).toBe('1')
-      // A live row has neither the dimming nor a state word.
+      expect(stored.get('mnemosyne.memories.state')).toBe('all')
+      // A live row has neither the ash nor a state word.
       const live = (byId('mem-rows').children as AppNode[]).find(node => node.className === 'row')
       expect(live).toBeDefined()
-      // Off again: hidden, and remembered as off.
-      toggle.checked = false
-      toggle.fire('change')
+      // Not live: only the others.
+      seg('gone').fire('click')
+      expect(shown()).toContain(made.memory_id)
+      expect((byId('mem-rows').children as AppNode[]).some(node => node.className === 'row')).toBe(false)
+      // Live again: hidden, and remembered.
+      seg('live').fire('click')
       expect(shown()).not.toContain(made.memory_id)
-      expect(stored.get('mnemosyne.memories.showRetired')).toBe('0')
+      expect(stored.get('mnemosyne.memories.state')).toBe('live')
       // A storage that throws is only a lost convenience.
       g.localStorage = { getItem: () => { throw new Error('blocked') }, setItem: () => { throw new Error('blocked') } }
-      toggle.checked = true
-      expect(() => toggle.fire('change')).not.toThrow()
+      expect(() => seg('all').fire('click')).not.toThrow()
       expect(shown()).toContain(made.memory_id)
-      toggle.checked = false
-      toggle.fire('change')
+      seg('live').fire('click')
     } finally {
       g.localStorage = savedStorage
     }
@@ -1171,7 +1196,7 @@ describe('VIEWS R2: the Knowledge and Health glue in app.ts', () => {
     for (const state of ['retired', 'expired', 'lapsed']) {
       const row = app.memoryRow(note(state), () => {}) as AppNode
       expect(row.className).toBe('row is-dim')
-      expect((row.children[0] as AppNode).textContent).toBe(`${state} a note`)
+      expect((row.children[1] as AppNode).textContent).toBe(`${state} a note`)
     }
     for (const state of [undefined, 'live']) expect((app.memoryRow(note(state), () => {}) as AppNode).className).toBe('row')
     expect(app.isGone(note())).toBe(false)

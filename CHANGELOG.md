@@ -2,6 +2,33 @@
 
 Newest first. Each release is tagged `vX.Y.Z` on GitHub; the README and DESIGN.md describe the contracts.
 
+## 0.18.0 (Memories tab polish)
+
+The second step of the tab polish, following the design proposal's Memories notes.
+
+1. **Groundwork the next tabs reuse:**
+   - an owner chip (global in gold);
+   - kind glyphs (a CSS mask per kind; the shape alone tells the kind);
+   - a reach marker: all is a gold dot, shared a dashed blue ring, project a plain ring, as on the map.
+2. **Each row is one line:**
+   - the lead (up to a colon) in bold, with at most three tags under it ("+n" for more); the Tags column is gone;
+   - new Kind, Reach and Importance (five pips) columns;
+   - recalls as a log-scaled bar;
+   - the saved time as "09:42", "19 Oct" or a date.
+3. Not-live rows are in ash with their state as a worded pill.
+4. **One filter bar:** text, tag or id, with `/` to focus it; the tag is a token inside the bar. "Show retired" became a Live / Not live / All control with counts. It is still this viewer's setting; the old "on" reads as All.
+5. **Reach and kind chips,** counted by the server under the other filters. A chip with 0 is disabled.
+6. **Title, groups and empty state:**
+   - the title counts live, not live, global and shared memories, and the projects;
+   - rows are grouped under sticky day headings (Today, Yesterday, then dates); the "Most recalled" sort is not grouped;
+   - with no rows, an empty state names the filters that are on, with Clear project and Clear all filters.
+7. **Keys:** J and K move, Enter opens, Esc closes (and in the filter box clears it first), `/` filters, N starts a new memory. A hint in the footer lists them.
+8. **The memory panel:**
+   - on screens 1200 px and wider, opened from Memories, it stands beside the list and the list makes room;
+   - its head shows the kind, the owner chip and the reach;
+   - a four-number strip (importance, recalls, saved, state) and a sentence on the reach were added.
+9. **Server:** `GET /api/memories` takes `reach=all|shared|project` and `kind=`, returns `facets: { reach, kind }` and each row's `memory_type`, and its `q` also matches the start of an id. No setting or engine change.
+
 ## 0.17.0 (dashboard shell and shared design tokens)
 
 First step of the tab polish: the header every tab shares, and the design tokens the next tabs build on.

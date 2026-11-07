@@ -21,6 +21,8 @@ export type SheetOptions = {
   returnFocus?: HTMLElement | null | (() => HTMLElement | null)
   /** Runs once when the sheet closes (not when another call to openSheet replaces its content). */
   onClose?: () => void
+  /** On a wide screen (the CSS decides: 1200 px and up) the panel stands beside the page instead of over its foot. */
+  side?: boolean
 }
 
 /** How long the slide-down lasts: the sheet is hidden for good after this. */
@@ -61,6 +63,8 @@ export function openSheet(options: SheetOptions) {
     state.returnFocus = active && active !== document.body ? active : null
   }
   state.onClose = options.onClose
+  if (options.side === true) sheet.classList.add('is-side')
+  else sheet.classList.remove('is-side')
   if (!state.open) {
     state.open = true
     sheet.hidden = false

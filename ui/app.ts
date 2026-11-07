@@ -152,6 +152,34 @@ export function day(value: string | null | undefined): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
 }
 
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+/** A saved time, short: HH:MM today, "19 Oct" this year, else YYYY-MM-DD; '' when there is none. */
+export function savedLabel(value: string | null | undefined, now = new Date()): string {
+  if (!value) return ''
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  const pad = (n: number) => String(n).padStart(2, '0')
+  if (day(value) === day(now.toISOString())) return `${pad(date.getHours())}:${pad(date.getMinutes())}`
+  if (date.getFullYear() === now.getFullYear()) return `${date.getDate()} ${MONTHS[date.getMonth()]}`
+  return day(value)
+}
+
+/** A day group's heading: Today, Yesterday, else "19 Oct 2026". */
+export function dayHeading(value: string | null | undefined, now = new Date()): string {
+  const key = day(value)
+  if (!key) return 'No date'
+  if (key === day(now.toISOString())) return 'Today'
+  if (key === day(new Date(now.getTime() - 86_400_000).toISOString())) return 'Yesterday'
+  return longDay(value)
+}
+
+/** A date as "6 Nov 2026"; '' when there is none. */
+export function longDay(value: string | null | undefined): string {
+  const date = new Date(value ?? '')
+  return Number.isNaN(date.getTime()) ? '' : `${date.getDate()} ${MONTHS[date.getMonth()]} ${date.getFullYear()}`
+}
+
 /** A time as HH:MM:SS, local time. */
 export function clock(value: string | undefined): string {
   const date = new Date(value ?? '')
@@ -277,9 +305,9 @@ export function useOwners(list: readonly string[]) {
   colours = ownerColours(list)
 }
 
-/** A project's name with its colour dot; `label` stands for a group of projects (grey). */
+/** A project's name with its colour dot; `label` stands for a group of projects (grey). The class `own` makes it a chip (G1): global is gold. */
 export function project(owner: string | undefined, className = 'project', label?: string) {
-  const span = el('span', undefined, className)
+  const span = el('span', undefined, owner === 'global' && !label && className.includes('own') ? `${className} is-global` : className)
   span.title = label ?? owner ?? ''
   const dot = el('span', undefined, `dot ${dotClass(label ? ownerColour(colours, undefined) : ownerColour(colours, owner))}`)
   span.append(dot, el('span', label ?? ownerName(owner)))
@@ -316,27 +344,117 @@ function chips(tags: readonly string[], pick?: (tag: string) => void) {
 /** True for a memory that is retired, expired or lapsed; an older server sends no state, which is live. */
 export const isGone = (memory: Pick<Memory, 'state'>) => memory.state !== undefined && memory.state !== 'live'
 
-/** One row of the Memories table. */
+/** The kinds the engine writes (memory_type); anything else shows as unknown. */
+export const KINDS = ['fact', 'decision', 'preference', 'instruction', 'context', 'event', 'error', 'artifact', 'relation'] as const
+
+/** A kind's name as the page shows it: a known kind, else 'unknown'. */
+export const kindOf = (kind: string | null | undefined): string => ((KINDS as readonly string[]).includes(kind ?? '') ? (kind as string) : 'unknown')
+
+/** A kind glyph (G2): its shape alone tells the kind (a CSS mask, in the text colour); the name is its label. */
+export function kindGlyph(kind: string | null | undefined) {
+  const name = kindOf(kind)
+  const glyph = el('span', undefined, `kg k-${name}`)
+  glyph.title = name
+  glyph.setAttribute('role', 'img')
+  glyph.setAttribute('aria-label', name)
+  return glyph
+}
+
+/**
+ * How far a memory reaches, as the map draws it: `all` (the global owner: every project reads it), `shared` (a
+ * project's memory with global scope: every project can recall it) or `project` (its own project only).
+ */
+export type Reach = 'all' | 'shared' | 'project'
+export function reachOf(memory: Pick<Memory, 'owner' | 'scope'>): Reach {
+  if (memory.owner === 'global') return 'all'
+  return memory.scope === 'global' ? 'shared' : 'project'
+}
+
+export const REACH_WORD: Record<Reach, string> = { all: 'all', shared: 'shared', project: 'project' }
+export const REACH_HELP: Record<Reach, string> = {
+  all: 'A global memory: every project reads it. On the map it circles the sun.',
+  shared: 'Lives in its project and is recalled in every project. On the map it is a probe on the dashed blue ring.',
+  project: 'Recalled only in its own project.',
+}
+
+/** The reach marker (G3): a gold dot for all, a dashed blue ring for shared, a plain ring for project; with its word. */
+export function reachMark(reach: Reach) {
+  const mark = el('span', undefined, `reach r-${reach}`)
+  mark.title = REACH_HELP[reach]
+  mark.append(el('span', undefined, 'reach-dot'), el('span', REACH_WORD[reach]))
+  return mark
+}
+
+/** Importance as five pips (0 to 5 lit); unknown reads as none lit, with a tooltip saying so. */
+export function importancePips(importance: number | null | undefined) {
+  const known = typeof importance === 'number' && Number.isFinite(importance)
+  const lit = known ? Math.max(0, Math.min(5, Math.round(importance * 5))) : 0
+  const pips = el('span', undefined, `imp i${lit}`)
+  pips.title = known ? `Importance ${importance.toFixed(2)}` : 'Importance unknown'
+  for (let i = 0; i < 5; i++) pips.append(el('span'))
+  return pips
+}
+
+/** A recall count's bar width, 1 to 5, log-scaled so 2 and 200 both read. */
+export const recallWidth = (count: number) => Math.max(1, Math.min(5, Math.ceil(Math.log2(count + 1) / 1.4)))
+
+/** A memory's first line split at its lead: the words up to a colon in the first 80 characters. */
+export function leadOf(text: string): { lead: string; rest: string } {
+  const at = text.indexOf(':')
+  if (at <= 0 || at > 80 || text.slice(0, at).includes('\n')) return { lead: '', rest: text }
+  return { lead: text.slice(0, at + 1), rest: text.slice(at + 1) }
+}
+
+/** At most this many tags show under a row's text, then "+n". */
+export const ROW_TAGS = 3
+
+/** One row of the Memories table: glyph, text over its tags, owner chip, reach, importance, recalls, saved. */
 export function memoryRow(memory: Memory, open: (id: string) => void, pickTag?: (tag: string) => void) {
   const gone = isGone(memory)
   const row = el('tr', undefined, gone ? 'row is-dim' : 'row')
   row.tabIndex = 0
   row.dataset.id = memory.id
-  const text = el('td')
-  // Two lines at most (the CSS clamps it); the id and the full text are in the sheet. A cut-short preview ends in an ellipsis.
+  const kind = el('td', undefined, 'g-col')
+  kind.append(kindGlyph(memory.memory_type))
+  const text = el('td', undefined, 'mem-cell')
+  // One line (the CSS ends it in an ellipsis), the lead in bold; the id and the full text are in the sheet.
   const shown = memory.preview ?? memory.content ?? ''
+  const full = memory.truncated === true && !shown.endsWith('…') ? `${shown}…` : shown
+  const line = el('div', undefined, 'l1')
   // A memory that is not live (retired, expired or lapsed) says so, in words, in front of its text.
-  if (gone) text.append(el('span', `${memory.state} `, 'state-mark'))
-  text.append(el('span', memory.truncated === true && !shown.endsWith('…') ? `${shown}…` : shown, 'row-text'))
+  if (gone) line.append(el('span', `${memory.state} `, `state-mark is-${memory.state}`))
+  const { lead, rest } = leadOf(full.replace(/\s+/g, ' '))
+  const words = el('span', undefined, 'row-text')
+  if (lead) words.append(el('span', lead, 'lead'))
+  words.append(el('span', rest))
+  line.append(words)
+  text.append(line)
+  const tags = tagsOfMemory(memory)
+  if (tags.length > 0) {
+    const under = el('div', undefined, 'l2')
+    under.append(chips(tags.slice(0, ROW_TAGS), pickTag))
+    if (tags.length > ROW_TAGS) under.append(el('span', `+${tags.length - ROW_TAGS}`, 'tag-more'))
+    text.append(under)
+  }
   const owner = el('td', undefined, 'nowrap')
-  owner.append(project(memory.owner))
-  const tags = el('td')
-  tags.append(chips(tagsOfMemory(memory), pickTag))
-  // Recalls: "never" (muted) for 0; the tooltip says when it was last recalled.
+  owner.append(project(memory.owner, 'project own'))
+  const reach = el('td', undefined, 'nowrap')
+  reach.append(reachMark(reachOf(memory)))
+  const imp = el('td')
+  imp.append(importancePips(memory.importance))
+  // Recalls: "never" (muted) for 0, else a log-scaled bar and the count; the tooltip says when it was last recalled.
   const recalls = memory.recall_count ?? 0
-  const recalled = el('td', recalls === 0 ? 'never' : String(recalls), recalls === 0 ? 'num muted' : 'num mono')
+  const recalled = el('td', undefined, recalls === 0 ? 'num rc muted' : 'num rc mono')
+  if (recalls === 0) recalled.textContent = 'never'
+  else {
+    const bar = el('span', undefined, 'rc-bar')
+    bar.append(el('span', undefined, `w${recallWidth(recalls)}`))
+    recalled.append(bar, el('span', String(recalls)))
+  }
   recalled.title = `Last recalled: ${day(memory.last_recalled) || 'never'}`
-  row.append(text, owner, tags, el('td', day(memory.timestamp), 'muted nowrap'), recalled)
+  const saved = el('td', savedLabel(memory.timestamp), 'num muted nowrap')
+  saved.title = memory.timestamp ?? ''
+  row.append(kind, text, owner, reach, imp, recalled, saved)
   row.addEventListener('click', () => open(memory.id))
   row.addEventListener('keydown', event => {
     if (event.key === 'Enter' || event.key === ' ') {
@@ -351,8 +469,24 @@ export function memoryRow(memory: Memory, open: (id: string) => void, pickTag?: 
 export function memoryDetail(memory: Memory, forget: (memory: Memory, done: (error?: string) => void) => void, pickTag?: (tag: string) => void, edit?: (memory: Memory) => void) {
   const panel = el('div', undefined, 'detail-body')
   const head = el('div', undefined, 'detail-head')
-  head.append(project(memory.owner, 'project muted'), el('span', memory.id, 'mono muted push-right'))
+  const reach = reachOf(memory)
+  head.append(kindGlyph(memory.memory_type), el('span', kindOf(memory.memory_type), 'detail-kind'), project(memory.owner, 'project own'), reachMark(reach), el('span', memory.id, 'mono muted push-right'))
   const content = memory.content ?? memory.preview ?? ''
+  // Four numbers at a glance; the full list of facts stays beside it.
+  const stats = el('div', undefined, 'stats')
+  const stat = (label: string, value: string, note = '') => {
+    const cell = el('div', undefined, 'stat')
+    cell.append(el('span', label, 'stat-label'), el('span', value, 'stat-value'))
+    if (note) cell.append(el('span', note, 'stat-note'))
+    stats.append(cell)
+  }
+  const known = typeof memory.importance === 'number' && Number.isFinite(memory.importance)
+  stat('Importance', known ? (memory.importance as number).toFixed(2) : '–', 'of 1')
+  stat('Recalls', String(memory.recall_count ?? 0), day(memory.last_recalled) || 'never')
+  stat('Saved', savedLabel(memory.timestamp) || 'unknown')
+  stat('State', memory.state ?? 'live')
+  const explain = el('p', undefined, `reach-note r-${reach}`)
+  explain.append(el('span', reach === 'all' ? 'Global. ' : reach === 'shared' ? `Shared from ${ownerName(memory.owner)}. ` : `Only in ${ownerName(memory.owner)}. `, 'lead'), el('span', REACH_HELP[reach]))
   const facts = el('dl', undefined, 'grid-facts')
   const fact = (label: string, value: string) => {
     const box = el('div')
@@ -424,9 +558,9 @@ export function memoryDetail(memory: Memory, forget: (memory: Memory, done: (err
 
   // Two columns on a wide screen: the memory itself on the left, what is known about it on the right.
   const main = el('div', undefined, 'detail-main')
-  main.append(head, el('p', content, 'detail-text'))
+  main.append(head, el('p', content, 'detail-text'), stats)
   const side = el('div', undefined, 'detail-side')
-  side.append(facts, tagBox, editor, danger)
+  side.append(explain, facts, tagBox, editor, danger)
   panel.append(main, side)
   return panel
 }
@@ -1446,31 +1580,49 @@ function watchDev() {
 
 // ---- Memories ----
 
-const memories = { selected: '' as string, rows: [] as Memory[], total: 0, timer: 0 as ReturnType<typeof setTimeout> | 0, tag: '', showRetired: false }
+/** Which rows the table shows by state: the live ones, the not-live ones (retired, expired, lapsed), or all. */
+export type StateView = 'live' | 'gone' | 'all'
+type Facets = { reach: Record<string, number>; kind: Record<string, number> }
 
-// "Show retired" is a per-viewer setting: this browser's own storage, and the page works without it.
+const memories = {
+  selected: '' as string,
+  rows: [] as Memory[],
+  total: 0,
+  timer: 0 as ReturnType<typeof setTimeout> | 0,
+  tag: '',
+  state: 'live' as StateView,
+  reach: '' as '' | Reach,
+  kind: '',
+  facets: null as Facets | null,
+}
+
+// The state view is a per-viewer setting: this browser's own storage, and the page works without it.
+// The old "Show retired" on (key below, '1') reads as All.
+const STATE_KEY = 'mnemosyne.memories.state'
 const RETIRED_KEY = 'mnemosyne.memories.showRetired'
-function readShowRetired(): boolean {
+function readStateView(): StateView {
   try {
-    return prefStorage()?.getItem(RETIRED_KEY) === '1'
+    const saved = prefStorage()?.getItem(STATE_KEY)
+    if (saved === 'live' || saved === 'gone' || saved === 'all') return saved
+    return prefStorage()?.getItem(RETIRED_KEY) === '1' ? 'all' : 'live'
   } catch {
-    return false
+    return 'live'
   }
 }
-function saveShowRetired(on: boolean) {
+function saveStateView(state: StateView) {
   try {
-    prefStorage()?.setItem(RETIRED_KEY, on ? '1' : '0')
+    prefStorage()?.setItem(STATE_KEY, state)
   } catch {
     // storage is a convenience only
   }
 }
 
-/** Filters the table to one tag ('' clears it), and shows which. */
+/** Filters the table to one tag ('' clears it), and shows which: a token in the filter bar. */
 function setTagFilter(tag: string) {
   memories.tag = tag
   const button = byId('mem-tag')
   button.hidden = tag === ''
-  button.textContent = tag === '' ? '' : `Tag: ${tag} ×`
+  button.textContent = tag === '' ? '' : `tag: ${tag} ×`
   button.title = tag === '' ? '' : `Showing only memories tagged ${tag}. Press to show all.`
   button.setAttribute('aria-label', tag === '' ? 'Clear tag filter' : `Clear tag filter: ${tag}`)
   void loadMemories()
@@ -1485,31 +1637,197 @@ export async function loadMemories() {
   params.set('sort', sort)
   if (q) params.set('q', q)
   if (memories.tag) params.set('tag', memories.tag)
+  if (memories.reach) params.set('reach', memories.reach)
+  if (memories.kind) params.set('kind', memories.kind)
   try {
     const response = await api(`/api/memories?${params}`)
-    const body = await readJson<{ total?: number; count?: number; memories?: Memory[]; error?: string }>(response)
+    const body = await readJson<{ total?: number; count?: number; memories?: Memory[]; facets?: Facets; error?: string }>(response)
     if (!response.ok) throw new Error(body.error ?? `the server answered ${response.status}`)
     memories.rows = body.memories ?? []
     memories.total = body.total ?? memories.rows.length
+    // An older server sends no facets: the chips then hide.
+    memories.facets = body.facets ?? null
+    drawFacets()
     drawRows()
   } catch (err) {
     if (!(err instanceof Expired)) setStatus(`Could not load memories: ${failure(err)}`, 'error')
   }
 }
 
-/** The rows the table shows: the live ones, and the retired, expired and lapsed ones too while "Show retired" is on. */
-function visibleRows() {
-  return memories.showRetired ? memories.rows : memories.rows.filter(memory => !isGone(memory))
+const REACH_CHIPS: { reach: Reach; label: string }[] = [
+  { reach: 'all', label: 'Every project' },
+  { reach: 'shared', label: 'Shared' },
+  { reach: 'project', label: 'Project only' },
+]
+
+/** One counted filter chip: pressed while it filters; a chip with 0 is disabled unless it is the one on. */
+function facetChip(label: string | HTMLElement, count: number, on: boolean, pick: () => void, className: string) {
+  const chip = el('button', undefined, `chip-btn facet ${className}`)
+  chip.type = 'button'
+  chip.setAttribute('aria-pressed', String(on))
+  if (typeof label === 'string') chip.append(el('span', label))
+  else chip.append(label)
+  chip.append(el('span', String(count), 'n'))
+  chip.disabled = count === 0 && !on
+  chip.addEventListener('click', pick)
+  return chip
 }
+
+/** The reach and kind chips, with the counts the server took under the other filters. */
+export function drawFacets() {
+  const reachBox = byId('mem-reach')
+  const kindBox = byId('mem-kind')
+  const facets = memories.facets
+  byId('mem-facets').hidden = facets === null
+  if (facets === null) {
+    reachBox.replaceChildren()
+    kindBox.replaceChildren()
+    return
+  }
+  reachBox.replaceChildren(
+    ...REACH_CHIPS.map(({ reach, label }) =>
+      facetChip(label, facets.reach[reach] ?? 0, memories.reach === reach, () => {
+        memories.reach = memories.reach === reach ? '' : reach
+        void loadMemories()
+      }, `r-${reach}`),
+    ),
+  )
+  const kinds = Object.entries(facets.kind).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+  // The picked kind keeps its chip when another filter leaves it no rows.
+  if (memories.kind && !kinds.some(([kind]) => kind === memories.kind)) kinds.push([memories.kind, 0])
+  kindBox.replaceChildren(
+    ...kinds.map(([kind, count]) => {
+      const chip = facetChip(kindGlyph(kind), count, memories.kind === kind, () => {
+        memories.kind = memories.kind === kind ? '' : kind
+        void loadMemories()
+      }, 'kind-chip')
+      chip.title = `${kind}: ${count}`
+      chip.setAttribute('aria-label', `${kind}, ${count}`)
+      return chip
+    }),
+  )
+}
+
+/** The rows the table shows under the state view: live, not live (retired, expired, lapsed), or all. */
+function visibleRows() {
+  if (memories.state === 'all') return memories.rows
+  const gone = memories.state === 'gone'
+  return memories.rows.filter(memory => isGone(memory) === gone)
+}
+
+/** The rows with a day heading row in front of each new saved day (newest and never-recalled sorts only). */
+export function withDays(rows: readonly Memory[], grouped: boolean): ({ day: string; heading: string; count: number } | Memory)[] {
+  if (!grouped) return [...rows]
+  const out: ({ day: string; heading: string; count: number } | Memory)[] = []
+  let head: { day: string; heading: string; count: number } | null = null
+  for (const memory of rows) {
+    const key = day(memory.timestamp)
+    if (head === null || head.day !== key) {
+      const heading = dayHeading(memory.timestamp)
+      // Today and Yesterday carry their date as well.
+      head = { day: key, heading: heading === 'Today' || heading === 'Yesterday' ? `${heading}  ${longDay(memory.timestamp)}` : heading, count: 0 }
+      out.push(head)
+    }
+    head.count++
+    out.push(memory)
+  }
+  return out
+}
+
+const STATE_WORD: Record<StateView, string> = { live: 'live', gone: 'not live', all: '' }
 
 export function drawRows() {
   const body = byId('mem-rows')
   const shown = visibleRows()
-  body.replaceChildren(...shown.map(memory => memoryRow(memory, id => void openMemory(id), setTagFilter)))
+  const sort = byId<HTMLSelectElement>('mem-sort').value
+  body.replaceChildren(
+    ...withDays(shown, sort !== 'recalled').map(item => {
+      if (!('day' in item)) return memoryRow(item, id => void openMemory(id), setTagFilter)
+      const row = el('tr', undefined, 'day-group')
+      const cell = el('td')
+      cell.colSpan = 7
+      cell.append(el('span', item.heading, 'day-name'), el('span', ` · ${item.count} ${item.count === 1 ? 'memory' : 'memories'}`, 'muted'))
+      row.append(cell)
+      return row
+    }),
+  )
+  const live = memories.rows.filter(memory => !isGone(memory)).length
+  const gone = memories.rows.length - live
+  for (const { state, button, count } of stateButtons) {
+    button.setAttribute('aria-pressed', String(state === memories.state))
+    count.textContent = state === 'live' ? String(live) : state === 'gone' ? String(gone) : ''
+  }
+  drawCounts(live, gone)
   const hidden = memories.rows.length - shown.length
-  const note = hidden > 0 ? ` (${hidden} not live, hidden: turn on Show retired to see ${hidden === 1 ? 'it' : 'them'})` : ''
-  byId('mem-count').textContent = shown.length === 0 ? `No ${hidden > 0 ? 'live ' : ''}memories match.${note}` : `Showing ${shown.length} of ${memories.total}${note}`
+  const word = STATE_WORD[memories.state]
+  const note = hidden > 0 && memories.state === 'live' ? ` (${hidden} not live, hidden: pick Not live or All to see ${hidden === 1 ? 'it' : 'them'})` : ''
+  byId('mem-count').textContent = shown.length === 0 ? `No ${word ? `${word} ` : ''}memories match.${note}` : `Showing ${shown.length} of ${memories.total}${word ? ` · ${word}` : ''}${note}`
+  drawEmpty(shown.length === 0)
   markSelected()
+}
+
+/** The title's counts for the rows loaded: live, not live, global (every project), shared, and how many projects. */
+function drawCounts(live: number, gone: number) {
+  const box = byId('mem-counts')
+  const all = memories.rows.filter(memory => reachOf(memory) === 'all').length
+  const shared = memories.rows.filter(memory => reachOf(memory) === 'shared').length
+  const projects = new Set(memories.rows.map(memory => memory.owner)).size
+  const part = (text: string, className = '') => el('span', text, className)
+  const dot = () => el('span', ' · ', 'muted')
+  box.replaceChildren(
+    part(`${live} live`, 'strong'), dot(), part(`${gone} not live`, 'muted'), dot(),
+    part(`${all} for every project`, 'r-all-text'), dot(), part(`${shared} shared`, 'r-shared-text'), dot(),
+    part(`${projects} ${projects === 1 ? 'project' : 'projects'}`, 'muted'),
+  )
+}
+
+/** With no rows: what is filtering, and buttons that clear it. */
+function drawEmpty(empty: boolean) {
+  const box = byId('mem-empty')
+  box.hidden = !empty
+  if (!empty) {
+    box.replaceChildren()
+    return
+  }
+  const owner = byId<HTMLSelectElement>('mem-owner').value
+  const q = byId<HTMLInputElement>('mem-filter').value.trim()
+  const on: string[] = []
+  if (q) on.push(`Text “${q}”`)
+  if (memories.tag) on.push(`Tag ${memories.tag}`)
+  if (memories.reach) on.push(`Reach ${REACH_WORD[memories.reach]}`)
+  if (memories.kind) on.push(`Kind ${memories.kind}`)
+  if (owner) on.push(`Project ${ownerName(owner)}`)
+  if (memories.state !== 'all') on.push(`State ${STATE_WORD[memories.state]}`)
+  const text = el('div', undefined, 'mem-empty-text')
+  text.append(el('p', 'No memories match.', 'mem-empty-title'), el('p', on.length > 0 ? `${on.length} ${on.length === 1 ? 'filter is' : 'filters are'} on: ${on.join(' · ')}.` : 'The store is empty: save one with New memory.', 'muted small'))
+  const buttons = el('div', undefined, 'buttons')
+  if (owner) {
+    const clear = el('button', 'Clear project', 'btn')
+    clear.type = 'button'
+    clear.addEventListener('click', () => {
+      byId<HTMLSelectElement>('mem-owner').value = ''
+      void loadMemories()
+    })
+    buttons.append(clear)
+  }
+  if (on.length > 0) {
+    const all = el('button', 'Clear all filters', 'btn')
+    all.type = 'button'
+    all.addEventListener('click', () => clearMemoryFilters())
+    buttons.append(all)
+  }
+  box.replaceChildren(text, buttons)
+}
+
+/** Every filter off; the state view goes to All so nothing is hidden. */
+function clearMemoryFilters() {
+  byId<HTMLSelectElement>('mem-owner').value = ''
+  byId<HTMLInputElement>('mem-filter').value = ''
+  memories.reach = ''
+  memories.kind = ''
+  memories.state = 'all'
+  saveStateView('all')
+  setTagFilter('')
 }
 
 function markSelected() {
@@ -1527,6 +1845,8 @@ async function openMemory(id: string, from?: HTMLElement) {
   // Memories row (looked up then: the rows get redrawn).
   const sheet = {
     title: 'Memory',
+    // On the Memories tab it opens beside the list on a wide screen, so the list stays in view.
+    side: current === 'memories',
     returnFocus: from ?? (() => [...byId('mem-rows').querySelectorAll<HTMLElement>('tr.row')].find(row => row.dataset.id === id) ?? null),
     onClose: () => {
       if (memories.selected === id) memories.selected = ''
@@ -1593,21 +1913,64 @@ function pickTagFromSheet(tag: string) {
   setTagFilter(tag)
 }
 
-/** The Show retired toggle (a per-viewer setting) and the New memory button. */
-export function wireShowRetired() {
-  memories.showRetired = readShowRetired()
-  const toggle = byId<HTMLInputElement>('mem-retired')
-  toggle.checked = memories.showRetired
-  toggle.addEventListener('change', () => {
-    memories.showRetired = toggle.checked
-    saveShowRetired(toggle.checked)
-    drawRows()
+/** The Live / Not live / All control (a per-viewer setting) and the New memory button. */
+export function wireStateView() {
+  memories.state = readStateView()
+  stateButtons = (['live', 'gone', 'all'] as const).map(state => {
+    const button = el('button', state === 'live' ? 'Live' : state === 'gone' ? 'Not live' : 'All', 'seg-btn')
+    button.type = 'button'
+    button.dataset.state = state
+    const count = el('span', '', 'n')
+    button.append(count)
+    button.setAttribute('aria-pressed', String(state === memories.state))
+    button.addEventListener('click', () => {
+      memories.state = state
+      saveStateView(state)
+      drawRows()
+    })
+    return { state, button, count }
   })
-  byId('mem-new').addEventListener('click', () => openForm(undefined, { title: 'New memory', returnFocus: byId('mem-new') }))
+  byId('mem-state').replaceChildren(...stateButtons.map(item => item.button))
+  byId('mem-new').addEventListener('click', () => openNewMemory())
+}
+
+let stateButtons: { state: StateView; button: HTMLButtonElement; count: HTMLSpanElement }[] = []
+
+const openNewMemory = () => openForm(undefined, { title: 'New memory', returnFocus: byId('mem-new') })
+
+/** True when a key press is typing: in a field, or with a modifier held. */
+const typing = (event: KeyboardEvent) => {
+  const target = event.target as HTMLElement | null
+  const tag = target?.tagName?.toLowerCase() ?? ''
+  return event.ctrlKey || event.metaKey || event.altKey || tag === 'input' || tag === 'select' || tag === 'textarea' || target?.isContentEditable === true
+}
+
+/** The Memories keys: J/K move between rows, / goes to the filter, N starts a new memory (Enter and Esc are the row's and the sheet's). */
+export function memoryKey(event: KeyboardEvent) {
+  if (current !== 'memories' || event.defaultPrevented || typing(event)) return
+  const key = event.key
+  if (key === '/') {
+    event.preventDefault()
+    byId<HTMLInputElement>('mem-filter').focus()
+    return
+  }
+  if (key === 'n' || key === 'N') {
+    event.preventDefault()
+    openNewMemory()
+    return
+  }
+  if (key !== 'j' && key !== 'k' && key !== 'J' && key !== 'K') return
+  const rows = [...byId('mem-rows').querySelectorAll<HTMLElement>('tr.row')]
+  if (rows.length === 0) return
+  event.preventDefault()
+  const at = rows.findIndex(row => row === document.activeElement || row.dataset.id === memories.selected)
+  const next = key.toLowerCase() === 'j' ? Math.min(rows.length - 1, at + 1) : Math.max(0, at === -1 ? 0 : at - 1)
+  rows[next]!.focus()
+  rows[next]!.scrollIntoView?.({ block: 'nearest' })
 }
 
 function wireMemories() {
-  wireShowRetired()
+  wireStateView()
   byId('mem-owner').addEventListener('change', () => void loadMemories())
   byId('mem-sort').addEventListener('change', () => void loadMemories())
   byId('mem-tag').addEventListener('click', () => setTagFilter(''))
@@ -1615,6 +1978,17 @@ function wireMemories() {
     if (memories.timer) clearTimeout(memories.timer)
     memories.timer = setTimeout(() => void loadMemories(), 250)
   })
+  // Esc in the filter box clears it first; a second Esc leaves the box.
+  byId('mem-filter').addEventListener('keydown', event => {
+    const input = event.target as HTMLInputElement
+    if (event.key !== 'Escape') return
+    event.preventDefault()
+    if (input.value !== '') {
+      input.value = ''
+      void loadMemories()
+    } else input.blur()
+  })
+  document.addEventListener('keydown', memoryKey)
   wireSheet()
 }
 

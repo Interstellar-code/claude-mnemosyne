@@ -234,35 +234,53 @@
   </main>
 
   <main id="view-memories" class="main view" hidden>
-    <section class="list" aria-label="All memories">
-      <div class="toolbar">
+    <section class="list mem-list" aria-label="All memories">
+      <div class="mem-title">
         <h1 class="title-left">Memories</h1>
-        <label class="field">Project
-          <select id="mem-owner" class="input"><option value="">All projects</option></select>
-        </label>
-        <label class="field">Sort
-          <select id="mem-sort" class="input">
-            <option value="newest">Newest first</option>
-            <option value="recalled">Most recalled</option>
-            <option value="never">Never recalled</option>
-          </select>
-        </label>
-        <label class="field">Filter
-          <input id="mem-filter" class="input filter" type="search" placeholder="Text or tag" maxlength="200">
-        </label>
-        <button id="mem-tag" type="button" class="chip-btn" aria-label="Clear tag filter" hidden></button>
-        <label class="check-field"><input id="mem-retired" type="checkbox"> Show retired</label>
-        <button id="mem-new" type="button" class="btn primary push-right">New memory</button>
+        <span id="mem-counts" class="mem-counts"></span>
+        <button id="mem-new" type="button" class="btn primary push-right">New memory <kbd>N</kbd></button>
       </div>
-      <div class="table-wrap">
-        <table class="table table-dense">
-          <thead>
-            <tr><th>Memory</th><th>Project</th><th>Tags</th><th>Saved</th><th class="num">Recalls</th></tr>
-          </thead>
-          <tbody id="mem-rows"></tbody>
-        </table>
+      <div class="mem-card">
+        <div class="mem-bar">
+          <label class="mem-find">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path></svg>
+            <span class="sr-only">Filter</span>
+            <input id="mem-filter" class="mem-find-input" type="search" placeholder="Filter by text, tag or id" maxlength="200">
+            <kbd aria-hidden="true">/</kbd>
+          </label>
+          <button id="mem-tag" type="button" class="mem-token" aria-label="Clear tag filter" hidden></button>
+          <label class="field-inline"><span class="sr-only">Project</span>
+            <select id="mem-owner" class="input"><option value="">All projects</option></select>
+          </label>
+          <label class="field-inline"><span class="sr-only">Sort</span>
+            <select id="mem-sort" class="input">
+              <option value="newest">Newest first</option>
+              <option value="recalled">Most recalled</option>
+              <option value="never">Never recalled</option>
+            </select>
+          </label>
+          <div id="mem-state" class="segmented mem-state" role="group" aria-label="Show"></div>
+        </div>
+        <div id="mem-facets" class="mem-facets">
+          <span class="facet-label">Reach</span>
+          <div id="mem-reach" class="facet-chips" role="group" aria-label="Reach"></div>
+          <span class="facet-label">Kind</span>
+          <div id="mem-kind" class="facet-chips" role="group" aria-label="Kind"></div>
+        </div>
+        <div class="table-wrap">
+          <table class="table table-dense mem-table">
+            <thead>
+              <tr><th class="g-col"><span class="sr-only">Kind</span></th><th>Memory · tags</th><th>Project</th><th>Reach</th><th>Imp.</th><th class="num">Recalls</th><th class="num">Saved</th></tr>
+            </thead>
+            <tbody id="mem-rows"></tbody>
+          </table>
+        </div>
+        <div id="mem-empty" class="mem-empty" hidden></div>
+        <div class="mem-foot">
+          <span id="mem-count" class="muted small"></span>
+          <span class="keys small muted" aria-hidden="true"><kbd>J</kbd><kbd>K</kbd> move · <kbd>Enter</kbd> open · <kbd>Esc</kbd> close · <kbd>/</kbd> filter · <kbd>N</kbd> new</span>
+        </div>
       </div>
-      <span id="mem-count" class="muted small"></span>
     </section>
   </main>
 
