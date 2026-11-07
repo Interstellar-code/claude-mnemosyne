@@ -580,18 +580,36 @@
   </main>
 
   <main id="view-vocabulary" class="main view column wide" hidden>
-    <div class="titlebar">
-      <h1 id="vocab-title" tabindex="-1">Tag vocabulary</h1>
-      <span class="muted small">The shared list of tags a memory may carry, by namespace. Admit a candidate, or make a spelling count as an admitted tag. Nothing is removed from here on its own.</span>
+    <div class="titlebar vocab-titlebar">
+      <div class="vocab-intro">
+        <h1 id="vocab-title" tabindex="-1">Tag vocabulary</h1>
+        <span class="muted small">The tags a memory may carry, by namespace. Admit a candidate, or make a spelling count as an admitted tag. Nothing is removed on its own.</span>
+      </div>
+      <div class="vocab-tools">
+        <label class="mem-find vocab-find">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path></svg>
+          <span class="sr-only">Find a tag</span>
+          <input id="vocab-find" class="mem-find-input" type="search" placeholder="Find a tag" maxlength="100" autocomplete="off">
+          <kbd aria-hidden="true">/</kbd>
+        </label>
+        <div id="vocab-sort" class="segmented sm" role="group" aria-label="Sort tags"></div>
+      </div>
     </div>
     <div class="status-row">
       <p id="vocab-status" class="notice-line small muted" role="status">Loading…</p>
       <button id="vocab-retry" class="btn" type="button" hidden>Try again</button>
     </div>
-    <div id="vocab-body" hidden>
-      <p id="vocab-text" class="muted small"></p>
-      <div id="vocab-candidates" class="vocab-section"></div>
-      <div id="vocab-tags" class="vocab-section"></div>
+    <div id="vocab-body" class="vocab-body" hidden>
+      <div id="vocab-summary" class="kpis"></div>
+      <section id="vocab-ribbon-box" class="card vocab-ribbon-box" aria-label="Where the tag uses fall">
+        <p class="muted small">Where the tag uses fall</p>
+        <div id="vocab-ribbon" class="vocab-ribbon"></div>
+        <p id="vocab-text" class="muted small"></p>
+      </section>
+      <div class="vocab-layout">
+        <div id="vocab-tags" class="vocab-section vocab-grid"></div>
+        <aside id="vocab-candidates" class="vocab-section vocab-aside" aria-label="Candidates"></aside>
+      </div>
     </div>
   </main>
 

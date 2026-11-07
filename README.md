@@ -330,6 +330,9 @@ The header shows how many memories are in how many projects (global is counted a
   - **The recalls chart** stacks Claude Code, other apps and the dashboard per day.
   - **Projects** show as bars (global in gold), and storage as chips. Never recalled and recalled at least once both count live memories, and global is never counted as a project (the header reads "in 13 projects + global").
 - **Vocabulary:** the shared tags by namespace with counts, and the candidates to Admit or Alias.
+  - **Groups:** Topics, Projects (tags named like a project on the map), Entities, Assets and Agents, each tag with a usage bar. An unused tag is shown in ash.
+  - **Find and sort:** a find box (`/`) and Most used / A–Z. Tiles count admitted, waiting and unused tags and tag uses, and a ribbon shows where the uses fall. Hover a tag to open its memories.
+  - **Candidates** sit in a panel with ticks toward the auto-admit count. When one looks like a spelling of an admitted tag, "Count as <tag>" is offered first.
 - **Settings:** every setting of the memory system with its value and default, where you change, reset and back up (see [Settings](#settings)). It writes to `~/.claude/mnemosyne/config.json` and, through the `claude` command, to the plugin options.
 
 Every tab but the Map shares one content width.

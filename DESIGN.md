@@ -1603,6 +1603,16 @@ C10.3: the engine's trigger `trim_validations_to_3` keeps only the newest 3 `mem
 
 On the solar-system map a plain folder (no git repo) with at least `map.stationMin` live memories is a space station and one with fewer a starship (default 50, range 2 to 1000, applies now). The galaxy reply carries the value. Git repos are always planets.
 
+### The Vocabulary tab (0.24.0)
+
+Eighth step of the tab polish (design proposal `tabs-after/NOTES-shell-vocabulary-settings.md`, Vocabulary items 1 to 7).
+- **Groups.** `NAMESPACES` is Topics (`other`, #), Projects (`project`, ▣), Entities (◆), Assets (▲) and Agents (●), each with a glyph and a help line. `groupTags(tags, projects)` puts a tag with no namespace under Projects when `namesProject` holds: its bare name (letters and digits, lower case) equals a project's bare name or `projectCore` (the project's words without "project", "code", "the", "repo" and plain numbers). With no project names passed, every bare tag is a Topic. The page passes the map's owner names other than global.
+- **Memories form.** The Memories form's tag picker calls `groupTags` without projects and keeps its own order and words (Entities, Agents, Assets, Other tags), since the tags are saved in picker order.
+- **Rows.** `tagGroups(data, {projects, query, sort, openTag})` filters with `findTags` (name, alias, description), sorts by use or A–Z (`nameOf`, without the namespace), and draws: the namespace muted, the name, the description and "also …", a bar in twentieths against the most used tag, and the count (with "memories" for screen readers). An unused tag gets `is-unused` (ash) and a dashed "unused" label. A used one has "Open N memories →" (on hover or focus), which shows the Memories tab with that tag.
+- **Tiles and ribbon.** `vocabTiles` gives admitted, waiting, unused and uses. `ribbon` gives uses per group in twentieths (a segment of 0 is hidden; a click scrolls to the group).
+- **Candidates.** `/api/vocabulary` sends `autoAdmitCount` (the default when the config cannot be read), parsed as `autoAdmit`. `candidateRow` draws a card with that many ticks and "n of N · admitted on its own at N". `spellingOf` picks the admitted tag within 2 edits (`editDistance` on bare names; the same letters with other punctuation counts as 0), else the most used one that contains it or that it contains (3+ characters). With a suggestion, "Count as <tag>" posts the alias, Admit reads "Admit as new", and the Count as… select starts on it. The card keeps the class `list-row vocab-candidate` and the message "Pick the tag it should count as.". With no candidates, `candidateList` draws an empty state with the rule and a link to Settings.
+- **Keys and header.** `vocabKey`: `/` focuses the find box; in the box Esc clears, then leaves. The tab padding is now 12 px and the header's column gap 24 px, so the header stays on one line at 1440 px.
+
 ### The Health tab (0.23.0)
 
 Seventh step of the tab polish (design proposal `tabs-after/NOTES-activity-review-health.md`, Health items 1 to 6), and the second data mismatch the notes list.

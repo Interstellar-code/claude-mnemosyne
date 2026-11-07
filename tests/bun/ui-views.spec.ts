@@ -2131,9 +2131,11 @@ describe('CRUD.1 and CRUD.3: the form and the vocabulary panel', () => {
       const groups = vocab.tagGroups(data) as FNode[]
       expect(groups.map(group => group.dataset.ns)).toContain('agent')
       const agent = groups.find(group => group.dataset.ns === 'agent')!
-      expect(agent.texts()[0]).toBe('Agents (4)')
-      // An admitted tag nothing uses shows 0 memories.
-      expect(agent.texts().join('|')).toContain('0 memories')
+      // 0.24.0: the heading is the glyph, the name, the count and the uses, each its own part.
+      expect(agent.texts().slice(0, 3)).toEqual(['●', 'Agents', '4'])
+      // An admitted tag nothing uses shows 0 memories, and is marked unused (ash, not alarm amber).
+      expect(agent.texts().join('')).toContain('0 memories')
+      expect(agent.all().some(n => n.className === 'list-row vocab-tag is-unused')).toBe(true)
       expect(vocab.vocabularyText(data)).toBe(`${data.tags.length} tags in the vocabulary, 2 candidates waiting.`)
       const reloads: string[] = []
       const host = { post, reload: (message: string) => void reloads.push(message) }
@@ -2149,13 +2151,14 @@ describe('CRUD.1 and CRUD.3: the form and the vocabulary panel', () => {
       // Alias: nothing is sent until a target is picked; then the server folds the spelling in.
       const fresh = await get()
       const second = (vocab.candidateList(fresh, host) as FNode[])[0]!.all().find(n => n.dataset.tag === 'cand-two')!
-      buttonOf(second, 'Alias').fire('click')
+      // 0.24.0: "Count as…" and Apply (was "Alias to…" and Alias).
+      buttonOf(second, 'Apply').fire('click')
       expect(second.texts()).toContain('Pick the tag it should count as.')
       expect(reloads).toHaveLength(1)
       const target = second.all().find(n => n.tagName === 'select')!
       expect((target.children as FNode[]).map(option => option.value)).toContain('cand-one')
       target.value = 'cand-one'
-      buttonOf(second, 'Alias').fire('click')
+      buttonOf(second, 'Apply').fire('click')
       await settle(() => reloads.length === 2, 'the alias to reload the lists')
       expect(reloads.at(-1)).toBe('cand-two now counts as cand-one.')
       expect((await get()).tags.find((t: { tag: string }) => t.tag === 'cand-one').aliases).toContain('cand-two')
@@ -2166,7 +2169,7 @@ describe('CRUD.1 and CRUD.3: the form and the vocabulary panel', () => {
       const data = vocab.parseVocabulary({ exists: true, tags: [{ tag: 'agent:codex', ns: 'agent', description: '', aliases: [], count: 0 }], candidates: [{ tag: '!!!', count: 1 }] })
       const refuse = (status: number, error: string) => ({ post: async () => ({ status, body: { error } }), reload: (message: string) => void reloads.push(message) })
       const row400 = (vocab.candidateList(data, refuse(400, 'tag is not a usable tag: it needs a letter or digit')) as FNode[])[0]!.all().find(n => n.dataset.tag === '!!!')!
-      row400.all().find(n => n.textContent === 'Admit')!.fire('click')
+      row400.all().find(n => n.tagName === 'button' && n.textContent === 'Admit')!.fire('click')
       await settle(() => row400.texts().includes('tag is not a usable tag: it needs a letter or digit'), 'the refusal text')
       expect(row400.texts()).toContain('tag is not a usable tag: it needs a letter or digit')
       // The real server: admitting a spelling that is an alias is a 409 with its own words.
@@ -2177,7 +2180,7 @@ describe('CRUD.1 and CRUD.3: the form and the vocabulary panel', () => {
       expect(bad.status).toBe(400)
       expect(vocab.vocabularyFailure(bad.status, bad.body)).toContain('not a usable tag')
       const row409 = (vocab.candidateList(data, refuse(409, 'cand-two is an alias of cand-one: admit that tag instead')) as FNode[])[0]!.all().find(n => n.dataset.tag === '!!!')!
-      row409.all().find(n => n.textContent === 'Admit')!.fire('click')
+      row409.all().find(n => n.tagName === 'button' && n.textContent === 'Admit')!.fire('click')
       await settle(() => row409.texts().includes('cand-two is an alias of cand-one: admit that tag instead'), 'the refusal text')
       expect(row409.texts()).toContain('cand-two is an alias of cand-one: admit that tag instead')
       expect(reloads).toEqual([])

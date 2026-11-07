@@ -262,9 +262,14 @@ export function buildForm(host: FormHost, memory?: FormMemory): BuiltForm {
   const own = memory === undefined ? [] : tagsOf(memory)
   const drawPicker = (vocabulary: VocabData | null) => {
     const offered = vocabulary?.tags ?? []
+    // The picker keeps its own order and words (Entities, Agents, Assets, then Other tags): the tags are saved in this
+    // order, and the Vocabulary tab's Topics / Projects split (0.24.0) is not passed in here.
+    const FORM_ORDER = ['entity', 'agent', 'asset', 'other']
     const groups = groupTags(offered.map(tag => ({ tag: tag.tag, ns: tag.ns })))
+      .map(group => (group.id === 'other' ? { ...group, label: 'Other tags' } : group))
+      .sort((a, b) => FORM_ORDER.indexOf(a.id) - FORM_ORDER.indexOf(b.id))
     const outside = own.filter(tag => !offered.some(item => item.tag === tag))
-    if (outside.length > 0) groups.push({ id: 'current', label: 'On this memory, not in the vocabulary', tags: outside.map(tag => ({ tag, ns: null })) })
+    if (outside.length > 0) groups.push({ id: 'current', label: 'On this memory, not in the vocabulary', glyph: '', help: '', tags: outside.map(tag => ({ tag, ns: null })) })
     const parts: HTMLElement[] = []
     if (groups.length === 0) parts.push(el('p', vocabulary === null ? 'The tag vocabulary could not be read, so no tags are offered.' : 'There is no tag vocabulary yet. Run /mnemosyne-tags in Claude Code to make one.', 'muted small'))
     for (const group of groups) {

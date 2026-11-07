@@ -2,6 +2,23 @@
 
 Newest first. Each release is tagged `vX.Y.Z` on GitHub; the README and DESIGN.md describe the contracts.
 
+## 0.24.0 (Vocabulary tab polish)
+
+The eighth step of the tab polish, following the design proposal's Vocabulary notes.
+
+1. **Usage bars:** each tag has a bar against the most used tag, then its count; the namespace shows muted before the name ("entity: arxada"), with its other spellings and description.
+2. **Unused in ash:** a tag no memory uses is ash with a dashed "unused" label, not alarm amber. It is allowed, and stays until a person removes it.
+3. **Topics and Projects:** "Other tags" splits into **Topics** (#) and **Projects** (▣). A project tag is one whose name is a project's whole name or its core ("uno" for Project-Uno-2025, "subshero" for Code-Subshero). A word that is only part of a name ("sap" in SAPflow, "personal" in personal-life) stays a topic. Each group has a glyph, a line saying what it holds, and its uses.
+4. **Find and sort:** a find box (name, alias or description; `/` to focus, Esc to clear) and Most used / A–Z.
+5. **Candidates panel** on the right:
+   - each candidate is a card with ticks toward the auto-admit count, "n of N · admitted on its own at N";
+   - with no candidates, an empty state explains the rule and links to the setting;
+   - two notes say a candidate never changes a memory's tags until you act.
+6. **Spelling suggestion:** when an admitted tag is within two edits (or one contains the other), the card says "Looks like sap (spelling)". **Count as sap** comes first, then Admit as new; "Count as…" with any tag and Apply (was "Alias to…" and Alias) stays.
+7. **Tiles and ribbon:** admitted, waiting, unused and tag uses, and a ribbon of uses per group (a segment jumps to its group). Hovering a tag offers **Open N memories →**, the Memories tab filtered to that tag.
+8. **Header:** the slightly tighter tab spacing keeps the header on one line at 1440 px with "in 13 projects + global".
+9. **Server:** `GET /api/vocabulary` adds `autoAdmitCount` (tags.autoAdmitCount). The Memories form's tag picker keeps its own order and words. No setting or engine change.
+
 ## 0.23.0 (Health tab polish, one project count)
 
 The seventh step of the tab polish, following the design proposal's Health notes.

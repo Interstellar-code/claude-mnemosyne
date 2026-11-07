@@ -101,7 +101,7 @@ import {
   type RowFilter,
 } from './review'
 import { buildForm, type FormMemory } from './form'
-import { candidateList, parseVocabulary, tagGroups, vocabularyText, type VocabData } from './vocabulary'
+import { candidateList, parseVocabulary, ribbon as vocabRibbon, tagGroups, vocabTiles, vocabularyText, type TagSort, type VocabData } from './vocabulary'
 import { isClaudeRecall, isOtherAppsRecall } from './recalls'
 import { startTheme, type ThemeMode } from './theme'
 import { drawGroups, drawTop, newView, parseSettings, type BrowserPrefs, type SettingsData, type SettingsHost } from './settings'
@@ -2104,8 +2104,98 @@ export async function loadReview() {
 
 // ---- Vocabulary ----
 
-const vocabView = { data: null as VocabData | null }
-const vocabHost = { post: postJson, reload: (message: string) => void loadVocabulary(message) }
+// 0.24.0: the find text and the sort (Most used or A–Z).
+const vocabView = { data: null as VocabData | null, query: '', sort: 'used' as TagSort }
+const vocabHost = {
+  post: postJson,
+  reload: (message: string) => void loadVocabulary(message),
+  openTag: (tag: string) => openTagInMemories(tag),
+  openSettings: () => show('settings'),
+}
+
+/** The Memories tab with only the memories of one tag. */
+function openTagInMemories(tag: string) {
+  show('memories')
+  setTagFilter(tag)
+}
+
+/** The project names the map knows, for the Projects group. */
+const projectNames = () => owners.filter(row => row.owner !== 'global').map(row => ownerName(row.owner))
+
+/** The tag groups only: the find box redraws this, so it keeps focus while typing. */
+function drawVocabTags() {
+  const data = vocabView.data
+  if (data === null) return
+  byId('vocab-tags').replaceChildren(...tagGroups(data, { projects: projectNames(), query: vocabView.query, sort: vocabView.sort, openTag: vocabHost.openTag }))
+}
+
+/** The four tiles and the ribbon of uses per group (a segment jumps to its group). */
+function drawVocabSummary(data: VocabData) {
+  const tiles = maybe('vocab-summary')
+  if (tiles) {
+    const t = vocabTiles(data)
+    const tile = (value: number, words: string, className = '') => {
+      const box = el('div', undefined, `kpi ${className}`.trim())
+      box.append(el('div', undefined, 'kpi-line'))
+      box.firstElementChild?.append(el('span', String(value), 'kpi-n'))
+      box.append(el('div', words, 'kpi-help'))
+      return box
+    }
+    tiles.replaceChildren(
+      tile(t.admitted, 'admitted tags'),
+      tile(t.waiting, t.waiting > 0 ? 'candidates waiting, in the panel →' : 'candidates waiting', t.waiting > 0 ? 'is-warn' : ''),
+      tile(t.unused, 'unused · kept until removed', 'is-ash'),
+      tile(t.uses, 'tag uses in all'),
+    )
+  }
+  const ribbonBox = maybe('vocab-ribbon')
+  if (ribbonBox) {
+    ribbonBox.replaceChildren(
+      ...vocabRibbon(data, projectNames())
+        .filter(group => group.uses > 0)
+        .map(group => {
+          const seg = el('button', `${group.label} · ${group.uses}`, `rb-seg rb-${group.id} w${group.width}`)
+          seg.type = 'button'
+          seg.title = `${group.glyph} ${group.label}: ${group.tags} ${group.tags === 1 ? 'tag' : 'tags'}, ${group.uses} uses. Jump to the group.`
+          seg.addEventListener('click', () => {
+            const box = (Array.from(byId('vocab-tags').children) as HTMLElement[]).find(child => child.dataset?.ns === group.id)
+            box?.scrollIntoView?.({ block: 'start', behavior: 'smooth' })
+          })
+          return seg
+        }),
+    )
+  }
+}
+
+/** The Most used / A–Z control. */
+function drawVocabSort() {
+  const box = maybe('vocab-sort')
+  if (box === null) return
+  const choices: [TagSort, string][] = [
+    ['used', 'Most used'],
+    ['az', 'A–Z'],
+  ]
+  box.replaceChildren(
+    ...choices.map(([sort, label]) => {
+      const button = el('button', label, 'seg-btn')
+      button.type = 'button'
+      button.setAttribute('aria-pressed', String(sort === vocabView.sort))
+      button.addEventListener('click', () => {
+        vocabView.sort = sort
+        drawVocabSort()
+        drawVocabTags()
+      })
+      return button
+    }),
+  )
+}
+
+/** `/` on the Vocabulary tab focuses the find box. */
+export function vocabKey(event: KeyboardEvent) {
+  if (current !== 'vocabulary' || event.defaultPrevented || typing(event) || event.key !== '/') return
+  event.preventDefault()
+  maybe<HTMLInputElement>('vocab-find')?.focus()
+}
 
 /** GET /api/vocabulary, or null when it cannot be read (the form then offers no tags, and says so). */
 async function fetchVocabulary(): Promise<VocabData | null> {
@@ -2121,7 +2211,9 @@ export function drawVocabulary() {
   const data = vocabView.data
   if (data === null) return
   byId('vocab-text').textContent = vocabularyText(data)
-  byId('vocab-tags').replaceChildren(...tagGroups(data))
+  drawVocabSummary(data)
+  drawVocabSort()
+  drawVocabTags()
   byId('vocab-candidates').replaceChildren(...candidateList(data, vocabHost))
   byId('vocab-body').hidden = false
 }
@@ -2168,6 +2260,21 @@ export function wireKnowledgeHealth() {
   }
   document.addEventListener?.('keydown', reviewKey)
   byId('vocab-retry').addEventListener('click', () => void loadVocabulary())
+  // 0.24.0: find (Esc clears, then leaves) and `/`; absent from older stand-in pages.
+  const vocabFind = maybe<HTMLInputElement>('vocab-find')
+  vocabFind?.addEventListener('input', () => {
+    vocabView.query = vocabFind.value
+    drawVocabTags()
+  })
+  vocabFind?.addEventListener('keydown', event => {
+    if ((event as KeyboardEvent).key !== 'Escape') return
+    if (vocabFind.value !== '') {
+      vocabFind.value = ''
+      vocabView.query = ''
+      drawVocabTags()
+    } else vocabFind.blur()
+  })
+  document.addEventListener?.('keydown', vocabKey)
   byId('know-retry').addEventListener('click', () => void loadKnowledge())
   byId('know-owner').addEventListener('change', () => {
     knowledgeView.filter.owner = byId<HTMLSelectElement>('know-owner').value

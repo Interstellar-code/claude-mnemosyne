@@ -2693,7 +2693,14 @@ export function vocabularyList(root: string): Answer {
   if (!existsSync(vocabularyFileOf(root))) return { status: 200, body: { exists: false, tags: [], candidates: [] } }
   try {
     const { tags, candidates } = listVocabulary(root)
-    return { status: 200, body: { exists: true, tags, candidates } }
+    // 0.24.0: the auto-admit count (tags.autoAdmitCount), so a candidate card can show how close it is to admitting itself.
+    let autoAdmitCount = settingDefaults().tags.autoAdmitCount
+    try {
+      autoAdmitCount = readConfig(root).tags.autoAdmitCount
+    } catch {
+      // the default stands
+    }
+    return { status: 200, body: { exists: true, tags, candidates, autoAdmitCount } }
   } catch (err) {
     return { status: 409, body: { error: `The tag vocabulary cannot be read: ${preview((err as Error).message)}` } }
   }
