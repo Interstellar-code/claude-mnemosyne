@@ -334,6 +334,11 @@ The header shows how many memories are in how many projects (global is counted a
   - **Find and sort:** a find box (`/`) and Most used / A–Z. Tiles count admitted, waiting and unused tags and tag uses, and a ribbon shows where the uses fall. Hover a tag to open its memories.
   - **Candidates** sit in a panel with ticks toward the auto-admit count. When one looks like a spelling of an admitted tag, "Count as <tag>" is offered first.
 - **Settings:** every setting of the memory system with its value and default, where you change, reset and back up (see [Settings](#settings)). It writes to `~/.claude/mnemosyne/config.json` and, through the `claude` command, to the plugin options.
+  - **Rows:** each row reads across: what it is, the control, and when and where it applies.
+  - **Changing a value:** a change is checked as you type (the warn length must stay below the max length), Save turns on only for a valid change, and Cancel puts it back. A row changed from its default is marked, and numbers show where the default sits.
+  - **Finding a setting:** a group rail with counts, and quick filters: Changed, Next session, Plugin options and Read-only.
+  - **Plugin options** this page cannot write show `/config` with Copy, and read-only facts fold into one line.
+  - **Reset all** sits in a danger zone and lists what it would change.
 
 Every tab but the Map shares one content width.
 

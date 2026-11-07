@@ -104,7 +104,7 @@ import { buildForm, type FormMemory } from './form'
 import { candidateList, parseVocabulary, ribbon as vocabRibbon, tagGroups, vocabTiles, vocabularyText, type TagSort, type VocabData } from './vocabulary'
 import { isClaudeRecall, isOtherAppsRecall } from './recalls'
 import { startTheme, type ThemeMode } from './theme'
-import { drawGroups, drawTop, newView, parseSettings, type BrowserPrefs, type SettingsData, type SettingsHost } from './settings'
+import { drawGroups, drawQuick as drawSettingsQuick, drawRail as drawSettingsRail, drawTop, newView, parseSettings, type BrowserPrefs, type SettingsData, type SettingsHost } from './settings'
 import { closeSheet, openSheet, wireSheet } from './sheet'
 import {
   chooseMode,
@@ -1722,15 +1722,40 @@ const settingsHost: SettingsHost = {
 export function drawSettings() {
   const data = settingsView.data
   if (data === null) return
-  byId('settings-top').replaceChildren(...drawTop(data, settingsView, settingsHost, drawSettings))
+  // 0.25.0: the banner stays on top; Reset all moves to the danger zone at the foot.
+  const [banner, danger] = drawTop(data, settingsView, settingsHost, drawSettings)
+  const dangerBox = maybe('settings-danger')
+  if (dangerBox && danger) {
+    byId('settings-top').replaceChildren(banner!)
+    dangerBox.replaceChildren(danger)
+  } else byId('settings-top').replaceChildren(...[banner, danger].filter((node): node is HTMLElement => node !== undefined))
   drawSettingsGroups(data)
   tabStatus('settings', '')
   byId('settings-body').hidden = false
 }
 
-/** Only the groups: the filter box redraws them per keystroke, so the box keeps focus. */
+/** The groups, the rail and the quick filter counts: the filter box redraws these per keystroke, so the box keeps focus. */
 function drawSettingsGroups(data: SettingsData) {
   byId('settings-groups').replaceChildren(...drawGroups(data, settingsView, settingsHost))
+  maybe('settings-rail')?.replaceChildren(
+    ...drawSettingsRail(data, settingsView, group => {
+      const card = (Array.from(byId('settings-groups').children) as HTMLElement[]).find(child => child.dataset?.group === group)
+      card?.scrollIntoView?.({ block: 'start', behavior: 'smooth' })
+    }),
+  )
+  maybe('settings-quick')?.replaceChildren(
+    ...drawSettingsQuick(data, settingsView, mode => {
+      settingsView.mode = mode
+      drawSettingsGroups(data)
+    }),
+  )
+}
+
+/** `/` on the Settings tab focuses the filter. */
+export function settingsKey(event: KeyboardEvent) {
+  if (current !== 'settings' || event.defaultPrevented || typing(event) || event.key !== '/') return
+  event.preventDefault()
+  byId<HTMLInputElement>('settings-filter').focus()
 }
 
 export async function loadSettings() {
@@ -2313,6 +2338,7 @@ export function wireKnowledgeHealth() {
     settingsView.filter = byId<HTMLInputElement>('settings-filter').value
     if (settingsView.data !== null) drawSettingsGroups(settingsView.data)
   })
+  document.addEventListener?.('keydown', settingsKey)
 }
 
 // ---- Header and footer ----

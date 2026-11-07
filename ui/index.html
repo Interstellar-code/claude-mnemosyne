@@ -622,14 +622,24 @@
       <p id="settings-status" class="notice-line small muted" role="status">Loading…</p>
       <button id="settings-retry" class="btn" type="button" hidden>Try again</button>
     </div>
-    <div id="settings-body" hidden>
-      <div class="toolbar">
-        <label class="field grow" for="settings-filter">Filter settings
-          <input id="settings-filter" class="input" type="search" autocomplete="off" placeholder="Name, help text or group">
+    <div id="settings-body" class="set-body" hidden>
+      <div class="toolbar set-toolbar">
+        <label class="mem-find set-find" for="settings-filter">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path></svg>
+          <span class="sr-only">Filter settings</span>
+          <input id="settings-filter" class="mem-find-input" type="search" autocomplete="off" placeholder="Filter: name, help text, key or group">
+          <kbd aria-hidden="true">/</kbd>
         </label>
+        <div id="settings-quick" class="set-quicks" role="group" aria-label="Quick filters"></div>
       </div>
-      <div id="settings-top"></div>
-      <div id="settings-groups" class="set-groups"></div>
+      <div class="set-layout">
+        <nav id="settings-rail" class="set-rail" aria-label="Setting groups"></nav>
+        <div class="set-main">
+          <div id="settings-top"></div>
+          <div id="settings-groups" class="set-groups"></div>
+          <div id="settings-danger" class="set-danger-box"></div>
+        </div>
+      </div>
     </div>
   </main>
 

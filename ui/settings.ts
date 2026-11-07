@@ -148,12 +148,76 @@ export function rangeText(row: SettingRow): string {
 /** Rows a person can change: not read-only, not a facts row. */
 export const isEditable = (row: SettingRow) => row.home !== 'read-only' && row.type !== 'facts'
 
-/** The rows matching the filter box (name, help, id, group label), case ignored; an empty filter keeps all. */
-export function filterRows(rows: readonly SettingRow[], groups: readonly Group[], filter: string): SettingRow[] {
+/**
+ * 0.25.0: a plugin option, whether this page can write it (home option) or not (the server then sends it as read-only, with a
+ * note to change it in /config). Facts rows are never plugin options.
+ */
+export const isPluginRow = (row: SettingRow) => row.home === 'option' || (row.home === 'read-only' && row.type !== 'facts')
+
+/** 0.25.0: whether a row differs from its default (a facts row never does; an option only counts once it is set). */
+export function isChanged(row: SettingRow): boolean {
+  if (row.type === 'facts' || row.home === 'read-only') return false
+  if (row.home === 'option' && row.configured !== true) return false
+  return !sameJson(row.value, row.default)
+}
+
+/** 0.25.0: the quick filters. Changed, Next session (applies later than now), Plugin options, Read-only. */
+export type QuickMode = 'all' | 'changed' | 'next' | 'plugin' | 'readonly'
+export const QUICK_MODES: readonly { id: QuickMode; label: string }[] = [
+  { id: 'all', label: 'All' },
+  { id: 'changed', label: 'Changed' },
+  { id: 'next', label: 'Next session' },
+  { id: 'plugin', label: 'Plugin options' },
+  { id: 'readonly', label: 'Read-only' },
+]
+
+/** Whether a row passes a quick filter. */
+export function matchesMode(row: SettingRow, mode: QuickMode): boolean {
+  if (mode === 'changed') return isChanged(row)
+  if (mode === 'next') return row.applies !== '' && row.applies !== 'now' && row.home !== 'read-only'
+  if (mode === 'plugin') return isPluginRow(row)
+  if (mode === 'readonly') return !isEditable(row)
+  return true
+}
+
+/**
+ * The rows matching the filter box (name, help, id, group label), case ignored, and (0.25.0) the quick filter; an empty
+ * filter and 'all' keep all.
+ */
+export function filterRows(rows: readonly SettingRow[], groups: readonly Group[], filter: string, mode: QuickMode = 'all'): SettingRow[] {
   const needle = filter.trim().toLowerCase()
-  if (needle === '') return [...rows]
   const label = (id: string) => groups.find(group => group.id === id)?.label ?? id
-  return rows.filter(row => [row.label, row.help, row.id, row.note ?? '', label(row.group)].some(part => part.toLowerCase().includes(needle)))
+  return rows.filter(row => matchesMode(row, mode) && (needle === '' || [row.label, row.help, row.id, row.note ?? '', label(row.group)].some(part => part.toLowerCase().includes(needle))))
+}
+
+/** How many rows each quick filter holds (under the find text). */
+export function modeCounts(rows: readonly SettingRow[], groups: readonly Group[], filter: string): Record<QuickMode, number> {
+  return Object.fromEntries(QUICK_MODES.map(({ id }) => [id, filterRows(rows, groups, filter, id).length])) as Record<QuickMode, number>
+}
+
+/** 0.25.0: a value checked against the other rows it must agree with: the warn length stays below the max length. */
+export function crossCheck(row: SettingRow, value: unknown, rows: readonly SettingRow[]): Checked {
+  const other = (id: string) => rows.find(item => item.id === id)?.value
+  if (row.id === 'guard.warnLength' && typeof value === 'number') {
+    const max = other('guard.maxLength')
+    if (typeof max === 'number' && value >= max) return { ok: false, reason: `Must stay below Max length (${max}). Allowed ${row.min ?? 0} to ${max - 1}.` }
+  }
+  if (row.id === 'guard.maxLength' && typeof value === 'number') {
+    const warn = other('guard.warnLength')
+    if (typeof warn === 'number' && value <= warn) return { ok: false, reason: `Must stay above Warn length (${warn}).` }
+  }
+  return { ok: true, value }
+}
+
+/** Where a number sits on its range, in twentieths (for the track's dot and default tick); null without a range. */
+export function rangeStep(row: SettingRow, value: unknown): number | null {
+  if (typeof value !== 'number' || row.min === undefined || row.max === undefined || row.max <= row.min) return null
+  return Math.round((Math.min(row.max, Math.max(row.min, value)) - row.min) / (row.max - row.min) * 20)
+}
+
+/** The changed rows Reset all would put back, as "label: value → default" pairs (config rows only; plugin options stay). */
+export function resetDiff(rows: readonly SettingRow[]): { label: string; from: string; to: string }[] {
+  return rows.filter(row => row.home === 'config' && isChanged(row)).map(row => ({ label: row.label, from: formatValue(row.value), to: formatValue(row.default) }))
 }
 
 // ---- Checking a value before it is sent ----
@@ -260,9 +324,11 @@ export type SettingsView = {
   resetAll: boolean
   /** The drawn banner, so a reply that changes the restart list can redraw it alone. */
   banner: { node: HTMLElement; data: SettingsData; view: SettingsView } | null
+  /** 0.25.0: the quick filter (All, Changed, Next session, Plugin options, Read-only). */
+  mode?: QuickMode
 }
 
-export const newView = (): SettingsView => ({ data: null, filter: '', busy: false, notice: '', copied: '', backup: { text: '', error: false, list: null }, resetAll: false, banner: null })
+export const newView = (): SettingsView => ({ data: null, filter: '', busy: false, notice: '', copied: '', backup: { text: '', error: false, list: null }, resetAll: false, banner: null, mode: 'all' })
 
 const BUSY_TEXT = 'Another change is still saving. Try again in a moment.'
 
@@ -281,13 +347,43 @@ function showCurrent(row: SettingRow, parts: RowParts) {
   parts.badges.replaceChildren(...badgeList(row))
 }
 
+/** 0.25.0: when and where, as the third column: "Applies now" neutral, anything later amber with ↻, then the home with its mark. */
 function badgeList(row: SettingRow): HTMLElement[] {
-  const out = [el('span', homeText(row.home), 'mini-badge')]
+  const out: HTMLElement[] = []
   const applies = appliesText(row.applies)
-  if (applies !== '' && row.home !== 'read-only') out.push(el('span', applies, 'mini-badge set-applies'))
+  if (applies !== '' && row.home !== 'read-only') {
+    const now = row.applies === 'now'
+    const badge = el('span', undefined, now ? 'mini-badge set-applies is-now' : 'mini-badge set-applies is-later')
+    badge.append(el('span', now ? '●' : '↻', 'set-mark'), el('span', applies))
+    out.push(badge)
+  }
+  const home = el('span', undefined, `set-home h-${row.home === 'read-only' ? 'locked' : row.home}`)
+  // A plugin option this page cannot write says so, rather than a bare "Read-only".
+  const where = row.home === 'read-only' && isPluginRow(row) ? 'Plugin option (read-only here)' : homeText(row.home)
+  home.append(el('span', row.home === 'read-only' ? '🔒' : '⌂', 'set-mark'), el('span', where))
+  out.push(home)
   if (row.restartNeeded === true) out.push(el('span', 'Restart needed', 'mini-badge set-restart'))
   if (row.advanced === true) out.push(el('span', 'Advanced', 'mini-badge'))
   return out
+}
+
+/** The row's classes: changed from the default (a teal edge), read-only, and dirty while an edit is not saved (an amber edge). */
+const rowClass = (row: SettingRow, dirty = false) => `set-row${isChanged(row) ? ' is-changed' : ''}${isEditable(row) ? '' : ' is-readonly'}${dirty ? ' is-dirty' : ''}`
+
+/** The track under a number with a range: the value's dot and the default's tick, placed by class (no inline styles). */
+function rangeTrack(row: SettingRow): HTMLElement | null {
+  const at = rangeStep(row, row.value)
+  if (at === null) return null
+  const track = el('div', undefined, 'set-range')
+  track.setAttribute('aria-hidden', 'true')
+  const tick = rangeStep(row, row.default)
+  if (tick !== null) track.append(el('span', undefined, `set-tick at-${tick}`))
+  track.append(el('span', undefined, `set-dot at-${at}`))
+  const ends = el('div', undefined, 'set-ends mono')
+  ends.append(el('span', String(row.min)), el('span', `default ${formatValue(row.default)}`), el('span', String(row.max)))
+  const wrap = el('div', undefined, 'set-range-wrap')
+  wrap.append(track, ends)
+  return wrap
 }
 
 /** A confirmed change: the row takes the value from the server's reply, never from the field. */
@@ -397,7 +493,8 @@ function editorFor(row: SettingRow, view: SettingsView, host: SettingsHost, part
     const input = el('input', undefined, 'input')
     input.type = 'text'
     if (row.type !== 'text') input.inputMode = row.type === 'integer' ? 'numeric' : 'decimal'
-    input.value = formatValue(row.value) === 'not set' ? '' : String(row.value ?? '')
+    const shown = () => (formatValue(row.value) === 'not set' ? '' : String(row.value ?? ''))
+    input.value = shown()
     const range = row.type === 'text' ? '' : rangeText(row)
     const field = labelled('New value', input, range ? `Allowed: ${range}` : undefined)
     const again = row.confirm === true ? el('input', undefined, 'input') : null
@@ -406,8 +503,18 @@ function editorFor(row: SettingRow, view: SettingsView, host: SettingsHost, part
       again.type = 'text'
       againField = labelled('Type the new value again to confirm', again, 'Memories already saved are not moved to the new place.')
     }
-    const save = button('Save', 'primary', () => {
+    // 0.25.0: the value is checked as it is typed (its type and range, and the rows it must agree with); Save is on only while the
+    // field holds a valid change, and Cancel puts the saved value back.
+    const verdict = (): Checked => {
       const checked = checkValue(row, input.value)
+      return checked.ok ? crossCheck(row, checked.value, view.data?.settings ?? []) : checked
+    }
+    const cancel = button('Cancel', 'link-btn set-cancel', () => {
+      input.value = shown()
+      refresh()
+    })
+    const save = button('Save', 'primary', () => {
+      const checked = verdict()
       if (!checked.ok) return say(parts, checked.reason, true)
       if (again !== null && again.value.trim() !== String(checked.value)) return say(parts, 'The two entries differ. Type the new value again exactly to confirm.', true)
       void (async () => {
@@ -416,10 +523,29 @@ function editorFor(row: SettingRow, view: SettingsView, host: SettingsHost, part
         takeReply(row, reply, parts, view)
         input.value = row.value === null ? '' : String(row.value)
         if (again !== null) again.value = ''
+        refresh(false)
         done(parts, reply)
       })()
     })
-    return againField === null ? [fieldLine(field, save)] : [fieldLine(field, save), againField]
+    const refresh = (speak = true) => {
+      const dirty = input.value.trim() !== shown()
+      const checked = verdict()
+      save.disabled = !dirty || !checked.ok
+      cancel.hidden = !dirty
+      parts.box.className = rowClass(row, dirty)
+      if (speak) say(parts, dirty && !checked.ok ? checked.reason : '', dirty && !checked.ok)
+    }
+    input.addEventListener('input', () => refresh())
+    input.addEventListener('keydown', event => {
+      const key = (event as KeyboardEvent).key
+      if (key === 'Enter' && !save.disabled) save.click?.()
+      else if (key === 'Escape') cancel.click?.()
+    })
+    refresh(false)
+    const line = fieldLine(field, save)
+    line.append(cancel)
+    const track = row.type === 'text' ? null : rangeTrack(row)
+    return [line, ...(track ? [track] : []), ...(againField ? [againField] : [])]
   }
 
   if (row.type === 'words' || row.type === 'terms' || row.type === 'pick') {
@@ -516,33 +642,60 @@ function drawFacts(row: SettingRow): HTMLElement {
 
 // ---- A row ----
 
+/**
+ * One row (0.25.0: three columns): what it is (the name, its key, "Changed", the help), the control (the current value, the
+ * editor, Reset, the message), and when and where (applies, home). A row changed from its default has a teal edge; one being
+ * edited, an amber edge.
+ */
 export function settingRow(row: SettingRow, view: SettingsView, host: SettingsHost, message = ''): HTMLElement {
-  const box = el('div', undefined, 'set-row')
+  const box = el('div', undefined, rowClass(row))
   box.dataset.id = row.id
-  const parts: RowParts = { box, message: el('p', '', 'set-msg small muted'), current: el('p', undefined, 'set-current small'), badges: el('span', undefined, 'set-badges') }
+  const parts: RowParts = { box, message: el('p', '', 'set-msg small muted'), current: el('p', undefined, 'set-current small'), badges: el('div', undefined, 'set-badges set-where') }
   say(parts, message)
+  const about = el('div', undefined, 'set-about')
   const head = el('div', undefined, 'set-head')
-  head.append(el('h3', row.label, 'set-name'), parts.badges)
-  box.append(head)
-  if (row.help !== '') box.append(el('p', row.help, 'set-help small muted'))
-  if (row.note !== undefined) box.append(el('p', row.note, 'set-note small'))
+  head.append(el('h3', row.label, 'set-name'))
+  if (row.home !== 'read-only') head.append(el('code', row.id, 'set-key mono'))
+  if (isChanged(row)) head.append(el('span', 'Changed', 'set-changed'))
+  about.append(head)
+  if (row.help !== '') about.append(el('p', row.help, 'set-help small muted'))
+  // A read-only plugin option's note ("change it in /config") becomes the /config line with Copy in the control column.
+  const pluginLocked = row.home === 'read-only' && isPluginRow(row)
+  if (row.note !== undefined && !pluginLocked) about.append(el('p', row.note, 'set-note small'))
+  const box2 = el('div', undefined, 'set-control')
+  box.append(about, box2, parts.badges)
+  // From here on the control column takes what the row used to hold under its head.
+  const control = { append: (...nodes: HTMLElement[]) => box2.append(...nodes) }
   if (row.type !== 'facts') {
     showCurrent(row, parts)
-    box.append(parts.current)
+    control.append(parts.current)
   } else {
     parts.badges.replaceChildren(...badgeList(row))
   }
+  // A plugin option this page cannot write: the way to change it, with Copy (0.25.0, in the row instead of a banner).
+  if (pluginLocked || (row.home === 'option' && view.data !== null && view.data.plugin.optionsEditable !== true)) {
+    const how = el('p', undefined, 'set-config small')
+    const copy = button(view.copied === '/config' ? 'Copied' : 'Copy', 'small', () => {
+      void (async () => {
+        const ok = await host.copy('/config')
+        copy.textContent = ok ? 'Copied' : 'Copy failed'
+        view.copied = ok ? '/config' : ''
+      })()
+    }, 'Copy /config')
+    how.append(el('code', '/config', 'mono'), copy, el('span', ' A plugin option: change it in Claude Code.', 'muted'))
+    control.append(how)
+  }
   if (isEditable(row)) {
-    box.append(...editorFor(row, view, host, parts))
+    control.append(...editorFor(row, view, host, parts))
     // Reset to default: asks the server; the row changes only on its reply, then is drawn again so the editors hold the new value.
     // memoryDir and scope: the server wants the default typed again as confirm.
     const sure = row.confirm === true ? el('input', undefined, 'input') : null
     if (sure !== null) {
       sure.type = 'text'
-      box.append(labelled('Type the default again to reset', sure, `The default is ${formatValue(row.default)}. Memories already saved are not moved.`))
+      control.append(labelled('Type the default again to reset', sure, `The default is ${formatValue(row.default)}. Memories already saved are not moved.`))
     }
-    box.append(
-      button('Reset to default', 'link-btn', () => {
+    control.append(
+      button('Reset to default', isChanged(row) ? 'link-btn set-reset is-on' : 'link-btn set-reset', () => {
         const want = String(row.default ?? '')
         if (sure !== null && sure.value.trim() !== want) return say(parts, 'The entry differs from the default. Type the default exactly to confirm.', true)
         void (async () => {
@@ -551,13 +704,60 @@ export function settingRow(row: SettingRow, view: SettingsView, host: SettingsHo
           takeReply(row, { ...reply, reset: true }, parts, view)
           box.replaceWith(settingRow(row, view, host, doneText(reply, true)))
         })()
-      }),
+      }, `Reset to ${formatValue(row.default)}`),
     )
   } else if (row.type === 'facts') {
-    box.append(drawFacts(row))
+    control.append(drawFacts(row))
   }
-  box.append(parts.message)
+  control.append(parts.message)
   return box
+}
+
+/** A read-only facts row folded into one locked line (0.25.0): the name and "read-only"; opened, the row. */
+function lockedRow(row: SettingRow, view: SettingsView, host: SettingsHost): HTMLElement {
+  const fold = el('details', undefined, 'set-locked')
+  const summary = el('summary', undefined, 'set-locked-line')
+  summary.append(el('span', '🔒', 'set-mark'), el('strong', row.label), el('span', ' · read-only', 'muted'))
+  if (row.help !== '') summary.append(el('span', ` · ${row.help.length > 90 ? `${row.help.slice(0, 89)}…` : row.help}`, 'muted small'))
+  fold.append(summary, settingRow(row, view, host))
+  return fold
+}
+
+/** 0.25.0: the group rail: each group with its row count and a dot where a row differs from its default; a click jumps there. */
+export function drawRail(data: SettingsData, view: SettingsView, jump: (group: string) => void): HTMLElement[] {
+  const rows = filterRows(data.settings, data.groups, view.filter, view.mode ?? 'all')
+  const out: HTMLElement[] = []
+  for (const group of data.groups) {
+    const inGroup = rows.filter(row => row.group === group.id)
+    if (inGroup.length === 0) continue
+    const item = el('button', undefined, 'set-rail-item')
+    item.type = 'button'
+    item.dataset.group = group.id
+    item.append(el('span', group.label))
+    if (inGroup.some(isChanged)) {
+      const dot = el('span', undefined, 'set-rail-dot')
+      dot.title = 'A setting here differs from its default'
+      item.append(dot)
+    }
+    item.append(el('span', String(inGroup.length), 'set-rail-n mono'))
+    item.addEventListener('click', () => jump(group.id))
+    out.push(item)
+  }
+  return out
+}
+
+/** 0.25.0: the quick filter chips with their counts (under the find text). */
+export function drawQuick(data: SettingsData, view: SettingsView, pick: (mode: QuickMode) => void): HTMLElement[] {
+  const counts = modeCounts(data.settings, data.groups, view.filter)
+  return QUICK_MODES.map(({ id, label }) => {
+    const chip = el('button', undefined, 'chip-btn facet set-quick')
+    chip.type = 'button'
+    chip.setAttribute('aria-pressed', String((view.mode ?? 'all') === id))
+    chip.append(el('span', label), el('span', String(counts[id]), 'n'))
+    chip.disabled = counts[id] === 0 && id !== 'all'
+    chip.addEventListener('click', () => pick(id))
+    return chip
+  })
 }
 
 // ---- Groups and the banner ----
@@ -749,20 +949,28 @@ function drawSetup(rows: readonly SettingRow[], view: SettingsView, host: Settin
 /** Everything under the page title: the banner, Reset all, the groups. The filter box redraws only this. */
 export function drawGroups(data: SettingsData, view: SettingsView, host: SettingsHost): HTMLElement[] {
   const out: HTMLElement[] = []
-  const rows = filterRows(data.settings, data.groups, view.filter)
-  const matching = view.filter.trim() !== ''
+  const mode = view.mode ?? 'all'
+  const rows = filterRows(data.settings, data.groups, view.filter, mode)
+  const matching = view.filter.trim() !== '' || mode !== 'all'
   for (const group of data.groups) {
     const inGroup = rows.filter(row => row.group === group.id)
     if (inGroup.length === 0) continue
     const card = el('section', undefined, 'card set-group')
     card.setAttribute('aria-label', group.label)
+    card.dataset.group = group.id
     card.append(el('h2', group.label, 'card-title'))
+    // 0.25.0: how many settings, and how many differ from their defaults.
+    const changed = inGroup.filter(isChanged).length
+    card.append(el('p', `${inGroup.length} ${inGroup.length === 1 ? 'setting' : 'settings'}${changed > 0 ? ` · ${changed} changed` : ''}`, 'set-group-meta mono muted'))
     if (group.id === 'setup') {
       card.append(...drawSetup(inGroup, view, host))
     } else {
       const plain = inGroup.filter(row => row.advanced !== true)
       const advanced = inGroup.filter(row => row.advanced === true)
-      for (const row of plain) card.append(settingRow(row, view, host))
+      // Read-only facts fold into one locked line each, after the rows that can change.
+      const locked = plain.filter(row => row.type === 'facts' && !isEditable(row))
+      for (const row of plain.filter(item => !locked.includes(item))) card.append(settingRow(row, view, host))
+      for (const row of locked) card.append(lockedRow(row, view, host))
       if (advanced.length > 0) {
         const details = el('details', undefined, 'set-advanced')
         details.open = matching
@@ -806,15 +1014,31 @@ export function drawTop(data: SettingsData, view: SettingsView, host: SettingsHo
   view.banner = { node: banner, data, view }
   fillBanner(banner, data, view)
   out.push(banner)
-  const all = el('div', undefined, 'set-resetall')
+  // 0.25.0: a danger zone at the foot of the page; the confirm lists exactly what changes.
+  const all = el('div', undefined, 'set-resetall set-danger')
+  const diff = resetDiff(data.settings)
   if (!view.resetAll) {
-    all.append(button('Reset all', 'danger-outline', () => {
-      view.resetAll = true
-      redraw()
-    }))
+    const words = el('div', undefined, 'set-danger-text')
+    words.append(el('p', 'Reset all to defaults', 'set-danger-title'), el('p', diff.length === 0 ? 'Every Mnemosyne config value is at its default. Plugin options stay as they are.' : `${diff.length} Mnemosyne config ${diff.length === 1 ? 'value differs' : 'values differ'} from the default. Plugin options stay as they are.`, 'small muted'))
+    all.append(
+      words,
+      button('Reset all', 'danger-outline', () => {
+        view.resetAll = true
+        redraw()
+      }),
+    )
   } else {
     const input = el('input', undefined, 'input')
     input.type = 'text'
+    if (diff.length > 0) {
+      const list = el('ul', undefined, 'set-diff')
+      for (const item of diff) {
+        const li = el('li')
+        li.append(el('span', item.label), el('span', item.from, 'mono muted'), el('span', '→', 'muted'), el('span', item.to, 'mono'))
+        list.append(li)
+      }
+      all.append(el('p', `Reset ${diff.length} ${diff.length === 1 ? 'setting' : 'settings'} to ${diff.length === 1 ? 'its default' : 'their defaults'}?`, 'set-danger-title'), list)
+    }
     const status = el('p', 'This puts every Mnemosyne setting in config.json back at its default (the old file is kept as config.json.bak). Plugin options are not changed.', 'small muted')
     const fail = el('p', '', 'set-msg warn')
     fail.hidden = true

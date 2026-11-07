@@ -81,6 +81,9 @@ class FakeNode {
   findAll(tag: string): FakeNode[] {
     return this.all().filter(node => node.tagName === tag)
   }
+  texts(): string[] {
+    return this.children.flatMap(child => (child instanceof FakeNode ? child.texts() : [child.data]))
+  }
 }
 
 const fakeDocument = { createElement: (tag: string) => new FakeNode(tag.toLowerCase()), createTextNode: (data: string) => new FakeText(data) }
@@ -95,6 +98,112 @@ async function withDocument<T>(body: () => Promise<T> | T): Promise<T> {
     g.document = saved
   }
 }
+
+describe('SET 0.25: changed rows, quick filters, cross checks, the range, the diff and the rail (hand-made rows, no CLI)', () => {
+  const row = (over: Record<string, unknown>) => ({ id: 'x', ref: '', group: 'guard', label: 'X', help: '', type: 'integer', home: 'config', applies: 'now', default: 5, value: 5, ...over })
+  const rows = [
+    row({ id: 'guard.warnLength', label: 'Warn length', default: 1500, value: 1500, min: 200, max: 7999 }),
+    row({ id: 'guard.maxLength', label: 'Max length', default: 4000, value: 4000, min: 201, max: 8000 }),
+    row({ id: 'map.linkScore', label: 'Black hole: closeness', group: 'map', type: 'number', default: 0.8, value: 0.7, min: 0.65, max: 0.95 }),
+    row({ id: 'tools.memory_forget', label: 'Forget tool', group: 'tools', type: 'boolean', default: true, value: true, applies: 'next session' }),
+    row({ id: 'guardMode', label: 'Save guard mode', type: 'choice', home: 'read-only', applies: 'after restart', default: 'strict', value: null, note: 'change it in /config' }),
+    row({ id: 'scope', label: 'Memory scope', type: 'choice', home: 'option', applies: 'after restart', default: 'global', value: 'global', configured: true }),
+    row({ id: 'guard.secretRules', label: 'Built-in secret rules', type: 'facts', home: 'read-only', default: null, value: ['GitHub token'] }),
+  ]
+  const groups = [{ id: 'guard', label: 'Guard' }, { id: 'map', label: 'Map' }, { id: 'tools', label: 'Tools' }]
+  const data = parseSettings({ settings: rows, groups, plugin: { optionsEditable: false } })
+
+  test('changed, plugin rows and the quick filters with their counts', () => {
+    const byId = (id: string) => data.settings.find((r: { id: string }) => r.id === id)
+    expect(['guard.warnLength', 'map.linkScore', 'scope', 'guard.secretRules', 'guardMode'].map(id => settings.isChanged(byId(id)))).toEqual([false, true, false, false, false])
+    expect(['guardMode', 'scope', 'guard.secretRules', 'guard.maxLength'].map(id => settings.isPluginRow(byId(id)))).toEqual([true, true, false, false])
+    expect(settings.modeCounts(data.settings, groups, '')).toEqual({ all: 7, changed: 1, next: 2, plugin: 2, readonly: 2 })
+    expect(filterRows(data.settings, groups, '', 'changed').map((r: { id: string }) => r.id)).toEqual(['map.linkScore'])
+    expect(filterRows(data.settings, groups, 'guard', 'readonly').map((r: { id: string }) => r.id)).toEqual(['guardMode', 'guard.secretRules'])
+    // Without a mode the old behaviour holds.
+    expect(filterRows(data.settings, groups, '')).toHaveLength(7)
+  })
+
+  test('the warn length stays below the max length, both ways; the range step and the reset diff', () => {
+    const warn = data.settings[0]
+    const max = data.settings[1]
+    expect(settings.crossCheck(warn, 4200, data.settings)).toEqual({ ok: false, reason: 'Must stay below Max length (4000). Allowed 200 to 3999.' })
+    expect(settings.crossCheck(warn, 3999, data.settings)).toEqual({ ok: true, value: 3999 })
+    expect(settings.crossCheck(max, 1500, data.settings)).toMatchObject({ ok: false })
+    expect([settings.rangeStep(data.settings[2], 0.7), settings.rangeStep(data.settings[2], 0.8), settings.rangeStep(data.settings[2], 5), settings.rangeStep(data.settings[3], true)]).toEqual([3, 10, 20, null])
+    expect(settings.resetDiff(data.settings)).toEqual([{ label: 'Black hole: closeness', from: '0.7', to: '0.8' }])
+  })
+
+  test('a number row: three columns; Save is off until a valid change; Cancel puts it back; a cross-check speaks before Save', () =>
+    withDocument(() => {
+      const view = newView()
+      view.data = data
+      const host = { post: async () => ({ status: 200, body: { ok: true, value: 3000 } }), copy: async () => true, reload: () => {}, browser: [] }
+      const card = drawGroups(data, view, host)[0] as FakeNode
+      const warnRow = card.all().find(n => n.dataset.id === 'guard.warnLength')!
+      expect(warnRow.children.map(c => (c as FakeNode).className)).toEqual(['set-about', 'set-control', 'set-badges set-where'])
+      const input = warnRow.find('input')!
+      const save = warnRow.find('button', 'Save')!
+      const cancel = warnRow.find('button', 'Cancel')!
+      expect([save.disabled, cancel.hidden]).toEqual([true, true])
+      input.value = '4200'
+      input.fire('input')
+      expect([save.disabled, cancel.hidden, warnRow.className]).toEqual([true, false, 'set-row is-dirty'])
+      expect(warnRow.all().map(n => n.textContent).join('|')).toContain('Must stay below Max length (4000)')
+      input.value = '3000'
+      input.fire('input')
+      expect(save.disabled).toBe(false)
+      cancel.fire('click')
+      expect([input.value, save.disabled, warnRow.className]).toEqual(['1500', true, 'set-row'])
+      // A changed row: a teal edge, "Changed", the range track with its default tick, and Reset as the lit link.
+      const map = drawGroups(data, view, host).find((c: FakeNode) => c.dataset.group === 'map') as FakeNode
+      const link = map.all().find(n => n.dataset.id === 'map.linkScore')!
+      expect(link.className).toBe('set-row is-changed')
+      expect(link.all().some(n => n.className === 'set-changed' && n.textContent === 'Changed')).toBe(true)
+      expect(link.all().filter(n => n.className.startsWith('set-dot') || n.className.startsWith('set-tick')).map(n => n.className)).toEqual(['set-tick at-10', 'set-dot at-3'])
+      expect(link.find('button', 'Reset to default')!.className).toBe('btn link-btn set-reset is-on')
+      // The group says how many settings it has and how many are changed.
+      expect(map.all().find(n => n.className.startsWith('set-group-meta'))!.textContent).toBe('1 setting · 1 changed')
+    }))
+
+  test('a read-only plugin option: /config with Copy, "Plugin option (read-only here)"; read-only facts fold behind a locked line', () =>
+    withDocument(async () => {
+      const view = newView()
+      view.data = data
+      const copied: string[] = []
+      const host = { post: async () => ({ status: 0, body: {} }), copy: async (t: string) => (copied.push(t), true), reload: () => {}, browser: [] }
+      const guard = drawGroups(data, view, host)[0] as FakeNode
+      const mode = guard.all().find(n => n.dataset.id === 'guardMode')!
+      expect(mode.all().map(n => n.textContent).join('|')).toContain('Plugin option (read-only here)')
+      expect(mode.all().map(n => n.textContent).join('|')).not.toContain('change it in /config|')
+      mode.find('button', 'Copy')!.fire('click')
+      await tick()
+      expect(copied).toEqual(['/config'])
+      const locked = guard.all().find(n => n.tagName === 'details' && n.className === 'set-locked')!
+      expect(locked.find('summary')!.textContent).toContain('Built-in secret rules · read-only')
+      expect(locked.findAll('button')).toHaveLength(0)
+    }))
+
+  test('the rail and the quick chips; Reset all lists what would change', () =>
+    withDocument(() => {
+      const view = newView()
+      const jumps: string[] = []
+      const rail = settings.drawRail(data, view, (g: string) => void jumps.push(g)) as FakeNode[]
+      expect(rail.map(item => item.texts().join('/'))).toEqual(['Guard/5', 'Map/1', 'Tools/1'])
+      expect(rail[1]!.all().some(n => n.className === 'set-rail-dot')).toBe(true)
+      rail[1]!.fire('click')
+      expect(jumps).toEqual(['map'])
+      const picks: string[] = []
+      const chips = settings.drawQuick(data, view, (m: string) => void picks.push(m)) as FakeNode[]
+      expect(chips.map(c => c.texts().join(' '))).toEqual(['All 7', 'Changed 1', 'Next session 2', 'Plugin options 2', 'Read-only 2'])
+      chips[1]!.fire('click')
+      expect(picks).toEqual(['changed'])
+      view.resetAll = true
+      const [, danger] = drawTop(data, view, { post: async () => ({ status: 0, body: {} }), copy: async () => true, reload: () => {}, browser: [] }, () => {}) as FakeNode[]
+      expect(danger!.texts().join(' ')).toContain('Reset 1 setting to its default?')
+      expect(danger!.find('ul')!.texts()).toEqual(['Black hole: closeness', '0.7', '→', '0.8'])
+    }))
+})
 
 const last = <T>(list: readonly T[]): T => list[list.length - 1] as T
 const tick = () => new Promise(resolve => setTimeout(resolve, 5))

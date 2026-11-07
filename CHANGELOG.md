@@ -2,6 +2,28 @@
 
 Newest first. Each release is tagged `vX.Y.Z` on GitHub; the README and DESIGN.md describe the contracts.
 
+## 0.25.0 (Settings tab polish)
+
+The ninth and last step of the tab polish, following the design proposal's Settings notes.
+
+1. **Three columns per row:**
+   - what it is: the name, its key, a "Changed" label and the help;
+   - the control: the current value and default, the editor, Reset and the message;
+   - when and where: applies and home.
+
+   A row used to stack about seven lines.
+2. **Save only when it is a valid change:** a number or text field is checked as it is typed, against its type and range and against the rows it must agree with (the warn length stays below the max length, and the max above the warn). While the field holds an unsaved change the row has an amber edge and **Cancel** puts the saved value back. Save stays off until the change is valid. Enter saves; Esc cancels.
+3. **Changed from the default:** a teal edge and a "Changed" label. A number with a range shows a track with its value and a tick at the default, and Reset to default is lit only on a changed row.
+4. **When and where:** "● Applies now" is neutral; anything later is "↻ Applies next session" or "after restart" in amber. The home reads ⌂ Mnemosyne config, ⌂ Plugin option, or 🔒 for read-only. A plugin option this page cannot write says "Plugin option (read-only here)" and shows `/config` with **Copy**, in place of the bare "change it in /config".
+5. **Rail and quick filters:**
+   - a sticky rail of groups with their counts, and a teal dot where a setting differs from its default; a click jumps to the group;
+   - quick filters with counts: All, Changed, Next session, Plugin options and Read-only;
+   - each group says "n settings · m changed".
+6. **Read-only facts fold** into one locked line each (the built-in secret rules, the tag format, the engine tools); opened, the facts.
+7. **Reset all** moves to a danger zone at the foot. Its confirm lists exactly what changes ("Black hole: closeness 0.7 → 0.8"); the typed "reset" stays.
+
+No server, setting or engine change.
+
 ## 0.24.0 (Vocabulary tab polish)
 
 The eighth step of the tab polish, following the design proposal's Vocabulary notes.

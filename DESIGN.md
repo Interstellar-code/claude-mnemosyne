@@ -1603,6 +1603,17 @@ C10.3: the engine's trigger `trim_validations_to_3` keeps only the newest 3 `mem
 
 On the solar-system map a plain folder (no git repo) with at least `map.stationMin` live memories is a space station and one with fewer a starship (default 50, range 2 to 1000, applies now). The galaxy reply carries the value. Git repos are always planets.
 
+### The Settings tab (0.25.0)
+
+Ninth and last step of the tab polish (design proposal `tabs-after/NOTES-shell-vocabulary-settings.md`, Settings items 1 to 7). Page only: no server, setting or engine change.
+- **Row.** `settingRow` builds `.set-about` (name, `code.set-key` with the id, "Changed", help, note), `.set-control` (the "Current: … · Default: …" line, the editors, Reset, the message) and `.set-badges.set-where` (applies, home). The row's text and buttons are the same as before, so the drawn words stay the server's. `rowClass` gives `is-changed`, `is-readonly` and `is-dirty`.
+- **Changed and plugin rows.** `isChanged`: not a facts or read-only row, an option only once configured, and the value differs from the default (by JSON). `isPluginRow`: home `option`, or a read-only row that is not facts (how the server sends a plugin option it cannot write). Such a row shows `/config` with Copy (`host.copy`) and "Plugin option (read-only here)" in place of its note.
+- **Editing.** A number or text field runs `checkValue`, then `crossCheck` (warnLength < maxLength, both ways), on every `input`. Save is disabled unless the field differs from the saved value and is valid; Cancel restores it; Enter and Esc do the same. The Save handler checks again, so a value set without typing (the tests) still goes through the same rule. Choice, switch and list editors are unchanged.
+- **Range.** `rangeStep` places a value and the default on twentieths of [min, max]; `.set-dot.at-n` and `.set-tick.at-n` position them by class (the CSP refuses inline styles).
+- **Filters.** `QuickMode` is all, changed, next (applies later than now, not read-only), plugin, or readonly (not editable). `filterRows(rows, groups, text, mode)` keeps the old three-argument behaviour, and `modeCounts` gives the chip counts. `drawRail` lists the groups with counts and a dot where `isChanged`; `drawQuick` draws the chips.
+- **Groups.** Each card has `data-group` and a "n settings · m changed" line under its unchanged `h2`. Read-only facts rows go last, each inside `details.set-locked` with a 🔒 summary (no button in it).
+- **Reset all.** `drawTop` still returns [banner, reset]. The page puts the reset into `#settings-danger` at the foot. `resetDiff` lists the changed config rows (plugin options are not reset) in the confirm; the typed "reset" stays.
+
 ### The Vocabulary tab (0.24.0)
 
 Eighth step of the tab polish (design proposal `tabs-after/NOTES-shell-vocabulary-settings.md`, Vocabulary items 1 to 7).
