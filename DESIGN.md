@@ -1603,6 +1603,9 @@ C10.3: the engine's trigger `trim_validations_to_3` keeps only the newest 3 `mem
 
 On the solar-system map a plain folder (no git repo) with at least `map.stationMin` live memories is a space station and one with fewer a starship (default 50, range 2 to 1000, applies now). The galaxy reply carries the value. Git repos are always planets.
 
+### Show on map on the solar scene (0.27.1)
+
+`MapView.show(id)` hands the request to the solar page when the Galaxy layout is drawn by it (`solarWanted()`); the page's `show` maps the id to a memory `Target` (`memoryTarget`), applies the level (path, hash, card) and flies the scene there. A request before `/api/galaxy` arrives waits in `pendingMemory` and wins over the URL's level. A true global (owner `global`) is in the sun belt, which has no body: `panelModel` gives it `memoryModel` under `GLOBAL_BELT`, and the camera flies home first (that reports the galaxy level, which the memory level then replaces).
 ### Entity questions (0.27.0)
 
 Issue #56 part 1, engine change 20. `mnemopi_recall` sets `useIntent` (default on, `use_intent: false` off); `classifyIntent` lets entity win its tie with factual; `searchTextOf` strips a leading question phrase before keyword search and candidate lookup (intent and embedding see the whole query); for entity intent `namesSubject` (every query group within the first groups+2 content tokens) makes the lexical score 1, and `recencyFactor` is `0.9 + 0.1 × decay` for entity and factual questions without a time, `0.7 + 0.3 × decay` otherwise. The rules are about how a question is phrased and where a memory names its subject, never about particular stored memories; the eval gold set only measures them. Next (part 2): the entity card from `memoria_kg`.

@@ -2,6 +2,13 @@
 
 Newest first. Each release is tagged `vX.Y.Z` on GitHub; the README and DESIGN.md describe the contracts.
 
+## 0.27.1 (Show on map selects the memory)
+
+"Map" on a Knowledge row (and on Search and Memories) opened the Map tab but selected nothing: the request reached only the older force-graph renderer, while the Galaxy layout is drawn by the solar scene.
+
+1. **The solar map takes the request.** It sets the memory level (breadcrumb, URL, card), flies to the memory's probe, and keeps a request that arrives before the map has loaded.
+2. **Global memories too.** A true global sits in the sun belt, which is not a planet, so its card used to fall back to the store overview. It now opens its own card under "Global (sun belt)", and the camera goes back to the overview where the belt is.
+3. A memory the map does not hold (retired, expired) says so in the status line.
 ## 0.27.0 (entity questions find what they ask about)
 
 Issue #56, part 1 (ranking; the entity card comes later). A question like "who is Rohit" or "tell me about X" returned the newest notes that mention the name, not the memories about it. Four general rules, in the engine (build 18.12.3-mnemosyne.12, change 20 in engine/UPSTREAM.md):

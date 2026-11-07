@@ -400,3 +400,31 @@ describe('building the panel', () => {
     expect(readFileSync(join(ROOT, 'ui', 'app.ts'), 'utf8')).toContain("byId('map-inspector')")
   })
 })
+
+const { memoryTarget, GLOBAL_BELT } = (await import(join(ROOT, 'ui', 'map.ts'))) as {
+  memoryTarget: (memories: readonly Pick<SolarMemory, 'id' | 'owner' | 'kind'>[], id: string) => Target | null
+  GLOBAL_BELT: string
+}
+
+// 0.27.1: "Map" from the Knowledge, Search and Memories tabs selects the memory on the solar map too.
+describe('Show on map selects the memory, a true global included', () => {
+
+  test('memoryTarget is the memory level of a memory the map holds, null otherwise', () => {
+    const first = FIXTURE.memories[0]!
+    expect(memoryTarget(FIXTURE.memories, first.id)).toEqual({ level: 'memory', owner: first.owner, kind: first.kind, id: first.id })
+    expect(memoryTarget(FIXTURE.memories, 'not-there')).toBeNull()
+  })
+
+  test('a global memory (sun belt, not a body) gets its own card, not the store overview', () => {
+    const galaxy = clone(FIXTURE)
+    const base = galaxy.memories[0]!
+    galaxy.memories.push({ ...base, id: 'g-1', owner: 'global', scope: 'global', kind: 'preference', label: 'Prefers short answers' })
+    const level = memoryTarget(galaxy.memories, 'g-1')!
+    const model = panelModel(level, bodiesOf(galaxy), galaxy, { content: 'Prefers short answers, links included.' })
+    expect(model.kicker).toBe(`Memory · ${kindOne('preference')} · ${GLOBAL_BELT}`)
+    expect(model.title).toBe('Prefers short answers')
+    expect(model.text).toBe('Prefers short answers, links included.')
+    // Another owner with no body still falls back to the overview.
+    expect(panelModel({ ...level, owner: 'project-gone-1a2b' } as Target, bodiesOf(galaxy), galaxy).kicker).not.toContain('Memory ·')
+  })
+})
