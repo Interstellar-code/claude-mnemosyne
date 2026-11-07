@@ -2,6 +2,14 @@
 
 Newest first. Each release is tagged `vX.Y.Z` on GitHub; the README and DESIGN.md describe the contracts.
 
+## 0.27.2 (fast meaning search across projects)
+
+A dashboard search in "Keyword + meaning" across every project took 20-30 s: each project ran in its own engine process, and each process loaded the embedding model again.
+
+1. **One warm engine.** The dashboard keeps one engine process with the model loaded and asks it for each project in turn. On the author's store: the first search about 3-4 s, later ones about 1 s, with results identical to before.
+2. **Every project is searched.** The old cap of 10 projects (the smallest were skipped) is now 100.
+3. **Safe by default.** The engine takes the project per call only when the dashboard starts it that way (engine change 21, build 18.12.3-mnemosyne.13); hooks and the MCP launcher clear it. With an older engine, or if the warm engine fails, search falls back to one process per project.
+4. The warm engine stops after 10 idle minutes, so an idle dashboard holds no model in memory.
 ## 0.27.1 (Show on map selects the memory)
 
 "Map" on a Knowledge row (and on Search and Memories) opened the Map tab but selected nothing: the request reached only the older force-graph renderer, while the Galaxy layout is drawn by the solar scene.

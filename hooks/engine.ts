@@ -49,6 +49,8 @@ export function engineEnv(store: string, owner: string, options: EngineEnvOption
     MNEMOPI_DATA_DIR: store,
     MNEMOPI_SESSION_ID: owner,
     MNEMOPI_CHANNEL_ID: owner,
+    // 0.27.2: the owner is this process's, never one a call names (engine change 21); only the dashboard's warm search engine turns it on.
+    MNEMOPI_OWNER_PER_CALL: '',
     // Inherited from the shell this would move writes to <store>/banks/<x>; empty falls back to `default`.
     MNEMOPI_MCP_BANK: 'default',
     // The env is layered over the caller's: an exported LLM URL would let the engine call out.

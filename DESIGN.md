@@ -1603,6 +1603,9 @@ C10.3: the engine's trigger `trim_validations_to_3` keeps only the newest 3 `mem
 
 On the solar-system map a plain folder (no git repo) with at least `map.stationMin` live memories is a space station and one with fewer a starship (default 50, range 2 to 1000, applies now). The galaxy reply carries the value. Git repos are always planets.
 
+### The warm search engine (0.27.2)
+
+`ui/warm-engine.ts`: one `bun <cli> mcp` with `engineEnv(store, 'global', {embeddings})` plus `MNEMOPI_OWNER_PER_CALL=1` (engine change 21); each call is a `tools/call` with `owner` added to its arguments, sent one at a time and matched by id. A call past `WARM_CALL_TIMEOUT_MS` (60 s) or a process exit fails the waiting calls and ends the process; the next call starts a new one; `WARM_IDLE_MS` (10 min) without calls stops it. `search` uses it for hybrid searches when the installed build supports it (`supportsOwnerPerCall`, build .13 or later), over up to `WARM_SEARCH_OWNERS` (100) owners; any failed owner reruns the whole search the old way (one process per owner, `SEARCH_OWNERS` 10). Keyword searches stay one process per owner (they load no model).
 ### Show on map on the solar scene (0.27.1)
 
 `MapView.show(id)` hands the request to the solar page when the Galaxy layout is drawn by it (`solarWanted()`); the page's `show` maps the id to a memory `Target` (`memoryTarget`), applies the level (path, hash, card) and flies the scene there. A request before `/api/galaxy` arrives waits in `pendingMemory` and wins over the URL's level. A true global (owner `global`) is in the sun belt, which has no body: `panelModel` gives it `memoryModel` under `GLOBAL_BELT`, and the camera flies home first (that reports the galaxy level, which the memory level then replaces).

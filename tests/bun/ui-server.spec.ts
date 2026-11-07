@@ -562,6 +562,7 @@ describe('SRV.1: the server runs the engine as the hooks do', () => {
     MNEMOPI_DATA_DIR: store,
     MNEMOPI_SESSION_ID: 'global',
     MNEMOPI_CHANNEL_ID: 'global',
+    MNEMOPI_OWNER_PER_CALL: '',
     MNEMOPI_NO_EMBEDDINGS: '1',
     MNEMOPI_MCP_BANK: 'default',
     MNEMOPI_LLM_BASE_URL: '',
