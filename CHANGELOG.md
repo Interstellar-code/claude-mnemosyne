@@ -2,6 +2,26 @@
 
 Newest first. Each release is tagged `vX.Y.Z` on GitHub; the README and DESIGN.md describe the contracts.
 
+## 0.26.0 (recall evaluation harness)
+
+The first step of the gbrain learnings: measure recall before any ranking change. New script `bin/eval.ts`:
+
+1. **`capture`** reads the real recall queries from the activity log (and its backup), one per project and text, with how often each was asked. It writes `<root>/eval/queries.jsonl`.
+2. **`run`** replays every captured query (plus the labelled set) and writes `<root>/eval/runs/<name>.json`.
+   - **Safety:** it works on a snapshot copy of the store (VACUUM INTO a temp folder, removed after) with recall counts left alone, so nothing in the live store changes.
+   - **Speed:** one engine process per project.
+   - **Options:** `--mode keyword|hybrid`, `--k`, and `--weights vector,keyword,importance` for A/B runs.
+3. **`gold-draft`** writes the most-asked queries with today's top hits (each with its first line) to `<root>/eval/gold.draft.json`. You copy the right ids into `expect` and save it as `gold.json`, the labelled set.
+4. **`compare a b`** reports, on the queries both runs answered, how often the top hit is the same and how much the top 5 and top k overlap; with a gold set, recall@1, @5, @k, hit@k and MRR for each. **`report run`** gives one run's gold scores.
+5. **Privacy:** queries, labels and runs hold your memory ids and query text. They stay in the Mnemosyne root (a 0700 folder, 0600 files, written by rename), never in this repository.
+
+**On the author's store** (107 real queries over 14 projects):
+- Keyword-only and keyword + meaning agree on the top hit for 84%.
+- Meaning search leaves 1 query empty, against 6 for keyword-only.
+- Two hybrid runs agree 100%, so a difference the harness reports comes from the change, not from noise.
+
+No setting, engine or recall change.
+
 ## 0.25.0 (Settings tab polish)
 
 The ninth and last step of the tab polish, following the design proposal's Settings notes.

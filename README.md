@@ -259,6 +259,21 @@ What leaves your machine: for a session import, the conversation text (your mess
 
 Claude's `memory_update` also takes `pinned`: `true` pins a memory so it is never a retirement candidate and never expires on its own, `false` unpins it. Outside agents cannot pin.
 
+## Measuring recall: bin/eval.ts
+
+A ranking change is only an improvement if it finds the right memories more often. The evaluation harness replays your own real recall queries and measures that, with nothing in the store changing. From the plugin folder:
+
+```
+bun bin/eval.ts capture                       # the real recall queries from your activity log
+bun bin/eval.ts run --mode hybrid --name base  # replay them all (keyword or hybrid, --weights v,k,i to try others)
+bun bin/eval.ts gold-draft                     # the most-asked queries with today's top hits, to label
+bun bin/eval.ts compare <run a> <run b>        # how much changed, and recall@k / MRR on your labelled set
+```
+
+**How it stays safe and private:**
+- A replay runs on a snapshot copy of the store and never counts a recall.
+- Everything it writes is under `~/.claude/mnemosyne/eval/`, private to you: the queries, your labels (`gold.json`, made from `gold.draft.json` by copying the right ids into `expect`) and the runs.
+
 ## Embeddings (meaning-based recall)
 
 Since 0.7.0 the engine can also compare memories by meaning, using a small local model, BAAI/bge-small-en-v1.5 (384 dimensions, about 63 MB). It runs on your machine. The engine's route to a remote embedding API is closed: it needs an engine-only opt-in (`MNEMOPI_EMBEDDINGS_API_OPT_IN`) that the plugin pins to `0`, so memory text is never sent to an embedding API. The API URL and key, `OPENROUTER_BASE_URL`, `OPENROUTER_API_KEY` and `OPENAI_API_KEY` are also emptied, and the model name, the download host and the cache folder are pinned to fixed values. A `.env` file or a shell variable cannot send text to an embedding API, change the model or move the model cache.

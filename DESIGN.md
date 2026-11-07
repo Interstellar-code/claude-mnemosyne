@@ -1603,6 +1603,15 @@ C10.3: the engine's trigger `trim_validations_to_3` keeps only the newest 3 `mem
 
 On the solar-system map a plain folder (no git repo) with at least `map.stationMin` live memories is a space station and one with fewer a starship (default 50, range 2 to 1000, applies now). The galaxy reply carries the value. Git repos are always planets.
 
+### The recall evaluation harness (0.26.0)
+
+First of the gbrain learnings (`mnemosyne-design/gbrain-research.md` §5.1 and §10): no ranking change ships unless this shows it helps. Script only (`bin/eval.ts`); no setting, engine or recall change.
+- **Capture.** `queriesOf(lines, origins)` takes successful recall lines with text from `activity.jsonl.1` and `activity.jsonl`, one per owner and trimmed text, counting how often each was asked and when last, most asked first. A dashboard search across several owners (`owners > 1`) replays as `global`. `--origins` limits the origins.
+- **Snapshot and replay.** `snapshotStore` copies `mnemopi.db` with `VACUUM INTO` into a new temp folder (the live file is opened read-only); `run` and `gold-draft` replay there and remove it after. `replay` starts one `bun <cli> mcp` per owner with `engineEnv(snapshot, owner, {embeddings, weights})`, the plugin's own environment, so it is local only with pinned weights. It sends that owner's queries as `mnemopi_recall {query, limit: k, update_recall_counts: false}`. `recallIds` reads each reply's ids and scores; a failure is kept as `error` on that query. Hybrid needs `<root>/embeddings.json`, as the hooks do.
+- **Files.** `<root>/eval/` (0700): `queries.jsonl`, `gold.draft.json` (the top `--top` queries with their candidates and first lines), `gold.json` (the labels: `{owner, query, expect: [ids]}`; `parseGold` drops entries without an expected id) and `runs/<name>.json` (`{name, created, mode, k, weights, results: [{owner, query, ids, scores, error?}]}`). Files are 0600, written by rename. The repository is public, so none of these live in it.
+- **Metrics.** `recallAt` (share of expected ids in the top k), `reciprocalRank`, `overlap` (Jaccard of two top-k lists). `goldScore` gives mean recall@1, @5, @k, hit@k, MRR and the five worst queries; a gold query missing from the run counts as 0 and is reported. `compareRuns` uses the queries both runs answered: top-1 same, overlap@5, overlap@k, up to 10 changed top hits, and both gold scores when there is a gold set.
+- **Baseline (7 Nov 2026, the author's store, 107 queries, 14 owners, k = 10):** keyword against hybrid: top-1 same 84.1%, overlap@5 79.2%. Two hybrid runs are identical (100%), so the replay is deterministic and any reported difference is the change's. Empty results: keyword 6, hybrid 1.
+
 ### The Settings tab (0.25.0)
 
 Ninth and last step of the tab polish (design proposal `tabs-after/NOTES-shell-vocabulary-settings.md`, Settings items 1 to 7). Page only: no server, setting or engine change.
