@@ -34,6 +34,36 @@ Restart Claude Code afterwards. The plugin carries its own copy of the engine; w
 
 After updating to 0.8.0, **run `/mnemosyne-setup` before you save anything**: it installs engine build `18.12.3-mnemosyne.10`. Until it has run, the plugin refuses `memory_remember` and `memory_update` with a message that names `/mnemosyne-setup`, and an outside agent's save through the MCP proxy is refused the same way. Nothing is lost by this: recall, forget and stats keep working on the older engine, and Claude can save again as soon as the setup is done. The refusal is there because the older engine's 24-hour trim deletes every memory that is not labelled `imported`, and 0.8.0 no longer labels saves that way (see [How long a memory lasts](#how-long-a-memory-lasts)); the same refusal applies when the installed engine's build cannot be read. After the setup, restart any other MCP client (Cursor, Codex) that uses the memory: its proxy read the old build when it started and keeps refusing saves until the client is restarted. The 0.8.0 changes that live in the engine need that build: the trim that spares durable memories by scope, the memory kind and expiry, the near-duplicate check, `replaces`, the audit trail and the first-writer rule. The same build carries what 0.7.0 added (the knowledge tools, local embeddings and `/mnemosyne-embed`); without it extraction, `/mnemosyne-knowledge` and the dashboard stay off and say so, and embeddings stay off (see [What 0.7.0 does not do yet](#what-070-does-not-do-yet)). Then, if you want meaning-based recall for the memories you already have, run `/mnemosyne-embed apply` (see [Embeddings](#embeddings-meaning-based-recall)). What changes for you in 0.8.0 is in [What 0.8.0 adds](#what-080-adds).
 
+## Updating without Claude Code
+
+On a machine that uses Mnemosyne only through Claude Desktop (or another MCP client) there is no `claude plugin update`. Since 0.28.0 one command updates the engine, the proxy and the dashboard copy under `~/.claude/mnemosyne`, with Bun on the PATH:
+
+```sh
+bun bin/update.ts                   # from any checkout of 0.28.0 or later: installs the latest release
+bun bin/update.ts --from .          # installs this checkout instead
+```
+
+It downloads the newest `vX.Y.Z` release into `~/.claude/mnemosyne/update-staging` (with git, or as the GitHub tarball when git is missing), runs that release's own updater and removes the folder afterwards. Then:
+
+1. **Engine.** Installed with `bin/install-engine.ts`: built next to the old one, checked, then swapped in. Skipped when the build is already current.
+2. **Plugin copy.** `~/.claude/mnemosyne/plugin` (the MCP proxy and the dashboard) is staged in `plugin.next` and swapped the same way.
+3. **Launcher.** `~/.claude/mnemosyne/bin/mnemosyne-mcp.cmd` (`mnemosyne-mcp` elsewhere) is rewritten with the current launcher, keeping your store, activity log, guard mode, vocabulary, model cache and embeddings choice; it is created if missing.
+4. **Dashboard.** On Windows the always-on dashboard (scheduled task "Mnemosyne dashboard") is stopped for the swap and started again, with no window.
+5. **Report.** It prints the plugin version and engine build before and after.
+
+Your store, `config.json`, `vocabulary.json` and activity log are never touched. If any step fails, the old engine and plugin copy stay in place and the message says what is installed.
+
+**Close your chats first (Windows).** A running engine keeps its files locked, so while Claude Desktop has Mnemosyne connected the update stops, lists the processes (how many, which pids) and exits 2 without changing anything. Quit Claude Desktop and run it again, or:
+
+- `--wait 600` waits up to 10 minutes for them to end;
+- `--stop-engines` stops them now (open chats lose Mnemosyne until Claude Desktop is restarted). Nothing is stopped without this flag.
+
+Other options: `--tag v0.28.0` installs that release, `--force` reinstalls the same version (or an older one, which is otherwise refused). Exit codes: 0 done or already up to date, 1 failed, 2 refused while engines run, 3 another install holds `engine.lock`.
+
+**Start Menu (Windows).** Each update writes **Update Mnemosyne** next to **Open Mnemosyne dashboard** (or run `bun bin/update.ts --install-shortcut`). It runs `~/.claude/mnemosyne/plugin/bin/update.ts` hidden and shows the result in a message box (full output in `~/.claude/mnemosyne-ui/update.log`). When chats are running it lists them and asks before stopping them. The shortcut needs a plugin copy of 0.28.0 or later, so the first update runs from a checkout.
+
+Restart Claude Desktop (and other MCP clients) afterwards to use the new version.
+
 ## Uninstall
 
 ```sh

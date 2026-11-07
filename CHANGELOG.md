@@ -2,6 +2,19 @@
 
 Newest first. Each release is tagged `vX.Y.Z` on GitHub; the README and DESIGN.md describe the contracts.
 
+## 0.28.0 (one-step update without Claude Code)
+
+Issue #43. A machine that runs Mnemosyne only through Claude Desktop (or another MCP client) has no `claude plugin update`, so the engine and the plugin copy behind `mnemosyne-mcp` stayed on whatever was copied by hand. New script `bin/update.ts`:
+
+1. **One command.** `bun bin/update.ts` finds the latest release tag (`vX.Y.Z`), stages it in `~/.claude/mnemosyne/update-staging` (git, or the release tarball and `tar` without git) and runs that release's own updater. `--from <checkout>` uses a checkout instead, `--tag vX.Y.Z` picks a release.
+2. **Safe swaps.** The engine goes through `install-engine.ts` (built beside the old one, checked, then swapped); the plugin copy in `~/.claude/mnemosyne/plugin` (proxy and dashboard) is staged and swapped the same way; `bin/mnemosyne-mcp.cmd` is rewritten with the current launcher, keeping its store, activity log, guard mode, vocabulary, model cache and embeddings values. The store, `config.json`, `vocabulary.json` and the activity log are never written. A failure leaves the old install working and says what is installed.
+3. **Running chats.** On Windows a running engine keeps its folder locked. The updater names the Claude chats' MCP processes (how many, which pids) and stops with exit 2, changing nothing. `--wait <s>` waits for them; `--stop-engines` stops them, and only then.
+4. **The dashboard.** The always-on dashboard (scheduled task "Mnemosyne dashboard") is stopped for the swap and started again through its task, windowless.
+5. **Start Menu.** On Windows each update (or `--install-shortcut`) writes "Update Mnemosyne" next to "Open Mnemosyne dashboard". It runs the update hidden and shows the result in a message box; when chats are running it asks before stopping them.
+6. **Output.** Old to new plugin version and engine build. Exit 0 done or up to date, 1 failed, 2 refused while engines run, 3 another install holds the lock.
+
+No engine or recall change. Tests (`tests/bun/update.spec.ts`) cover the planning, the refusals, process sorting, the launcher and release staging with a fake runner and fetch (no network).
+
 ## 0.27.0 (entity questions find what they ask about)
 
 Issue #56, part 1 (ranking; the entity card comes later). A question like "who is Rohit" or "tell me about X" returned the newest notes that mention the name, not the memories about it. Four general rules, in the engine (build 18.12.3-mnemosyne.12, change 20 in engine/UPSTREAM.md):
