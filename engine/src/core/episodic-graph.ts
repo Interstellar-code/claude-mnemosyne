@@ -346,14 +346,14 @@ export class EpisodicGraph {
 			});
 		};
 
-		for (const match of bounded.matchAll(/\b([A-Z][a-zA-Z\s]+?)\s+is\s+(?:a|an|the)?\s*([a-zA-Z\s]+?)\b/g)) {
+		for (const match of bounded.matchAll(/\b([A-Z][a-zA-Z\s]+?)\s+is\s+(?:(?:a|an|the)\s+)?([a-zA-Z\s]+?)\b/g)) {
 			pushFact(match[1] ?? "", "is", match[2] ?? "", 0.7);
 		}
-		for (const match of bounded.matchAll(/\b([A-Z][a-zA-Z\s]+?)\s+has\s+(?:a|an|the)?\s*([a-zA-Z\d\s]+?)\b/g)) {
+		for (const match of bounded.matchAll(/\b([A-Z][a-zA-Z\s]+?)\s+has\s+(?:(?:a|an|the)\s+)?([a-zA-Z\d\s]+?)\b/g)) {
 			pushFact(match[1] ?? "", "has", match[2] ?? "", 0.6);
 		}
 		for (const match of bounded.matchAll(
-			/\b([A-Z][a-zA-Z\s]+?)\s+(uses?|using|used)\s+(?:a|an|the)?\s*([a-zA-Z\s]+?)\b/g,
+			/\b([A-Z][a-zA-Z\s]+?)\s+(uses?|using|used)\s+(?:(?:a|an|the)\s+)?([a-zA-Z\s]+?)\b/g,
 		)) {
 			pushFact(match[1] ?? "", "uses", match[3] ?? "", 0.6);
 		}
