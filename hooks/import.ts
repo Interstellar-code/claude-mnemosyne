@@ -70,7 +70,7 @@ export type DocChunk = {
 }
 export type SplitResult = { chunks: DocChunk[]; skippedEmpty: number }
 
-const HEADING = /^ {0,3}(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$/
+const HEADING = /^ {0,3}(#{1,6})[ \t]+(.+?)(?:[ \t]+#+)?[ \t]*$/
 const FENCE = /^ {0,3}(```|~~~)/
 
 const cut = (text: string, limit: number) => {

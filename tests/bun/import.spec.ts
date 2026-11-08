@@ -5,6 +5,7 @@ import { Database } from 'bun:sqlite'
 import { afterEach, describe, expect, setDefaultTimeout, test } from 'bun:test'
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { splitDocument } from '../../hooks/import'
 import { body, engineCall, toolCall } from './helpers'
 import { makeHost } from './knowledge-host'
 import type { Host } from './knowledge-host'
@@ -666,5 +667,24 @@ describe('IMPORT.2: apply', () => {
     expect(reply).toContain('no longer in this Claude Code process')
     expect(backups(host)).toHaveLength(0)
     expect(rows(host)).toHaveLength(0)
+  })
+})
+
+describe('IMPORT: heading titles', () => {
+  const text = 'The dashboard server listens on a random free port and prints it once.'
+  test('a closing # sequence is stripped only after a space or tab (CommonMark), so C# keeps its #', () => {
+    const cases: [string, string][] = [
+      ['## Learn C#', 'Learn C#'],
+      ['# F#', 'F#'],
+      ['## Title ##', 'Title'],
+      ['### Title ###  ', 'Title'],
+      ['## Title #   ', 'Title'],
+      ['## Title', 'Title'],
+      ['## a#b', 'a#b'],
+    ]
+    for (const [line, title] of cases) {
+      expect(splitDocument(`${line}\n\n${text}`).chunks.map(chunk => chunk.heading)).toEqual([title])
+    }
+    expect(splitDocument(`## C#\n\n${text}\n\n## C\n\n${text} Two.`).chunks.map(chunk => chunk.heading)).toEqual(['C#', 'C'])
   })
 })
