@@ -2670,7 +2670,7 @@ export function createMap(host: MapHost): MapView {
     if (star === undefined) return
     if (spark.kind === 'recall') {
       const was = star.recalls
-      if (!recallMemory(g, id)) return
+      if (!recallMemory(g, id, spark.t || undefined)) return
       if (v) {
         v.size = starSize(star.recalls)
         // A star that was a hollow ring becomes a glow with its first recall.
@@ -2740,7 +2740,7 @@ export function createMap(host: MapHost): MapView {
     renderStrip()
     const sparks = graph !== null && shown && layerOn(state, event.kind) ? sparksFor(event, targets, state.reducedMotion, Math.random) : []
     if (sparks.length === 0) {
-      for (const target of targets) arrive({ ...target, kind: event.kind, delay: 0, curve: 0, age: 0, demo: event.demo === true })
+      for (const target of targets) arrive({ ...target, kind: event.kind, delay: 0, curve: 0, age: 0, demo: event.demo === true, t: event.t })
       return
     }
     enqueueSparks(sparkPool, sparks)

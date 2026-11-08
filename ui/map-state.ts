@@ -1565,10 +1565,11 @@ export function addMemory(galaxy: Galaxy, row: GalaxyMemory): number {
 }
 
 /** A recall raises the star's count (its size and colour follow); false when it is not on the map. */
-export function recallMemory(galaxy: Galaxy, id: string): boolean {
+export function recallMemory(galaxy: Galaxy, id: string, at: string = new Date().toISOString()): boolean {
   const star = galaxy.layout.stars[slotOf(galaxy.layout.starById, id)]
   if (star === undefined || galaxy.gone.has(id)) return false
   star.recalls++
+  star.lastRecalled = at
   galaxy.maxRecalls = Math.max(galaxy.maxRecalls, star.recalls)
   return true
 }
@@ -1704,6 +1705,8 @@ export type Spark = {
   age: number
   /** True for a demo event: it plays and changes nothing. */
   demo: boolean
+  /** The event's timestamp, when it has one. */
+  t?: string
 }
 type SparkPool = { active: (Spark | null)[]; queue: Spark[] }
 
@@ -1712,7 +1715,7 @@ export const newSparkPool = (size = SPARK_POOL): SparkPool => ({ active: Array.f
 /** The sparks an event sends: one per target, staggered 0.12 s; none under prefers-reduced-motion (the stars still pulse). */
 export function sparksFor(event: MapEvent, targets: readonly { to: string; toKind: 'star' | 'hub' }[], reducedMotion: boolean, random: () => number): Spark[] {
   if (reducedMotion) return []
-  return targets.map((target, i) => ({ ...target, kind: event.kind, delay: i * SPARK_STAGGER, curve: random() * 2 - 1, age: 0, demo: event.demo === true }))
+  return targets.map((target, i) => ({ ...target, kind: event.kind, delay: i * SPARK_STAGGER, curve: random() * 2 - 1, age: 0, demo: event.demo === true, t: event.t }))
 }
 
 /** Adds sparks to the queue; the next step starts them as slots free up (an extra event waits, it is never dropped). */

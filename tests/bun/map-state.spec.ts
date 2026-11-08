@@ -1341,6 +1341,20 @@ describe('LIVE.1: what an event does to the galaxy', () => {
     expect(touchMemory(g, 'nope')).toBe(false)
   })
 
+  test('LIVE.1.a3b: a recall sets the star\'s last-recalled time to the event\'s timestamp, else to now (#32)', () => {
+    const g = freshGalaxy()
+    const star = g.layout.stars[g.layout.starById.m1!]!
+    expect(recallMemory(g, 'm1', '2026-10-27T09:30:00.000Z')).toBe(true)
+    expect(star.lastRecalled).toBe('2026-10-27T09:30:00.000Z')
+    const before = Date.now()
+    expect(recallMemory(g, 'm1')).toBe(true)
+    expect(Date.parse(star.lastRecalled!)).toBeGreaterThanOrEqual(before)
+    expect(usageText(star.recalls, star.lastRecalled)).toBe('its memory recalled 4 times, last today')
+    // A spark carries its event's timestamp to the star it lands on.
+    const [spark] = sparksFor({ kind: 'recall', ids: ['m1'], client: 'x', t: '2026-10-27T10:00:00.000Z' }, [{ to: 'm1', toKind: 'star' }], false, () => 0.5)
+    expect(spark!.t).toBe('2026-10-27T10:00:00.000Z')
+  })
+
   test('LIVE.1.a2: a forget removes the star from every count and every list, and a second forget is nothing', () => {
     const g = freshGalaxy()
     expect(forgetMemory(g, 'm2')).toBe(true)
