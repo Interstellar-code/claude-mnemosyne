@@ -24,6 +24,21 @@ describe("parseExtractedFactCategories broken JSON fallback", () => {
       raw: '{\n"facts": ["Tea lover",\n"preferences": {\n],\n"User runs the linter',
       facts: ["User runs the linter"],
     },
+    {
+      name: "compact one-line truncated reply keeps only the cut-off value",
+      raw: '{"facts": ["Short"], "instructions": ["Always use tabs in Go',
+      facts: ["Always use tabs in Go"],
+    },
+    {
+      name: "compact one-line truncated reply inside a json fence",
+      raw: '```json\n{"facts": ["User likes green tea and coffee',
+      facts: ["User likes green tea and coffee"],
+    },
+    {
+      name: "multi-line kg entry with only short values is not stored verbatim",
+      raw: '{\n  "kg": [\n    {"subject": "User", "predicate": "works_at", "object": "Acme',
+      facts: [],
+    },
   ];
 
   for (const c of cases) {

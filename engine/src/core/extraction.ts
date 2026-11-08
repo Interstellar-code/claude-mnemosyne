@@ -267,7 +267,14 @@ export function parseExtractedFactCategories(
 				// Drop structural JSON lines and unwrap value lines from a broken JSON reply (#14).
 				const trimmed = line.trim();
 				if (/^[[\]{},\s]*$/.test(trimmed) || /^"[^"]*"\s*:\s*[[{]?\s*$/.test(trimmed)) continue;
-				line = trimmed
+				// The salvage above found no complete 10+ value, so a line's closed strings are keys or
+				// short values: keep only a cut-off trailing value (odd quote count), else drop the line.
+				const quotes = [...trimmed.matchAll(/(?<!\\)"/g)];
+				if (quotes.length % 2 === 1) {
+					line = trimmed.slice((quotes[quotes.length - 1]?.index ?? -1) + 1);
+				} else if (quotes.length > 0) {
+					continue;
+				} else line = trimmed
 					.replace(/^"[^"]*"\s*:\s*/, "")
 					.replace(/^\[\s*/, "")
 					.replace(/[\s,\]}]+$/, "")
