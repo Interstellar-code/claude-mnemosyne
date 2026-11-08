@@ -2,6 +2,10 @@
 
 Newest first. Each release is tagged `vX.Y.Z` on GitHub; the README and DESIGN.md describe the contracts.
 
+## 0.28.3 (the Galaxy pill moves to the bottom)
+
+On the Galaxy page the path pill (Galaxy, and the planet or moon you flew to) now sits bottom left above the hint, and the Bodies legend takes the top left corner.
+
 ## 0.28.2 (the Update button finds a new release at once)
 
 The dashboard checks GitHub for a new release at most once a day and keeps the answer, so right after a release the Update button could stay hidden for up to a day (it did for v0.28.1).
