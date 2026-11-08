@@ -2,6 +2,13 @@
 
 Newest first. Each release is tagged `vX.Y.Z` on GitHub; the README and DESIGN.md describe the contracts.
 
+## 0.30.0 (storm clouds, live ties and captions in the nebula)
+
+1. **Storm clouds.** Each cloud of three or more memories is an electric storm: it breathes slowly, and every 5 to 14 seconds it flashes in two strikes while a jagged bolt crackles between two of its memories. With reduced motion the clouds glow steadily.
+2. **Ties from topics to projects, with current flowing.** Each nebula cloud has a glowing tie rising to every project that holds at least two of its memories (global memories tie to the sun). On each tie one crackling ball of electricity travels from the storm up to the project and back again, lighting the line as it passes (faster on a lit tie; a steady line with reduced motion). A tie and its ball are brighter and larger the more of the cloud the project holds. At rest the ties are faint; hover a planet and only its ties light up (the topics it feeds), hover a speck and its cloud's ties light up (the projects that share that topic). A planet's tooltip lists its topics ("Topics: sap · nce-mcs (12), …"), a speck's tooltip the projects in its cloud.
+3. **Captions when the map is left alone.** After 5 seconds without mouse or wheel input on the map (at the Galaxy, no tooltip open), a random speck shows its memory's first line, fading in and out over about 8 seconds; at most three at once, never two from one cloud. Any mouse or wheel input clears them at once. With reduced motion they appear without fading.
+4. The Show card has a "Nebula captions" switch, and the legend a Tie row.
+
 ## 0.29.0 (the meaning nebula)
 
 The Meaning layout moves into the Galaxy: a nebula under the solar system shows your memories by what they say, while the planets above show where they live.

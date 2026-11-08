@@ -1767,6 +1767,8 @@ export type SolarView = {
   rotate: boolean
   /** 0.29.0: the meaning nebula under the orbit plane. */
   nebula: boolean
+  /** 0.30.0: idle captions in the nebula. */
+  captions: boolean
   legend: boolean
 }
 
@@ -1818,11 +1820,11 @@ export const SOLAR_KEY = 'mnemosyne.map.solar'
 const GALAXY_LEVEL: Target = { level: 'galaxy' }
 
 export const initialSolarPage = (): SolarPage => ({
-  arrange: 'activity', colour: 'writer', hidden: {}, query: '', rotate: true, nebula: true, legend: true, legL: true, legR: true, level: GALAXY_LEVEL, findOpen: false,
+  arrange: 'activity', colour: 'writer', hidden: {}, query: '', rotate: true, nebula: true, captions: true, legend: true, legL: true, legR: true, level: GALAXY_LEVEL, findOpen: false,
 })
 
 /** What is remembered per viewer: Arrange by and the Show toggles (and the folds of the two legend cards). */
-const SOLAR_KEYS = ['arrange', 'rotate', 'nebula', 'legend', 'legL', 'legR'] as const
+const SOLAR_KEYS = ['arrange', 'rotate', 'nebula', 'captions', 'legend', 'legL', 'legR'] as const
 
 /** The remembered settings laid over the defaults; anything stored that is not a known value is ignored. */
 export function readSolarPage(storage: Pick<Storage, 'getItem'> | undefined): SolarPage {
@@ -1832,7 +1834,7 @@ export function readSolarPage(storage: Pick<Storage, 'getItem'> | undefined): So
     if (raw === null || typeof raw !== 'object') return page
     if (ARRANGE.some(a => a.id === raw.arrange)) page.arrange = raw.arrange as Arrange
     // 0.28.3: no Colour-dots-by card any more, so a remembered Recalls or Age is not restored: dots are by writer.
-    for (const key of ['rotate', 'nebula', 'legend', 'legL', 'legR'] as const) if (typeof raw[key] === 'boolean') page[key] = raw[key] as boolean
+    for (const key of ['rotate', 'nebula', 'captions', 'legend', 'legL', 'legR'] as const) if (typeof raw[key] === 'boolean') page[key] = raw[key] as boolean
   } catch {
     // storage is a convenience only
   }
@@ -1849,7 +1851,7 @@ export function saveSolarPage(storage: Pick<Storage, 'setItem'> | undefined, pag
 
 export const setArrange = (page: SolarPage, arrange: Arrange): SolarPage => (ARRANGE.some(a => a.id === arrange) && arrange !== page.arrange ? { ...page, arrange } : page)
 export const setColour = (page: SolarPage, colour: ColourMode): SolarPage => (COLOURS.some(c => c.id === colour) && colour !== page.colour ? { ...page, colour } : page)
-export const toggleShow = (page: SolarPage, key: 'rotate' | 'nebula' | 'legend' | 'legL' | 'legR'): SolarPage => ({ ...page, [key]: !page[key] })
+export const toggleShow = (page: SolarPage, key: 'rotate' | 'nebula' | 'captions' | 'legend' | 'legL' | 'legR'): SolarPage => ({ ...page, [key]: !page[key] })
 
 /** The Bodies strip: hides one body, or shows it again. */
 export function toggleBody(page: SolarPage, owner: string): SolarPage {
@@ -1865,7 +1867,7 @@ export const setSolarLevel = (page: SolarPage, level: Target): SolarPage => ({ .
 
 /** The C13 `view`: a fresh object, so the scene can keep it. */
 export const viewOf = (page: SolarPage): SolarView => ({
-  arrange: page.arrange, colour: page.colour, hidden: { ...page.hidden }, query: page.query, rotate: page.rotate, nebula: page.nebula, legend: page.legend,
+  arrange: page.arrange, colour: page.colour, hidden: { ...page.hidden }, query: page.query, rotate: page.rotate, nebula: page.nebula, captions: page.captions, legend: page.legend,
 })
 
 export const arrangeHint = (arrange: Arrange): string => ARRANGE.find(a => a.id === arrange)?.hint ?? ''
@@ -2075,7 +2077,7 @@ export const LEGEND_RIGHT: readonly LegendRow[] = legend([
   ['#6f7787', 'Outer belt', 'retired, expired, lapsed (ash)'], ['#000000', 'Black hole', 'similar across projects'], ['#E8B8FF', 'Twin violet strands', 'bond: N pairs; pulse /30 s'],
   ['#F0E442', 'Recall comet', 'planet → sun'], ['#56B4E9', 'Save comet', 'sun → planet'], ['#3DDC97', 'Update beam', 'green, writer → body'],
   ['#FF4D4D', 'Forget laser', 'red, writer → body'], ['#ecf1fa', 'Clouds · ice', 'needs review · idle 30 d'],
-  ['#c77dff', 'Nebula', 'below: memories by meaning; a cloud = a topic'],
+  ['#c77dff', 'Nebula', 'below: memories by meaning; a cloud = a topic'], ['#4cc9f0', 'Tie', 'cloud → project; brighter = more of it'],
 ])
 
 export const VIEW_BUTTONS: readonly { label: string; aria: string; action: { zoom: number } | { view: SolarViewName } }[] = [
@@ -2090,6 +2092,7 @@ export const VIEW_BUTTONS: readonly { label: string; aria: string; action: { zoo
 export const SHOW_TOGGLES = [
   { key: 'rotate', label: 'Auto-rotate' },
   { key: 'nebula', label: 'Meaning nebula' },
+  { key: 'captions', label: 'Nebula captions' },
   { key: 'legend', label: 'Legend' },
 ] as const
 

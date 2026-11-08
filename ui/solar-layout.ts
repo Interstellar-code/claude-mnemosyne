@@ -687,8 +687,8 @@ const dist2 = (a: readonly number[], b: readonly number[]) => sq((a[0] ?? 0) - (
 
 // Tags that say who wrote a memory, not what it is about: never a cloud's name.
 const NEBULA_SKIP_TAG = /^agent:/
-const tagsOf = (m: SolarMemory) => [...new Set(m.tags.map(t => t.toLowerCase()).filter(t => !NEBULA_SKIP_TAG.test(t)))]
-const wordsOf = (m: SolarMemory) => [...new Set((m.label.toLowerCase().match(/[a-z][a-z0-9-]{3,}/g) ?? []).filter(w => !NEBULA_STOP.has(w)))]
+const tagsOf = (m: SolarMemory) => [...new Set((Array.isArray(m?.tags) ? m.tags : []).map(t => String(t).toLowerCase()).filter(t => !NEBULA_SKIP_TAG.test(t)))]
+const wordsOf = (m: SolarMemory) => [...new Set((String(m?.label ?? '').toLowerCase().match(/[a-z][a-z0-9-]{3,}/g) ?? []).filter(w => !NEBULA_STOP.has(w)))]
 
 /**
  * The cloud's name: its two most telling tags (each on at least two of its memories), else words of its
@@ -826,4 +826,35 @@ export function nebulaOf(memories: readonly SolarMemory[], radius: number, depth
   })
   const specks: NebulaSpeck[] = placed.map((m, i) => ({ id: m.id, owner: m.owner, kind: m.kind, position: pos[i]!, cloud: renumber.get(cloudOf[i]!) ?? 0 }))
   return { specks, clouds }
+}
+
+/** 0.30.0: a cloud's tie to a project: how many of the cloud's memories it holds, and their share of the cloud. */
+export type CloudTie = { cloud: number; owner: string; count: number; share: number }
+/** A tie needs at least this many of the cloud's memories in the project: one stray memory draws nothing. */
+export const TIE_MIN = 2
+
+/**
+ * 0.30.0: the ties from each cloud to the projects its memories live in (owner `global` included: the scene
+ * ties it to the sun). Clouds in order, then biggest first, ties by owner on equal counts.
+ */
+export function cloudTies(nebula: Nebula): CloudTie[] {
+  const ties: CloudTie[] = []
+  nebula.clouds.forEach((cloud, ci) => {
+    const counts = new Map<string, number>()
+    for (const sp of nebula.specks) if (sp.cloud === ci) counts.set(sp.owner, (counts.get(sp.owner) ?? 0) + 1)
+    const mine = [...counts.entries()]
+      .filter(([, n]) => n >= TIE_MIN)
+      .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+      .map(([owner, count]) => ({ cloud: ci, owner, count, share: cloud.count > 0 ? count / cloud.count : 0 }))
+    ties.push(...mine)
+  })
+  return ties
+}
+
+/** 0.30.0: the "Topics: …" text of a project (its ties, biggest first), or null when it feeds no cloud. */
+export function topicsLine(nebula: Nebula, ties: readonly CloudTie[], owner: string, max = 3): string | null {
+  const mine = ties.filter(t => t.owner === owner).sort((a, b) => b.count - a.count || a.cloud - b.cloud)
+  if (mine.length === 0) return null
+  const named = mine.slice(0, max).map(t => `${nebula.clouds[t.cloud]?.name || `cloud ${t.cloud + 1}`} (${t.count})`)
+  return `Topics: ${named.join(', ')}${mine.length > max ? ` +${mine.length - max} more` : ''}`
 }

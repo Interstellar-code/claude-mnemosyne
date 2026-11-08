@@ -1699,3 +1699,182 @@ describe('0.29.0 the meaning nebula in the scene', () => {
     r.scene.dispose()
   })
 })
+
+// ---- 0.30.0: ties, idle captions and storms ----
+
+/** The fixture plus 24 placed live memories: 12 of matrixkoder in one place, 12 of hermes in another. Others get no position. */
+function tiedData(): any {
+  const data = galaxy()
+  const seed = (data.memories as any[]).find(m => m.state === 'live')
+  for (const m of data.memories as any[]) delete m.position
+  const add = (owner: string, prefix: string, cx: number) => {
+    for (let i = 0; i < 12; i++) {
+      data.memories.push({ ...seed, owner, id: `${prefix}-${i}`, label: `${prefix} caption line ${i}`, similar: [], position: [cx + Math.cos(i) * 3, Math.sin(i) * 0.5, Math.sin(i) * 3] })
+    }
+  }
+  add(MATRIX, 'tie-matrix', -40)
+  add(HERMES, 'tie-hermes', 40)
+  return data
+}
+const ties = (r: ReturnType<typeof rig>) => r.all(o => o.userData?.kind === 'nebula-tie')
+const captions = (r: ReturnType<typeof rig>) => r.all(o => o.userData?.kind === 'nebula-caption')
+
+describe('0.30.0 nebula ties in the scene', () => {
+  test('a cloud with two or more memories of a project ties to it; ties carry sparks; the nebula switch hides them all', () => {
+    const r = rig({ data: tiedData() })
+    r.run(0.5)
+    const lines = ties(r)
+    expect(lines.length).toBeGreaterThanOrEqual(2)
+    for (const line of lines) {
+      expect(line.type).toBe('Line')
+      expect(line.visible).toBe(true)
+      // A solid line coloured per point (37 points), with a child Points of sparks (2 x 5 points).
+      expect(line.material.vertexColors).toBe(true)
+      expect(line.geometry.attributes.position.count).toBe(37)
+      expect(line.geometry.attributes.color.count).toBe(37)
+      const sparks = line.userData.sparks
+      expect(sparks.userData.kind).toBe('nebula-tie-sparks')
+      expect(sparks.type).toBe('Points')
+      expect(line.children).toContain(sparks)
+      // 0.30.0: one electric blob per tie: a core and 6 crackling sparks, with a halo and a jagged arc as children.
+      expect(sparks.geometry.attributes.position.count).toBe(7)
+      expect(sparks.children.map((c: any) => c.userData.kind).sort()).toEqual(['nebula-tie-arc', 'nebula-tie-halo'])
+      // The rig runs under reduced motion: no sparks.
+      expect(sparks.visible).toBe(false)
+      expect(line.material.opacity).toBeGreaterThan(0)
+    }
+    r.scene.setView({ nebula: false })
+    r.run(0.1)
+    for (const line of ties(r)) expect(line.visible).toBe(false)
+    r.scene.setView({ nebula: true })
+    r.run(0.1)
+    for (const line of ties(r)) expect(line.visible).toBe(true)
+    r.scene.dispose()
+  })
+
+  test('a hidden project\'s ties are hidden; the others stay', () => {
+    const r = rig({ data: tiedData() })
+    r.run(0.5)
+    const before = ties(r).filter(l => l.visible).length
+    r.scene.setView({ hidden: { [MATRIX]: true } })
+    r.run(0.1)
+    const visible = ties(r).filter(l => l.visible).length
+    expect(visible).toBeGreaterThan(0)
+    expect(visible).toBeLessThan(before)
+    r.scene.dispose()
+  })
+
+  test('hovering a project lights its own ties above the resting ones and dims the rest', () => {
+    const r = rig({ data: tiedData() })
+    r.run(0.5)
+    const resting = new Map(ties(r).map(l => [l, l.material.opacity as number]))
+    const at = r.screen(r.planet(MATRIX))
+    const tip = r.hover(at.x, at.y)
+    expect(tip?.[0]?.toLowerCase()).toContain('matrix')
+    // 0.30.0: with a nebula the planet's tooltip names its topics.
+    expect(tip!.some(line => line.startsWith('Topics: '))).toBe(true)
+    r.run(0.05)
+    // The hovered planet's ties are brighter than at rest; the others all but vanish.
+    let lit = 0
+    for (const [line, rest] of resting) {
+      if (line.material.opacity > rest) lit++
+      else expect(line.material.opacity).toBeLessThan(rest)
+    }
+    expect(lit).toBeGreaterThan(0)
+    r.scene.dispose()
+  })
+})
+
+describe('0.30.0 idle captions', () => {
+  // Where a caption sits names its speck; the speck's colour names its cloud.
+  const cloudKey = (r: ReturnType<typeof rig>, sprite: any) => {
+    const specks = r.all(o => o.type === 'Points' && o.userData?.nebula === true)[0]
+    const pos = specks.geometry.attributes.position
+    const col = specks.geometry.attributes.color
+    let best = 0
+    let bestD = Infinity
+    for (let i = 0; i < pos.count; i++) {
+      const d = Math.hypot(pos.getX(i) - sprite.position.x, pos.getZ(i) - sprite.position.z)
+      if (d < bestD) {
+        bestD = d
+        best = i
+      }
+    }
+    return [col.getX(best), col.getY(best), col.getZ(best)].map(v => v.toFixed(3)).join(',')
+  }
+
+  test('after CAPTION_IDLE (5 s) with no input captions appear, at most three, from distinct clouds; a pointermove or a wheel removes them all', () => {
+    const r = rig({ data: tiedData() })
+    r.run(4)
+    expect(captions(r)).toHaveLength(0)
+    let most = 0
+    for (let k = 0; k < 40; k++) {
+      r.run(0.25)
+      const now = captions(r)
+      most = Math.max(most, now.length)
+      expect(now.length).toBeLessThanOrEqual(3)
+      expect(new Set(now.map(s => cloudKey(r, s))).size).toBe(now.length)
+      for (const s of now) expect(s.parent?.userData?.kind).toBe('nebula')
+    }
+    expect(most).toBeGreaterThanOrEqual(2)
+    expect(captions(r).length).toBeGreaterThan(0)
+    // A pointermove far from everything: all go at once, and the idle clock restarts.
+    r.canvas.emit('pointermove', { clientX: 2, clientY: 2 })
+    expect(captions(r)).toHaveLength(0)
+    r.run(4)
+    expect(captions(r)).toHaveLength(0)
+    r.run(2)
+    expect(captions(r).length).toBeGreaterThan(0)
+    // A wheel turn too.
+    r.canvas.emit('wheel', { clientX: 2, clientY: 2 })
+    expect(captions(r)).toHaveLength(0)
+    r.run(1)
+    expect(captions(r)).toHaveLength(0)
+    r.scene.dispose()
+  })
+
+  test('none from a hidden project, and none at all with the Nebula captions switch off', () => {
+    const hidden = rig({ data: tiedData(), view: { hidden: { [HERMES]: true } } })
+    for (let k = 0; k < 40; k++) {
+      hidden.run(0.25)
+      for (const s of captions(hidden)) expect(s.position.x).toBeLessThan(0)
+    }
+    hidden.scene.dispose()
+    const off = rig({ data: tiedData(), view: { captions: false } })
+    off.run(12)
+    expect(captions(off)).toHaveLength(0)
+    // And turning it off while they show takes them away.
+    const on = rig({ data: tiedData() })
+    on.run(7)
+    expect(captions(on).length).toBeGreaterThan(0)
+    on.scene.setView({ captions: false })
+    on.run(0.1)
+    expect(captions(on)).toHaveLength(0)
+    on.scene.dispose()
+    off.scene.dispose()
+  })
+})
+
+describe('0.30.0 storms', () => {
+  const bolts = (r: ReturnType<typeof rig>) => r.all(o => o.userData?.kind === 'nebula-bolt')
+  test('a cloud of three or more has a bolt that shows during a flash (stepped 15 s: the first flash comes within 6 s); under reduced motion none shows', () => {
+    const r = rig({ data: tiedData(), reduced: false })
+    expect(bolts(r).length).toBeGreaterThan(0)
+    for (const b of bolts(r)) expect(b.geometry.attributes.position.count).toBe(11)
+    let seen = false
+    for (let k = 0; k < 15 / 0.016 && !seen; k++) {
+      r.clock.tick()
+      seen = bolts(r).some(b => b.visible)
+    }
+    expect(seen).toBe(true)
+    // With motion on, resting ties carry their sparks.
+    expect(ties(r).some(l => l.visible && l.userData.sparks.visible)).toBe(true)
+    r.scene.dispose()
+    const still = rig({ data: tiedData(), reduced: true })
+    for (let k = 0; k < 15 / 0.016; k++) {
+      still.clock.tick()
+      expect(still.all(o => o.userData?.kind === 'nebula-bolt' && o.visible)).toHaveLength(0)
+    }
+    still.scene.dispose()
+  })
+})

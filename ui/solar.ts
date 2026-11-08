@@ -42,6 +42,8 @@ import {
   beltDots,
   nebulaOf,
   NEBULA_PALETTE,
+  cloudTies,
+  topicsLine,
   probesOf,
   tagColour,
   tagHash,
@@ -49,7 +51,7 @@ import {
   writerColour,
   writerInfos,
 } from './solar-layout'
-import type { Arrange, Body, ColourMode, LinkInfo, NebulaCloud, NebulaSpeck, Orbits, PlanetStyle, SolarGalaxy, SolarMemory, StyleId, Target, WriterInfo } from './solar-layout'
+import type { Arrange, Body, CloudTie, ColourMode, LinkInfo, Nebula, NebulaCloud, NebulaSpeck, Orbits, PlanetStyle, SolarGalaxy, SolarMemory, StyleId, Target, WriterInfo } from './solar-layout'
 
 type Three = typeof import('./vendor/map-lib.js')
 // three.js objects are handled as plain objects here: the vendored declarations are loose on purpose.
@@ -75,6 +77,8 @@ export type SolarView = {
   rotate: boolean
   /** 0.29.0: the meaning nebula under the orbit plane is drawn. */
   nebula: boolean
+  /** 0.30.0: when the map is left alone, specks show their memory's first line now and then. */
+  captions: boolean
   legend: boolean
 }
 
@@ -124,7 +128,7 @@ export type SolarScene = {
 /** The method names C13 fixes; a spec checks the returned object against this list. */
 export const SCENE_METHODS = ['setData', 'setView', 'flyTo', 'showView', 'zoom', 'event', 'dispose'] as const
 
-export const DEFAULT_VIEW: SolarView = { arrange: 'activity', colour: 'writer', hidden: {}, query: '', rotate: false, nebula: true, legend: true }
+export const DEFAULT_VIEW: SolarView = { arrange: 'activity', colour: 'writer', hidden: {}, query: '', rotate: false, nebula: true, captions: true, legend: true }
 
 // ---- Constants (the approved look) -----------------------------------------------------
 
@@ -237,7 +241,37 @@ type Fade = { obj: O3; index: number; rgb: [number, number, number] }
  * neighbours (the opened or hovered memory's closest specks, lit). uiltR is maxR when built: the group scales
  * with the orbits after an Arrange change.
  */
-type NebRec = { group: O3; specks: O3; haze: O3; labels: O3[]; thread: O3; near: O3; data: NebulaSpeck[]; clouds: NebulaCloud[]; index: Map<string, number>; builtR: number; hiddenKey: string }
+type NebRec = { group: O3; specks: O3; haze: O3; labels: O3[]; thread: O3; near: O3; data: NebulaSpeck[]; clouds: NebulaCloud[]; index: Map<string, number>; builtR: number; hiddenKey: string; model: Nebula; ties: TieRec[]; captions: CaptionRec[]; nextCaption: number; storms: StormRec[] }
+/** 0.30.0: a cloud as an electric storm: its glow flashes now and then, and a jagged bolt crackles between two of its memories. */
+type StormRec = { cloud: number; glow: O3; bolt: O3; members: number[]; base: O3; next: number; flashAt: number }
+// A bolt's points, and how long a flash (two strikes) lasts.
+const BOLT_POINTS = 10
+const FLASH_SECONDS = 1.1
+// A storm's next flash comes FLASH_GAP_MIN to FLASH_GAP_MIN + FLASH_GAP_SPREAD seconds after the last.
+const FLASH_GAP_MIN = 5
+const FLASH_GAP_SPREAD = 9
+// The current on a tie: ties per second a pulse travels, at rest and when lit.
+const TIE_FLOW = 0.12
+// The electric blob on a tie: one bright core and BLOB_CRACKLE sparks crackling around it (re-placed every
+// BLOB_RESHAPE s), plus a tiny jagged arc of BLOB_ARC points through it; its radius is BLOB_R of the orbit radius.
+const BLOB_CRACKLE = 6
+const BLOB_ARC = 7
+const BLOB_RESHAPE = 0.09
+const BLOB_R = 0.014
+const TIE_FLOW_LIT = 0.25
+/** 0.30.0: one cloud-to-project tie: a curve from the cloud's middle up to the planet (or the sun for global). */
+type TieRec = { tie: CloudTie; line: O3; phase: number }
+/** 0.30.0: one idle caption: a speck's first line, fading in, holding and fading out. */
+type CaptionRec = { sprite: O3; speck: number; cloud: number; born: number }
+// A tie curve's points.
+const TIE_POINTS = 36
+// Idle captions: after this long without input they start; one more every CAPTION_EVERY seconds, at most CAPTION_MAX at once.
+const CAPTION_IDLE = 5
+const CAPTION_EVERY = 3
+const CAPTION_MAX = 3
+const CAPTION_FADE = 1.2
+const CAPTION_HOLD = 6
+const CAPTION_CHARS = 60
 // The nebula's place: its disc reaches this share of the outermost orbit, this share of it below the plane.
 const NEBULA_REACH = 0.95
 const NEBULA_DEPTH = 0.5
@@ -340,6 +374,12 @@ class SolarImpl {
   private neb: NebRec | null = null
   /** 0.29.0: the memory the pointer rests on (a nebula speck or an asteroid), for the thread between the two. */
   private hoverMem: { id: string; obj: O3; index: number } | null = null
+  /** 0.30.0: the clock time of the last pointer or wheel input (the idle captions wait CAPTION_IDLE after it). */
+  private lastInput = 0
+  /** 0.30.0: which speck captions next (seeded, so a test run is repeatable). */
+  private readonly captionRng = rng(29)
+  /** 0.30.0: when each storm flashes and where its bolt runs (seeded). */
+  private readonly stormRng = rng(41)
   private now = Date.now()
   private maxR = 700
   private homePos: O3
@@ -380,9 +420,15 @@ class SolarImpl {
     if (this.reduced) this.finishFlight()
   }
   private readonly onDown = (e: any): void => {
+    this.markInput()
     this.down = { x: e.clientX, y: e.clientY }
   }
+  /** 0.30.0: a wheel turn (zoom) is input too: the idle captions go. */
+  private readonly onWheel = (): void => {
+    this.markInput()
+  }
   private readonly onMove = (e: any): void => {
+    this.markInput()
     if (this.down && Math.abs(e.clientX - this.down.x) + Math.abs(e.clientY - this.down.y) > 4) {
       this.hideTip()
       return
@@ -469,6 +515,7 @@ class SolarImpl {
       canvas.addEventListener('pointermove', this.onMove)
       canvas.addEventListener('pointerleave', this.onLeave)
       canvas.addEventListener('click', this.onClick)
+      canvas.addEventListener('wheel', this.onWheel, { passive: true })
       this.handle = this.clockSource.request(this.loop)
     } catch (err) {
       // Free everything made so far (listeners, controls, textures, composer, the context), then fail.
@@ -548,6 +595,7 @@ class SolarImpl {
       canvas.removeEventListener('pointermove', this.onMove)
       canvas.removeEventListener('pointerleave', this.onLeave)
       canvas.removeEventListener('click', this.onClick)
+      canvas.removeEventListener('wheel', this.onWheel)
       this.mediaQuery?.removeEventListener?.('change', this.onMedia)
       this.controls?.dispose?.()
       if (this.world) this.clearWorld()
@@ -1463,6 +1511,13 @@ class SolarImpl {
     const neb = nebulaOf(memories, builtR * NEBULA_REACH, builtR * NEBULA_DEPTH)
     if (neb.specks.length === 0) return
     const byId = new Map(memories.map(m => [m.id, m]))
+    const ties = cloudTies(neb)
+    const nameOf = (owner: string) => (owner === 'global' ? 'global' : (this.bodies.find(b => b.owner === owner)?.label ?? projectLabel(owner)))
+    // 0.30.0: a speck's tooltip names the projects its cloud ties to.
+    const projectsOf = (ci: number) => {
+      const mine = ties.filter(t => t.cloud === ci)
+      return mine.length === 0 ? 'projects: no project holds two of these' : `projects: ${mine.slice(0, 4).map(t => `${nameOf(t.owner)} ${t.count}`).join(', ')}${mine.length > 4 ? ` +${mine.length - 4} more` : ''}`
+    }
     const group = new T.Group()
     group.userData = { kind: 'nebula' }
     const pos: number[] = []
@@ -1489,6 +1544,7 @@ class SolarImpl {
           `Nebula · ${mem ? this.firstLine(mem) : sp.id}`,
           `from ${where} · ${sp.kind}`,
           `cloud: ${cloud?.name || `cloud ${sp.cloud + 1}`} (${cloud?.count ?? 0} memories)`,
+          projectsOf(sp.cloud),
           near > 0 ? `${near} close in meaning (lit while you look at it)` : 'nothing else close in meaning',
           sp.owner === 'global' ? 'click: fly to it' : 'click: open it on its planet',
         ],
@@ -1504,6 +1560,7 @@ class SolarImpl {
     haze.userData = { kind: 'nebula-haze', clouds: [] as O3[] }
     group.add(haze, specks)
     const labels: O3[] = []
+    const storms: StormRec[] = []
     neb.clouds.forEach((cloud, ci) => {
       if (cloud.count < 3) return
       const colour = NEBULA_PALETTE[ci % NEBULA_PALETTE.length] as string
@@ -1511,6 +1568,16 @@ class SolarImpl {
       glow.position.set(...cloud.centre)
       group.add(glow)
       haze.userData.clouds.push(glow)
+      // 0.30.0, the storm: a jagged bolt (hidden until a flash) between two of the cloud's memories.
+      const bg = new T.BufferGeometry()
+      bg.setAttribute('position', new T.BufferAttribute(new Float32Array((BOLT_POINTS + 1) * 3), 3))
+      const bolt = new T.Line(bg, new T.LineBasicMaterial({ color: new T.Color(colour).lerp(new T.Color('#ffffff'), 0.65), transparent: true, opacity: 0, depthWrite: false, blending: T.AdditiveBlending }))
+      bolt.frustumCulled = false
+      bolt.visible = false
+      bolt.userData = { kind: 'nebula-bolt' }
+      group.add(bolt)
+      const members = neb.specks.flatMap((sp, i) => (sp.cloud === ci ? [i] : []))
+      storms.push({ cloud: ci, glow, bolt, members, base: new T.Color(colour), next: 1 + this.stormRng() * FLASH_GAP_MIN, flashAt: -99 })
       if (cloud.name === '') return
       const label = this.label(cloud.name, `${cloud.count} memories`, colour, Math.max(18, builtR * 0.05))
       label.position.set(cloud.centre[0], cloud.centre[1] - 18, cloud.centre[2])
@@ -1530,9 +1597,44 @@ class SolarImpl {
     thread.frustumCulled = false
     thread.visible = false
     thread.userData = { kind: 'nebula-thread' }
+    // 0.30.0: the ties, one curve each, coloured as their cloud; placed every frame (the planets move).
+    let tieRecsSeed = 0
+    const tieRecs: TieRec[] = ties.map(tie => {
+      const g = new T.BufferGeometry()
+      g.setAttribute('position', new T.BufferAttribute(new Float32Array((TIE_POINTS + 1) * 3), 3))
+      // The line's colour per point: set every frame (soft at both ends, brighter where a spark passes).
+      g.setAttribute('color', new T.BufferAttribute(new Float32Array((TIE_POINTS + 1) * 3), 3))
+      const line = new T.Line(g, new T.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0, depthWrite: false, blending: T.AdditiveBlending }))
+      line.frustumCulled = false
+      line.userData = { kind: 'nebula-tie', colour: new T.Color(NEBULA_PALETTE[tie.cloud % NEBULA_PALETTE.length]) }
+      // The current: one electric blob going from the cloud to the project and back. A bright core and crackling
+      // sparks around it (point 0 is the core) ...
+      const sg = new T.BufferGeometry()
+      sg.setAttribute('position', new T.BufferAttribute(new Float32Array((1 + BLOB_CRACKLE) * 3), 3))
+      sg.setAttribute('color', new T.BufferAttribute(new Float32Array((1 + BLOB_CRACKLE) * 3), 3))
+      const sparks = new T.Points(sg, new T.PointsMaterial({ size: 5 + 5 * tie.share, map: this.dotTex, vertexColors: true, transparent: true, opacity: 0, depthWrite: false, sizeAttenuation: false, blending: T.AdditiveBlending }))
+      sparks.frustumCulled = false
+      sparks.userData = { kind: 'nebula-tie-sparks' }
+      // ... a soft halo under the core, and a tiny jagged arc flickering through it.
+      const halo = this.glow(NEBULA_PALETTE[tie.cloud % NEBULA_PALETTE.length] as string, 1, 0)
+      halo.userData = { kind: 'nebula-tie-halo' }
+      const ag = new T.BufferGeometry()
+      ag.setAttribute('position', new T.BufferAttribute(new Float32Array(BLOB_ARC * 3), 3))
+      const arc = new T.Line(ag, new T.LineBasicMaterial({ color: new T.Color(NEBULA_PALETTE[tie.cloud % NEBULA_PALETTE.length]).lerp(new T.Color('#ffffff'), 0.7), transparent: true, opacity: 0, depthWrite: false, blending: T.AdditiveBlending }))
+      arc.frustumCulled = false
+      arc.userData = { kind: 'nebula-tie-arc' }
+      sparks.add(halo, arc)
+      line.add(sparks)
+      line.userData.sparks = sparks
+      line.userData.halo = halo
+      line.userData.arc = arc
+      line.userData.reshaped = -1
+      this.world.add(line)
+      return { tie, line, phase: (tie.cloud * 0.17 + tieRecsSeed++ * 0.11) % 1 }
+    })
     this.world.add(group, thread)
     this.pickables.push(specks)
-    this.neb = { group, specks, haze, labels, thread, near, data: neb.specks, clouds: neb.clouds, index, builtR, hiddenKey: '' }
+    this.neb = { group, specks, haze, labels, thread, near, data: neb.specks, clouds: neb.clouds, index, builtR, hiddenKey: '', model: neb, ties: tieRecs, captions: [], nextCaption: 0, storms }
   }
 
   /**
@@ -1541,14 +1643,18 @@ class SolarImpl {
    * opened one) gets a thread from its dot on the planet (or the planet, or the sun for a global) to its speck,
    * and its closest memories' specks light up.
    */
-  private stepNebula(): void {
+  private stepNebula(focus: string | null, dt: number): void {
     const N = this.neb as NebRec
     const T = this.T
     const s = this.view
     const on = s.nebula !== false
     N.group.visible = on
     N.thread.visible = false
-    if (!on) return
+    if (!on) {
+      for (const R of N.ties) R.line.visible = false
+      this.clearCaptions()
+      return
+    }
     N.group.scale.setScalar((this.maxR || N.builtR) / N.builtR)
     N.group.updateMatrixWorld(true)
     const key = Object.keys(s.hidden)
@@ -1573,7 +1679,9 @@ class SolarImpl {
     const light = 1 - (1 - NEBULA_TOP_DIM) * Math.max(0, Math.min(1, (elev - 0.3) / 0.55))
     N.specks.material.opacity = 0.95 * light
     N.haze.material.opacity = 0.16 * light
-    for (const glow of N.haze.userData.clouds as O3[]) glow.material.opacity = 0.12 * light
+    this.stepStorms(light)
+    this.stepTies(focus, light)
+    this.stepCaptions(dt, light)
     for (const label of N.labels) label.material.opacity = 0.8 * light
     const id = this.hoverMem?.id ?? (this.S.level === 'memory' ? this.S.memId : null)
     const i = id === null ? undefined : N.index.get(id)
@@ -1620,6 +1728,236 @@ class SolarImpl {
     })
     N.near.geometry.attributes.position.needsUpdate = true
     N.near.geometry.setDrawRange(0, 1 + near.length)
+  }
+
+  /**
+   * 0.30.0, the storms: every cloud of three or more flashes at seeded random times (1.2 to 5.7 s apart): its
+   * glow brightens toward white in two quick strikes over FLASH_SECONDS, and a jagged bolt runs between two of
+   * its memories for that long. Between flashes the glow flickers faintly. Under reduced motion: a steady glow, no bolts.
+   */
+  private stepStorms(light: number): void {
+    const N = this.neb as NebRec
+    const T = this.T
+    const white = new T.Color('#ffffff')
+    for (const S of N.storms) {
+      if (this.reduced) {
+        S.glow.material.opacity = 0.12 * light
+        S.glow.material.color.copy(S.base)
+        S.bolt.visible = false
+        continue
+      }
+      if (this.clock >= S.next) {
+        S.flashAt = this.clock
+        S.next = this.clock + FLASH_GAP_MIN + this.stormRng() * FLASH_GAP_SPREAD
+        this.shapeBolt(S)
+      }
+      const age = this.clock - S.flashAt
+      const flash = age < 0 || age > FLASH_SECONDS ? 0 : Math.min(1, Math.max(Math.exp(-age / 0.12), age > 0.25 ? 0.85 * Math.exp(-(age - 0.25) / 0.18) : 0))
+      const flicker = 0.9 + 0.1 * Math.sin(this.clock * 2.2 + S.cloud * 2.3)
+      S.glow.material.opacity = (0.12 * flicker + 0.42 * flash) * light
+      S.glow.material.color.copy(S.base).lerp(white, flash * 0.6)
+      S.bolt.visible = flash > 0.03
+      S.bolt.material.opacity = flash
+    }
+  }
+
+  /** A bolt's jagged path between two of the cloud's memories (or from one to the cloud's middle), set when it flashes. */
+  private shapeBolt(S: StormRec): void {
+    const N = this.neb as NebRec
+    const pick = () => S.members[Math.floor(this.stormRng() * S.members.length)] as number
+    const a = N.data[pick()]?.position
+    let bIndex = pick()
+    for (let tries = 0; tries < 4 && S.members.length > 1 && N.data[bIndex]?.position === a; tries++) bIndex = pick()
+    const b = S.members.length > 1 ? N.data[bIndex]?.position : N.clouds[S.cloud]?.centre
+    if (!a || !b) return
+    const len = Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]) || 1
+    const arr = S.bolt.geometry.attributes.position.array
+    for (let k = 0; k <= BOLT_POINTS; k++) {
+      const u = k / BOLT_POINTS
+      const j = k === 0 || k === BOLT_POINTS ? 0 : len * 0.12 * Math.sin(Math.PI * u)
+      arr[k * 3] = a[0] + (b[0] - a[0]) * u + (this.stormRng() - 0.5) * 2 * j
+      arr[k * 3 + 1] = a[1] + (b[1] - a[1]) * u + (this.stormRng() - 0.5) * j
+      arr[k * 3 + 2] = a[2] + (b[2] - a[2]) * u + (this.stormRng() - 0.5) * 2 * j
+    }
+    S.bolt.geometry.attributes.position.needsUpdate = true
+  }
+
+  /**
+   * 0.30.0, the ties: a curve from each cloud's middle up to each project holding at least TIE_MIN of its
+   * memories (the sun for global). At rest every tie is faint, brighter with the project's share of the cloud.
+   * A hovered speck lights its cloud's ties; else the project in focus (hovered or opened) lights its own; the
+   * rest all but vanish. A hidden project's ties are hidden.
+   */
+  private stepTies(focus: string | null, light: number): void {
+    const N = this.neb as NebRec
+    const T = this.T
+    const s = this.view
+    const hover = this.hoverMem
+    const focusCloud = hover && hover.obj === N.specks ? (N.data[hover.index]?.cloud ?? null) : null
+    const centre = new T.Vector3()
+    for (const R of N.ties) {
+      const { tie, line } = R
+      const P = this.P[tie.owner]
+      const to = P ? this.worldOf(P.pG) : tie.owner === 'global' && this.sunG ? this.worldOf(this.sunG) : null
+      const cloud = N.clouds[tie.cloud]
+      if (to === null || cloud === undefined || s.hidden[tie.owner]) {
+        line.visible = false
+        continue
+      }
+      centre.set(cloud.centre[0], cloud.centre[1], cloud.centre[2])
+      N.group.localToWorld(centre)
+      const lit = focusCloud !== null ? tie.cloud === focusCloud : focus !== null ? tie.owner === focus : null
+      const opacity = lit === null ? (0.07 + 0.2 * tie.share) * light : lit ? (0.45 + 0.5 * tie.share) * Math.max(0.7, light) : 0.015
+      line.material.opacity = opacity
+      const sparks = line.userData.sparks
+      sparks.visible = !this.reduced && lit !== false
+      sparks.material.opacity = lit ? 1 : Math.min(1, opacity * 2.5)
+      line.visible = true
+      // Current: one electric blob goes from the cloud (u = 0) up to the project (u = 1) and back, again and again,
+      // faster on a lit tie (eased at each end); the line is soft at both ends and glows a little where the blob is.
+      // Reduced motion: a steady line, no blob.
+      const base = line.userData.colour
+      const col = line.geometry.attributes.color.array
+      const cycle = (((this.clock * (lit ? TIE_FLOW_LIT : TIE_FLOW) * 0.5 + R.phase) % 1) + 1) % 1
+      const tri = 1 - Math.abs(2 * cycle - 1)
+      const p = tri * tri * (3 - 2 * tri)
+      for (let k = 0; k <= TIE_POINTS; k++) {
+        const u = k / TIE_POINTS
+        const ends = Math.min(1, Math.sin(Math.PI * u) * 2.5)
+        const glow = this.reduced ? 0 : Math.exp(-(((u - p) / 0.06) ** 2))
+        const v = (0.55 + 0.45 * glow) * ends
+        const w = 0.35 * glow * ends
+        col[k * 3] = base.r * v + w
+        col[k * 3 + 1] = base.g * v + w
+        col[k * 3 + 2] = base.b * v + w
+      }
+      line.geometry.attributes.color.needsUpdate = true
+      // A quadratic rising from the cloud: its control point at the planet's height, most of the way over the cloud.
+      const cx = centre.x * 0.7 + to.x * 0.3
+      const cy = to.y
+      const cz = centre.z * 0.7 + to.z * 0.3
+      const arr = line.geometry.attributes.position.array
+      for (let k = 0; k <= TIE_POINTS; k++) {
+        const u = k / TIE_POINTS
+        const a = (1 - u) * (1 - u)
+        const b = 2 * (1 - u) * u
+        const c = u * u
+        arr[k * 3] = a * centre.x + b * cx + c * to.x
+        arr[k * 3 + 1] = a * centre.y + b * cy + c * to.y
+        arr[k * 3 + 2] = a * centre.z + b * cz + c * to.z
+      }
+      line.geometry.attributes.position.needsUpdate = true
+      if (!sparks.visible) continue
+      // The blob: its core on the curve at p; around it, every BLOB_RESHAPE s, the crackling sparks jump to new
+      // places within BLOB_R and the jagged arc takes a new shape through the core (the space between reshapes holds).
+      const f = p * TIE_POINTS
+      const i0 = Math.min(TIE_POINTS - 1, Math.floor(f))
+      const t = f - i0
+      const core = [0, 1, 2].map(d => (arr[i0 * 3 + d] as number) * (1 - t) + (arr[(i0 + 1) * 3 + d] as number) * t) as [number, number, number]
+      const radius = (this.maxR || N.builtR) * BLOB_R * (0.7 + 0.6 * tie.share)
+      const sp = sparks.geometry.attributes.position.array
+      const sc = sparks.geometry.attributes.color.array
+      const reshape = this.clock - (line.userData.reshaped as number) >= BLOB_RESHAPE || line.userData.reshaped < 0
+      if (reshape) line.userData.reshaped = this.clock
+      const offs: number[] = line.userData.offs ?? (line.userData.offs = new Array((1 + BLOB_CRACKLE) * 3).fill(0))
+      const arcOffs: number[] = line.userData.arcOffs ?? (line.userData.arcOffs = new Array(BLOB_ARC * 3).fill(0))
+      if (reshape) {
+        for (let q = 1; q <= BLOB_CRACKLE; q++) {
+          // A random direction, at 40 to 100% of the radius.
+          const th = this.stormRng() * Math.PI * 2
+          const ph = Math.acos(2 * this.stormRng() - 1)
+          const r = radius * (0.4 + 0.6 * this.stormRng())
+          offs[q * 3] = Math.sin(ph) * Math.cos(th) * r
+          offs[q * 3 + 1] = Math.cos(ph) * r
+          offs[q * 3 + 2] = Math.sin(ph) * Math.sin(th) * r
+        }
+        for (let q = 0; q < BLOB_ARC; q++) for (let d = 0; d < 3; d++) arcOffs[q * 3 + d] = (this.stormRng() - 0.5) * 2 * radius * 1.3
+      }
+      for (let q = 0; q <= BLOB_CRACKLE; q++) {
+        for (let d = 0; d < 3; d++) sp[q * 3 + d] = core[d]! + (offs[q * 3 + d] as number)
+        // The core is near white; the crackle is the cloud's colour, each spark flickering.
+        const hot = q === 0 ? 0.75 : 0.25
+        const k = q === 0 ? 1 : 0.45 + 0.55 * ((Math.sin(this.clock * 23 + q * 1.7 + R.phase * 10) + 1) / 2)
+        sc[q * 3] = (base.r * (1 - hot) + hot) * k
+        sc[q * 3 + 1] = (base.g * (1 - hot) + hot) * k
+        sc[q * 3 + 2] = (base.b * (1 - hot) + hot) * k
+      }
+      sparks.geometry.attributes.position.needsUpdate = true
+      sparks.geometry.attributes.color.needsUpdate = true
+      const halo = line.userData.halo
+      halo.position.set(core[0], core[1], core[2])
+      halo.scale.setScalar(radius * 3.2)
+      halo.material.opacity = (lit ? 0.55 : 0.35) * sparks.material.opacity
+      const arc = line.userData.arc
+      const ap = arc.geometry.attributes.position.array
+      for (let q = 0; q < BLOB_ARC; q++) for (let d = 0; d < 3; d++) ap[q * 3 + d] = core[d]! + (arcOffs[q * 3 + d] as number)
+      arc.geometry.attributes.position.needsUpdate = true
+      arc.material.opacity = sparks.material.opacity * 0.8
+    }
+  }
+
+  /** 0.30.0: any pointer or wheel input on the map: the idle clock restarts and the captions go. */
+  private markInput(): void {
+    this.lastInput = this.clock
+    if (this.neb && this.neb.captions.length > 0) this.clearCaptions()
+  }
+
+  private clearCaptions(): void {
+    const N = this.neb
+    if (!N) return
+    for (const C of N.captions) {
+      N.group.remove(C.sprite)
+      this.disposeTree(C.sprite)
+    }
+    N.captions = []
+  }
+
+  /**
+   * 0.30.0, idle captions: once the map has had no input for CAPTION_IDLE seconds (at the Galaxy, nothing
+   * flying, the Nebula captions switch on), a random speck shows its memory's first line every CAPTION_EVERY
+   * seconds: it fades in, holds, fades out. At most CAPTION_MAX at once, never two from one cloud, none from a
+   * hidden project. Under reduced motion a caption appears and goes without fading.
+   */
+  private stepCaptions(dt: number, light: number): void {
+    void dt
+    const N = this.neb as NebRec
+    const idle = this.view.captions !== false && this.flight === null && !this.tipShown && this.S.level === 'galaxy' && this.clock - this.lastInput >= CAPTION_IDLE
+    if (!idle) {
+      if (N.captions.length > 0) this.clearCaptions()
+      N.nextCaption = 0
+      return
+    }
+    const life = CAPTION_FADE * 2 + CAPTION_HOLD
+    N.captions = N.captions.filter(C => {
+      const age = this.clock - C.born
+      if (age >= life || this.view.hidden[N.data[C.speck]?.owner ?? '']) {
+        N.group.remove(C.sprite)
+        this.disposeTree(C.sprite)
+        return false
+      }
+      const fade = this.reduced ? 1 : age < CAPTION_FADE ? age / CAPTION_FADE : age > CAPTION_FADE + CAPTION_HOLD ? (life - age) / CAPTION_FADE : 1
+      C.sprite.material.opacity = fade * Math.max(0.6, light)
+      return true
+    })
+    if (this.clock < N.nextCaption || N.captions.length >= CAPTION_MAX) return
+    N.nextCaption = this.clock + CAPTION_EVERY
+    const busy = new Set(N.captions.map(C => C.cloud))
+    const items = N.specks.userData.items as Item[]
+    const pool: number[] = []
+    N.data.forEach((sp, i) => {
+      if (!busy.has(sp.cloud) && !this.view.hidden[sp.owner] && items[i]?.mem) pool.push(i)
+    })
+    if (pool.length === 0) return
+    const i = pool[Math.floor(this.captionRng() * pool.length)] as number
+    const sp = N.data[i] as NebulaSpeck
+    const full = this.firstLine(items[i]!.mem as SolarMemory)
+    const text = full.length > CAPTION_CHARS ? `${full.slice(0, CAPTION_CHARS - 1).trimEnd()}…` : full
+    const sprite = this.label(text, null, NEBULA_PALETTE[sp.cloud % NEBULA_PALETTE.length] as string, Math.max(12, N.builtR * 0.03))
+    sprite.position.set(sp.position[0], sp.position[1] + N.builtR * 0.035, sp.position[2])
+    sprite.material.opacity = 0
+    sprite.userData = { kind: 'nebula-caption' }
+    N.group.add(sprite)
+    N.captions.push({ sprite, speck: i, cloud: sp.cloud, born: this.clock })
   }
 
   /** 0.29.0: a click on a speck opens its memory on its planet; a global one (no planet) is flown to where it is. */
@@ -2244,7 +2582,7 @@ class SolarImpl {
       this.outerLabel.position.set(0, 30, -outerR)
     }
     if (this.sunBeltObj) this.sunBeltObj.rotation.y += dt * 0.06 * spin
-    if (this.neb) this.stepNebula()
+    if (this.neb) this.stepNebula(focus, dt)
 
     // Sun-belt tethers: each true global dot (it turns with the belt) to the planet it is close to (it orbits).
     // A hidden project's tether is hidden, as its black holes go with it. 0.16.0, folding: with no focus only a
@@ -2498,6 +2836,8 @@ class SolarImpl {
             `${describe(b)} · one orbit every ${minutes} min${shared ? ' (shared orbit)' : ''}`,
             `${b.count} memories · ${b.tagsTotal} tags · ${b.kinds.length} kinds`,
             globalLine,
+            // 0.30.0: the nebula clouds this project feeds.
+            ...(this.neb ? [topicsLine(this.neb.model, this.neb.ties.map(R => R.tie), b.owner) ?? 'Topics: none in the nebula yet'] : []),
             `activity ${b.activity}${b.activitySource === 'lifetime' ? ' (lifetime so far)' : ' (30 days)'} · recalls ${b.recalls} · median age ${b.age === null ? 'unknown' : `${Math.round(b.age * 10) / 10} d`}`,
             `top tags: ${b.tags.slice(0, 3).map(t => t.tag).join(', ') || 'none'}`,
             ls.length ? `similar memories: ${ls.join(', ')}` : 'no black holes',

@@ -22,6 +22,9 @@ import {
   linksOf,
   metric,
   nebulaOf,
+  cloudTies,
+  TIE_MIN,
+  topicsLine,
   NEBULA_FLAT,
   NEBULA_MAX_CLOUDS,
   NEBULA_MIN,
@@ -42,7 +45,7 @@ import {
   writerInfos,
   WRITER_PALETTE,
 } from '../../ui/solar-layout'
-import type { Arrange, Body, SolarGalaxy, SolarMemory, SolarProject, StyleId } from '../../ui/solar-layout'
+import type { Arrange, Body, Nebula, SolarGalaxy, SolarMemory, SolarProject, StyleId } from '../../ui/solar-layout'
 
 const NOW = Date.parse('2026-10-25T12:00:00Z')
 const DAY = 86400000
@@ -746,5 +749,96 @@ describe('the meaning nebula', () => {
     expect(names.some(n => n.includes('posting'))).toBe(true)
     expect(names.some(n => n.includes('routing'))).toBe(true)
     expect(new Set(names).size).toBe(names.length)
+  })
+})
+
+// ---- 0.30.0: ties from clouds to projects (cloudTies) and a project's topics (topicsLine) ----
+
+/** A hand-made nebula: `clouds[i]` lists the owners of cloud i's specks, one entry per speck. */
+function handNebula(clouds: { name: string; owners: string[] }[]): Nebula {
+  let n = 0
+  return {
+    clouds: clouds.map((c, i) => ({ centre: [i * 10, -20, 0], count: c.owners.length, spread: 3, name: c.name })),
+    specks: clouds.flatMap((c, ci) => c.owners.map(owner => ({ id: `s${n++}`, owner, kind: 'fact', position: [ci * 10, -20, 0] as [number, number, number], cloud: ci }))),
+  }
+}
+
+describe('0.30.0: cloud ties', () => {
+  test('an owner needs TIE_MIN of a cloud\'s specks for a tie; share is count over the cloud\'s count', () => {
+    expect(TIE_MIN).toBe(2)
+    const nebula = handNebula([{ name: 'invoices', owners: ['a', 'a', 'a', 'b', 'b', 'c'] }])
+    const ties = cloudTies(nebula)
+    expect(ties).toEqual([
+      { cloud: 0, owner: 'a', count: 3, share: 0.5 },
+      { cloud: 0, owner: 'b', count: 2, share: 2 / 6 },
+    ])
+    // The single stray memory of c draws nothing.
+    expect(ties.some(t => t.owner === 'c')).toBe(false)
+  })
+
+  test('clouds in order, then the biggest count first, then owner on equal counts; global is kept', () => {
+    const nebula = handNebula([
+      { name: 'one', owners: ['z', 'z', 'm', 'm', 'global', 'global', 'global'] },
+      { name: 'two', owners: ['b', 'b', 'a', 'a', 'q'] },
+      { name: 'three', owners: ['x'] },
+    ])
+    expect(cloudTies(nebula).map(t => [t.cloud, t.owner, t.count])).toEqual([
+      [0, 'global', 3],
+      [0, 'm', 2],
+      [0, 'z', 2],
+      [1, 'a', 2],
+      [1, 'b', 2],
+    ])
+  })
+
+  test('an empty nebula has no ties; ties from nebulaOf only name owners with at least TIE_MIN specks', () => {
+    expect(cloudTies({ specks: [], clouds: [] })).toEqual([])
+    // Two groups far apart; alpha holds most of the left, beta most of the right, gamma one stray memory.
+    const mem = (id: string, owner: string, x: number, z: number): SolarMemory => ({
+      id, owner, tags: [], recalls: 0, lastRecalled: null, created: null, label: id, source: 'claude-code',
+      sourceInferred: false, kind: 'fact', scope: 'channel', importance: 3, pinned: false, state: 'live', validUntil: null,
+      position: [x, (x + z) * 0.01, z],
+    })
+    const memories = [
+      ...Array.from({ length: 8 }, (_, i) => mem(`l${i}`, i < 6 ? 'alpha' : 'beta', -50 + (i % 3), i % 4)),
+      ...Array.from({ length: 8 }, (_, i) => mem(`r${i}`, i < 7 ? 'beta' : 'gamma', 50 + (i % 3), i % 4)),
+    ]
+    const nebula = nebulaOf(memories, 100, 20)
+    const ties = cloudTies(nebula)
+    expect(ties.length).toBeGreaterThan(0)
+    expect(ties.some(t => t.owner === 'gamma')).toBe(false)
+    for (const t of ties) {
+      const n = nebula.specks.filter(s => s.cloud === t.cloud && s.owner === t.owner).length
+      expect(t.count).toBe(n)
+      expect(n).toBeGreaterThanOrEqual(TIE_MIN)
+      expect(t.share).toBeCloseTo(n / nebula.clouds[t.cloud]!.count, 10)
+    }
+  })
+})
+
+describe('0.30.0: a project\'s topics line', () => {
+  const nebula = handNebula([
+    { name: 'invoices', owners: ['a', 'a', 'b', 'b', 'b'] },
+    { name: 'routing', owners: ['a', 'a', 'a', 'a'] },
+    { name: '', owners: ['a', 'a', 'a'] },
+    { name: 'pricing', owners: ['a', 'a'] },
+    { name: 'tax', owners: ['a', 'a'] },
+  ])
+  const ties = cloudTies(nebula)
+
+  test('biggest first, "name (n)", an unnamed cloud is "cloud N", and the rest are "+k more"', () => {
+    expect(topicsLine(nebula, ties, 'a')).toBe('Topics: routing (4), cloud 3 (3), invoices (2) +2 more')
+    expect(topicsLine(nebula, ties, 'b')).toBe('Topics: invoices (3)')
+  })
+
+  test('max sets how many are named; none left over means no "+k more"', () => {
+    expect(topicsLine(nebula, ties, 'a', 5)).toBe('Topics: routing (4), cloud 3 (3), invoices (2), pricing (2), tax (2)')
+    expect(topicsLine(nebula, ties, 'a', 1)).toBe('Topics: routing (4) +4 more')
+  })
+
+  test('an owner with no ties (or only a stray memory) gets null', () => {
+    expect(topicsLine(nebula, ties, 'nobody')).toBeNull()
+    const stray = handNebula([{ name: 'x', owners: ['a', 'a', 'c'] }])
+    expect(topicsLine(stray, cloudTies(stray), 'c')).toBeNull()
   })
 })

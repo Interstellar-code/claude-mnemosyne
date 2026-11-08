@@ -440,13 +440,15 @@ describe('the Galaxy layout as a solar page', () => {
     expect(b.node('solar-canvas').hidden).toBe(false)
     expect(b.scene().of('setData')[0]!.galaxy.projects.length).toBe(FIXTURE.projects.length)
     // 0.29.0: the view carries the Meaning nebula toggle (on by default).
-    expect(lastView(b)).toEqual({ arrange: 'activity', colour: 'writer', hidden: {}, query: '', rotate: true, legend: true, nebula: true })
+    // 0.30.0: and the Nebula captions toggle (on by default).
+    expect(lastView(b)).toEqual({ arrange: 'activity', colour: 'writer', hidden: {}, query: '', rotate: true, legend: true, nebula: true, captions: true })
     expect(b.node('view-map').classList.contains('solar-on')).toBe(true)
     for (const id of ['solar-card-arrange', 'solar-card-show', 'solar-bodies']) expect(b.node(id).hidden).toBe(false)
     for (const id of ['map-card-colour', 'map-card-links', 'map-card-know', 'map-card-layers', 'map-card-projects', 'map-overview', 'map-legend']) expect(b.node(id).classes()).toContain('legacy-only')
     expect(buttons(b.node('solar-arrange')).map(x => x.textContent)).toEqual(['Activity', 'Size', 'Age', 'Recalls'])
     // 0.29.0: Meaning nebula sits between Auto-rotate and Legend.
-    expect(buttons(b.node('solar-show')).map(x => x.textContent)).toEqual(['Auto-rotate: on', 'Meaning nebula: on', 'Legend: on'])
+    // 0.30.0: Nebula captions follows Meaning nebula.
+    expect(buttons(b.node('solar-show')).map(x => x.textContent)).toEqual(['Auto-rotate: on', 'Meaning nebula: on', 'Nebula captions: on', 'Legend: on'])
     // The 0.6.0 Live strip stays.
     expect(b.node('map-live-strip').classes()).not.toContain('legacy-only')
     expect(b.node('map-live-strip').hidden).toBe(false)
@@ -538,6 +540,26 @@ describe('the controls drive the scene through C13 and are remembered', () => {
     expect(JSON.parse(again.storage.get('mnemosyne.map.solar')!)).toMatchObject({ nebula: true })
   })
 
+  test('0.30.0: the Nebula captions toggle is on by default, calls setView with captions: false, saves and is restored', async () => {
+    const b = await boot()
+    const captions = () => byText(b.node('solar-show'), 'Nebula captions')
+    expect(captions().textContent).toBe('Nebula captions: on')
+    expect(lastView(b).captions).toBe(true)
+    captions().fire('click')
+    expect(lastView(b).captions).toBe(false)
+    expect(captions().textContent).toBe('Nebula captions: off')
+    expect(captions().attributes.get('aria-pressed')).toBe('false')
+    // The nebula itself and the other toggles are untouched.
+    expect(lastView(b)).toMatchObject({ nebula: true, rotate: true, legend: true })
+    expect(JSON.parse(b.storage.get('mnemosyne.map.solar')!)).toMatchObject({ captions: false })
+    const again = await boot({ storage: b.storage })
+    expect(lastView(again).captions).toBe(false)
+    expect(byText(again.node('solar-show'), 'Nebula captions').textContent).toBe('Nebula captions: off')
+    byText(again.node('solar-show'), 'Nebula captions').fire('click')
+    expect(lastView(again).captions).toBe(true)
+    expect(JSON.parse(again.storage.get('mnemosyne.map.solar')!)).toMatchObject({ captions: true })
+  })
+
   test('a remembered Recalls or Age colour from before 0.28.3 is not restored: dots are by writer', async () => {
     const storage = new Map([['mnemosyne.map.solar', JSON.stringify({ arrange: 'size', colour: 'age' })]])
     const b = await boot({ storage })
@@ -560,6 +582,10 @@ describe('the controls drive the scene through C13 and are remembered', () => {
     expect(left.texts().join(' ')).not.toContain('Space station')
     expect(buttons(left)[0]!.attributes.get('aria-expanded')).toBe('false')
     expect(b.node('solar-legend-right').texts().join(' ')).toContain('Black hole')
+    // 0.30.0: the Tie row follows the Nebula row.
+    const right = b.node('solar-legend-right').texts().join(' ')
+    expect(right).toContain('cloud → project; brighter = more of it')
+    expect(right.indexOf('Tie')).toBeGreaterThan(right.indexOf('Nebula'))
   })
 
   test('the view buttons call showView and zoom', async () => {
