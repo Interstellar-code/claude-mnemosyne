@@ -687,4 +687,12 @@ describe('IMPORT: heading titles', () => {
     }
     expect(splitDocument(`## C#\n\n${text}\n\n## C\n\n${text} Two.`).chunks.map(chunk => chunk.heading)).toEqual(['C#', 'C'])
   })
+  test('a heading whose content is only #s is an empty heading (CommonMark), not a title of #s', () => {
+    for (const line of ['### ###', '## ##', '# #', '## #  ']) {
+      expect(splitDocument(`${line}\n\n${text}`).chunks).toEqual([{ heading: '(start)', text }])
+      expect(splitDocument(`# Top\n\n${line}\n\n${text}`).chunks.map(chunk => chunk.heading)).toEqual([line.startsWith('# ') ? '(start)' : 'Top > '])
+    }
+    expect(splitDocument(`## # #\n\n${text}`).chunks.map(chunk => chunk.heading)).toEqual(['#'])
+    expect(splitDocument(`## #foo\n\n${text}`).chunks.map(chunk => chunk.heading)).toEqual(['#foo'])
+  })
 })
