@@ -3843,7 +3843,7 @@ function drawHits(more: boolean, keep = 0) {
   const list = visibleHits()
   const rank = new Map(searchHits.map((hit, i) => [hit.id, i + 1]))
   const from = more ? searchShown : 0
-  searchShown = Math.min(list.length, more ? searchShown + SHOW_FIRST : Math.max(SHOW_FIRST, keep))
+  searchShown = Math.min(list.length, more ? searchShown + SHOW_FIRST : keep > 0 ? keep : SHOW_FIRST)
   const rows: HTMLElement[] = []
   list.slice(from, searchShown).forEach((hit, i) => {
     const at = from + i
