@@ -872,6 +872,9 @@ describe('META.4: replaces retires, never deletes', () => {
     expect(again.deny).toBeUndefined()
     expect(first(again)).toMatchObject({ status: 'retired', memory_id: old, duplicate: true })
     expect(String(again.result)).toContain(`already stored as retired memory ${old}`)
+    // Claude is pointed at the dashboard, not at an engine restore argument the plugin's memory_update does not take.
+    expect(String(first(again).hint)).toContain('dashboard')
+    expect(String(again.result)).not.toContain('mnemopi_update')
     expect(String(again.result)).not.toContain(`retired ${fresh}`)
     // Neither row changed: the retired one stays retired, the live one is not retired in favour of it.
     expect(rowOf(host, old)).toEqual(before.old)

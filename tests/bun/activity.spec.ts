@@ -5,7 +5,7 @@ import { afterAll, describe, expect, test } from 'bun:test'
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { appendActivity, LOCK_STALE_MS, MAX_BYTES, rotate } from '../../bin/activity'
-import { activityLine } from '../../hooks/activity-log'
+import { activityLine, callOutcome } from '../../hooks/activity-log'
 import { ROOT, tempDir, isolatedEnv } from './helpers'
 
 const SCRIPT = join(ROOT, 'bin', 'activity.ts')
@@ -442,3 +442,14 @@ describe('the log size follows config.json (S4)', () => {
     expect(existsSync(`${path}.1`)).toBe(true)
   })
 })
+
+// Issue #16: a remember that found its text as a retired or expired memory names the row but counts as no save.
+describe('callOutcome for a kept remember', () => {
+  test('retired and expired replies count 0, a fresh or live duplicate save counts 1', () => {
+    for (const status of ['retired', 'expired']) {
+      expect(callOutcome('remember', {}, JSON.stringify({ status, memory_id: 'm1', duplicate: true }))).toEqual({ ok: true, ids: ['m1'], count: 0 })
+    }
+    expect(callOutcome('remember', {}, JSON.stringify({ status: 'stored', memory_id: 'm1', duplicate: true }))).toEqual({ ok: true, ids: ['m1'], count: 1 })
+  })
+})
+

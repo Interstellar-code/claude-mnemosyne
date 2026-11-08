@@ -990,6 +990,16 @@ function keptStatus(reply: string): 'retired' | 'expired' | undefined {
   }
 }
 
+/** Issue #16: the engine's hint names mnemopi_update restore, which the plugin's memory_update does not take; Claude gets the plugin's way instead. */
+function keptReply(reply: string): string {
+  try {
+    const body = JSON.parse(reply) as Record<string, unknown>
+    return JSON.stringify({ ...body, hint: 'This text is already stored as a hidden memory and was left unchanged. The user can restore it from the dashboard (Review tab).' })
+  } catch {
+    return reply
+  }
+}
+
 /** The engine call for knowledge: requests -> per request its text or its error, in one engine process, as the owner. */
 function knowledgeEngine($: EngineInterface, options: PluginOptions): KnowledgeEngine {
   return (requests, owner) => runAll($, options, requests.map(([name, args]) => [name, args] as const), owner, KNOWLEDGE_ENGINE_TIMEOUT_MS)
@@ -1833,12 +1843,14 @@ async function finishSessionSummaries($: EngineInterface, options: PluginOptions
         ).catch((err: unknown) => [err instanceof Error ? err : new Error(String(err))])
         const answer = answers[0]
         const id = answer === undefined || answer instanceof Error ? undefined : savedId(answer)
+        // Issue #16: the same summary text is already a retired or expired memory, left so: done, but not a save.
+        const kept = answer === undefined || answer instanceof Error ? undefined : keptStatus(answer)
         if (id !== undefined) {
           finished = true
           await drop(entry)
         }
         await record($, options, [
-          { action: 'remember', origin: 'session', owner: entry.owner, client: 'mnemosyne-session', text: 'session summary', ids: id === undefined ? [] : [id], count: id === undefined ? 0 : 1, ok: id !== undefined, error: id === undefined ? 'the summary was not saved' : '' },
+          { action: 'remember', origin: 'session', owner: entry.owner, client: 'mnemosyne-session', text: 'session summary', ids: id === undefined ? [] : [id], count: id === undefined || kept !== undefined ? 0 : 1, ok: id !== undefined, error: id === undefined ? 'the summary was not saved' : '' },
         ])
       } finally {
         if (!finished) await release(entry)
@@ -2289,7 +2301,7 @@ export const register: Register = (on, options) => {
         }
         // One warning line per hit, after the engine's reply; `reply` stays the engine's own text.
         const warnings = (warnIds.length > 0 ? guard!.hits.map(hit => `\nMnemosyne guard warning: ${hit.message}`).join('') : '') + (near.length > 0 ? `\nMnemosyne guard warning: ${nearDuplicateMessage(near)}` : '')
-        return { reply: text, result: name === 'mnemopi_recall' ? JSON.stringify(compact(text)) : name === 'mnemopi_stats' ? mnemosyneStats(text) : `${text}${warnings}${retireLine}` }
+        return { reply: text, result: name === 'mnemopi_recall' ? JSON.stringify(compact(text)) : name === 'mnemopi_stats' ? mnemosyneStats(text) : `${kept !== undefined ? keptReply(text) : text}${warnings}${retireLine}` }
       } catch (err) {
         return { deny: `Mnemosyne: ${(err as Error).message}` }
       }
