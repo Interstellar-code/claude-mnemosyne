@@ -724,7 +724,7 @@ describe('VIEWS R2: the Knowledge and Health glue in app.ts', () => {
   let app: Record<string, any>
   let saved: unknown
   const realFetch = globalThis.fetch
-  let mode: 'real' | 'fail500' | 'throw' = 'real'
+  let mode: 'real' | 'fail500' | 'throw' | 'failQueue' = 'real'
   const calls: { path: string; method: string; body: string }[] = []
   const focused: AppNode[] = []
   // When set, /api/memories requests wait here until the test lets each one through (out of order).
@@ -835,6 +835,7 @@ describe('VIEWS R2: the Knowledge and Health glue in app.ts', () => {
       calls.push({ path, method: init.method ?? 'GET', body: typeof init.body === 'string' ? init.body : '' })
       if (held && path.startsWith('/api/memories?')) await new Promise<void>(release => held!.push({ path, release }))
       if (mode === 'fail500') return new Response(JSON.stringify({ error: 'boom' }), { status: 500 })
+      if (mode === 'failQueue' && path === '/api/review') return new Response(JSON.stringify({ error: 'boom' }), { status: 500 })
       // The server itself still answers /api/health (the page's check on a failed request), so these are tab failures, not a lost server.
       if (mode === 'throw' && path !== '/api/health') throw new TypeError('network down')
       const headers = { ...(init.headers as Record<string, string>), Authorization: `Bearer ${server.token}`, Origin: `http://127.0.0.1:${server.port}` }
@@ -1039,6 +1040,30 @@ describe('VIEWS R2: the Knowledge and Health glue in app.ts', () => {
     yes!.fire('click')
     await until(() => !(byId('review-rows').children as AppNode[]).includes(row), 'the row to leave after the retry')
     expect(await state()).toBe('retired')
+  })
+
+  test('#30: a failed queue reload keeps the last lists but says the refresh failed; the next good load clears the note', async () => {
+    const pick = (name: string) => (byId('review-filters').children as AppNode[]).find(button => button.dataset.filter === name)!.fire('click')
+    mode = 'real'
+    await app.loadReview()
+    pick('notlive')
+    const good = byId('review-text').textContent
+    expect(good).toContain('not live')
+    expect(byId('review-notlive-rows').children.length).toBeGreaterThan(0)
+    mode = 'failQueue'
+    await app.loadReview()
+    mode = 'real'
+    pick('notlive')
+    // The old rows stay, and the text says they are the last loaded ones.
+    expect(byId('review-notlive-rows').children.length).toBeGreaterThan(0)
+    expect(byId('review-text').textContent).toContain('Refresh failed: the server answered 500')
+    expect(byId('review-text').textContent).toContain('showing the last loaded queue')
+    pick('retire')
+    expect(byId('review-text').textContent).toContain('Refresh failed: the server answered 500')
+    await app.loadReview()
+    pick('notlive')
+    expect(byId('review-text').textContent).toBe(good)
+    pick('never')
   })
 
   // ---- QAPAGE R1: the glue items, on the same stand-in document ----

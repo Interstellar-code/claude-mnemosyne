@@ -1898,6 +1898,9 @@ function groupedReviewRows<T extends { owner: string; id: string }>(list: readon
 /** The sentence under the filters when the review queue is not there (yet): still loading, or why it failed. */
 const queueMissing = () => (reviewView.queueError !== '' ? reviewView.queueError : 'Loading the review queue…')
 
+/** The queue sentence, with the failed refresh's note after it when the lists shown are the last loaded ones. */
+const queueStale = (text: string) => (reviewView.queueError === '' ? text : `${text} ${reviewView.queueError}`)
+
 /** Takes a row out of the live lists after the server retired it: the candidates (and the near-duplicate reasons that named it), and it joins the Not live list. */
 function applyRetired(id: string) {
   const now = new Date().toISOString()
@@ -2038,13 +2041,13 @@ export function drawReview() {
   let rows: HTMLElement[] = []
   let shown = 0
   if (filter === 'retire') {
-    byId('review-text').textContent = queue === null ? queueMissing() : queueText('retire', candidates.length, queue.candidateTotal)
+    byId('review-text').textContent = queue === null ? queueMissing() : queueStale(queueText('retire', candidates.length, queue.candidateTotal))
     rows = groupedReviewRows(candidates, 4, (candidate, index) => candidateRow(candidate, reviewHost, again(index)))
     shown = candidates.length
     byId('review-candidate-rows').replaceChildren(...rows)
   } else if (filter === 'notlive') {
     const list = queue?.notLive ?? []
-    byId('review-text').textContent = queue === null ? queueMissing() : queueText('notlive', list.length, queue.notLiveTotal)
+    byId('review-text').textContent = queue === null ? queueMissing() : queueStale(queueText('notlive', list.length, queue.notLiveTotal))
     rows = list.map((row, index) => notLiveRow(row, reviewHost, again(index)))
     shown = list.length
     byId('review-notlive-rows').replaceChildren(...rows)
@@ -2127,7 +2130,7 @@ async function loadQueue() {
     reviewView.queueError = ''
   } catch (err) {
     if (err instanceof Expired) return
-    reviewView.queueError = `Could not load the review queue: ${failure(err)}`
+    reviewView.queueError = reviewView.queue === null ? `Could not load the review queue: ${failure(err)}` : `Refresh failed: ${failure(err)}; showing the last loaded queue.`
   }
 }
 
