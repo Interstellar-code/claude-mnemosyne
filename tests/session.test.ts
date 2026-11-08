@@ -480,7 +480,9 @@ test('SESSION.1.a3: in strict mode (the default) a warned summary is dropped, no
 })
 
 const claimsOf = (state: ReturnType<typeof rig>) => sessionRuns(state, 'session-pending').filter(run => run.argv.includes('claim')).map(run => run.argv.at(-1))
-const releasesOf = (state: ReturnType<typeof rig>) => sessionRuns(state, 'session-pending').filter(run => run.argv.includes('release')).map(run => run.argv.at(-1))
+// The session id is the last argument that is not a flag (issue #38 adds --failed after it for a failed model call).
+const releasesOf = (state: ReturnType<typeof rig>) => sessionRuns(state, 'session-pending').filter(run => run.argv.includes('release')).map(run => run.argv.filter(arg => !arg.startsWith('--')).at(-1))
+const failedReleasesOf = (state: ReturnType<typeof rig>) => sessionRuns(state, 'session-pending').filter(run => run.argv.includes('release') && run.argv.includes('--failed')).map(run => run.argv.filter(arg => !arg.startsWith('--')).at(-1))
 
 test('SESSION.1.a4: every marker is claimed before its transcript is read; a marker another session claimed is left alone', { options: { sessionSummary: 'on' } }, async ($, on) => {
   const state = rig(on, withPending(['taken', 'mine'], { memories: argv => (argv.includes('claim') && argv.at(-1) === 'taken' ? { stdout: '{"claimed":false}\n' } : undefined) }))
@@ -502,6 +504,8 @@ test('SESSION.1.a4: a claim that is not finished (a lost call, a read that faile
   })
   await firstReply($)
   expect(releasesOf(state)).toEqual(['lost', 'broken'])
+  // Issue #38: only the failed model call counts as an attempt; a failed transcript read is released as before.
+  expect(failedReleasesOf(state)).toEqual(['lost'])
   expect(removed(state)).toEqual(['done'])
 })
 
