@@ -38,8 +38,9 @@ Ours, not upstream's (engine-diff ignores them): `UPSTREAM.md`, `bun.lock` (our 
 | 18.12.3-mnemosyne.13 | c3d440372055b89b60d1eedeccd12062e57b7ca985a2ab17287b5b7973e56177 |
 | 18.12.3-mnemosyne.14 | f015d15f218cbeda835b65f4ae3b347bf67ba02bc9077efba07aa22718e4da8b |
 | 18.12.3-mnemosyne.15 | 7840532d977bf4b9b7087d9ec73955d34fac3e7613ba60bfd88e0a1854fd9ff7 |
+| 18.12.3-mnemosyne.16 | a920529105abee6a7f0bfd0ebb845f8afeb513a8e9522a379d469edaf8be34a5 |
 
-The `18.12.3` row is the untouched upstream source, for reference. `.1` had changes 1 to 3; `.2` makes the change 1 merge keep a `__proto__` key as plain data (it was dropped); `.3` adds the two knowledge tools (change 4) and keeps the first author on dedupe with empty author env unset (change 5); `.4` is the review fix round: the knowledge reply is normalised by `parseExtractedFactCategories` (change 4), and the author pair merges as one unit (change 5); `.5` turns embeddings on: fastembed is a real dependency with an onnxruntime override (change 6), the CLI exits naturally on success (change 7), the on-demand runtime install is gone (change 8), and a `reembed` command backfills vectors (change 9); `.6` is the review fix round: `reembed` recounts after the drain and proves the model before a rebuild (change 9), and the API embedding route is refused without an explicit opt-in (change 10); `.7` is the second fix round: the fastembed cache dir is read from the plugin-pinned `PI_CONFIG_DIR` directly, immune to the dotenv/XDG/profile refill (change 11), and the dry run prints the 'apply' hint only when something is missing (change 9). `.8` is phase MODEL (v3): the trim spares every row whose scope is not 'session' (change 12), remember and update store `memory_type`, `trust_tier` and `valid_until` and update can restore a retired row (change 13), the read-only `mnemopi_similar` (change 14), `mnemopi_expire_unused` (change 15), and the audit trail in `memory_validations` that forget purges (change 16). `.9` MODEL.7 fix round: a re-save of the same text by the same owner never lowers a stored scope, keeps the stored trust tier unless the call names one, and never relabels a fact, preference, instruction or decision or gives it an expiry (change 17). `.10` MODEL.8: a re-save also keeps the first writer's `source` and `trust_tier` (change 18). `.11` the `mnemopi_remember` reply says `duplicate` (change 19). `.12` entity questions rank the memories about the thing asked (change 20). `.13` a process can take the owner per call, for the dashboard's warm search engine (change 21). `.14` a query naming a memory kind finds that kind (change 22), and an entity question gets the extracted facts about it (change 23). `.15` an explicit nested `llm.enabled: false` is kept (change 24), and model replies keep their list and `Source:` lines outside summaries (change 25).
+The `18.12.3` row is the untouched upstream source, for reference. `.1` had changes 1 to 3; `.2` makes the change 1 merge keep a `__proto__` key as plain data (it was dropped); `.3` adds the two knowledge tools (change 4) and keeps the first author on dedupe with empty author env unset (change 5); `.4` is the review fix round: the knowledge reply is normalised by `parseExtractedFactCategories` (change 4), and the author pair merges as one unit (change 5); `.5` turns embeddings on: fastembed is a real dependency with an onnxruntime override (change 6), the CLI exits naturally on success (change 7), the on-demand runtime install is gone (change 8), and a `reembed` command backfills vectors (change 9); `.6` is the review fix round: `reembed` recounts after the drain and proves the model before a rebuild (change 9), and the API embedding route is refused without an explicit opt-in (change 10); `.7` is the second fix round: the fastembed cache dir is read from the plugin-pinned `PI_CONFIG_DIR` directly, immune to the dotenv/XDG/profile refill (change 11), and the dry run prints the 'apply' hint only when something is missing (change 9). `.8` is phase MODEL (v3): the trim spares every row whose scope is not 'session' (change 12), remember and update store `memory_type`, `trust_tier` and `valid_until` and update can restore a retired row (change 13), the read-only `mnemopi_similar` (change 14), `mnemopi_expire_unused` (change 15), and the audit trail in `memory_validations` that forget purges (change 16). `.9` MODEL.7 fix round: a re-save of the same text by the same owner never lowers a stored scope, keeps the stored trust tier unless the call names one, and never relabels a fact, preference, instruction or decision or gives it an expiry (change 17). `.10` MODEL.8: a re-save also keeps the first writer's `source` and `trust_tier` (change 18). `.11` the `mnemopi_remember` reply says `duplicate` (change 19). `.12` entity questions rank the memories about the thing asked (change 20). `.13` a process can take the owner per call, for the dashboard's warm search engine (change 21). `.14` a query naming a memory kind finds that kind (change 22), and an entity question gets the extracted facts about it (change 23). `.15` an explicit nested `llm.enabled: false` is kept (change 24), and model replies keep their list and `Source:` lines outside summaries (change 25). `.16` a backdated triple is stored as history and no triple range ends before it starts (change 26), a re-save of a retired or expired memory's text leaves it so and says so (change 27), and `mnemopi_validate`'s `private` and `surface` banks reach the real stores (change 28).
 
 ## Changes
 
@@ -268,4 +269,31 @@ Not changed: `dist/types/*.d.ts` still describe upstream 18.12.3 (no `metadata` 
 - Tests: `test/llm-output.spec.ts`
 - Upstream issue: none yet
 - Contributed by: mikemikimike (claude-mnemosyne#41, fixes claude-mnemosyne#8); the summary-only stripping added at merge
+- Status: open
+
+### 26. A backdated triple is history, and no range ends before it starts
+
+- What: `TripleStore.add` reads the open (subject, predicate) rows in one transaction with the insert. An open row that starts strictly after the new `valid_from` is newer and stays open, and the new row is inserted already closed at the earliest such start. Every other open row is closed at the new `valid_from`, or at its own start when that is later. A date-only `valid_from` (the default, today) counts as the same day as a timestamp on that day, not as earlier.
+- Why: an older fact closed the current row at its own date, giving `valid_until < valid_from`; `query()` never matched that row and the older fact showed as current (claude-mnemosyne#15). Several open rows for one pair are possible (`insertKg`, imports), and extraction rows carry timestamps.
+- Files: `src/core/triples.ts`
+- Tests: `test/triples-backdated.spec.ts`
+- Upstream issue: none yet
+- Status: open
+
+### 27. A re-save of a retired or expired memory's text leaves it so and says so
+
+- What: `remember` leaves a duplicate row that is retired (`superseded_by` set) or expired (`valid_until` passed) unchanged and returns its id; `duplicateState(content)` (`store.ts`, `BeamMemory.duplicateState`) gives `live`, `retired`, `expired` or none. `mnemopi_remember` then answers `status` `retired` or `expired` (not `stored`) with the existing `memory_id`, `duplicate: true` and a restore hint. A live duplicate is unchanged (change 19).
+- Why: the re-save rewrote a hidden row and answered `stored` while recall kept hiding it (claude-mnemosyne#16). Retiring is a decision; a re-save does not undo it, and the caller is told.
+- Files: `src/core/beam/store.ts` `src/core/beam/index.ts` `src/mcp-tools.ts`
+- Tests: `test/remember-duplicate.spec.ts`
+- Upstream issue: none yet
+- Status: open
+
+### 28. `mnemopi_validate`'s banks reach the real stores
+
+- What: in `handleValidate`, bank `private` opens the main store (the bank the other tools use when none is given: `MNEMOPI_MCP_BANK` or default) and bank `surface` the shared surface store (`withSharedBeam`, as `mnemopi_shared_*`). Other bank names are handled as before.
+- Why: the schema offers only `private` and `surface`, and both opened a new empty `banks/<name>` store: validation always answered `memory_not_found` and left a stray bank (claude-mnemosyne#13). A bank created by hand under either name can no longer be validated through this tool.
+- Files: `src/mcp-tools.ts`
+- Tests: `test/validate-bank.spec.ts`
+- Upstream issue: none yet
 - Status: open

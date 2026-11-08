@@ -679,7 +679,8 @@ async function handleRemember(args: ToolArguments): Promise<ToolResult> {
 	if (validUntil !== null && typeof validUntil === "object") return validUntil;
 	return withBeam(args, (beam, bank) => {
 		// engine/UPSTREAM.md change 19: say when the text was already stored (the status stays "stored").
-		const duplicate = beam.hasDuplicate(content);
+		const state = beam.duplicateState(content);
+		const duplicate = state !== null;
 		const memoryId = beam.remember(content, {
 			source: stringArg(args, "source", "mcp"),
 			importance: numberArg(args, "importance", 0.5),
@@ -692,6 +693,17 @@ async function handleRemember(args: ToolArguments): Promise<ToolResult> {
 			trustTier: trustTierArg(args),
 			validUntil: validUntil ?? undefined,
 		});
+		// Issue #16: re-saving a retired or expired memory leaves it so and says how to bring it back.
+		if (state === "retired" || state === "expired") {
+			return {
+				status: state,
+				memory_id: memoryId,
+				bank,
+				content_preview: content.slice(0, 100),
+				duplicate,
+				hint: `This text is already stored as a ${state} memory and was left unchanged. Call mnemopi_update with memory_id and restore: true to bring it back.`,
+			};
+		}
 		return { status: "stored", memory_id: memoryId, bank, content_preview: content.slice(0, 100), duplicate };
 	});
 }
@@ -1063,7 +1075,16 @@ async function handleValidate(args: ToolArguments): Promise<ToolResult> {
 		return { error: "new_content is required for action='update'" };
 	const validator = validatorArg(args);
 	if (typeof validator === "object") return validator;
-	return withBeam(args, (beam, bank) => {
+	// 'private' is the main store (the bank the other tools use when none is named); 'surface' is the shared
+	// surface store of the mnemopi_shared_* tools. Any other name is a bank, as before.
+	const requested = stringArg(args, "bank", "private");
+	const run = <T>(fn: (beam: BeamMemory, bank: string) => T | Promise<T>): Promise<T> =>
+		requested === "surface"
+			? withSharedBeam(beam => fn(beam, "surface"))
+			: requested === "private"
+				? withBeam({ ...args, bank: "" }, fn)
+				: withBeam(args, fn);
+	return run((beam, bank) => {
 		const existing = beam.get(memoryId) as { content?: string; author_id?: string | null } | null;
 		if (existing === null) return { error: "memory_not_found", memory_id: memoryId, bank };
 		let status: string;

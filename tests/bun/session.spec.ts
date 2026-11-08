@@ -508,6 +508,33 @@ describe('SESSION.1: session-pending markers', () => {
   })
 })
 
+describe('SESSION.1: every owner the plugin builds gets a pending marker (#28)', () => {
+  test('a per-project owner from a ~200-character folder name is accepted; characters outside the class are still refused', async () => {
+    const { pendingSession } = await import('../../hooks/session')
+    const { ownerId } = await import('../../hooks/owner')
+    const owner = ownerId('per-project', `/work/${'a'.repeat(200)}`)
+    expect(owner.length).toBeGreaterThan(200)
+    expect(pendingSession('s1', owner, '/t.jsonl')).toEqual({ sessionId: 's1', owner, transcript: '/t.jsonl' })
+    expect(pendingSession('s1', ownerId('per-project', `/work/${'b'.repeat(255)}`), '/t.jsonl')).toBeDefined()
+    expect(pendingSession('s1', `${owner}/x`, '/t.jsonl')).toBeUndefined()
+    expect(pendingSession('s1', 'project-a.b', '/t.jsonl')).toBeUndefined()
+    expect(pendingSession('s1', `project-${'a'.repeat(301)}`, '/t.jsonl')).toBeUndefined()
+  })
+
+  test('the owner limit is the one hooks/projects.ts exports, so the registry and the marker accept the same owners', async () => {
+    const { pendingSession } = await import('../../hooks/session')
+    const { OWNER_NAME_MAX, sanitizeInput } = await import('../../hooks/projects')
+    expect(typeof OWNER_NAME_MAX).toBe('number')
+    const record = (owner: string) => sanitizeInput({ owner, name: 'x', kind: 'folder', remoteHost: null })
+    const longest = `project-${'a'.repeat(OWNER_NAME_MAX)}`
+    const tooLong = `project-${'a'.repeat(OWNER_NAME_MAX + 1)}`
+    expect(record(longest)).not.toBeNull()
+    expect(pendingSession('s1', longest, '/t.jsonl')).toBeDefined()
+    expect(record(tooLong)).toBeNull()
+    expect(pendingSession('s1', tooLong, '/t.jsonl')).toBeUndefined()
+  })
+})
+
 describe('SESSION.1: a session-pending marker is claimed by one session before it is summarised', () => {
   const entry = (id: string) => ({ sessionId: id, owner: 'global', transcript: `/home/u/.claude/projects/-work/${id}.jsonl` })
   const folderOf = (host: Host) => join(host.root, 'session-pending')

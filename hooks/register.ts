@@ -980,6 +980,26 @@ function savedId(reply: string): string | undefined {
   }
 }
 
+/** Issue #16: 'retired' or 'expired' when a remember found its text as such a memory and left it so (not a fresh save, not a failure). */
+function keptStatus(reply: string): 'retired' | 'expired' | undefined {
+  try {
+    const status = (JSON.parse(reply) as Record<string, unknown>)?.status
+    return status === 'retired' || status === 'expired' ? status : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** Issue #16: the engine's hint names mnemopi_update restore, which the plugin's memory_update does not take; Claude gets the plugin's way instead. */
+function keptReply(reply: string): string {
+  try {
+    const body = JSON.parse(reply) as Record<string, unknown>
+    return JSON.stringify({ ...body, hint: 'This text is already stored as a hidden memory and was left unchanged. The user can restore it from the dashboard (Review tab).' })
+  } catch {
+    return reply
+  }
+}
+
 /** The engine call for knowledge: requests -> per request its text or its error, in one engine process, as the owner. */
 function knowledgeEngine($: EngineInterface, options: PluginOptions): KnowledgeEngine {
   return (requests, owner) => runAll($, options, requests.map(([name, args]) => [name, args] as const), owner, KNOWLEDGE_ENGINE_TIMEOUT_MS)
@@ -1503,6 +1523,7 @@ async function saveImported($: EngineInterface, options: PluginOptions, kind: 'd
   const isGlobal = options.scope !== 'per-project'
   const saved: { id: string; entry: ChunkEntry }[] = []
   let failed = 0
+  let kept = 0
   let firstError = ''
   let notReached = 0
   for (let at = 0; at < todo.length; at += IMPORT_SAVE_BATCH) {
@@ -1527,13 +1548,15 @@ async function saveImported($: EngineInterface, options: PluginOptions, kind: 'd
     ).catch((err: unknown) => batch.map(() => (err instanceof Error ? err : new Error(String(err)))))
     answers.forEach((answer, i) => {
       const id = answer instanceof Error ? undefined : savedId(answer)
-      if (id === undefined) {
+      // Issue #16: the text is a retired or expired memory, left as it is: not saved, not failed.
+      if (id !== undefined && keptStatus(String(answer)) !== undefined) kept++
+      else if (id === undefined) {
         failed++
         firstError ||= answer instanceof Error ? answer.message.slice(0, 200) : 'the engine gave no memory id'
       } else saved.push({ id, entry: batch[i]!.entry })
     })
   }
-  return { saved, failed, firstError, notReached }
+  return { saved, failed, kept, firstError, notReached }
 }
 
 /** A changed chunk's old row is retired once its replacement is saved (as the old row's owner); it is not deleted and can be restored. */
@@ -1624,7 +1647,7 @@ export async function importApply($: EngineInterface, options: PluginOptions, co
     })
   }
   const me = await owner($, options)
-  const { saved, failed, firstError, notReached } = await saveImported($, options, proposal.kind, todo, signal)
+  const { saved, failed, kept, firstError, notReached } = await saveImported($, options, proposal.kind, todo, signal)
   const { retired, failed: retireFailed, pairs } = await retireImported($, options, saved)
   const noun = proposal.kind === 'doc' ? 'chunk' : 'memory'
   const nouns = proposal.kind === 'doc' ? 'chunks' : 'memories'
@@ -1637,6 +1660,7 @@ export async function importApply($: EngineInterface, options: PluginOptions, co
     `Imported ${plural(saved.length, noun, nouns)} of ${label} (${plural(todo.length, noun, nouns)} ${todo.length === 1 ? 'was' : 'were'} due).`,
     `Skipped: ${skipped.unchanged} already in the store, ${skipped.blocked} blocked, ${skipped.edited} edited since the dry run (run it again), ${skipped.confirm} with a warning (resend as /mnemosyne-import apply confirm to save them).`,
     ...(pairs > 0 ? [`Replaced ${retired.length / 2} of ${plural(pairs, 'earlier chunk')}: each old row is retired, not deleted, and can be restored.${retireFailed > 0 ? ` ${plural(retireFailed, 'retire')} failed; the new chunks are saved and the old rows were left as they were.` : ''}`] : []),
+    ...(kept > 0 ? [`${plural(kept, noun, nouns)} already stored as retired or expired memories, left as they are (restore one from the dashboard to bring it back).`] : []),
     ...(failed > 0 ? [`${plural(failed, 'save')} failed (${firstError}).`] : []),
     ...(notReached > 0 ? [`Stopped early: ${plural(notReached, noun, nouns)} not reached; run /mnemosyne-import apply again to finish.`] : []),
     'Knowledge is not extracted from imported memories (no model call each): /mnemosyne-knowledge does that when you want it.',
@@ -1819,12 +1843,14 @@ async function finishSessionSummaries($: EngineInterface, options: PluginOptions
         ).catch((err: unknown) => [err instanceof Error ? err : new Error(String(err))])
         const answer = answers[0]
         const id = answer === undefined || answer instanceof Error ? undefined : savedId(answer)
+        // Issue #16: the same summary text is already a retired or expired memory, left so: done, but not a save.
+        const kept = answer === undefined || answer instanceof Error ? undefined : keptStatus(answer)
         if (id !== undefined) {
           finished = true
           await drop(entry)
         }
         await record($, options, [
-          { action: 'remember', origin: 'session', owner: entry.owner, client: 'mnemosyne-session', text: 'session summary', ids: id === undefined ? [] : [id], count: id === undefined ? 0 : 1, ok: id !== undefined, error: id === undefined ? 'the summary was not saved' : '' },
+          { action: 'remember', origin: 'session', owner: entry.owner, client: 'mnemosyne-session', text: 'session summary', ids: id === undefined ? [] : [id], count: id === undefined || kept !== undefined ? 0 : 1, ok: id !== undefined, error: id === undefined ? 'the summary was not saved' : '' },
         ])
       } finally {
         if (!finished) await release(entry)
@@ -2198,8 +2224,10 @@ export const register: Register = (on, options) => {
     const refused = refusedByGuard || nearRefused || missingKind
     // KNOWX.1: only the main thread's first save after a remember phrase is the
     // human's. A subagent's event carries an agentId and never consumes the trigger.
+    // Taken only once every refusal below has passed (#18): a denied call, whatever its reason, leaves the trigger for the retry.
     let provenance: { author_type: 'human'; veracity: 'stated' } | undefined
-    if (tool === 'memory_remember' && e.agentId === undefined && !refused && !staleSave) {
+    const takeTrigger = async () => {
+      if (tool !== 'memory_remember' || e.agentId !== undefined || refused || staleSave) return
       const session = await $.session.id().catch(() => undefined)
       if (session !== undefined) {
         // Consumed inside the updater, which sees the value as it is when the update lands: of two saves at once only one takes it.
@@ -2247,6 +2275,7 @@ export const register: Register = (on, options) => {
         }
         if ((tool === 'memory_update' || tool === 'memory_remember') && !(await isCurrent($, options))) return { deny: NOT_CURRENT }
         const [name, args] = engineArgs(tool, input, rules, settings)
+        await takeTrigger()
         // The trigger save is the person's: human, with veracity 'stated'.
         // C4: source 'user' and trust tier STATED besides the human author and veracity 'stated'.
         const withProvenance = provenance === undefined ? args : { ...args, ...provenance, source: 'user', trust_tier: 'STATED' }
@@ -2263,13 +2292,19 @@ export const register: Register = (on, options) => {
         const text = await call($, options, name, sent, as)
         // META.4: the save went in; now the memory it replaces is retired, as its owner. A failure here is a line, not a denial.
         let retireLine = ''
-        if (replacesId !== undefined) {
+        // Issue #16: the text is already a retired or expired memory; the engine left it so, and nothing is retired in its favour.
+        const kept = tool === 'memory_remember' ? keptStatus(text) : undefined
+        if (kept !== undefined) {
+          const keptId = savedId(text)
+          retireLine = `\nMnemosyne: this text is already stored as ${kept} memory ${keptId ?? 'unknown'}. It was left as it is and recall keeps hiding it; the user can restore it from the dashboard.`
+          if (replacesId !== undefined) retireLine += ` replaces ${replacesId} was not retired.`
+        } else if (replacesId !== undefined) {
           retired = await retireReplaced($, options, replacesId, savedId(text), replacesOwner)
           retireLine = retired.line
         }
         // One warning line per hit, after the engine's reply; `reply` stays the engine's own text.
         const warnings = (warnIds.length > 0 ? guard!.hits.map(hit => `\nMnemosyne guard warning: ${hit.message}`).join('') : '') + (near.length > 0 ? `\nMnemosyne guard warning: ${nearDuplicateMessage(near)}` : '')
-        return { reply: text, result: name === 'mnemopi_recall' ? JSON.stringify(compact(text)) : name === 'mnemopi_stats' ? mnemosyneStats(text) : `${text}${warnings}${retireLine}` }
+        return { reply: text, result: name === 'mnemopi_recall' ? JSON.stringify(compact(text)) : name === 'mnemopi_stats' ? mnemosyneStats(text) : `${kept !== undefined ? keptReply(text) : text}${warnings}${retireLine}` }
       } catch (err) {
         return { deny: `Mnemosyne: ${(err as Error).message}` }
       }
@@ -2287,7 +2322,8 @@ export const register: Register = (on, options) => {
     // A successful save (or a content update) starts extraction after the reply.
     // A tags-only or importance-only update changes no text, so it extracts nothing.
     if (!('deny' in answer) && (tool === 'memory_remember' || (tool === 'memory_update' && typeof input.content === 'string'))) {
-      const id = savedId(answer.reply)
+      // Issue #16: a retired or expired memory left as it is gets no extraction (its knowledge would bring it back).
+      const id = keptStatus(answer.reply) === undefined ? savedId(answer.reply) : undefined
       if (id !== undefined) {
         const who = as ?? (await owner($, options).catch(() => GLOBAL_OWNER))
         const session = (await $.session.id().catch(() => undefined)) ?? ''

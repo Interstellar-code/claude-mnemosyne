@@ -243,5 +243,7 @@ export function callOutcome(action: ActivityAction, args: Record<string, unknown
     return { ok: true, ids: results.map(r => String(r?.id ?? '')).filter(Boolean), count: results.length }
   }
   const id = str(body.memory_id) ?? (action === 'update' || action === 'forget' ? str(args.memory_id) : undefined)
+  // Issue #16: a remember that found its text as a retired or expired memory left it so; it names the row but saved nothing.
+  if (action === 'remember' && (body.status === 'retired' || body.status === 'expired')) return { ok: true, ids: id ? [id] : [], count: 0 }
   return { ok: true, ids: id ? [id] : [], count: id ? 1 : 0 }
 }

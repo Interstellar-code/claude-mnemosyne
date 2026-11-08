@@ -44,7 +44,9 @@ const DAY = /^\d{4}-\d{2}-\d{2}$/
 const HOST = /^(?:[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?|(?:[0-9a-f]{0,4}:){2,7}[0-9a-f.]{0,45})$/
 // 'project-<name>-<hash>' as owner() builds it; the prefix keeps 'global' and '__proto__' out of the registry.
 // owner() does not cap the folder name (up to 255 on most file systems), so the owner is kept whole; only the display name is cut to MAX_NAME.
-const OWNER = /^project-[A-Za-z0-9_-]{1,300}$/
+/** The longest name after 'project-' an owner may have; hooks/session.ts uses it too, so both accept the same owners. */
+export const OWNER_NAME_MAX = 300
+const OWNER = new RegExp(`^project-[A-Za-z0-9_-]{1,${OWNER_NAME_MAX}}$`)
 
 const isHost = (text: string) => text.length <= 253 && HOST.test(text)
 

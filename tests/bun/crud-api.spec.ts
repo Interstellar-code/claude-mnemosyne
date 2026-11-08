@@ -197,6 +197,24 @@ describe('CRUDX.1 and CRUDX.2: write routes on a real store', () => {
       expect(JSON.stringify(added[0])).not.toContain('build script')
     })
 
+    test('issue 16: saving the text of a retired memory again leaves it retired and answers 200 with its status, id and a hint', async () => {
+      const text = 'The alpha release checklist lives in the ops handbook'
+      const first = await post('/api/memory/create', { owner: OWNER, content: text, kind: 'fact' })
+      expect(first.status).toBe(200)
+      expect((await post('/api/memory/retire', { memory_id: first.json.memory_id })).status).toBe(200)
+      const before = rowOf(store, first.json.memory_id)
+      const logged = lines().length
+      const again = await post('/api/memory/create', { owner: OWNER, content: text, kind: 'fact', importance: 0.9 })
+      expect(again.status).toBe(200)
+      // The dashboard's retire ends valid_until (no replacement), so the engine names it expired.
+      expect(again.json).toMatchObject({ status: 'expired', memory_id: first.json.memory_id, owner: OWNER, kind: 'fact' })
+      expect(String(again.json.hint)).toMatch(/restore/i)
+      expect(rowOf(store, first.json.memory_id)).toEqual(before)
+      const added = lines().slice(logged)
+      expect(added).toHaveLength(1)
+      expect(added[0]).toMatchObject({ action: 'remember', origin: 'ui', owner: OWNER, ids: [first.json.memory_id], count: 0, ok: true })
+    })
+
     test('a global save is scope global; tags are optional', async () => {
       const { status, json } = await post('/api/memory/create', { owner: 'global', content: 'Rohit reads the weekly summary on Mondays', kind: 'preference' })
       expect(status).toBe(200)

@@ -382,6 +382,21 @@ describe('POST /api/settings/update: plugin options go through the CLI only', ()
     expect(JSON.parse(readFileSync(world.settingsFile, 'utf8')).pluginConfigs[PLUGIN_ID].options.recallTerms).toBe('none')
   })
 
+  test('a list holding only none (any case) saves as off, not a read-back mismatch (#34)', async () => {
+    const world = await boot()
+    for (const word of ['none', 'None', 'NONE']) {
+      const on = await world.post('/api/settings/update', { id: 'recallTerms', value: ['look up'] })
+      expect(on.status).toBe(200)
+      expect(on.body.value).toEqual(['look up'])
+      const off = await world.post('/api/settings/update', { id: 'recallTerms', value: [word] })
+      expect(off.status).toBe(200)
+      expect(off.body.value).toEqual([])
+      expect(off.body.changed).toBe(true)
+      expect(JSON.parse(readFileSync(world.settingsFile, 'utf8')).pluginConfigs[PLUGIN_ID].options.recallTerms).toBe('none')
+      expect((await world.row('recallTerms')).value).toEqual([])
+    }
+  })
+
   test('memoryDir and scope need the new value typed again, and warn that rows are not moved', async () => {
     const world = await boot()
     const before = writes(world).length

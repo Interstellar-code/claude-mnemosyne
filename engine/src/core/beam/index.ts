@@ -38,6 +38,7 @@ import {
 	importFromDict,
 	invalidate,
 	hasDuplicate,
+	duplicateState,
 	remember,
 	rememberBatch,
 	scratchpadClear,
@@ -232,6 +233,10 @@ export class BeamMemory implements BeamMemoryState {
 
 	hasDuplicate(content: string): boolean {
 		return hasDuplicate(this, content);
+	}
+
+	duplicateState(content: string): "live" | "retired" | "expired" | null {
+		return duplicateState(this, content);
 	}
 
 	remember(content: string, options: RememberOptions = {}): string {

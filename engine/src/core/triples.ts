@@ -249,16 +249,28 @@ export class TripleStore {
 	add(subject: string, predicate: string, object: string, options?: TripleWriteOptions | string | null): number {
 		const normalized = normalizeOptions(options);
 		const validFrom = normalized.validFrom ?? today();
-		this.conn.run("UPDATE triples SET valid_until = ? WHERE subject = ? AND predicate = ? AND valid_until IS NULL", [
-			validFrom,
-			subject,
-			predicate,
-		]);
-		const result = this.conn.run(
-			"INSERT INTO triples (subject, predicate, object, valid_from, source, confidence) VALUES (?, ?, ?, ?, ?, ?)",
-			[subject, predicate, object, validFrom, normalized.source, normalized.confidence],
-		);
-		return Number(result.lastInsertRowid);
+		return this.conn.transaction(() => {
+			const open = this.conn
+				.query("SELECT id, valid_from FROM triples WHERE subject = ? AND predicate = ? AND valid_until IS NULL")
+				.all(subject, predicate) as { id: number; valid_from: string }[];
+			// Per open row: one that starts after validFrom is newer and stays open, and the new fact is history that
+			// ends where the earliest such row starts. A date-only validFrom is the same day as a timestamp on that day,
+			// not earlier. Every other open row is closed, never before its own start.
+			let validUntil: string | null = null;
+			for (const row of open) {
+				if (validFrom < row.valid_from && !row.valid_from.startsWith(validFrom)) {
+					if (validUntil === null || row.valid_from < validUntil) validUntil = row.valid_from;
+				} else {
+					const closeAt = validFrom < row.valid_from ? row.valid_from : validFrom;
+					this.conn.run("UPDATE triples SET valid_until = ? WHERE id = ?", [closeAt, row.id]);
+				}
+			}
+			const result = this.conn.run(
+				"INSERT INTO triples (subject, predicate, object, valid_from, valid_until, source, confidence) VALUES (?, ?, ?, ?, ?, ?, ?)",
+				[subject, predicate, object, validFrom, validUntil, normalized.source, normalized.confidence],
+			);
+			return Number(result.lastInsertRowid);
+		})();
 	}
 
 	query(options?: TripleQueryOptions): TripleRow[];

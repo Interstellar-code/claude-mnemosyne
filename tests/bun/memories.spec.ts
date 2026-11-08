@@ -860,6 +860,27 @@ describe('META.4: replaces retires, never deletes', () => {
     expect(String(again.result)).toContain('nothing to retire')
     expect(rowOf(host, id)).toMatchObject({ valid_until: null, superseded_by: null })
   })
+
+  test('issue 16: re-saving a retired text leaves it retired, says so, and retires nothing it names', async () => {
+    const host = await open()
+    const blue = { content: 'The build cache lives on the blue volume.', kind: 'fact' }
+    const old = first(await host.tool('memory_remember', blue)).memory_id as string
+    const fresh = first(await host.tool('memory_remember', { content: 'The build cache now lives on the green volume.', kind: 'fact', replaces: old })).memory_id as string
+    expect(rowOf(host, old)!.superseded_by).toBe(fresh)
+    const before = { old: rowOf(host, old), fresh: rowOf(host, fresh) }
+    const again = await host.tool('memory_remember', { ...blue, replaces: fresh })
+    expect(again.deny).toBeUndefined()
+    expect(first(again)).toMatchObject({ status: 'retired', memory_id: old, duplicate: true })
+    expect(String(again.result)).toContain(`already stored as retired memory ${old}`)
+    // Claude is pointed at the dashboard, not at an engine restore argument the plugin's memory_update does not take.
+    expect(String(first(again).hint)).toContain('dashboard')
+    expect(String(again.result)).not.toContain('mnemopi_update')
+    expect(String(again.result)).not.toContain(`retired ${fresh}`)
+    // Neither row changed: the retired one stays retired, the live one is not retired in favour of it.
+    expect(rowOf(host, old)).toEqual(before.old)
+    expect(rowOf(host, fresh)).toEqual(before.fresh)
+    expect(await recalled(host, 'build cache blue volume')).not.toContain(old)
+  }, 30_000)
 })
 
 // VOCAB.4: /mnemosyne-tags retag through the real hooks/register.ts, bin/memories.ts and engine (only the model is a stand-in).

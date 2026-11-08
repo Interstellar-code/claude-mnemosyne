@@ -158,6 +158,21 @@ export function hasDuplicate(beam: BeamMemoryState, content: string): boolean {
 	return findDuplicate(beam, content) !== null;
 }
 
+/**
+ * Issue #16: the state of the row `remember` would re-save, or null when there is none. A retired
+ * (superseded) or expired row is left as it is by a re-save; only `restoreWorking` brings it back.
+ */
+export function duplicateState(beam: BeamMemoryState, content: string): "live" | "retired" | "expired" | null {
+	const id = findDuplicate(beam, content);
+	if (id === null) return null;
+	using statement = beam.db.prepare("SELECT valid_until, superseded_by FROM working_memory WHERE id = ?");
+	const row = statement.get(id) as { valid_until: string | null; superseded_by: string | null } | null;
+	if (row == null) return null;
+	if (row.superseded_by != null) return "retired";
+	if (row.valid_until != null && row.valid_until <= toUtcIso()) return "expired";
+	return "live";
+}
+
 function findDuplicate(beam: BeamMemoryState, content: string): string | null {
 	using statement = beam.db.prepare("SELECT id FROM working_memory WHERE content = ? AND session_id = ? LIMIT 1");
 	const row = statement.get(content, beam.sessionId) as { id: string } | null;
@@ -461,6 +476,8 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 	const embedText = embeddingText(content, options);
 
 	const existingId = findDuplicate(beam, content);
+	// Issue #16: a retired or expired row stays as it is; mnemopi_update with restore brings it back.
+	if (existingId !== null && duplicateState(beam, content) !== "live") return existingId;
 	if (existingId !== null) {
 		// engine/UPSTREAM.md changes 17 and 18: a re-save never lowers a stored scope (session < channel < global),
 		// keeps the first writer's source and trust tier (a NULL is filled), and never changes the kind or adds an
