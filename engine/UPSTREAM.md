@@ -40,8 +40,9 @@ Ours, not upstream's (engine-diff ignores them): `UPSTREAM.md`, `bun.lock` (our 
 | 18.12.3-mnemosyne.15 | 7840532d977bf4b9b7087d9ec73955d34fac3e7613ba60bfd88e0a1854fd9ff7 |
 | 18.12.3-mnemosyne.16 | a920529105abee6a7f0bfd0ebb845f8afeb513a8e9522a379d469edaf8be34a5 |
 | 18.12.3-mnemosyne.17 | ac1064bc11c5b1460b7388860986c4aa4edd5062ccb32e5b7096efe7fb4f304f |
+| 18.12.3-mnemosyne.18 | 2c3cdefb964baa90f40786ccb1bf9d731d45bf7350270cf5fa81b1a79330a4d2 |
 
-The `18.12.3` row is the untouched upstream source, for reference. `.1` had changes 1 to 3; `.2` makes the change 1 merge keep a `__proto__` key as plain data (it was dropped); `.3` adds the two knowledge tools (change 4) and keeps the first author on dedupe with empty author env unset (change 5); `.4` is the review fix round: the knowledge reply is normalised by `parseExtractedFactCategories` (change 4), and the author pair merges as one unit (change 5); `.5` turns embeddings on: fastembed is a real dependency with an onnxruntime override (change 6), the CLI exits naturally on success (change 7), the on-demand runtime install is gone (change 8), and a `reembed` command backfills vectors (change 9); `.6` is the review fix round: `reembed` recounts after the drain and proves the model before a rebuild (change 9), and the API embedding route is refused without an explicit opt-in (change 10); `.7` is the second fix round: the fastembed cache dir is read from the plugin-pinned `PI_CONFIG_DIR` directly, immune to the dotenv/XDG/profile refill (change 11), and the dry run prints the 'apply' hint only when something is missing (change 9). `.8` is phase MODEL (v3): the trim spares every row whose scope is not 'session' (change 12), remember and update store `memory_type`, `trust_tier` and `valid_until` and update can restore a retired row (change 13), the read-only `mnemopi_similar` (change 14), `mnemopi_expire_unused` (change 15), and the audit trail in `memory_validations` that forget purges (change 16). `.9` MODEL.7 fix round: a re-save of the same text by the same owner never lowers a stored scope, keeps the stored trust tier unless the call names one, and never relabels a fact, preference, instruction or decision or gives it an expiry (change 17). `.10` MODEL.8: a re-save also keeps the first writer's `source` and `trust_tier` (change 18). `.11` the `mnemopi_remember` reply says `duplicate` (change 19). `.12` entity questions rank the memories about the thing asked (change 20). `.13` a process can take the owner per call, for the dashboard's warm search engine (change 21). `.14` a query naming a memory kind finds that kind (change 22), and an entity question gets the extracted facts about it (change 23). `.15` an explicit nested `llm.enabled: false` is kept (change 24), and model replies keep their list and `Source:` lines outside summaries (change 25). `.16` a backdated triple is stored as history and no triple range ends before it starts (change 26), a re-save of a retired or expired memory's text leaves it so and says so (change 27), and `mnemopi_validate`'s `private` and `surface` banks reach the real stores (change 28). `.17` bug-hunt batch C: the broken-JSON fallback stores no keys or JSON fragments as facts (change 29), the extraction prompt keeps `$` patterns in the conversation (change 30), percent metrics are extracted (change 31), the `launched` EVENT pattern matches (change 32), and the is / has / uses fact patterns no longer clip the next word (change 33).
+The `18.12.3` row is the untouched upstream source, for reference. `.1` had changes 1 to 3; `.2` makes the change 1 merge keep a `__proto__` key as plain data (it was dropped); `.3` adds the two knowledge tools (change 4) and keeps the first author on dedupe with empty author env unset (change 5); `.4` is the review fix round: the knowledge reply is normalised by `parseExtractedFactCategories` (change 4), and the author pair merges as one unit (change 5); `.5` turns embeddings on: fastembed is a real dependency with an onnxruntime override (change 6), the CLI exits naturally on success (change 7), the on-demand runtime install is gone (change 8), and a `reembed` command backfills vectors (change 9); `.6` is the review fix round: `reembed` recounts after the drain and proves the model before a rebuild (change 9), and the API embedding route is refused without an explicit opt-in (change 10); `.7` is the second fix round: the fastembed cache dir is read from the plugin-pinned `PI_CONFIG_DIR` directly, immune to the dotenv/XDG/profile refill (change 11), and the dry run prints the 'apply' hint only when something is missing (change 9). `.8` is phase MODEL (v3): the trim spares every row whose scope is not 'session' (change 12), remember and update store `memory_type`, `trust_tier` and `valid_until` and update can restore a retired row (change 13), the read-only `mnemopi_similar` (change 14), `mnemopi_expire_unused` (change 15), and the audit trail in `memory_validations` that forget purges (change 16). `.9` MODEL.7 fix round: a re-save of the same text by the same owner never lowers a stored scope, keeps the stored trust tier unless the call names one, and never relabels a fact, preference, instruction or decision or gives it an expiry (change 17). `.10` MODEL.8: a re-save also keeps the first writer's `source` and `trust_tier` (change 18). `.11` the `mnemopi_remember` reply says `duplicate` (change 19). `.12` entity questions rank the memories about the thing asked (change 20). `.13` a process can take the owner per call, for the dashboard's warm search engine (change 21). `.14` a query naming a memory kind finds that kind (change 22), and an entity question gets the extracted facts about it (change 23). `.15` an explicit nested `llm.enabled: false` is kept (change 24), and model replies keep their list and `Source:` lines outside summaries (change 25). `.16` a backdated triple is stored as history and no triple range ends before it starts (change 26), a re-save of a retired or expired memory's text leaves it so and says so (change 27), and `mnemopi_validate`'s `private` and `surface` banks reach the real stores (change 28). `.17` bug-hunt batch C: the broken-JSON fallback stores no keys or JSON fragments as facts (change 29), the extraction prompt keeps `$` patterns in the conversation (change 30), percent metrics are extracted (change 31), the `launched` EVENT pattern matches (change 32), and the is / has / uses fact patterns no longer clip the next word (change 33). `.18` bug-hunt batch B: meaning search covers every embedded memory (change 34), the facade passes the recall flags through (change 35), a word in several synonym groups expands to all of them (change 36), the temporal voice matches whole words (change 37), every query word stays in the FTS query (change 38), 'the day before yesterday' is two days back (change 39), and confidence boosters match whole words (change 40).
 
 ## Changes
 
@@ -341,5 +342,68 @@ Not changed: `dist/types/*.d.ts` still describe upstream 18.12.3 (no `metadata` 
 - Why: `(?:a|an|the)?\s*` matched a leading a/an/the inside the next word, so "amazing" became "mazing" and "another" became "nother", and the clipped facts passed the length check (claude-mnemosyne#25).
 - Files: `src/core/episodic-graph.ts`
 - Tests: `test/fact-article.spec.ts`
+- Upstream issue: none yet
+- Status: open
+
+### 34. Meaning search covers every embedded memory
+
+- What: with a query embedding, recall computes vector similarity over every visible row that has a stored embedding (`embeddedVisibleIds`, in chunks of 500), with the same visibility, scope, date and kind filters, not only the 500 newest per tier. Without an embedding nothing changes; the result limit and weights are unchanged. The cost is a linear cosine scan of the embedded rows; `vec_episodes` is not used (never created by `schema.ts`, episodic only, and its top-k cannot apply the filters).
+- Why: an older memory with no keyword overlap but the best embedding match was never found (claude-mnemosyne#19).
+- Files: `src/core/beam/recall.ts`
+- Tests: `test/vector-recall-coverage.spec.ts`
+- Upstream issue: none yet
+- Status: open
+
+### 35. The facade passes the recall flags through
+
+- What: `toRecallOptions` in `src/core/memory.ts` passes `useSynonyms`, `useIntent`, `useMmr` and `mmrLambda` from `recall()` / `recallEnhanced()` to beam recall; unset stays unset.
+- Why: the flags were dropped, so the caller's settings were silently ignored (claude-mnemosyne#7).
+- Files: `src/core/memory.ts`
+- Tests: `test/recall-facade-options.spec.ts`
+- Upstream issue: none yet
+- Status: open
+
+### 36. A word in several synonym groups expands to all of them
+
+- What: `getSynonyms` covers every group a word is in, deduped, in group order (built on the new `getSynonymGroups`). Recall's `expandedTokens` lists the literal query words first, then one variant per synonym group in turn, so the 12-term FTS query and the fact fallback reach every word and every meaning; the token set is unchanged, only the order. `normalizeQuery` and `expandQuery` keep one canonical.
+- Why: recall for 'token', 'push', 'setup', 'check' and similar words missed memories using the other meaning's words (claude-mnemosyne#12).
+- Files: `src/core/synonyms.ts` `src/core/beam/recall.ts`
+- Tests: `test/synonyms.spec.ts`
+- Upstream issue: none yet
+- Status: open
+
+### 37. The temporal voice matches whole words
+
+- What: `looksTemporal` (now exported) matches its keywords on word boundaries; the list is unchanged. `recently` and `lastly` no longer fire it.
+- Why: 'Chicago', 'Elasticsearch', 'plastic' and 'beforehand' switched the temporal voice on and mixed unrelated recent notes into results (claude-mnemosyne#17).
+- Files: `src/core/polyphonic-recall.ts`
+- Tests: `test/temporal-trigger.spec.ts`
+- Upstream issue: none yet
+- Status: open
+
+### 38. Every query word stays in the FTS query
+
+- What: `ftsQuery` keeps every distinct query word (more than 12 for a longer query) and adds synonyms only in the room left under the 12-term cap.
+- Why: early query words with many synonyms pushed later query words out of the FTS MATCH (claude-mnemosyne#26).
+- Files: `src/core/beam/recall.ts`
+- Tests: `test/fts-query-terms.spec.ts`
+- Upstream issue: none yet
+- Status: open
+
+### 39. 'The day before yesterday' is two days back
+
+- What: the two-day branch is checked before `/\byesterday\b/`.
+- Why: the yesterday check matched the phrase first, so it resolved to one day back (claude-mnemosyne#9).
+- Files: `src/core/temporal-parser.ts`
+- Tests: `test/temporal-day-before-yesterday.spec.ts`
+- Upstream issue: none yet
+- Status: open
+
+### 40. Confidence boosters match whole words
+
+- What: boosters in `classifyMemory` match as whole words or phrases (`\b`-bounded, regex-escaped); the lists and the +0.05 step are unchanged.
+- Why: the EVENT boosters 'at' and 'on' matched inside nearly every note, a false +0.10 that could flip the type to EVENT (claude-mnemosyne#23).
+- Files: `src/core/typed-memory.ts`
+- Tests: `test/confidence-boosters.spec.ts`
 - Upstream issue: none yet
 - Status: open

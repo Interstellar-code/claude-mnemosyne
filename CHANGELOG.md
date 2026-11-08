@@ -2,6 +2,18 @@
 
 Newest first. Each release is tagged `vX.Y.Z` on GitHub; the README and DESIGN.md describe the contracts.
 
+## 0.31.2 (bug-hunt batch B: recall and query)
+
+Engine build 18.12.3-mnemosyne.18 (engine changes 34 to 40). Run `/mnemosyne-setup` once after updating; outside Claude Code, `bun bin/update.ts` or Update… on the Health tab.
+
+1. **Meaning search looks at every memory.** With embeddings on, only the 500 newest memories were compared by meaning, so an older memory that matched by meaning but shared no words was never found. Now every memory with an embedding is compared (the work grows with the store; fine for thousands of memories) (#19).
+2. **Recall settings from the engine's own API are honoured.** `useSynonyms`, `useIntent`, `useMmr` and `mmrLambda` passed to `recall()` were silently dropped (#7).
+3. **Words with two meanings search both.** "token", "push", "setup", "check" and similar words now find memories that use either meaning's words (#12).
+4. **"Chicago" is not a time word.** Words that merely contain "ago", "last" or "before" (Chicago, Elasticsearch, plastic, beforehand) no longer pull recent unrelated notes into results (#17).
+5. **Long questions keep all their words.** In a question with several words, later words were dropped from the keyword search when earlier ones had many synonyms (#26).
+6. **"The day before yesterday" means two days back** (#9).
+7. **Notes are not mistaken for events.** The letters "at" and "on" inside other words made almost every note look a bit like an event (#23).
+
 ## 0.31.1 (bug-hunt batch C: extraction and parsing)
 
 Engine build 18.12.3-mnemosyne.17 (engine changes 29 to 33). Run `/mnemosyne-setup` once after updating; outside Claude Code, `bun bin/update.ts` or Update… on the Health tab.
