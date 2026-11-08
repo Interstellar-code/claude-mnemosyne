@@ -303,7 +303,12 @@ function trackCopy(view: SettingsView, copy: HTMLButtonElement, ok?: boolean) {
   const set = copyButtons.get(view) ?? new Set<HTMLButtonElement>()
   copyButtons.set(view, set)
   set.add(copy)
-  if (ok === true) for (const other of set) if (other !== copy && other.textContent === 'Copied') other.textContent = 'Copy'
+  if (ok !== true) return
+  for (const other of set) {
+    // A button whose row was drawn again is gone from the page: let it go rather than keep it for ever.
+    if (other.isConnected === false) set.delete(other)
+    else if (other !== copy && other.textContent === 'Copied') other.textContent = 'Copy'
+  }
 }
 
 let fieldCount = 0
@@ -964,6 +969,8 @@ function drawSetup(rows: readonly SettingRow[], view: SettingsView, host: Settin
 /** Everything under the page title: the banner, Reset all, the groups. The filter box redraws only this. */
 export function drawGroups(data: SettingsData, view: SettingsView, host: SettingsHost): HTMLElement[] {
   const out: HTMLElement[] = []
+  // Every card is drawn anew, so the copy buttons of the last draw are dropped (#33).
+  copyButtons.delete(view)
   const mode = view.mode ?? 'all'
   const rows = filterRows(data.settings, data.groups, view.filter, mode)
   const matching = view.filter.trim() !== '' || mode !== 'all'

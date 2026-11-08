@@ -782,6 +782,32 @@ describe('UI.3: Setup and backups, and This browser', () => {
     })
   })
 
+  test('copy buttons from an earlier draw or a replaced row are let go, not kept for ever (#33)', async () => {
+    const world = await boot()
+    const data = await load(world)
+    const sent = realHost(world)
+    await withDocument(async () => {
+      const view = newView()
+      const setupOf = (cards: FakeNode[]) => cards.find(card => card.find('h2')!.textContent === 'Setup')!
+      const [old] = setupOf(drawGroups(data, view, sent.host) as FakeNode[]).findAll('button').filter(button => button.textContent === 'Copy')
+      old.fire('click')
+      await settle()
+      expect(old.textContent).toBe('Copied')
+      // A filter keystroke draws every card again; the old tree is gone and must not stay tracked.
+      const fresh = setupOf(drawGroups(data, view, sent.host) as FakeNode[]).findAll('button').filter(button => button.textContent === 'Copy')
+      fresh[0].fire('click')
+      await settle()
+      expect(fresh[0].textContent).toBe('Copied')
+      expect(old.textContent).toBe('Copied')
+      // A button whose row was replaced (no longer connected) is dropped on the next copy.
+      Object.defineProperty(fresh[0], 'isConnected', { value: false })
+      fresh[1].fire('click')
+      await settle()
+      expect(fresh[1].textContent).toBe('Copied')
+      expect(fresh[0].textContent).toBe('Copied')
+    })
+  })
+
   test('a failed copy says so, and the command stays on the page as text', async () => {
     const world = await boot()
     const data = await load(world)
