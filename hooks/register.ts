@@ -2224,8 +2224,10 @@ export const register: Register = (on, options) => {
     const refused = refusedByGuard || nearRefused || missingKind
     // KNOWX.1: only the main thread's first save after a remember phrase is the
     // human's. A subagent's event carries an agentId and never consumes the trigger.
+    // Taken only once every refusal below has passed (#18): a denied call, whatever its reason, leaves the trigger for the retry.
     let provenance: { author_type: 'human'; veracity: 'stated' } | undefined
-    if (tool === 'memory_remember' && e.agentId === undefined && !refused && !staleSave) {
+    const takeTrigger = async () => {
+      if (tool !== 'memory_remember' || e.agentId !== undefined || refused || staleSave) return
       const session = await $.session.id().catch(() => undefined)
       if (session !== undefined) {
         // Consumed inside the updater, which sees the value as it is when the update lands: of two saves at once only one takes it.
@@ -2273,6 +2275,7 @@ export const register: Register = (on, options) => {
         }
         if ((tool === 'memory_update' || tool === 'memory_remember') && !(await isCurrent($, options))) return { deny: NOT_CURRENT }
         const [name, args] = engineArgs(tool, input, rules, settings)
+        await takeTrigger()
         // The trigger save is the person's: human, with veracity 'stated'.
         // C4: source 'user' and trust tier STATED besides the human author and veracity 'stated'.
         const withProvenance = provenance === undefined ? args : { ...args, ...provenance, source: 'user', trust_tier: 'STATED' }

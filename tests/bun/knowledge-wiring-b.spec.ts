@@ -377,6 +377,23 @@ describe('provenance through the real engine', () => {
     expect(agent.trust_tier).toBe('DERIVED')
   })
 
+  test('#18: a remember call refused for a bad kind, expires_in_days or replaces leaves the trigger, so the corrected retry is human + stated', async () => {
+    const host = await open({ options: TRIGGER, model: good })
+    await host.prompt('remember that we deploy on fridays')
+    const badKind = await host.tool('memory_remember', { kind: 'not-a-kind', content: 'we deploy on fridays' })
+    expect(badKind.deny).toBeDefined()
+    const badDays = await host.tool('memory_remember', { kind: 'fact', content: 'we deploy on fridays', expires_in_days: -3 })
+    expect(badDays.deny).toBeDefined()
+    const badReplaces = await host.tool('memory_remember', { kind: 'fact', content: 'we deploy on fridays', replaces: 'not an id' })
+    expect(badReplaces.deny).toBeDefined()
+    expect(rowsOf(host)).toHaveLength(0)
+    await host.tool('memory_remember', { kind: 'fact', content: 'we deploy on fridays' })
+    await until('the extract line', () => host.extractLines()[0])
+    const rows = rowsOf(host)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ author_type: 'human', veracity: 'stated', trust_tier: 'STATED' })
+  })
+
   test('spec 11: a content memory_update keeps the row human + stated', async () => {
     const host = await open({ options: TRIGGER, model: good })
     await host.prompt('remember that we deploy on fridays')
