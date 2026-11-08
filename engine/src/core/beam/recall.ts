@@ -19,7 +19,7 @@ import { type OrchestratedRecallResult, orchestrateRecall } from "../orchestrato
 import { POLYPHONIC_MAX_COMBINED_SCORE } from "../polyphonic-recall";
 import { isQueryCacheEnabled, QueryCache } from "../query-cache";
 import { adjustWeights, classifyIntent, type QueryIntentCategory } from "../query-intent";
-import { getSynonyms, STOP_WORDS as QUERY_STOP_WORDS } from "../synonyms";
+import { getSynonymGroups, getSynonyms, STOP_WORDS as QUERY_STOP_WORDS } from "../synonyms";
 import { extractTemporal } from "../temporal-parser";
 import { cosineSimilarity } from "../vector-math";
 import type { BeamMemoryState, RecallEnhancedOptions, RecallOptions, RecallResult } from "./types";
@@ -308,12 +308,24 @@ function recallSynonyms(token: string, useSynonyms: boolean): string[] {
 	}
 }
 
+// Literal query words first, then one variant from each synonym group of each word in turn, so a capped
+// prefix (ftsQuery, the fact fallback) reaches every query word and every meaning of a word that sits in
+// several synonym groups (issues #12, #26). The token set is the same as a flat expansion; only the order differs.
 function expandedTokens(query: string, useSynonyms = true): string[] {
-	const seen = new Set<string>();
+	const seen = new Set<string>(tokenize(query));
+	const lanes: string[][] = [];
 	for (const token of tokenize(query)) {
-		for (const variant of recallSynonyms(token, useSynonyms)) {
-			for (const part of tokenize(variant)) seen.add(part);
+		const meanings = useSynonyms ? getSynonymGroups(token) : [];
+		const grouped = new Set(meanings.flat());
+		const rest = recallSynonyms(token, useSynonyms).filter(variant => !grouped.has(variant));
+		for (const lane of [...meanings, rest]) {
+			const parts = lane.flatMap(variant => tokenize(variant));
+			if (parts.length > 0) lanes.push(parts);
 		}
+	}
+	const longest = Math.max(0, ...lanes.map(lane => lane.length));
+	for (let i = 0; i < longest; i++) {
+		for (const lane of lanes) if (i < lane.length) seen.add(lane[i] as string);
 	}
 	return [...seen];
 }

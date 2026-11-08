@@ -189,15 +189,19 @@ export function expandQuery(query: string): string {
 	}
 	return expandedParts.join(" ");
 }
-export function getSynonyms(word: string): string[] {
+// One list per synonym group the word belongs to ([canonical, ...synonyms]), in group order (issue #12).
+export function getSynonymGroups(word: string): string[][] {
 	const lowered = word.toLowerCase();
-	const words = new Set<string>();
+	const groups: string[][] = [];
 	for (const canonical in SYNONYM_GROUPS) {
 		const group: readonly string[] = SYNONYM_GROUPS[canonical as Canonical];
-		if (canonical !== lowered && !group.includes(lowered)) continue;
-		words.add(canonical);
-		for (const synonym of group) words.add(synonym);
+		if (canonical === lowered || group.includes(lowered)) groups.push([canonical, ...group]);
 	}
-	if (words.size === 0) return [lowered];
+	return groups;
+}
+
+export function getSynonyms(word: string): string[] {
+	const words = new Set(getSynonymGroups(word).flat());
+	if (words.size === 0) return [word.toLowerCase()];
 	return [...words];
 }

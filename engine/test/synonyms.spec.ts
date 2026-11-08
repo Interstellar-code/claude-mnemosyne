@@ -36,3 +36,12 @@ test("a recall for 'token' finds a memory that uses only a password-group word",
 	const [reply] = await mcp(store.dir, "o1", [["mnemopi_recall", { query: "token", update_recall_counts: false }]]);
 	expect((reply!.body.results as { id: string }[]).map(r => r.id)).toContain(id);
 });
+
+test("a two-word recall whose first word is in several groups still searches the second word", async () => {
+	const git = await remember(store.dir, "o1", "the git branch naming rules");
+	const setup = await remember(store.dir, "o1", "the setup guide for the cluster");
+	const [reply] = await mcp(store.dir, "o1", [["mnemopi_recall", { query: "push setup", update_recall_counts: false }]]);
+	const ids = (reply!.body.results as { id: string }[]).map(r => r.id);
+	expect(ids).toContain(git);
+	expect(ids).toContain(setup);
+});
