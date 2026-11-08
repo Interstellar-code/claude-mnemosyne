@@ -1,7 +1,7 @@
 export const meta = {
   name: 'fix-issues',
   description: 'Reproduce, fix and independently review a batch of GitHub issues, one worktree per issue',
-  whenToUse: 'A batch of independent bug issues, each in different files; args = {repo, setup, rules?, issues:[{number, title, location, summary, decision?, testHint}]}',
+  whenToUse: 'A batch of independent bug issues, each in different files; args = {repo, setup, base?, rules?, issues:[{number, title, location, summary, decision?, testHint}]}',
   phases: [
     { title: 'Fix', detail: 'one agent per issue, own worktree: failing test, smallest fix, commit' },
     { title: 'Review', detail: 'fresh agent per fix, reads only the commit and the issue' },
@@ -70,7 +70,7 @@ The report: ${it.summary}
 ${it.decision ? `The owner decided the intended behaviour: ${it.decision}` : ''}
 Testing hint: ${it.testHint}
 
-You are in a fresh git worktree of the repository. First install dependencies: ${args.setup}
+You are in a fresh git worktree of the repository. Its starting commit can be stale (it is cut from the local main ref), so first move it onto the base: run `git fetch origin` and `git reset --hard ${args.base ?? 'origin/main'}` in this worktree (it is a throwaway checkout with nothing of yours in it yet), then confirm with `git log -1 --oneline` and report that commit in testsRun. Then install dependencies: ${args.setup}
 The report may be older than the code; check the current code before trusting line numbers.
 ${RULES}
 Return the worktree path (git rev-parse --show-toplevel), branch (git branch --show-current) and the full commit sha.`,

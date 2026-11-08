@@ -8,6 +8,7 @@ Args:
 {
   "repo": "owner/name",
   "setup": "install command run in each fresh worktree",
+  "base": "the commit each worktree is moved to before work starts (optional, default origin/main)",
   "rules": "extra repo rules for every fix agent (optional)",
   "issues": [{ "number": 15, "title": "...", "location": "file and function", "summary": "what goes wrong", "decision": "intended behaviour, when the owner chose one (optional)", "testHint": "where and what to test" }]
 }
@@ -19,7 +20,7 @@ For this repo, `setup` is `bun install --frozen-lockfile && bun install --cwd en
 
 ## Before a run
 
-The worktrees are cut from the local `main` ref, not from the branch you are on, and in a fresh clone that ref can be weeks old. Update it first, or the agents fix old code:
+The worktrees are cut from the local `main` ref, not from the branch you are on, and in a fresh clone that ref can be weeks old. Each fix agent now moves its worktree to `base` (default `origin/main`) before it starts and reports the commit it is on. Updating the local ref first is still cheap insurance:
 
 ```bash
 git fetch origin main && git branch -f main origin/main
