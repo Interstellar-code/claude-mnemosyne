@@ -2,6 +2,14 @@
 
 Newest first. Each release is tagged `vX.Y.Z` on GitHub; the README and DESIGN.md describe the contracts.
 
+## 0.30.2 (bug-hunt fixes: facts with dates, retired re-saves, validate banks)
+
+Engine build 18.12.3-mnemosyne.16 (engine changes 26 to 28). Run `/mnemosyne-setup` once after updating; outside Claude Code, `bun bin/update.ts` or Update… on the Health tab.
+
+1. **An older fact no longer replaces the current one.** Adding a fact with an earlier start date than the current fact for the same subject and predicate stores it as history, ending where the current one starts; the current fact stays current. No fact's date range can end before it starts any more, and the change and the insert are one step (#15).
+2. **Saving the text of a retired or expired memory again leaves it retired.** Before, the save said "stored" while the memory stayed hidden. Now the reply says `retired` or `expired` with its id, Claude is told it can be restored from the dashboard, nothing named in `replaces` is retired in its favour, no knowledge is extracted from it, `/mnemosyne-import` counts it apart from saves, the dashboard's New memory shows it as kept (not as a failure), and the activity log counts it as no save (#16).
+3. **`mnemopi_validate` finds the memory.** Its bank `private` is the main store and `surface` the shared store; before, both opened a new empty bank, found nothing and left the empty folder behind (#13).
+
 ## 0.30.1 (two engine fixes from mikemikimike)
 
 Engine build 18.12.3-mnemosyne.15 (engine changes 24 and 25). Thanks to mikemikimike for both fixes (#41, #42).
