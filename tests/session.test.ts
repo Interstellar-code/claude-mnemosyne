@@ -245,6 +245,8 @@ function rig(on: On, options: RigOptions = {}) {
       state.imports.push({ ...e })
       return reply(options.importer?.(e.argv), '')
     }
+    // Issue #3: owner()'s registry lookup; exit 1, so the owner stays the path id these specs expect.
+    if (script.endsWith('/bin/projects.ts') && e.argv[2] === 'resolve') return reply({ exitCode: 1, stdout: '' }, '')
     state.engine.push({ ...e })
     const sent = (e.init?.stdin ?? '').split('\n').filter(Boolean).map(line => JSON.parse(line))
     const stdout = sent

@@ -9,6 +9,7 @@ import type { Proposal } from '../hooks/backfill'
 import type { Row } from '../hooks/backfill'
 import { cleanTags } from '../hooks/tags'
 import { KIND_LIST, missingKindMessage } from '../hooks/kinds'
+import { ownerId, remoteKey, remoteOwnerId } from '../hooks/owner'
 
 type Run = { argv: readonly string[]; init?: ProcessRunInit; via?: 'run' | 'spawn' }
 
@@ -47,6 +48,8 @@ type Extra = {
   cwd?: string
   // MAPX.8: each `bun bin/projects.ts write <path>` spawn finishes (default), never finishes, or throws.
   projects?: 'ok' | 'hang' | 'throw'
+  // Issue #3: the answer to `bun bin/projects.ts resolve <path> <store>`, by its stdin; undefined: exit 1, so owner() keeps the path id.
+  resolve?: (stdin: string) => { stdout?: string; exitCode?: number } | undefined
   // SESSION: the answer to a session command of bin/memories.ts (first-prompt, summarised, session-pending, sweep-claim, expire); undefined falls back to a quiet default (nothing pinned, nothing pending, no sweep due).
   memories?: (argv: readonly string[], stdin: string) => { stdout?: string; exitCode?: number; stderr?: string } | undefined
 }
@@ -62,7 +65,7 @@ const MODEL_DIR = '/home/u/.claude/mnemosyne/model-cache/cache/fastembed/Qdrant_
 const MARKER = '/home/u/.claude/mnemosyne/embeddings.json'
 
 function world(on: On, reply: string, isInstalled = true, exitCode = 0, build: string = ENGINE_BUILD, extra: Extra = {}) {
-  const runs: Run[] & { appends: Run[]; projects: Run[]; session: Run[] } = Object.assign([] as Run[], { appends: [] as Run[], projects: [] as Run[], session: [] as Run[] })
+  const runs: Run[] & { appends: Run[]; projects: Run[]; session: Run[]; resolves: Run[] } = Object.assign([] as Run[], { appends: [] as Run[], projects: [] as Run[], session: [] as Run[], resolves: [] as Run[] })
   on('env.get', (_$, e) => ({ value: extra.env?.[(e as { name: string }).name] ?? '/home/u' }))
   // A file for the installed engine; an empty embedding cache unless extra.embeddingsReady.
   on(
@@ -104,6 +107,12 @@ function world(on: On, reply: string, isInstalled = true, exitCode = 0, build: s
       const darwin = extra.darwinArm64 || extra.intelMac
       const stdout = e.argv[1] === '-s' ? (darwin ? 'Darwin\n' : 'Linux\n') : extra.darwinArm64 && !extra.intelMac ? 'arm64\n' : 'x86_64\n'
       return { value: { exitCode: 0, stdout, stderr: '' } } as never
+    }
+    // Issue #3: owner()'s lookup is kept apart too, so the engine runs these specs count stay the engine's.
+    if ((e.argv[1] ?? '').endsWith('/bin/projects.ts') && e.argv[2] === 'resolve') {
+      runs.resolves.push(e)
+      const given = extra.resolve?.(e.init?.stdin ?? '')
+      return { value: { exitCode: given?.exitCode ?? (given === undefined ? 1 : 0), stdout: given?.stdout ?? '', stderr: given === undefined ? 'no registry in this world' : '' } } as never
     }
     // SESSION: the session commands of bin/memories.ts are kept apart, so the engine runs these specs count stay the engine's.
     const command = SESSION_COMMANDS.find(name => e.argv.includes(name))
@@ -3042,6 +3051,47 @@ test('MAPX.8: owner() still gives project-My-Repo-<hash> for the fixture root /w
   expect(runs[0]!.init?.env?.MNEMOPI_SESSION_ID).toBe(REPO_OWNER)
 })
 
+// Issue #3: owner() asks bin/projects.ts resolve once per folder and remote, and
+// falls back to the path id when the lookup fails.
+test('issue #3: owner() uses the owner the registry lookup gives, and asks once', perProject, async ($, on) => {
+  const remote = 'git@github.com:o/r.git'
+  const runs = world(on, '{"status":"stored"}', true, 0, ENGINE_BUILD, { repo: { root: '/work/Other Clone', remote }, resolve: () => ({ stdout: `${REPO_OWNER}\n` }) })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', kind: 'fact', content: 'a fact from the second clone' })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', kind: 'fact', content: 'another fact from it' })
+
+  expect(runs.resolves.length).toBe(1)
+  expect(runs.resolves[0]!.argv.slice(2)).toEqual(['resolve', PROJECTS_PATH, '/home/u/.claude/mnemosyne/store'])
+  const sent = JSON.parse(runs.resolves[0]!.init?.stdin ?? '{}')
+  expect(sent).toEqual({ legacy: ownerId('per-project', '/work/Other Clone'), remoteKey: remoteKey('github.com/o/r'), remoteOwner: remoteOwnerId('github.com/o/r') })
+  expect(runs.resolves[0]!.init?.stdin).not.toContain('github.com')
+  const engine = runs.filter(run => run.init?.env?.MNEMOPI_SESSION_ID !== undefined)
+  expect(engine.length).toBeGreaterThan(0)
+  for (const run of engine) expect(run.init?.env?.MNEMOPI_SESSION_ID).toBe(REPO_OWNER)
+})
+
+test('issue #3: a failed lookup keeps the path id and is asked again next time', perProject, async ($, on) => {
+  const runs = world(on, '{"status":"stored"}')
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', kind: 'fact', content: 'The deploy key lives in the team vault.' })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', kind: 'fact', content: 'The staging database restarts every Sunday night.' })
+  // A failed lookup is not cached: every owner() call asks again (a save calls owner() more than once).
+  expect(runs.resolves.length).toBeGreaterThanOrEqual(2)
+  const engine = runs.filter(run => run.init?.env?.MNEMOPI_SESSION_ID !== undefined)
+  expect(engine.length).toBeGreaterThan(0)
+  for (const run of engine) expect(run.init?.env?.MNEMOPI_SESSION_ID).toBe(REPO_OWNER)
+})
+
+test('issue #3: an answer that is not a project owner is not used', perProject, async ($, on) => {
+  const runs = world(on, '{"status":"stored"}', true, 0, ENGINE_BUILD, { resolve: () => ({ stdout: 'global\n' }) })
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', kind: 'fact', content: 'The deploy key lives in the team vault.' })
+  expect(runs[0]!.init?.env?.MNEMOPI_SESSION_ID).toBe(REPO_OWNER)
+})
+
+test('issue #3: scope global never asks the registry', async ($, on) => {
+  const runs = world(on, '{"status":"stored"}')
+  await $.tool.call({ tool: 'mcp__mnemosyne__memory_remember', kind: 'fact', content: 'The deploy key lives in the team vault.' })
+  expect(runs.resolves).toEqual([])
+})
+
 test('MAPX.8: a repo is registered at session start through one detached spawn of bin/projects.ts', perProject, async ($, on) => {
   const runs = world(on, '{}', true, 0, ENGINE_BUILD, { repo: { root: '/work/My Repo', remote: 'git@github.com:o/r.git' } })
   await startSession($, on)
@@ -3052,25 +3102,25 @@ test('MAPX.8: a repo is registered at session start through one detached spawn o
   expect(run.argv[0]).toBe('bun')
   expect(run.argv[1]?.endsWith('/bin/projects.ts')).toBe(true)
   expect(run.argv.slice(2)).toEqual(['write', PROJECTS_PATH])
-  expect(registered(runs)).toEqual([{ owner: REPO_OWNER, name: 'My Repo', kind: 'repo', remoteHost: 'github.com' }])
+  expect(registered(runs)).toEqual([{ owner: REPO_OWNER, name: 'My Repo', kind: 'repo', remoteHost: 'github.com', remoteKey: remoteKey('github.com/o/r') }])
   expect(runs.appends).toEqual([]) // the activity log's spawn is a different one
 })
 
 // Every remote form gives its host and nothing else on the way out of the hook.
-for (const [remote, host] of [
-  ['git@github.com:o/r.git', 'github.com'],
-  ['https://hunter2user:ghp_sEcReTtOkEn0123456789@GitHub.com/o/r.git', 'github.com'],
-  ['ssh://git@git.example.org:2222/o/r', 'git.example.org'],
-  ['/srv/git/r.git', 'local'],
-  ['file:///srv/git/r.git', 'local'],
-  [null, null],
+for (const [remote, host, key] of [
+  ['git@github.com:o/r.git', 'github.com', remoteKey('github.com/o/r')],
+  ['https://hunter2user:ghp_sEcReTtOkEn0123456789@GitHub.com/o/r.git', 'github.com', remoteKey('github.com/o/r')],
+  ['ssh://git@git.example.org:2222/o/r', 'git.example.org', remoteKey('git.example.org/o/r')],
+  ['/srv/git/r.git', 'local', null],
+  ['file:///srv/git/r.git', 'local', null],
+  [null, null, null],
 ] as const) {
   test(`MAPX.8: the remote ${remote === null ? 'null' : 'form ' + remote.replace(/:[^@/]*@/, ':…@')} is recorded as host ${host === null ? 'null' : host}, never as the remote`, perProject, async ($, on) => {
     const runs = world(on, '{}', true, 0, ENGINE_BUILD, { repo: { root: '/work/My Repo', remote } })
     await startSession($, on)
 
     const sent = runs.projects[0]?.init?.stdin ?? ''
-    expect(registered(runs)).toEqual([{ owner: REPO_OWNER, name: 'My Repo', kind: 'repo', remoteHost: host }])
+    expect(registered(runs)).toEqual([{ owner: REPO_OWNER, name: 'My Repo', kind: 'repo', remoteHost: host, remoteKey: key }])
     for (const secret of ['hunter2user', 'ghp_', '2222', '/o/r', '/srv/git', 'file:']) expect(sent).not.toContain(secret)
   })
 }
@@ -3078,7 +3128,7 @@ for (const [remote, host] of [
 test('MAPX.8: a plain folder is registered as kind folder, named by the working folder', perProject, async ($, on) => {
   const runs = world(on, '{}', true, 0, ENGINE_BUILD, { repo: null, cwd: '/work/scratch' })
   await startSession($, on)
-  expect(registered(runs)).toEqual([{ owner: 'project-scratch-6s2iew', name: 'scratch', kind: 'folder', remoteHost: null }])
+  expect(registered(runs)).toEqual([{ owner: 'project-scratch-6s2iew', name: 'scratch', kind: 'folder', remoteHost: null, remoteKey: null }])
 })
 
 test('MAPX.8: the global owner is never registered (scope global)', async ($, on) => {

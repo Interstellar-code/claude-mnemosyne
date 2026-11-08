@@ -589,6 +589,16 @@ The tab draws the plugin options from the schema the `claude` command reports, s
 
 Changing `memoryDir` or `scope` changes which memories you see, and the memories already saved are not moved to the new place. So the tab asks you to type the new value again before it saves, and warns you.
 
+### Which project a memory belongs to (per-project)
+
+With `scope: per-project`, a repo keeps one memory wherever it is opened: a second clone, a worktree, the repo moved to another folder, or a fresh checkout in a cloud session all share it.
+
+1. A folder already in use keeps its owner (`project-<folder>-<hash of its path>`), so nothing saved before moves or is hidden.
+2. A new folder whose git remote is already known joins that project's owner. The remote is matched in every form: `git@github.com:Org/Repo.git`, `https://github.com/org/repo` and `ssh://git@github.com:22/org/repo` are one repo (case is ignored on GitHub, GitLab and Bitbucket).
+3. A repo seen nowhere before gets `project-<repo>-<hash of its remote>`, the same id on every machine. A repo without a remote, and a plain folder, keep the path id as before.
+
+`projects.json` records a hash of each remote, never the remote, its owner or org. Known limits: two copies that each have their own memories from before this change stay apart (neither is merged into the other); a project learns its remote's hash the first time a session starts in it after the update, so open the original folder once before a new clone or worktree, or the clone starts its own memory; a repo without a remote is still tied to its path.
+
 ### Reset, back up and the other rows
 
 1. "Reset to default" on a row sends that one setting back to its default; for a `config.json` setting this removes its key from the file.
@@ -654,7 +664,7 @@ What stays out of `$HOME`, and what does not. The installer and the launcher do 
 
 Two installs at once: each holds `<root>/engine.lock` while it runs. A second install waits up to 10 minutes and then exits 3 with `another install holds <path>`; `MNEMOSYNE_LOCK_WAIT_MS` (milliseconds) changes the wait. A lock older than 30 minutes is taken over, a running install keeps its lock fresh, and an install stopped by SIGTERM or SIGINT removes its lock (one killed outright leaves it for the 30 minutes). `/mnemosyne-setup` takes the same lock beside its own engine folder and waits only 30 seconds for it, so it ends inside its own time limit.
 
-The owner id for a folder, the same one the plugin uses with `scope: per-project`:
+The path id of a folder, the owner it had before issue #3 (the plugin now looks the owner up, see [Which project a memory belongs to](#which-project-a-memory-belongs-to-per-project), and still uses this id for every folder already in use):
 
 ```sh
 bun bin/owner.ts ~/dev/switch-agent    # project-switch-agent-…
