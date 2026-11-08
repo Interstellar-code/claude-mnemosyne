@@ -249,16 +249,25 @@ export class TripleStore {
 	add(subject: string, predicate: string, object: string, options?: TripleWriteOptions | string | null): number {
 		const normalized = normalizeOptions(options);
 		const validFrom = normalized.validFrom ?? today();
-		this.conn.run("UPDATE triples SET valid_until = ? WHERE subject = ? AND predicate = ? AND valid_until IS NULL", [
-			validFrom,
-			subject,
-			predicate,
-		]);
-		const result = this.conn.run(
-			"INSERT INTO triples (subject, predicate, object, valid_from, source, confidence) VALUES (?, ?, ?, ?, ?, ?)",
-			[subject, predicate, object, validFrom, normalized.source, normalized.confidence],
-		);
-		return Number(result.lastInsertRowid);
+		return this.conn.transaction(() => {
+			const open = this.conn
+				.query("SELECT MIN(valid_from) AS valid_from FROM triples WHERE subject = ? AND predicate = ? AND valid_until IS NULL")
+				.get(subject, predicate) as { valid_from: string | null } | null;
+			const openFrom = open?.valid_from ?? null;
+			// An older fact is history: insert it already closed at the open row's start and leave the open row alone.
+			const validUntil = openFrom !== null && validFrom < openFrom ? openFrom : null;
+			if (validUntil === null) {
+				this.conn.run(
+					"UPDATE triples SET valid_until = ? WHERE subject = ? AND predicate = ? AND valid_until IS NULL",
+					[validFrom, subject, predicate],
+				);
+			}
+			const result = this.conn.run(
+				"INSERT INTO triples (subject, predicate, object, valid_from, valid_until, source, confidence) VALUES (?, ?, ?, ?, ?, ?, ?)",
+				[subject, predicate, object, validFrom, validUntil, normalized.source, normalized.confidence],
+			);
+			return Number(result.lastInsertRowid);
+		})();
 	}
 
 	query(options?: TripleQueryOptions): TripleRow[];
