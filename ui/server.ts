@@ -2592,6 +2592,13 @@ async function createMemory(views: Views, text: string): Promise<Answer> {
     },
   ]
   const outcome = engineReply((await views.writes.run(() => views.run(views.config, [request], owner)))[0])
+  // Issue #16: the text is already a retired or expired memory; the engine left it so. Not a save, not a failure.
+  const keptStatus = 'reply' in outcome && (outcome.reply.status === 'retired' || outcome.reply.status === 'expired') && isMemoryId(outcome.reply.memory_id) ? outcome.reply.status : undefined
+  if (keptStatus !== undefined && 'reply' in outcome) {
+    const keptId = outcome.reply.memory_id as string
+    views.log({ ...logged, ids: [keptId], count: 0, ok: true }, { client: 'dashboard' })
+    return { status: 200, body: { status: keptStatus, memory_id: keptId, owner, kind, hint: `This text is already stored as ${keptStatus} memory ${keptId}; it was left as it is. Restore it to bring it back.` } }
+  }
   const id = 'reply' in outcome && outcome.reply.status === 'stored' && isMemoryId(outcome.reply.memory_id) ? outcome.reply.memory_id : undefined
   if (id === undefined) {
     views.log({ ...logged, error: 'class' in outcome ? outcome.class : 'the engine did not store the memory' }, { client: 'dashboard' })

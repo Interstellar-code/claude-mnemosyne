@@ -1978,6 +1978,11 @@ describe('CRUD.1 and CRUD.3: the form and the vocabulary panel', () => {
     expect(form.answerOf(400, { error: 'kind is required' }, true)).toEqual({ kind: 'failed', text: 'Save failed: kind is required' })
     expect(form.answerOf(404, { error: 'That memory is gone; nothing was changed.' }, false).text).toBe('Update failed: That memory is gone; nothing was changed.')
     expect(form.answerOf(0, { error: 'Could not reach the server: down' }, true).text).toBe('Could not reach the server: down')
+    // Issue 16: a re-save of a retired or expired memory is neither a save nor a failure: the form says it was left as it is.
+    for (const status of ['retired', 'expired']) {
+      const kept = form.answerOf(200, { status, memory_id: 'mem-3' }, true)
+      expect(kept).toEqual({ kind: 'kept', text: `This text is already stored as ${status} memory mem-3. It was left as it is; restore it to bring it back.` })
+    }
     // A 200 with no stored status is not a save; a 409 that is not a warning is a failure.
     expect(form.answerOf(200, {}, true).kind).toBe('failed')
     expect(form.answerOf(409, { error: 'this memory has no owner' }, false).kind).toBe('failed')

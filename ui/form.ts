@@ -110,6 +110,7 @@ export type Hit = { rule: string; message: string }
 
 export type Answer =
   | { kind: 'saved'; text: string; id: string }
+  | { kind: 'kept'; text: string }
   | { kind: 'warn'; text: string; hits: Hit[]; near: Near[] }
   | { kind: 'blocked'; text: string; hits: Hit[] }
   | { kind: 'toolong'; text: string }
@@ -137,6 +138,11 @@ export function answerOf(status: number, body: unknown, creating: boolean): Answ
   if (status === 200 && (reply.status === 'stored' || reply.status === 'updated')) {
     const id = typeof reply.memory_id === 'string' ? reply.memory_id : ''
     return { kind: 'saved', id, text: `${creating ? 'Saved' : 'Updated'} memory ${id}.` }
+  }
+  // Issue #16: the text is already a retired or expired memory, left as it is: neither a save nor a failure.
+  if (status === 200 && (reply.status === 'retired' || reply.status === 'expired')) {
+    const id = typeof reply.memory_id === 'string' ? reply.memory_id : ''
+    return { kind: 'kept', text: `This text is already stored as ${reply.status} memory ${id}. It was left as it is; restore it to bring it back.` }
   }
   if (status === 409 && reply.verdict === 'warn') {
     return { kind: 'warn', text: 'The save guard has warnings about this text.', hits: hitsOf(reply.hits), near: nearOf(reply.near) }
