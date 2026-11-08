@@ -513,7 +513,7 @@ export function listSessionPending(root: string, now: number = Date.now()): Pend
 }
 
 /** Makes the lock with an exclusive create, so one caller gets it; a lock left by a claimant that died is taken over. */
-function takeSweepLock(lock: string): boolean {
+export function takeSweepLock(lock: string, beforeTakeover?: () => void): boolean {
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       closeSync(openSync(lock, 'wx', 0o600))
@@ -530,14 +530,29 @@ function takeSweepLock(lock: string): boolean {
     if (age < SWEEP_LOCK_STALE_MS) return false // a live claimant is checking the marker right now
     // Stale: moved aside by a rename (one caller's rename wins), and only a lock that is still old is thrown away.
     const aside = `${lock}.${process.pid}.stale`
+    beforeTakeover?.() // test seam: another claimant may replace the stale lock here
     try {
       renameSync(lock, aside)
     } catch {
       continue
     }
-    const fresh = Date.now() - statSync(aside).mtimeMs < SWEEP_LOCK_STALE_MS
-    rmSync(aside, { force: true })
-    if (fresh) return false // that was a live claimant's new lock
+    let fresh: boolean
+    try {
+      fresh = Date.now() - statSync(aside).mtimeMs < SWEEP_LOCK_STALE_MS
+    } catch {
+      continue // it went in the meantime: try the create again
+    }
+    if (!fresh) {
+      rmSync(aside, { force: true })
+      continue
+    }
+    // That was a live claimant's new lock: put it back for them; if that fails, drop the copy, but never claim the lock.
+    try {
+      renameSync(aside, lock)
+    } catch {
+      rmSync(aside, { force: true })
+    }
+    return false
   }
   return false
 }

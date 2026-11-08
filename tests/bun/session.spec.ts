@@ -345,6 +345,25 @@ describe('SESSION.4: the daily marker', () => {
     expect(existsSync(marker)).toBe(true)
   })
 
+  test('a stale lock replaced by a live claimant just before the takeover is put back, not deleted (#37)', async () => {
+    const { takeSweepLock } = await import('../../bin/memories')
+    const host = await open()
+    mkdirSync(host.root, { recursive: true })
+    const lock = join(host.root, 'expire-sweep.lock')
+    writeFileSync(lock, '')
+    const long = new Date(Date.now() - 10 * 60_000)
+    utimesSync(lock, long, long)
+    // between our look at the old lock and our rename, another claimant replaces it with its own fresh lock
+    const taken = takeSweepLock(lock, () => {
+      const now = new Date()
+      utimesSync(lock, now, now)
+    })
+    expect(taken).toBe(false)
+    expect(existsSync(lock)).toBe(true)
+    expect(Date.now() - statSync(lock).mtimeMs).toBeLessThan(60_000)
+    expect(readdirSync(host.root).filter(name => name.endsWith('.stale'))).toEqual([])
+  })
+
   test('sweep-claim refuses --store and a bad folder argument', async () => {
     const host = await open()
     expect((await memories(['--store', host.store, 'sweep-claim', host.root])).exitCode).not.toBe(0)
