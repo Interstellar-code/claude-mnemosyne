@@ -12,6 +12,7 @@ export declare function buildHostPrompt(memories: readonly string[], source?: st
 export declare function hostBackendWillHandleCall(): boolean;
 export declare function configuredLlmWillHandleCall(): boolean;
 export declare function cleanOutput(text: string): string;
+export declare function cleanSummaryOutput(text: string, memories: readonly string[]): string;
 export declare function chunkMemoriesByBudget(memories: readonly string[], source?: string): string[][];
 export declare function llmAvailable(): boolean;
 export declare function callRemoteLlm(prompt: string, temperature?: number, options?: RemoteLlmOptions): Promise<string | null>;
