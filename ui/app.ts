@@ -1574,9 +1574,11 @@ export function forgetById(id: string, done: (error?: string) => void) {
       if (opened.has('knowledge')) void loadKnowledge()
       // Search: the forgotten hit leaves the list.
       if (searchHits.some(hit => hit.id === id)) {
+        // #31: the rows already shown stay shown (less the forgotten one); Show more is not undone.
+        const keep = searchShown - (visibleHits().slice(0, searchShown).some(hit => hit.id === id) ? 1 : 0)
         searchHits = searchHits.filter(hit => hit.id !== id)
         drawSearchAside()
-        drawHits(false)
+        drawHits(false, keep)
       }
       done()
     } catch (err) {
@@ -3834,14 +3836,14 @@ function weakCut() {
 }
 
 // The first SHOW_FIRST hits, then SHOW_FIRST more for each press of Show more.
-function drawHits(more: boolean) {
+function drawHits(more: boolean, keep = 0) {
   const results = byId('search-results')
   // A hit opens on this tab: beside the list on a wide screen, else in the bottom sheet.
   const open = (id: string, from?: HTMLElement) => void openMemory(id, from)
   const list = visibleHits()
   const rank = new Map(searchHits.map((hit, i) => [hit.id, i + 1]))
   const from = more ? searchShown : 0
-  searchShown = Math.min(list.length, more ? searchShown + SHOW_FIRST : SHOW_FIRST)
+  searchShown = Math.min(list.length, more ? searchShown + SHOW_FIRST : Math.max(SHOW_FIRST, keep))
   const rows: HTMLElement[] = []
   list.slice(from, searchShown).forEach((hit, i) => {
     const at = from + i
@@ -4058,7 +4060,7 @@ export function searchKey(event: KeyboardEvent) {
   }
 }
 
-function wireSearch() {
+export function wireSearch() {
   const form = byId<HTMLFormElement>('search-form')
   form.addEventListener('submit', event => {
     event.preventDefault()

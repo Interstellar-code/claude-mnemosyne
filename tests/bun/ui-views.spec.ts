@@ -770,6 +770,15 @@ describe('VIEWS R2: the Knowledge and Health glue in app.ts', () => {
       this.children = []
       this.append(...nodes)
     }
+    get lastChild() {
+      return this.children.at(-1) ?? null
+    }
+    insertBefore(node: AppNode | AppText, before: AppNode | AppText | null) {
+      const at = before === null ? -1 : this.children.indexOf(before)
+      if (at === -1) this.children.push(node)
+      else this.children.splice(at, 0, node)
+      return node
+    }
     setAttribute(name: string, value: string) {
       this.attributes.set(name, String(value))
     }
@@ -1330,6 +1339,39 @@ describe('VIEWS R2: the Knowledge and Health glue in app.ts', () => {
         held = null
       }
     })
+  })
+
+  test('#31: forgetting a search hit after Show more keeps the shown count (minus that hit) and rewrites the count note', async () => {
+    const hits = Array.from({ length: 25 }, (_, i) => ({ id: `mem_search_${i}`, owner: 'project-glue-1a2b', kind: 'note', content: `zebra note ${i}`, score: 0.9 - i * 0.001, matched: 'keyword' }))
+    const g = globalThis as Record<string, any>
+    const doc = g.document
+    const fetchBefore = g.fetch
+    doc.addEventListener = () => undefined
+    g.fetch = async (path: string, init: RequestInit = {}) => (path === '/api/search' ? Response.json({ results: hits, mode: 'keyword' }) : fetchBefore(path, init))
+    try {
+      app.wireSearch()
+      byId('search-query').value = 'zebra'
+      for (const submit of byId('search-form').listeners.get('submit') ?? []) submit({ preventDefault() {} })
+      const cards = () => (byId('search-results').children as AppNode[]).filter(node => node.tagName === 'li' && node.className.split(' ').includes('sh'))
+      await until(() => cards().length === 10, 'the first page of hits')
+      expect(byId('search-note').textContent).toContain('25 results')
+      byId('search-more').fire('click')
+      expect(cards()).toHaveLength(20)
+      let result: string | undefined = 'pending'
+      app.forgetById('mem_search_3', (error?: string) => {
+        result = error
+      })
+      await until(() => result !== 'pending', 'the search forget')
+      expect(result).toBeUndefined()
+      expect(cards()).toHaveLength(19)
+      expect(cards().map(card => card.dataset.id)).not.toContain('mem_search_3')
+      expect(byId('search-more').hidden).toBe(false)
+      expect(byId('search-note').textContent).toContain('24 results')
+      expect(byId('search-note').textContent).toContain('showing 19')
+    } finally {
+      g.fetch = fetchBefore
+      delete doc.addEventListener
+    }
   })
 })
 
