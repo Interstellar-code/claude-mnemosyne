@@ -1265,6 +1265,8 @@ export function createMap(host: MapHost): MapView {
   let state: MapState = initialState({ reducedMotion, layout: initialLayout(readLayout(storage), true) })
   let galaxy: Galaxy | null = null
   let found: Found | null = null
+  /** What the knowledge note last showed, so it is rebuilt (and its Clear replaced) only when that changes. */
+  let knowNoteKey = ''
   let graph: ForceGraph3DInstance | null = null
   let lib: MapLib | null = null
   let three: Three | null = null
@@ -1811,9 +1813,15 @@ export function createMap(host: MapHost): MapView {
       if (number) number.textContent = String(counts[kind])
     }
     const note = byId('map-know-note')
-    note.textContent = any ? knowledgeNote(state) : 'No knowledge extracted yet. Run /mnemosyne-knowledge, then reload.'
+    const text = any ? knowledgeNote(state) : 'No knowledge extracted yet. Run /mnemosyne-knowledge, then reload.'
+    const withClear = any && state.kinds.size > 0
+    // Rebuild only when the note changes, so a focused Clear keeps its node (and focus) across live events.
+    const key = `${withClear ? 1 : 0}${text}`
+    if (key === knowNoteKey) return
+    knowNoteKey = key
+    note.textContent = text
     // A chip dims the map: the note carries its own Clear (ui/index.html has none, so it is made here).
-    if (any && state.kinds.size > 0) {
+    if (withClear) {
       const clear = el('button', 'Clear', 'btn map-know-clear')
       clear.type = 'button'
       clear.addEventListener('click', () => dispatch(clearKinds(state)))

@@ -2049,6 +2049,12 @@ describe('MOON: moons on a clicked star and the knowledge filter', () => {
       // QAMAP R2: the note carries its own Clear button, made by the map; it clears the chips.
       const clearButton = () => node('map-know-note').all().find(n => n.tagName === 'button' && n.textContent === 'Clear')
       expect(clearButton()).toBeDefined()
+      // #29: a re-render with the filter still on keeps the same Clear node, so keyboard focus on it survives live events.
+      const firstClear = clearButton()
+      node('map-spokes').fire('change')
+      node('map-spokes').fire('change')
+      expect(clearButton()).toBe(firstClear)
+      expect(node('map-know-note').textContent).toBe('Showing only memories with the chosen knowledge; the rest are dimmed. Clear')
       clearButton()!.fire('click')
       expect(chips.map(chip => chip.attributes.get('aria-pressed'))).toEqual(['false', 'false', 'false', 'false', 'false'])
       expect(node('map-know-note').textContent).toBe('Pick a kind to light up only the memories it was mined from.')
