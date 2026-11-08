@@ -2,6 +2,43 @@
 
 Newest first. Each release is tagged `vX.Y.Z` on GitHub; the README and DESIGN.md describe the contracts.
 
+## 0.31.4 (bug-hunt batch E: housekeeping)
+
+No engine change.
+
+1. **A session marker that disappears mid-list no longer stops the summaries.** A marker claimed by another session between listing and reading is skipped (#36).
+2. **A live sweep lock is never deleted.** When a stale lock was taken over just as another process renewed it, the fresh lock was removed; it is now put back (#37).
+3. **Session summaries that keep failing give up.** A summary whose model call fails waits 1, 2, 4, then 8 hours before the next try, and after 5 failed attempts it is dropped with one line in the activity log, instead of being retried on every first prompt forever (#38).
+4. **The plans in `docs/plans/` say what shipped** (#39).
+
+`adm-zip` advisories (#35, still open): reviewed; the vulnerable code runs only in `onnxruntime-node`'s install script, which the plugin's own install skips, so nothing reachable at runtime. Moving the engine's `onnxruntime-node` pin from 1.26.0 to 1.31.1 would clear all 8 when the engine is next touched.
+
+## 0.31.3 (bug-hunt batch D: the dashboard)
+
+No engine change.
+
+1. **The Memories list shows the latest load.** A slow reply to an earlier load could overwrite the rows of a later one (#20).
+2. **A search typed after Escape runs.** Typing a new search while the previous request was still running did nothing (#22).
+3. **The Knowledge note's Clear button keeps focus** across re-renders (#29).
+4. **A failed Review reload says so** instead of silently showing the old queue (#30).
+5. **Forgetting a search hit keeps your place.** The list no longer collapses back to 10 and the count stays right (#31).
+6. **Live recall updates a memory's last-recalled time** on the map (#32).
+7. **Only the last copied command says "Copied"** on the Settings page (#33).
+
+#21 (reconnect replays duplicates after 20,000 lines) was already fixed: the stream resumes from a fresh cursor.
+
+## 0.31.2 (bug-hunt batch B: recall and query)
+
+Engine build 18.12.3-mnemosyne.18 (engine changes 34 to 40). Run `/mnemosyne-setup` once after updating; outside Claude Code, `bun bin/update.ts` or Update… on the Health tab.
+
+1. **Meaning search looks at every memory.** With embeddings on, only the 500 newest memories were compared by meaning, so an older memory that matched by meaning but shared no words was never found. Now every memory with an embedding is compared (the work grows with the store; fine for thousands of memories) (#19).
+2. **Recall settings from the engine's own API are honoured.** `useSynonyms`, `useIntent`, `useMmr` and `mmrLambda` passed to `recall()` were silently dropped (#7).
+3. **Words with two meanings search both.** "token", "push", "setup", "check" and similar words now find memories that use either meaning's words (#12).
+4. **"Chicago" is not a time word.** Words that merely contain "ago", "last" or "before" (Chicago, Elasticsearch, plastic, beforehand) no longer pull recent unrelated notes into results (#17).
+5. **Long questions keep all their words.** In a question with several words, later words were dropped from the keyword search when earlier ones had many synonyms (#26).
+6. **"The day before yesterday" means two days back** (#9).
+7. **Notes are not mistaken for events.** The letters "at" and "on" inside other words made almost every note look a bit like an event (#23).
+
 ## 0.31.1 (bug-hunt batch C: extraction and parsing)
 
 Engine build 18.12.3-mnemosyne.17 (engine changes 29 to 33). Run `/mnemosyne-setup` once after updating; outside Claude Code, `bun bin/update.ts` or Update… on the Health tab.

@@ -1,5 +1,6 @@
 # standalone-install: install the engine and proxy outside Claude Code (for Switch), issue #43
 Status: revision 2, ready to build (2026-11-01). Revised after the OMP DeepSeek v4.1 flash review in `docs/plans/research/standalone-install-review.md` (17 findings F1 to F17, answers Q1 to Q6); every finding is handled below, marked `[F#]`. Baseline: `main` at `8dfb382` (plugin 0.9.0, `ENGINE_BUILD` `18.12.3-mnemosyne.10`). Delivery: one branch in an Orca worktree, one commit per task, merged into `main` only after a separate review; nothing is pushed or tagged without Rohit. Release: 0.10.0 (next minor). Source: GitHub issue #43 (from Interstellar-code/switch-agent #5, decision SD12) and the Switch docs read on 2026-10-31.
+Status 2026-11-08: shipped in 0.10.0 (2026-11-01), SA.1 to SA.5; install fixes followed in 0.10.1 (2026-11-01).
 
 ## Summary
 

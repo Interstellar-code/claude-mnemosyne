@@ -2,6 +2,8 @@
 
 Status: decided, ready to build (Rohit's decisions 2026-10-25, see Decisions). Created 2026-10-25. Baseline: `main` at `ba6f97d` (plugin 0.8.2). Delivery: each task group on a short branch off `main`, merged straight into `main` after a separate review; nothing is pushed. Release: 0.8.3 (Rohit, confirmed 2026-10-25).
 
+Status 2026-11-08: shipped in 0.8.3 (2026-10-25), MAPX.0 to MAPX.8, MAPX.10 and MAPX.11; 0.8.4 (2026-10-25) then placed the Galaxy page as in the mockup. Not built: MAPX.9 (Edit, Pin and Retire in the Details panel); the panel is still read-only and points to the Review tab for Restore.
+
 This plan was split out of phase MAPX of `docs/plans/mnemosyne-v3.md` on 2026-10-25, because Rohit wants the map built first, ahead of the rest of 0.9.0 (the dashboard writes, the importers, session summaries and the expiry sweep). Everything the old MAPX text said is carried here; what changed, and why, is listed in "Notes for the reviewer". A later step removes MAPX from the 0.9.0 plan; "What the 0.9.0 plan must drop or point to" is the list for that step.
 
 ## Summary

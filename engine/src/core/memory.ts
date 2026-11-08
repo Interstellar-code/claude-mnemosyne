@@ -333,6 +333,10 @@ function toRecallOptions(options: RecallFacadeOptions): BeamRecallFacadeOptions 
 		ftsWeight: options.ftsWeight ?? options.fts_weight ?? undefined,
 		importanceWeight: options.importanceWeight ?? options.importance_weight ?? undefined,
 		contentPreviewChars: options.contentPreviewChars,
+		useSynonyms: options.useSynonyms,
+		useIntent: options.useIntent,
+		useMmr: options.useMmr,
+		mmrLambda: options.mmrLambda,
 	};
 	// Preserve the three-state semantics (`undefined` = auto-derive, `null` = explicitly
 	// FTS-only, `number[]` = caller-supplied) so callers can opt out of `recall()`'s

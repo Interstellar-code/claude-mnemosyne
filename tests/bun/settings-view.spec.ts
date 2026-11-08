@@ -749,7 +749,62 @@ describe('UI.3: Setup and backups, and This browser', () => {
       expect(sent.copied).toEqual(['/mnemosyne-setup', '/mnemosyne-embed', '/mnemosyne-tags', '/mnemosyne-knowledge'])
       expect(sent.posted).toHaveLength(0)
       // No button anywhere on this card runs setup or rebuilds vectors: only Copy and Back up now.
-      expect(setup.findAll('button').map(button => button.textContent).sort()).toEqual(['Back up now', 'Copied', 'Copied', 'Copied', 'Copied'])
+      // Only the last copied command's button says Copied (#33).
+      expect(setup.findAll('button').map(button => button.textContent).sort()).toEqual(['Back up now', 'Copied', 'Copy', 'Copy', 'Copy'])
+    })
+  })
+
+  test('copying a second command puts the first button back to Copy; a failure stays on its button (#33)', async () => {
+    const world = await boot()
+    const data = await load(world)
+    const sent = realHost(world)
+    await withDocument(async () => {
+      const cards = drawGroups(data, newView(), sent.host) as FakeNode[]
+      const setup = cards.find(card => card.find('h2')!.textContent === 'Setup')!
+      const [first, second, third] = setup.findAll('button').filter(button => button.textContent === 'Copy')
+      first.fire('click')
+      await settle()
+      expect(first.textContent).toBe('Copied')
+      second.fire('click')
+      await settle()
+      expect(second.textContent).toBe('Copied')
+      expect(first.textContent).toBe('Copy')
+      sent.host.copy = async () => false
+      third.fire('click')
+      await settle()
+      expect(third.textContent).toContain('Copy failed')
+      sent.host.copy = async () => true
+      first.fire('click')
+      await settle()
+      expect(first.textContent).toBe('Copied')
+      expect(second.textContent).toBe('Copy')
+      expect(third.textContent).toContain('Copy failed')
+    })
+  })
+
+  test('copy buttons from an earlier draw or a replaced row are let go, not kept for ever (#33)', async () => {
+    const world = await boot()
+    const data = await load(world)
+    const sent = realHost(world)
+    await withDocument(async () => {
+      const view = newView()
+      const setupOf = (cards: FakeNode[]) => cards.find(card => card.find('h2')!.textContent === 'Setup')!
+      const [old] = setupOf(drawGroups(data, view, sent.host) as FakeNode[]).findAll('button').filter(button => button.textContent === 'Copy')
+      old.fire('click')
+      await settle()
+      expect(old.textContent).toBe('Copied')
+      // A filter keystroke draws every card again; the old tree is gone and must not stay tracked.
+      const fresh = setupOf(drawGroups(data, view, sent.host) as FakeNode[]).findAll('button').filter(button => button.textContent === 'Copy')
+      fresh[0].fire('click')
+      await settle()
+      expect(fresh[0].textContent).toBe('Copied')
+      expect(old.textContent).toBe('Copied')
+      // A button whose row was replaced (no longer connected) is dropped on the next copy.
+      Object.defineProperty(fresh[0], 'isConnected', { value: false })
+      fresh[1].fire('click')
+      await settle()
+      expect(fresh[1].textContent).toBe('Copied')
+      expect(fresh[0].textContent).toBe('Copied')
     })
   })
 

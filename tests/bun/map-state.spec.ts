@@ -1341,6 +1341,20 @@ describe('LIVE.1: what an event does to the galaxy', () => {
     expect(touchMemory(g, 'nope')).toBe(false)
   })
 
+  test('LIVE.1.a3b: a recall sets the star\'s last-recalled time to the event\'s timestamp, else to now (#32)', () => {
+    const g = freshGalaxy()
+    const star = g.layout.stars[g.layout.starById.m1!]!
+    expect(recallMemory(g, 'm1', '2026-10-27T09:30:00.000Z')).toBe(true)
+    expect(star.lastRecalled).toBe('2026-10-27T09:30:00.000Z')
+    const before = Date.now()
+    expect(recallMemory(g, 'm1')).toBe(true)
+    expect(Date.parse(star.lastRecalled!)).toBeGreaterThanOrEqual(before)
+    expect(usageText(star.recalls, star.lastRecalled)).toBe('its memory recalled 4 times, last today')
+    // A spark carries its event's timestamp to the star it lands on.
+    const [spark] = sparksFor({ kind: 'recall', ids: ['m1'], client: 'x', t: '2026-10-27T10:00:00.000Z' }, [{ to: 'm1', toKind: 'star' }], false, () => 0.5)
+    expect(spark!.t).toBe('2026-10-27T10:00:00.000Z')
+  })
+
   test('LIVE.1.a2: a forget removes the star from every count and every list, and a second forget is nothing', () => {
     const g = freshGalaxy()
     expect(forgetMemory(g, 'm2')).toBe(true)
@@ -2049,6 +2063,12 @@ describe('MOON: moons on a clicked star and the knowledge filter', () => {
       // QAMAP R2: the note carries its own Clear button, made by the map; it clears the chips.
       const clearButton = () => node('map-know-note').all().find(n => n.tagName === 'button' && n.textContent === 'Clear')
       expect(clearButton()).toBeDefined()
+      // #29: a re-render with the filter still on keeps the same Clear node, so keyboard focus on it survives live events.
+      const firstClear = clearButton()
+      node('map-spokes').fire('change')
+      node('map-spokes').fire('change')
+      expect(clearButton()).toBe(firstClear)
+      expect(node('map-know-note').textContent).toBe('Showing only memories with the chosen knowledge; the rest are dimmed. Clear')
       clearButton()!.fire('click')
       expect(chips.map(chip => chip.attributes.get('aria-pressed'))).toEqual(['false', 'false', 'false', 'false', 'false'])
       expect(node('map-know-note').textContent).toBe('Pick a kind to light up only the memories it was mined from.')
@@ -3794,5 +3814,40 @@ describe('the solar page state (MAPX.11)', () => {
     answers[2]!(new Response('{"results":[{"id":"late"}]}', { status: 200 }))
     await Bun.sleep(5)
     expect(done.some(([, hits]) => JSON.stringify(hits).includes('late'))).toBe(false)
+  })
+
+  test('#22: a search typed after Escape while a request is in flight still runs, once, and the cancelled answer is never shown', async () => {
+    const sent: string[] = []
+    const answers: ((response: Response) => void)[] = []
+    const done: [string, unknown][] = []
+    const search = createMemorySearch({
+      post: (_path, body) => {
+        sent.push((body as { query: string }).query)
+        return new Promise<Response>(resolve => answers.push(resolve))
+      },
+      mode: () => 'keyword',
+      done: (query, hits) => void done.push([query, hits]),
+    })
+    search.enter('aaa')
+    search.cancel()
+    search.enter('bbb')
+    answers[0]!(new Response('{"results":[{"id":"a-hit"}]}', { status: 200 }))
+    await Bun.sleep(5)
+    expect(sent).toEqual(['aaa', 'bbb'])
+    answers[1]!(new Response('{"results":[{"id":"b-hit"}]}', { status: 200 }))
+    await Bun.sleep(5)
+    expect(sent).toEqual(['aaa', 'bbb'])
+    expect(done).toEqual([['bbb', [{ id: 'b-hit' }]]])
+    // The same words again after Escape: the cancelled answer is dropped, and the search runs again.
+    search.enter('ccc')
+    search.cancel()
+    search.enter('ccc')
+    answers[2]!(new Response('{"results":[{"id":"c-old"}]}', { status: 200 }))
+    await Bun.sleep(5)
+    expect(sent).toEqual(['aaa', 'bbb', 'ccc', 'ccc'])
+    answers[3]!(new Response('{"results":[{"id":"c-new"}]}', { status: 200 }))
+    await Bun.sleep(5)
+    expect(done.at(-1)).toEqual(['ccc', [{ id: 'c-new' }]])
+    expect(done.some(([, hits]) => JSON.stringify(hits).includes('c-old') || JSON.stringify(hits).includes('a-hit'))).toBe(false)
   })
 })

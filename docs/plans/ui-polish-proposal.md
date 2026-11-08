@@ -4,6 +4,8 @@ Date: 2026-10-24. Status: proposal, nothing built. Source: a read-only review of
 `ui/` (four parallel reviews plus the screenshots). No browser run was done, so the
 line references are from reading the code, not from a live check.
 
+Status 2026-11-08: partly done, mostly through other plans and in other forms. Already in the first commit of this repository (0.8.1, 2026-10-25): X1 (the Map loads first), X2 (the shared bottom sheet, `ui/sheet.ts`) and Search's Keyword / Keyword + meaning control (Search 1). Section 1 (Map) was superseded by the solar-system map (`docs/plans/mapx-solar-map.md`, 0.8.3, 2026-10-25). The Review tab and `GET /api/review` (section 6, items 8 and 9) shipped in 0.9.0 (2026-10-26). The tab polish of 0.17.0 to 0.25.0 (2026-11-07) followed a later design proposal, not this list, and covers much of sections 2 to 6 in its own way, for example X3 (Health's System panel, 0.23.0), why a hit matched (0.19.0), Activity grouping (0.21.0), Knowledge grouping and filters (0.20.0) and a Keep in Review (0.22.0); see those CHANGELOG entries. Items not named here are open or dropped.
+
 Effort: S = under an hour, M = a few hours, L = a day or more.
 
 ## 0. Cross-page changes (do first, every page gains)

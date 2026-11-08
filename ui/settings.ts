@@ -295,6 +295,22 @@ function button(label: string, className: string, onClick: () => void, title?: s
   return element
 }
 
+/** The copy buttons drawn for a view, so a new copy puts the last one back to Copy (#33). */
+const copyButtons = new WeakMap<SettingsView, Set<HTMLButtonElement>>()
+
+/** Remembers a copy button; on a copy that worked, every other button showing Copied goes back to Copy. */
+function trackCopy(view: SettingsView, copy: HTMLButtonElement, ok?: boolean) {
+  const set = copyButtons.get(view) ?? new Set<HTMLButtonElement>()
+  copyButtons.set(view, set)
+  set.add(copy)
+  if (ok !== true) return
+  for (const other of set) {
+    // A button whose row was drawn again is gone from the page: let it go rather than keep it for ever.
+    if (other.isConnected === false) set.delete(other)
+    else if (other !== copy && other.textContent === 'Copied') other.textContent = 'Copy'
+  }
+}
+
 let fieldCount = 0
 const nextId = (prefix: string) => `${prefix}-${++fieldCount}`
 
@@ -680,8 +696,10 @@ export function settingRow(row: SettingRow, view: SettingsView, host: SettingsHo
         const ok = await host.copy('/config')
         copy.textContent = ok ? 'Copied' : 'Copy failed'
         view.copied = ok ? '/config' : ''
+        trackCopy(view, copy, ok)
       })()
     }, 'Copy /config')
+    trackCopy(view, copy)
     how.append(el('code', '/config', 'mono'), copy, el('span', ' A plugin option: change it in Claude Code.', 'muted'))
     control.append(how)
   }
@@ -878,8 +896,10 @@ function drawSetup(rows: readonly SettingRow[], view: SettingsView, host: Settin
           const ok = await host.copy(item.command)
           copy.textContent = ok ? 'Copied' : 'Copy failed: select the command and copy it'
           view.copied = ok ? item.command : ''
+          trackCopy(view, copy, ok)
         })()
       }, `Copy ${item.command}`)
+      trackCopy(view, copy)
       li.append(el('code', item.command, 'mono'), el('span', item.what, 'muted small'), copy)
       list.append(li)
     }
@@ -949,6 +969,8 @@ function drawSetup(rows: readonly SettingRow[], view: SettingsView, host: Settin
 /** Everything under the page title: the banner, Reset all, the groups. The filter box redraws only this. */
 export function drawGroups(data: SettingsData, view: SettingsView, host: SettingsHost): HTMLElement[] {
   const out: HTMLElement[] = []
+  // Every card is drawn anew, so the copy buttons of the last draw are dropped (#33).
+  copyButtons.delete(view)
   const mode = view.mode ?? 'all'
   const rows = filterRows(data.settings, data.groups, view.filter, mode)
   const matching = view.filter.trim() !== '' || mode !== 'all'

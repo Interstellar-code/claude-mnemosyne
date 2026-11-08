@@ -268,10 +268,11 @@ function anchorTime(queryTime: string | Date | null | undefined): number | null 
 	return Number.isFinite(parsed) ? parsed : null;
 }
 
-function looksTemporal(query: string): boolean {
+export function looksTemporal(query: string): boolean {
 	const lower = query.toLowerCase();
+	// Whole words only, so "Chicago", "plastic" or "beforehand" do not switch the voice on (#17).
 	return ["yesterday", "today", "recent", "last", "latest", "this week", "this month", "ago", "before"].some(keyword =>
-		lower.includes(keyword),
+		new RegExp(`\\b${keyword}\\b`).test(lower),
 	);
 }
 

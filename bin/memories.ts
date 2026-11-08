@@ -8,7 +8,7 @@
 // and, for the session work (plan phase SESSION):
 //   bun bin/memories.ts --store <dir> first-prompt <owner> [<pins>]   the newest session summary and the pinned memories, as JSON (read-only)
 //   bun bin/memories.ts --store <dir> summarised <session id>...      which of those sessions already have a summary, as JSON (read-only)
-//   bun bin/memories.ts session-pending write|list|claim|release|remove <root> ...  the markers session.end leaves (an id, an owner and a path; never text); claim takes one for a summary, release puts it back
+//   bun bin/memories.ts session-pending write|list|claim|release|remove <root> ...  the markers session.end leaves (an id, an owner and a path; never text); claim takes one for a summary, release puts it back (release --failed counts a failed model call: back-off, dropped at the fifth)
 //   bun bin/memories.ts sweep-claim <root>                           whether the daily unused-expiry sweep is due; if so, marks it taken
 //   bun bin/memories.ts --store <dir> expire [--apply] [--days N] [--owner O] [--root R] [--limit N] [--json]
 //                                                                     the unused-expiry sweep: a dry run unless --apply, which backs the store up first
@@ -30,7 +30,7 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { BACKFILL_TEXT_LIMIT, isProposalId } from '../hooks/backfill'
 import { isKind } from '../hooks/kinds'
 import { buildRequests, engineEnv, parseReplies } from '../hooks/engine'
-import { BLOCK_PINNED_MAX, EXPIRE_DEFAULT_DAYS, expireRequest, expireSetting, parseExpireReply, parsePending, SESSION_CLAIM_STALE_MS, SESSION_CLAIM_SUFFIX, SESSION_ID, SESSION_PENDING_DIR, SWEEP_LIMIT, SWEEP_LOCK, SWEEP_LOCK_STALE_MS, SWEEP_MARKER, sweepDue, sweepMarkerText } from '../hooks/session'
+import { BLOCK_PINNED_MAX, EXPIRE_DEFAULT_DAYS, expireRequest, expireSetting, parseExpireReply, parsePending, SESSION_CLAIM_STALE_MS, SESSION_CLAIM_SUFFIX, SESSION_BACKOFF_MAX_MS, SESSION_ID, SESSION_MAX_ATTEMPTS, SESSION_PENDING_DIR, sessionBackoffMs, SWEEP_LIMIT, SWEEP_LOCK, SWEEP_LOCK_STALE_MS, SWEEP_MARKER, sweepDue, sweepMarkerText } from '../hooks/session'
 import type { BlockRead, ExpiredRow, PendingSession } from '../hooks/session'
 import { cleanTags, MAX_TAGS, normalizeTag } from '../hooks/tags'
 import { readConfig } from './settings'
@@ -476,6 +476,38 @@ export function releaseSessionPending(root: string, sessionId: string) {
   }
 }
 
+/**
+ * Issue #38: puts a claimed marker back after a failed summary model call, with one more failed attempt and a time before
+ * which it is not tried again; the fifth failed attempt drops it instead. The new marker is a 0600 file renamed over the
+ * claim, then the claim is put back as releaseSessionPending does. Nothing claimed is nothing to do (attempts 0).
+ */
+export function failSessionPending(root: string, sessionId: string, now: number = Date.now()): { attempts: number; gaveUp: boolean } {
+  if (!SESSION_ID.test(sessionId)) throw new Error('a session marker needs a plain session id')
+  const claim = claimFileOf(root, sessionId)
+  let entry: PendingSession | undefined
+  try {
+    entry = parsePending(readFileSync(claim, 'utf8'))
+  } catch {
+    return { attempts: 0, gaveUp: false }
+  }
+  if (entry === undefined || entry.sessionId !== sessionId) {
+    releaseSessionPending(root, sessionId)
+    return { attempts: 0, gaveUp: false }
+  }
+  const attempts = (entry.attempts ?? 0) + 1
+  if (attempts >= SESSION_MAX_ATTEMPTS) {
+    rmSync(claim, { force: true })
+    return { attempts, gaveUp: true }
+  }
+  const temp = `${claim}.${process.pid}.tmp`
+  rmSync(temp, { force: true })
+  writeFileSync(temp, `${JSON.stringify({ sessionId: entry.sessionId, owner: entry.owner, transcript: entry.transcript, attempts, notBefore: now + sessionBackoffMs(attempts) })}\n`, { mode: 0o600, flag: 'wx' })
+  if (!IS_WINDOWS) chmodSync(temp, 0o600)
+  renameSync(temp, claim)
+  releaseSessionPending(root, sessionId)
+  return { attempts, gaveUp: false }
+}
+
 /** Every session marker, newest file first (the latest sessions are summarised first); a torn or foreign file is skipped. */
 export function listSessionPending(root: string, now: number = Date.now()): PendingSession[] {
   const folder = sessionPendingDir(root)
@@ -492,13 +524,22 @@ export function listSessionPending(root: string, now: number = Date.now()): Pend
   }
   const files = readdirSync(folder)
     .filter(name => name.endsWith('.json'))
-    .map(name => ({ name, mtime: statSync(join(folder, name)).mtimeMs }))
+    .flatMap(name => {
+      try {
+        return [{ name, mtime: statSync(join(folder, name)).mtimeMs }]
+      } catch {
+        return [] // gone or claimed since the readdir
+      }
+    })
     .sort((a, b) => b.mtime - a.mtime || (a.name < b.name ? -1 : 1))
   const out: PendingSession[] = []
   for (const { name } of files) {
     try {
       const entry = parsePending(readFileSync(join(folder, name), 'utf8'))
-      if (entry !== undefined && `${entry.sessionId}.json` === name) out.push(entry)
+      // Issue #38: a marker still waiting after a failed attempt is not listed until its time comes. A wait longer than the
+      // longest back-off (a clock that jumped back, a hand edit) is not trusted, so such a marker is never hidden for good.
+      const waiting = entry?.notBefore !== undefined && entry.notBefore > now && entry.notBefore - now <= SESSION_BACKOFF_MAX_MS
+      if (entry !== undefined && `${entry.sessionId}.json` === name && !waiting) out.push(entry)
     } catch {
       // unreadable: not an entry
     }
@@ -507,7 +548,7 @@ export function listSessionPending(root: string, now: number = Date.now()): Pend
 }
 
 /** Makes the lock with an exclusive create, so one caller gets it; a lock left by a claimant that died is taken over. */
-function takeSweepLock(lock: string): boolean {
+export function takeSweepLock(lock: string, beforeTakeover?: () => void): boolean {
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       closeSync(openSync(lock, 'wx', 0o600))
@@ -524,14 +565,29 @@ function takeSweepLock(lock: string): boolean {
     if (age < SWEEP_LOCK_STALE_MS) return false // a live claimant is checking the marker right now
     // Stale: moved aside by a rename (one caller's rename wins), and only a lock that is still old is thrown away.
     const aside = `${lock}.${process.pid}.stale`
+    beforeTakeover?.() // test seam: another claimant may replace the stale lock here
     try {
       renameSync(lock, aside)
     } catch {
       continue
     }
-    const fresh = Date.now() - statSync(aside).mtimeMs < SWEEP_LOCK_STALE_MS
-    rmSync(aside, { force: true })
-    if (fresh) return false // that was a live claimant's new lock
+    let fresh: boolean
+    try {
+      fresh = Date.now() - statSync(aside).mtimeMs < SWEEP_LOCK_STALE_MS
+    } catch {
+      continue // it went in the meantime: try the create again
+    }
+    if (!fresh) {
+      rmSync(aside, { force: true })
+      continue
+    }
+    // That was a live claimant's new lock: put it back for them; if that fails, drop the copy, but never claim the lock.
+    try {
+      renameSync(aside, lock)
+    } catch {
+      rmSync(aside, { force: true })
+    }
+    return false
   }
   return false
 }
@@ -761,8 +817,9 @@ async function main(argv: readonly string[]) {
       if (more.length !== 1) throw new Error('usage: session-pending claim <root> <session id>')
       process.stdout.write(`${JSON.stringify({ claimed: claimSessionPending(root, more[0]!) })}\n`)
     } else if (action === 'release') {
-      if (more.length !== 1) throw new Error('usage: session-pending release <root> <session id>')
-      releaseSessionPending(root, more[0]!)
+      if (more.length === 2 && more[1] === '--failed') process.stdout.write(`${JSON.stringify(failSessionPending(root, more[0]!))}\n`)
+      else if (more.length !== 1) throw new Error('usage: session-pending release <root> <session id> [--failed]')
+      else releaseSessionPending(root, more[0]!)
     } else {
       throw new Error('usage: session-pending write|list|claim|release|remove <root> ...')
     }

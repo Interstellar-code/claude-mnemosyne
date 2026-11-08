@@ -4,7 +4,8 @@
 // under the temp HOME, `--store` and `--root` always name it, and the model is a stand-in.
 import { Database } from 'bun:sqlite'
 import { afterEach, describe, expect, setDefaultTimeout, test } from 'bun:test'
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { engineCall, isolatedEnv, ROOT, toolCall } from './helpers'
 import { hooks, makeHost, until } from './knowledge-host'
@@ -344,6 +345,25 @@ describe('SESSION.4: the daily marker', () => {
     expect(existsSync(marker)).toBe(true)
   })
 
+  test('a stale lock replaced by a live claimant just before the takeover is put back, not deleted (#37)', async () => {
+    const { takeSweepLock } = await import('../../bin/memories')
+    const host = await open()
+    mkdirSync(host.root, { recursive: true })
+    const lock = join(host.root, 'expire-sweep.lock')
+    writeFileSync(lock, '')
+    const long = new Date(Date.now() - 10 * 60_000)
+    utimesSync(lock, long, long)
+    // between our look at the old lock and our rename, another claimant replaces it with its own fresh lock
+    const taken = takeSweepLock(lock, () => {
+      const now = new Date()
+      utimesSync(lock, now, now)
+    })
+    expect(taken).toBe(false)
+    expect(existsSync(lock)).toBe(true)
+    expect(Date.now() - statSync(lock).mtimeMs).toBeLessThan(60_000)
+    expect(readdirSync(host.root).filter(name => name.endsWith('.stale'))).toEqual([])
+  })
+
   test('sweep-claim refuses --store and a bad folder argument', async () => {
     const host = await open()
     expect((await memories(['--store', host.store, 'sweep-claim', host.root])).exitCode).not.toBe(0)
@@ -505,6 +525,86 @@ describe('SESSION.1: session-pending markers', () => {
     writeFileSync(join(host.root, 'session-pending', 'torn.json'), '{"sessionId":')
     writeFileSync(join(host.root, 'session-pending', 'mismatch.json'), JSON.stringify(entry('other')))
     expect(JSON.parse((await memories(['session-pending', 'list', host.root])).stdout)).toEqual([])
+  })
+
+  test('issue #38: an old marker without attempts or notBefore parses as before; bad values are ignored', async () => {
+    const { parsePending } = await import('../../hooks/session')
+    expect(parsePending(JSON.stringify(entry('a')))).toEqual(entry('a'))
+    expect(parsePending(JSON.stringify({ ...entry('a'), attempts: 2, notBefore: 1234 }))).toEqual({ ...entry('a'), attempts: 2, notBefore: 1234 })
+    expect(parsePending(JSON.stringify({ ...entry('a'), attempts: -1, notBefore: 'soon' }))).toEqual(entry('a'))
+    expect(parsePending(JSON.stringify({ ...entry('a'), attempts: 1.5 }))).toEqual(entry('a'))
+  })
+
+  test('issue #38: list skips a marker whose notBefore is in the future; release --failed counts and backs off; write starts again at 0', async () => {
+    const host = await open()
+    mkdirSync(host.root, { recursive: true })
+    const folder = join(host.root, 'session-pending')
+    const listed = async () => JSON.parse(ok(await memories(['session-pending', 'list', host.root])).stdout) as { sessionId: string; attempts?: number; notBefore?: number }[]
+    ok(await memories(['session-pending', 'write', host.root], JSON.stringify(entry('one'))))
+    expect((JSON.parse(ok(await memories(['session-pending', 'claim', host.root, 'one'])).stdout) as { claimed: boolean }).claimed).toBe(true)
+    const failed = JSON.parse(ok(await memories(['session-pending', 'release', host.root, 'one', '--failed'])).stdout) as { attempts: number; gaveUp: boolean }
+    expect(failed).toEqual({ attempts: 1, gaveUp: false })
+    expect(readdirSync(folder)).toEqual(['one.json'])
+    expect((statSync(join(folder, 'one.json')).mode & 0o777).toString(8)).toBe('600')
+    const stored = JSON.parse(readFileSync(join(folder, 'one.json'), 'utf8')) as { attempts: number; notBefore: number }
+    expect(stored.attempts).toBe(1)
+    expect(stored.notBefore).toBeGreaterThan(Date.now() + 59 * 60_000)
+    expect(await listed()).toEqual([])
+    writeFileSync(join(folder, 'one.json'), JSON.stringify({ ...stored, notBefore: Date.now() - 1000 }))
+    const back = await listed()
+    expect(back.map(item => [item.sessionId, item.attempts])).toEqual([['one', 1]])
+    // a marker rewritten by write starts again at 0
+    ok(await memories(['session-pending', 'write', host.root], JSON.stringify({ ...entry('one'), attempts: 4, notBefore: Date.now() + DAY })))
+    expect(Object.keys(JSON.parse(readFileSync(join(folder, 'one.json'), 'utf8'))).sort()).toEqual(['owner', 'sessionId', 'transcript'])
+    expect(await listed()).toEqual([entry('one')])
+    // the fifth failed attempt drops the marker
+    writeFileSync(join(folder, 'one.json'), JSON.stringify({ ...entry('one'), attempts: 4 }))
+    expect((JSON.parse(ok(await memories(['session-pending', 'claim', host.root, 'one'])).stdout) as { claimed: boolean }).claimed).toBe(true)
+    expect(JSON.parse(ok(await memories(['session-pending', 'release', host.root, 'one', '--failed'])).stdout)).toEqual({ attempts: 5, gaveUp: true })
+    expect(readdirSync(folder)).toEqual([])
+    // nothing claimed: nothing to count
+    expect(JSON.parse(ok(await memories(['session-pending', 'release', host.root, 'one', '--failed'])).stdout)).toEqual({ attempts: 0, gaveUp: false })
+    expect((await memories(['session-pending', 'release', host.root, 'one', '--other'])).exitCode).not.toBe(0)
+  })
+
+  test('issue #38: a notBefore more than 24 hours ahead (a clock that jumped back, a hand edit) does not hide the marker', async () => {
+    const { listSessionPending } = await import('../../bin/memories')
+    const root = mkdtempSync(join(tmpdir(), 'mnemo-pending-'))
+    try {
+      const folder = join(root, 'session-pending')
+      mkdirSync(folder, { recursive: true })
+      const now = Date.now()
+      writeFileSync(join(folder, 'far.json'), JSON.stringify({ ...entry('far'), attempts: 2, notBefore: now + 365 * DAY }))
+      writeFileSync(join(folder, 'near.json'), JSON.stringify({ ...entry('near'), attempts: 4, notBefore: now + DAY - 60_000 }))
+      expect(listSessionPending(root, now).map(item => item.sessionId)).toEqual(['far'])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('SESSION.1: a session-pending marker that vanishes before it is stat-ed is skipped (#36)', () => {
+  const entry = (id: string) => ({ sessionId: id, owner: 'global', transcript: `/home/u/.claude/projects/-work/${id}.jsonl` })
+
+  test('a dangling <id>.json (listed by readdir, gone for stat) is skipped; the rest is listed newest first, in-process and via the CLI', async () => {
+    const { listSessionPending } = await import('../../bin/memories')
+    const root = mkdtempSync(join(tmpdir(), 'mnemo-pending-'))
+    try {
+      const folder = join(root, 'session-pending')
+      mkdirSync(folder, { recursive: true })
+      for (const [i, id] of ['older', 'newer'].entries()) {
+        writeFileSync(join(folder, `${id}.json`), JSON.stringify(entry(id)))
+        const when = new Date(Date.now() - (2 - i) * 60_000)
+        utimesSync(join(folder, `${id}.json`), when, when)
+      }
+      // readdir lists it, statSync throws ENOENT: the same as a marker claimed or removed between the two calls
+      symlinkSync(join(folder, 'missing-target'), join(folder, 'vanished.json'))
+      expect(listSessionPending(root).map(item => item.sessionId)).toEqual(['newer', 'older'])
+      const done = ok(await memories(['session-pending', 'list', root]))
+      expect((JSON.parse(done.stdout) as { sessionId: string }[]).map(item => item.sessionId)).toEqual(['newer', 'older'])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 })
 
@@ -784,13 +884,63 @@ describe('SESSION.1 and SESSION.2: the summary of the last session and the first
     await host.settled()
     expect(host.model).toHaveLength(1)
     expect(summaryRows(host)).toHaveLength(0)
-    expect(existsSync(join(host.root, 'session-pending', 'old-1.json'))).toBe(true)
+    const marker = join(host.root, 'session-pending', 'old-1.json')
+    expect(existsSync(marker)).toBe(true)
+    // issue #38: the failed attempt is counted and the marker waits an hour before the next try
+    const after = JSON.parse(readFileSync(marker, 'utf8')) as { attempts?: number; notBefore?: number }
+    expect(after.attempts).toBe(1)
+    expect(after.notBefore! - Date.now()).toBeGreaterThan(59 * 60_000)
+    expect(after.notBefore! - Date.now()).toBeLessThanOrEqual(60 * 60_000)
+    expect((statSync(marker).mode & 0o777).toString(8)).toBe('600')
     host.setSession('new-3')
     await host.prompt('First prompt of the third session, please help.')
     await host.turn()
     await host.settled()
+    expect(host.model).toHaveLength(1)
+    expect(existsSync(marker)).toBe(true)
+    // the clock past notBefore: the next first prompt tries again and finishes it
+    writeFileSync(marker, JSON.stringify({ ...after, notBefore: Date.now() - 1000 }))
+    host.setSession('new-4')
+    await host.prompt('First prompt of the fourth session, please help.')
+    await host.turn()
+    await host.settled()
+    expect(host.model).toHaveLength(2)
     expect(summaryRows(host)).toHaveLength(1)
-    expect(existsSync(join(host.root, 'session-pending', 'old-1.json'))).toBe(false)
+    expect(existsSync(marker)).toBe(false)
+  })
+
+  test('a model that always fails: the back-off doubles per attempt and after five failed attempts the marker is dropped with one activity line', async () => {
+    const host = await open({ options: { sessionSummary: 'on' }, model: () => ({ isAnswered: false, reason: 'api-error', status: 400, error: 'bad model id' }) })
+    writeTranscript(host, 'old-1')
+    await host.sessionEnd('old-1')
+    const marker = join(host.root, 'session-pending', 'old-1.json')
+    for (let n = 1; n <= 5; n++) {
+      host.setSession(`new-${n}`)
+      await host.prompt(`First prompt of session number ${n}, please help.`)
+      await host.turn()
+      await host.settled()
+      expect(host.model).toHaveLength(n)
+      if (n < 5) {
+        const state = JSON.parse(readFileSync(marker, 'utf8')) as { attempts?: number; notBefore?: number }
+        expect(state.attempts).toBe(n)
+        const wait = state.notBefore! - Date.now()
+        expect(wait).toBeGreaterThan(2 ** (n - 1) * 3_600_000 - 60_000)
+        expect(wait).toBeLessThanOrEqual(2 ** (n - 1) * 3_600_000)
+        // the clock moves past notBefore
+        writeFileSync(marker, JSON.stringify({ ...state, notBefore: Date.now() - 1000 }))
+      }
+    }
+    expect(readdirSync(join(host.root, 'session-pending'))).toEqual([])
+    expect(summaryRows(host)).toHaveLength(0)
+    const lines = host.activity().filter(entry => entry.origin === 'session' && entry.client === 'mnemosyne-session')
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({ ok: false, count: 0 })
+    expect(String(lines[0]!.error)).toContain('given up')
+    host.setSession('new-6')
+    await host.prompt('First prompt of session number six, please help.')
+    await host.turn()
+    await host.settled()
+    expect(host.model).toHaveLength(5)
   })
 
   test('a session with no transcript is dropped without a model call', async () => {

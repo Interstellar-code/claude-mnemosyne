@@ -19,7 +19,7 @@ import { type OrchestratedRecallResult, orchestrateRecall } from "../orchestrato
 import { POLYPHONIC_MAX_COMBINED_SCORE } from "../polyphonic-recall";
 import { isQueryCacheEnabled, QueryCache } from "../query-cache";
 import { adjustWeights, classifyIntent, type QueryIntentCategory } from "../query-intent";
-import { getSynonyms, STOP_WORDS as QUERY_STOP_WORDS } from "../synonyms";
+import { getSynonymGroups, getSynonyms, STOP_WORDS as QUERY_STOP_WORDS } from "../synonyms";
 import { extractTemporal } from "../temporal-parser";
 import { cosineSimilarity } from "../vector-math";
 import type { BeamMemoryState, RecallEnhancedOptions, RecallOptions, RecallResult } from "./types";
@@ -308,12 +308,24 @@ function recallSynonyms(token: string, useSynonyms: boolean): string[] {
 	}
 }
 
+// Literal query words first, then one variant from each synonym group of each word in turn, so a capped
+// prefix (ftsQuery, the fact fallback) reaches every query word and every meaning of a word that sits in
+// several synonym groups (issues #12, #26). The token set is the same as a flat expansion; only the order differs.
 function expandedTokens(query: string, useSynonyms = true): string[] {
-	const seen = new Set<string>();
+	const seen = new Set<string>(tokenize(query));
+	const lanes: string[][] = [];
 	for (const token of tokenize(query)) {
-		for (const variant of recallSynonyms(token, useSynonyms)) {
-			for (const part of tokenize(variant)) seen.add(part);
+		const meanings = useSynonyms ? getSynonymGroups(token) : [];
+		const grouped = new Set(meanings.flat());
+		const rest = recallSynonyms(token, useSynonyms).filter(variant => !grouped.has(variant));
+		for (const lane of [...meanings, rest]) {
+			const parts = lane.flatMap(variant => tokenize(variant));
+			if (parts.length > 0) lanes.push(parts);
 		}
+	}
+	const longest = Math.max(0, ...lanes.map(lane => lane.length));
+	for (let i = 0; i < longest; i++) {
+		for (const lane of lanes) if (i < lane.length) seen.add(lane[i] as string);
 	}
 	return [...seen];
 }
@@ -483,7 +495,10 @@ function ftsPhrase(token: string): string {
 }
 
 function ftsQuery(query: string, useSynonyms = true): string {
-	const tokens = expandedTokens(query, useSynonyms).slice(0, 12);
+	// Every distinct query word first, then synonyms fill whatever room is left under the cap (#26).
+	const words = [...new Set(tokenize(query))];
+	const synonyms = expandedTokens(query, useSynonyms).filter(token => !words.includes(token));
+	const tokens = [...words, ...synonyms.slice(0, Math.max(0, 12 - words.length))];
 	if (tokens.length === 0) return ftsPhrase(query.trim());
 	return tokens.map(ftsPhrase).join(" OR ");
 }
@@ -708,6 +723,22 @@ function allVisibleIds(
 		...params,
 		DEFAULT_LIMIT,
 	]);
+	return rows.map(row => asString(row.id)).filter(Boolean);
+}
+
+/** Every visible row with a stored embedding, not only the newest DEFAULT_LIMIT (issue #19). */
+function embeddedVisibleIds(
+	beam: BeamMemoryState,
+	table: "working_memory" | "episodic_memory",
+	options: RecallOptionsInternal,
+): string[] {
+	if (!tableExists(beam, "memory_embeddings")) return [];
+	const { where, params } = buildWhere(beam, "", options);
+	const rows = queryAll(
+		beam,
+		`SELECT id FROM ${table} WHERE ${where} AND id IN (SELECT memory_id FROM memory_embeddings)`,
+		params,
+	);
 	return rows.map(row => asString(row.id)).filter(Boolean);
 }
 
@@ -981,8 +1012,8 @@ function collectMemoryCandidates(
 	let wmVec = new Map<string, number>();
 	let emVec = new Map<string, number>();
 	if (queryEmbedding !== null && queryEmbedding !== undefined) {
-		const allWmIds = options.includeWorking === false ? [] : allVisibleIds(beam, "working_memory", options);
-		const allEmIds = allVisibleIds(beam, "episodic_memory", options);
+		const allWmIds = options.includeWorking === false ? [] : embeddedVisibleIds(beam, "working_memory", options);
+		const allEmIds = embeddedVisibleIds(beam, "episodic_memory", options);
 		wmVec = vectorSimilarities(beam, allWmIds, queryEmbedding);
 		emVec = vectorSimilarities(beam, allEmIds, queryEmbedding);
 		wmIds = [
