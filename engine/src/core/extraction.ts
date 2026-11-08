@@ -1,40 +1,26 @@
 import { withLoopPhase } from "@oh-my-pi/pi-utils";
 import { getDiagnostics, safeForLog } from "./extraction/diagnostics";
-import { callHostLlm, getHostLlmBackend } from "./llm-backends";
+import { callHostLlm } from "./llm-backends";
 import {
 	callConfiguredCompletion,
 	callLocalLlm,
 	callRemoteLlm,
 	cleanOutput,
 	configuredLlmWillHandleCall,
+	hostBackendWillHandleCall,
 	llmAvailable,
 	type RemoteLlmOptions,
 } from "./local-llm";
 import { getMnemopiRuntimeOptions } from "./runtime-options";
 import { clipToWindow, DEFAULT_INPUT_CHARS } from "./text-window";
 
-const TRUE_VALUES: Record<string, true> = { "1": true, true: true, yes: true, on: true };
-
 function env(name: string): string {
 	return process.env[name] ?? "";
-}
-
-function envBool(name: string, defaultValue: boolean): boolean {
-	const value = env(name).trim().toLowerCase();
-	return value === "" ? defaultValue : TRUE_VALUES[value] === true;
 }
 
 function envInt(name: string, defaultValue: number): number {
 	const parsed = Number.parseInt(env(name), 10);
 	return Number.isFinite(parsed) ? parsed : defaultValue;
-}
-
-function llmEnabled(): boolean {
-	return envBool("MNEMOPI_LLM_ENABLED", true);
-}
-
-function hostLlmEnabled(): boolean {
-	return envBool("MNEMOPI_HOST_LLM_ENABLED", false);
 }
 
 function llmMaxTokens(): number {
@@ -344,7 +330,7 @@ export function heuristicExtractFacts(text: string): string[] {
 }
 
 async function tryHostExtraction(prompt: string): Promise<[boolean, string | null]> {
-	if (!llmEnabled() || !hostLlmEnabled() || getHostLlmBackend() === null) {
+	if (!hostBackendWillHandleCall()) {
 		return [false, null];
 	}
 	const raw = await callHostLlm(prompt, {
