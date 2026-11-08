@@ -119,8 +119,17 @@ export const SESSION_ID = /^[A-Za-z0-9_-]{1,100}$/
 // The same limit as OWNER in hooks/projects.ts ('project-' plus up to OWNER_NAME_MAX): ownerId() does not cap the folder name.
 const OWNER_ID = new RegExp(`^[A-Za-z0-9_-]{1,${'project-'.length + OWNER_NAME_MAX}}$`)
 
-/** What a marker holds: the ended session's id, its owner and its transcript path. No conversation text, no memory text. */
-export type PendingSession = { sessionId: string; owner: string; transcript: string }
+/**
+ * What a marker holds: the ended session's id, its owner and its transcript path. No conversation text, no memory text.
+ * Issue #38: after a failed summary model call it also holds the failed attempts and the time (ms since the epoch) before
+ * which it is not tried again. An old marker without them is attempts 0 with no wait.
+ */
+export type PendingSession = { sessionId: string; owner: string; transcript: string; attempts?: number; notBefore?: number }
+
+/** Issue #38: the failed summary attempt that drops a marker for good. */
+export const SESSION_MAX_ATTEMPTS = 5
+/** Issue #38: the wait after a marker's nth failed attempt: 1 hour, doubling per attempt, at most 24 hours. */
+export const sessionBackoffMs = (attempts: number) => Math.min(3_600_000 * 2 ** Math.max(0, attempts - 1), 86_400_000)
 
 /** Claude Code's folder name for a project: the working folder with every character outside A-Z, a-z, 0-9 turned into '-'. */
 export const projectSlug = (cwd: string) => cwd.replace(/[^A-Za-z0-9]/g, '-')
@@ -138,7 +147,13 @@ export function pendingSession(sessionId: unknown, owner: unknown, transcript: u
 export function parsePending(text: string): PendingSession | undefined {
   try {
     const value = JSON.parse(text) as Record<string, unknown>
-    return value === null || typeof value !== 'object' ? undefined : pendingSession(value.sessionId, value.owner, value.transcript)
+    if (value === null || typeof value !== 'object') return undefined
+    const entry = pendingSession(value.sessionId, value.owner, value.transcript)
+    if (entry === undefined) return undefined
+    const { attempts, notBefore } = value
+    if (typeof attempts === 'number' && Number.isSafeInteger(attempts) && attempts > 0) entry.attempts = attempts
+    if (typeof notBefore === 'number' && Number.isFinite(notBefore)) entry.notBefore = notBefore
+    return entry
   } catch {
     return undefined
   }

@@ -30,7 +30,7 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { BACKFILL_TEXT_LIMIT, isProposalId } from '../hooks/backfill'
 import { isKind } from '../hooks/kinds'
 import { buildRequests, engineEnv, parseReplies } from '../hooks/engine'
-import { BLOCK_PINNED_MAX, EXPIRE_DEFAULT_DAYS, expireRequest, expireSetting, parseExpireReply, parsePending, SESSION_CLAIM_STALE_MS, SESSION_CLAIM_SUFFIX, SESSION_ID, SESSION_PENDING_DIR, SWEEP_LIMIT, SWEEP_LOCK, SWEEP_LOCK_STALE_MS, SWEEP_MARKER, sweepDue, sweepMarkerText } from '../hooks/session'
+import { BLOCK_PINNED_MAX, EXPIRE_DEFAULT_DAYS, expireRequest, expireSetting, parseExpireReply, parsePending, SESSION_CLAIM_STALE_MS, SESSION_CLAIM_SUFFIX, SESSION_ID, SESSION_MAX_ATTEMPTS, SESSION_PENDING_DIR, sessionBackoffMs, SWEEP_LIMIT, SWEEP_LOCK, SWEEP_LOCK_STALE_MS, SWEEP_MARKER, sweepDue, sweepMarkerText } from '../hooks/session'
 import type { BlockRead, ExpiredRow, PendingSession } from '../hooks/session'
 import { cleanTags, MAX_TAGS, normalizeTag } from '../hooks/tags'
 import { readConfig } from './settings'
@@ -476,6 +476,38 @@ export function releaseSessionPending(root: string, sessionId: string) {
   }
 }
 
+/**
+ * Issue #38: puts a claimed marker back after a failed summary model call, with one more failed attempt and a time before
+ * which it is not tried again; the fifth failed attempt drops it instead. The new marker is a 0600 file renamed over the
+ * claim, then the claim is put back as releaseSessionPending does. Nothing claimed is nothing to do (attempts 0).
+ */
+export function failSessionPending(root: string, sessionId: string, now: number = Date.now()): { attempts: number; gaveUp: boolean } {
+  if (!SESSION_ID.test(sessionId)) throw new Error('a session marker needs a plain session id')
+  const claim = claimFileOf(root, sessionId)
+  let entry: PendingSession | undefined
+  try {
+    entry = parsePending(readFileSync(claim, 'utf8'))
+  } catch {
+    return { attempts: 0, gaveUp: false }
+  }
+  if (entry === undefined || entry.sessionId !== sessionId) {
+    releaseSessionPending(root, sessionId)
+    return { attempts: 0, gaveUp: false }
+  }
+  const attempts = (entry.attempts ?? 0) + 1
+  if (attempts >= SESSION_MAX_ATTEMPTS) {
+    rmSync(claim, { force: true })
+    return { attempts, gaveUp: true }
+  }
+  const temp = `${claim}.${process.pid}.tmp`
+  rmSync(temp, { force: true })
+  writeFileSync(temp, `${JSON.stringify({ sessionId: entry.sessionId, owner: entry.owner, transcript: entry.transcript, attempts, notBefore: now + sessionBackoffMs(attempts) })}\n`, { mode: 0o600, flag: 'wx' })
+  if (!IS_WINDOWS) chmodSync(temp, 0o600)
+  renameSync(temp, claim)
+  releaseSessionPending(root, sessionId)
+  return { attempts, gaveUp: false }
+}
+
 /** Every session marker, newest file first (the latest sessions are summarised first); a torn or foreign file is skipped. */
 export function listSessionPending(root: string, now: number = Date.now()): PendingSession[] {
   const folder = sessionPendingDir(root)
@@ -504,7 +536,8 @@ export function listSessionPending(root: string, now: number = Date.now()): Pend
   for (const { name } of files) {
     try {
       const entry = parsePending(readFileSync(join(folder, name), 'utf8'))
-      if (entry !== undefined && `${entry.sessionId}.json` === name) out.push(entry)
+      // Issue #38: a marker still waiting after a failed attempt is not listed until its time comes.
+      if (entry !== undefined && `${entry.sessionId}.json` === name && !(entry.notBefore !== undefined && entry.notBefore > now)) out.push(entry)
     } catch {
       // unreadable: not an entry
     }
@@ -782,8 +815,9 @@ async function main(argv: readonly string[]) {
       if (more.length !== 1) throw new Error('usage: session-pending claim <root> <session id>')
       process.stdout.write(`${JSON.stringify({ claimed: claimSessionPending(root, more[0]!) })}\n`)
     } else if (action === 'release') {
-      if (more.length !== 1) throw new Error('usage: session-pending release <root> <session id>')
-      releaseSessionPending(root, more[0]!)
+      if (more.length === 2 && more[1] === '--failed') process.stdout.write(`${JSON.stringify(failSessionPending(root, more[0]!))}\n`)
+      else if (more.length !== 1) throw new Error('usage: session-pending release <root> <session id> [--failed]')
+      else releaseSessionPending(root, more[0]!)
     } else {
       throw new Error('usage: session-pending write|list|claim|release|remove <root> ...')
     }

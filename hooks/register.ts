@@ -83,6 +83,7 @@ import {
   parsePending,
   parseSummary,
   pendingSession,
+  SESSION_MAX_ATTEMPTS,
   SUMMARY_CALL_TIMEOUT_MS,
   SUMMARY_MAX_PER_RUN,
   SUMMARY_MAX_TOKENS,
@@ -1805,7 +1806,16 @@ async function finishSessionSummaries($: EngineInterface, options: PluginOptions
           () => $.model.complete({ model, system: summarySystemPrompt(), prompt: summaryPrompt(read.text), maxTokens: SUMMARY_MAX_TOKENS, timeoutMs: SUMMARY_CALL_TIMEOUT_MS }, { signal: never }),
           ms => $.clock.sleep(ms, { signal: never }),
         ).catch(() => undefined)
-        if (reply === undefined || !reply.isAnswered) continue
+        if (reply === undefined || !reply.isAnswered) {
+          // Issue #38: a failed or unanswered call counts: the marker waits longer each time, and the fifth failure drops it.
+          finished = true
+          const gaveUp = await memoriesCli($, options, ['session-pending', 'release', root, entry.sessionId, '--failed'], undefined, SESSION_CLI_TIMEOUT_MS).then(
+            out => (JSON.parse(out) as { gaveUp?: unknown }).gaveUp === true,
+            async () => (await release(entry), false),
+          ).catch(() => false)
+          if (gaveUp) await record($, options, [{ action: 'remember', origin: 'session', owner: entry.owner, client: 'mnemosyne-session', text: 'session summary', ids: [], count: 0, ok: false, error: `the summary was given up after ${SESSION_MAX_ATTEMPTS} failed attempts` }])
+          continue
+        }
         const summary = parseSummary(reply.text)
         const guard = summary === undefined ? undefined : admit({ content: summary, kind: 'event', origin: 'import' }, guardConfigOf(settings))
         // Nothing to say, a block, or a warning with nobody to confirm it (strict mode): the marker goes and nothing is saved.
