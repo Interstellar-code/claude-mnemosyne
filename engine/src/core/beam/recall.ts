@@ -483,7 +483,10 @@ function ftsPhrase(token: string): string {
 }
 
 function ftsQuery(query: string, useSynonyms = true): string {
-	const tokens = expandedTokens(query, useSynonyms).slice(0, 12);
+	// Every distinct query word first, then synonyms fill whatever room is left under the cap (#26).
+	const words = [...new Set(tokenize(query))];
+	const synonyms = expandedTokens(query, useSynonyms).filter(token => !words.includes(token));
+	const tokens = [...words, ...synonyms.slice(0, Math.max(0, 12 - words.length))];
 	if (tokens.length === 0) return ftsPhrase(query.trim());
 	return tokens.map(ftsPhrase).join(" OR ");
 }
