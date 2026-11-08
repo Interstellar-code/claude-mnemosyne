@@ -4,7 +4,8 @@
 // under the temp HOME, `--store` and `--root` always name it, and the model is a stand-in.
 import { Database } from 'bun:sqlite'
 import { afterEach, describe, expect, setDefaultTimeout, test } from 'bun:test'
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { engineCall, isolatedEnv, ROOT, toolCall } from './helpers'
 import { hooks, makeHost, until } from './knowledge-host'
@@ -505,6 +506,31 @@ describe('SESSION.1: session-pending markers', () => {
     writeFileSync(join(host.root, 'session-pending', 'torn.json'), '{"sessionId":')
     writeFileSync(join(host.root, 'session-pending', 'mismatch.json'), JSON.stringify(entry('other')))
     expect(JSON.parse((await memories(['session-pending', 'list', host.root])).stdout)).toEqual([])
+  })
+})
+
+describe('SESSION.1: a session-pending marker that vanishes before it is stat-ed is skipped (#36)', () => {
+  const entry = (id: string) => ({ sessionId: id, owner: 'global', transcript: `/home/u/.claude/projects/-work/${id}.jsonl` })
+
+  test('a dangling <id>.json (listed by readdir, gone for stat) is skipped; the rest is listed newest first, in-process and via the CLI', async () => {
+    const { listSessionPending } = await import('../../bin/memories')
+    const root = mkdtempSync(join(tmpdir(), 'mnemo-pending-'))
+    try {
+      const folder = join(root, 'session-pending')
+      mkdirSync(folder, { recursive: true })
+      for (const [i, id] of ['older', 'newer'].entries()) {
+        writeFileSync(join(folder, `${id}.json`), JSON.stringify(entry(id)))
+        const when = new Date(Date.now() - (2 - i) * 60_000)
+        utimesSync(join(folder, `${id}.json`), when, when)
+      }
+      // readdir lists it, statSync throws ENOENT: the same as a marker claimed or removed between the two calls
+      symlinkSync(join(folder, 'missing-target'), join(folder, 'vanished.json'))
+      expect(listSessionPending(root).map(item => item.sessionId)).toEqual(['newer', 'older'])
+      const done = ok(await memories(['session-pending', 'list', root]))
+      expect((JSON.parse(done.stdout) as { sessionId: string }[]).map(item => item.sessionId)).toEqual(['newer', 'older'])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 })
 

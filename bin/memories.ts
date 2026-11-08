@@ -492,7 +492,13 @@ export function listSessionPending(root: string, now: number = Date.now()): Pend
   }
   const files = readdirSync(folder)
     .filter(name => name.endsWith('.json'))
-    .map(name => ({ name, mtime: statSync(join(folder, name)).mtimeMs }))
+    .flatMap(name => {
+      try {
+        return [{ name, mtime: statSync(join(folder, name)).mtimeMs }]
+      } catch {
+        return [] // gone or claimed since the readdir
+      }
+    })
     .sort((a, b) => b.mtime - a.mtime || (a.name < b.name ? -1 : 1))
   const out: PendingSession[] = []
   for (const { name } of files) {
