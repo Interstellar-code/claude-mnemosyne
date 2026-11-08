@@ -1999,7 +1999,8 @@ export function createMemorySearch(deps: MemorySearchDeps) {
     if (mine === generation && query === latest) deps.done(query, hits)
     const next = queued
     queued = null
-    if (next !== null && next !== query && next === latest && mine === generation) await run(next)
+    // Escape clears queued, so a query queued now was asked after it: run it (the same words too, since the old answer was dropped).
+    if (next !== null && next === latest && (next !== query || mine !== generation)) await run(next)
   }
   return {
     /** A keystroke: starts the pause; under 3 characters it clears the memory results. */
