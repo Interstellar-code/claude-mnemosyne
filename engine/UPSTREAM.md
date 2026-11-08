@@ -39,8 +39,9 @@ Ours, not upstream's (engine-diff ignores them): `UPSTREAM.md`, `bun.lock` (our 
 | 18.12.3-mnemosyne.14 | f015d15f218cbeda835b65f4ae3b347bf67ba02bc9077efba07aa22718e4da8b |
 | 18.12.3-mnemosyne.15 | 7840532d977bf4b9b7087d9ec73955d34fac3e7613ba60bfd88e0a1854fd9ff7 |
 | 18.12.3-mnemosyne.16 | a920529105abee6a7f0bfd0ebb845f8afeb513a8e9522a379d469edaf8be34a5 |
+| 18.12.3-mnemosyne.17 | ac1064bc11c5b1460b7388860986c4aa4edd5062ccb32e5b7096efe7fb4f304f |
 
-The `18.12.3` row is the untouched upstream source, for reference. `.1` had changes 1 to 3; `.2` makes the change 1 merge keep a `__proto__` key as plain data (it was dropped); `.3` adds the two knowledge tools (change 4) and keeps the first author on dedupe with empty author env unset (change 5); `.4` is the review fix round: the knowledge reply is normalised by `parseExtractedFactCategories` (change 4), and the author pair merges as one unit (change 5); `.5` turns embeddings on: fastembed is a real dependency with an onnxruntime override (change 6), the CLI exits naturally on success (change 7), the on-demand runtime install is gone (change 8), and a `reembed` command backfills vectors (change 9); `.6` is the review fix round: `reembed` recounts after the drain and proves the model before a rebuild (change 9), and the API embedding route is refused without an explicit opt-in (change 10); `.7` is the second fix round: the fastembed cache dir is read from the plugin-pinned `PI_CONFIG_DIR` directly, immune to the dotenv/XDG/profile refill (change 11), and the dry run prints the 'apply' hint only when something is missing (change 9). `.8` is phase MODEL (v3): the trim spares every row whose scope is not 'session' (change 12), remember and update store `memory_type`, `trust_tier` and `valid_until` and update can restore a retired row (change 13), the read-only `mnemopi_similar` (change 14), `mnemopi_expire_unused` (change 15), and the audit trail in `memory_validations` that forget purges (change 16). `.9` MODEL.7 fix round: a re-save of the same text by the same owner never lowers a stored scope, keeps the stored trust tier unless the call names one, and never relabels a fact, preference, instruction or decision or gives it an expiry (change 17). `.10` MODEL.8: a re-save also keeps the first writer's `source` and `trust_tier` (change 18). `.11` the `mnemopi_remember` reply says `duplicate` (change 19). `.12` entity questions rank the memories about the thing asked (change 20). `.13` a process can take the owner per call, for the dashboard's warm search engine (change 21). `.14` a query naming a memory kind finds that kind (change 22), and an entity question gets the extracted facts about it (change 23). `.15` an explicit nested `llm.enabled: false` is kept (change 24), and model replies keep their list and `Source:` lines outside summaries (change 25). `.16` a backdated triple is stored as history and no triple range ends before it starts (change 26), a re-save of a retired or expired memory's text leaves it so and says so (change 27), and `mnemopi_validate`'s `private` and `surface` banks reach the real stores (change 28).
+The `18.12.3` row is the untouched upstream source, for reference. `.1` had changes 1 to 3; `.2` makes the change 1 merge keep a `__proto__` key as plain data (it was dropped); `.3` adds the two knowledge tools (change 4) and keeps the first author on dedupe with empty author env unset (change 5); `.4` is the review fix round: the knowledge reply is normalised by `parseExtractedFactCategories` (change 4), and the author pair merges as one unit (change 5); `.5` turns embeddings on: fastembed is a real dependency with an onnxruntime override (change 6), the CLI exits naturally on success (change 7), the on-demand runtime install is gone (change 8), and a `reembed` command backfills vectors (change 9); `.6` is the review fix round: `reembed` recounts after the drain and proves the model before a rebuild (change 9), and the API embedding route is refused without an explicit opt-in (change 10); `.7` is the second fix round: the fastembed cache dir is read from the plugin-pinned `PI_CONFIG_DIR` directly, immune to the dotenv/XDG/profile refill (change 11), and the dry run prints the 'apply' hint only when something is missing (change 9). `.8` is phase MODEL (v3): the trim spares every row whose scope is not 'session' (change 12), remember and update store `memory_type`, `trust_tier` and `valid_until` and update can restore a retired row (change 13), the read-only `mnemopi_similar` (change 14), `mnemopi_expire_unused` (change 15), and the audit trail in `memory_validations` that forget purges (change 16). `.9` MODEL.7 fix round: a re-save of the same text by the same owner never lowers a stored scope, keeps the stored trust tier unless the call names one, and never relabels a fact, preference, instruction or decision or gives it an expiry (change 17). `.10` MODEL.8: a re-save also keeps the first writer's `source` and `trust_tier` (change 18). `.11` the `mnemopi_remember` reply says `duplicate` (change 19). `.12` entity questions rank the memories about the thing asked (change 20). `.13` a process can take the owner per call, for the dashboard's warm search engine (change 21). `.14` a query naming a memory kind finds that kind (change 22), and an entity question gets the extracted facts about it (change 23). `.15` an explicit nested `llm.enabled: false` is kept (change 24), and model replies keep their list and `Source:` lines outside summaries (change 25). `.16` a backdated triple is stored as history and no triple range ends before it starts (change 26), a re-save of a retired or expired memory's text leaves it so and says so (change 27), and `mnemopi_validate`'s `private` and `surface` banks reach the real stores (change 28). `.17` bug-hunt batch C: the broken-JSON fallback stores no keys or JSON fragments as facts (change 29), the extraction prompt keeps `$` patterns in the conversation (change 30), percent metrics are extracted (change 31), the `launched` EVENT pattern matches (change 32), and the is / has / uses fact patterns no longer clip the next word (change 33).
 
 ## Changes
 
@@ -295,5 +296,50 @@ Not changed: `dist/types/*.d.ts` still describe upstream 18.12.3 (no `metadata` 
 - Why: the schema offers only `private` and `surface`, and both opened a new empty `banks/<name>` store: validation always answered `memory_not_found` and left a stray bank (claude-mnemosyne#13). A bank created by hand under either name can no longer be validated through this tool.
 - Files: `src/mcp-tools.ts`
 - Tests: `test/validate-bank.spec.ts`
+- Upstream issue: none yet
+- Status: open
+
+### 29. The broken-JSON fallback stores no keys or JSON fragments as facts
+
+- What: the broken-JSON fallback in `parseExtractedFactCategories` no longer stores JSON object keys or structural JSON lines as facts, and from a broken line keeps only the cut-off trailing value, so compact one-line truncated JSON (`{"key": ["value...`) is no longer stored as a raw fragment. Salvaged strings still all go to `facts`; plain-text replies take the same path as before.
+- Why: a truncated or malformed extractor reply (one cut off by the output token limit, for example) stored keys like "instructions" and lines like `"facts": [` as facts (claude-mnemosyne#14).
+- Files: `src/core/extraction.ts`
+- Tests: `test/extraction-parse.spec.ts`
+- Upstream issue: none yet
+- Status: open
+
+### 30. The extraction prompt keeps `$` patterns in the conversation
+
+- What: the extraction prompt carries the conversation text exactly as written, `$` substitution patterns included, through a replacer function instead of a replacement string.
+- Why: `String.replace` with a string replacement expanded `$$`, `$&`, `` $` `` and `$'` in the conversation text, corrupting what the fact extractor saw (claude-mnemosyne#11). `PatternCompressor.decompress` (`src/core/patterns.ts`) has the same shape with dictionary phrases, not conversation text; not changed.
+- Files: `src/core/extraction/client.ts`
+- Tests: `test/extraction-prompt-dollar.spec.ts`
+- Upstream issue: none yet
+- Status: open
+
+### 31. Percent metrics are extracted
+
+- What: in the metric regex of `extractAndStoreFacts`, only the `%` alternative stops needing a trailing word boundary (`(%|(?:ms|…|tickets?)\b)`), so a percent followed by a space, punctuation or the end of the text matches. Every other unit matches as before.
+- Why: `\b` after `%` held only when a word character followed directly, so the pct branch never ran (claude-mnemosyne#10).
+- Files: `src/core/beam/consolidate.ts`
+- Tests: `test/metric-percent.spec.ts`
+- Upstream issue: none yet
+- Status: open
+
+### 32. The `launched` EVENT pattern matches
+
+- What: a stray leading space is removed from the launched/released/shipped/deployed EVENT pattern (`\b( launched|` to `\b(launched|`).
+- Why: with the space, `\b` held only after a word character, so a note starting with "launched on", or with "launched" after punctuation, was not classified as an EVENT (claude-mnemosyne#24).
+- Files: `src/core/typed-memory.ts`
+- Tests: `test/typed-memory-event.spec.ts`
+- Upstream issue: none yet
+- Status: open
+
+### 33. The is / has / uses fact patterns no longer clip the next word
+
+- What: in `EpisodicGraph.extractFacts` the article matches only as a whole word followed by whitespace, `(?:(?:a|an|the)\s+)?`, in all three patterns.
+- Why: `(?:a|an|the)?\s*` matched a leading a/an/the inside the next word, so "amazing" became "mazing" and "another" became "nother", and the clipped facts passed the length check (claude-mnemosyne#25).
+- Files: `src/core/episodic-graph.ts`
+- Tests: `test/fact-article.spec.ts`
 - Upstream issue: none yet
 - Status: open

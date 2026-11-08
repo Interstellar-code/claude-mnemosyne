@@ -70,7 +70,7 @@ export type DocChunk = {
 }
 export type SplitResult = { chunks: DocChunk[]; skippedEmpty: number }
 
-const HEADING = /^ {0,3}(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$/
+const HEADING = /^ {0,3}(#{1,6})[ \t]+(?:#+[ \t]*$|(.+?)(?:[ \t]+#+)?[ \t]*$)/
 const FENCE = /^ {0,3}(```|~~~)/
 
 const cut = (text: string, limit: number) => {
@@ -153,7 +153,7 @@ export function splitDocument(raw: string): SplitResult {
     if (heading) {
       const level = heading[1]!.length
       while (stack.length > 0 && stack[stack.length - 1]!.level >= level) stack.pop()
-      stack.push({ level, title: heading[2]!.replace(/\s+/g, ' ').trim() })
+      stack.push({ level, title: (heading[2] ?? '').replace(/\s+/g, ' ').trim() })
       sections.push({ path: stack.map(item => item.title).join(' > '), body: [] })
     } else {
       sections[sections.length - 1]!.body.push(line)

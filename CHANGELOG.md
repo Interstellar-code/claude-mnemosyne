@@ -2,6 +2,17 @@
 
 Newest first. Each release is tagged `vX.Y.Z` on GitHub; the README and DESIGN.md describe the contracts.
 
+## 0.31.1 (bug-hunt batch C: extraction and parsing)
+
+Engine build 18.12.3-mnemosyne.17 (engine changes 29 to 33). Run `/mnemosyne-setup` once after updating; outside Claude Code, `bun bin/update.ts` or Update… on the Health tab.
+
+1. **A cut-off extraction reply no longer leaves junk facts.** When the model's reply was truncated or malformed JSON, its keys ("instructions") and lines like `"facts": [` were stored as facts. Now only real values are kept (#14).
+2. **Conversations with `$` in them reach the fact extractor unchanged.** Text such as `$$`, `$&` or `$'` (prices, shell snippets, regexes) was rewritten before extraction (#11).
+3. **Percentages are recognised as metrics.** "Cache hit rate is 85%." gave no metric before (#10).
+4. **"Launched …" notes are events.** A note starting with "launched on", or with "launched" after punctuation, was not classified as an event (#24).
+5. **Facts no longer lose the start of a word.** "X is an amazing tool" was stored as "mazing tool" (#25).
+6. **Imported document headings keep a trailing `#`.** A heading like "Learn C#" lost its `#`; closing `#`s are now stripped only after a space, as in CommonMark. A document imported before this fix gets the corrected headings on its next import, so its old chunks for those headings may stay alongside the new ones (#27).
+
 ## 0.31.0 (one project memory across clones, worktrees and moves)
 
 Issue #3. Only `scope: per-project` changes; `global` is untouched. No engine change.
