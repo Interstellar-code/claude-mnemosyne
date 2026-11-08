@@ -520,6 +520,19 @@ describe('SESSION.1: every owner the plugin builds gets a pending marker (#28)',
     expect(pendingSession('s1', 'project-a.b', '/t.jsonl')).toBeUndefined()
     expect(pendingSession('s1', `project-${'a'.repeat(301)}`, '/t.jsonl')).toBeUndefined()
   })
+
+  test('the owner limit is the one hooks/projects.ts exports, so the registry and the marker accept the same owners', async () => {
+    const { pendingSession } = await import('../../hooks/session')
+    const { OWNER_NAME_MAX, sanitizeInput } = await import('../../hooks/projects')
+    expect(typeof OWNER_NAME_MAX).toBe('number')
+    const record = (owner: string) => sanitizeInput({ owner, name: 'x', kind: 'folder', remoteHost: null })
+    const longest = `project-${'a'.repeat(OWNER_NAME_MAX)}`
+    const tooLong = `project-${'a'.repeat(OWNER_NAME_MAX + 1)}`
+    expect(record(longest)).not.toBeNull()
+    expect(pendingSession('s1', longest, '/t.jsonl')).toBeDefined()
+    expect(record(tooLong)).toBeNull()
+    expect(pendingSession('s1', tooLong, '/t.jsonl')).toBeUndefined()
+  })
 })
 
 describe('SESSION.1: a session-pending marker is claimed by one session before it is summarised', () => {

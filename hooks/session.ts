@@ -2,7 +2,7 @@
 // memories and that summary on a session's first prompt, and the unused-expiry sweep.
 //
 // Only the pure parts live here, so the hooks (register.ts), bin/memories.ts and the specs all use the same
-// rules. Nothing imports anything: no host calls, no files, no clock of its own.
+// rules. It imports only the owner limit from projects.ts (itself import-free): no host calls, no files, no clock of its own.
 //
 // What the module decides:
 //   1. the two options: sessionSummary ('off' by default) and expireUnusedDays (90, 0 for off, 1-29 refused);
@@ -10,6 +10,8 @@
 //   3. the summary prompt and how Haiku's reply is read;
 //   4. the first-prompt block (the newest summary, then pinned memories) and its caps;
 //   5. the sweep: its arguments to the engine (the kinds are fixed here, never widened), its 24-hour marker, and its reply.
+
+import { OWNER_NAME_MAX } from './projects'
 
 // ---- options ----
 
@@ -114,8 +116,8 @@ export const SESSION_CLAIM_SUFFIX = '.claim'
 /** A claim older than this was left by a session that died; listing puts the marker back. A summary run is bounded far below it. */
 export const SESSION_CLAIM_STALE_MS = 600_000
 export const SESSION_ID = /^[A-Za-z0-9_-]{1,100}$/
-// The same limit as OWNER in hooks/projects.ts ('project-' plus up to 300): ownerId() does not cap the folder name.
-const OWNER_ID = /^[A-Za-z0-9_-]{1,308}$/
+// The same limit as OWNER in hooks/projects.ts ('project-' plus up to OWNER_NAME_MAX): ownerId() does not cap the folder name.
+const OWNER_ID = new RegExp(`^[A-Za-z0-9_-]{1,${'project-'.length + OWNER_NAME_MAX}}$`)
 
 /** What a marker holds: the ended session's id, its owner and its transcript path. No conversation text, no memory text. */
 export type PendingSession = { sessionId: string; owner: string; transcript: string }
