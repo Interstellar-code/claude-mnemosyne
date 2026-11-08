@@ -149,7 +149,7 @@ export const TYPE_PATTERNS: readonly TypePattern[] = [
 	typePattern(String.raw`\b(yesterday|last\s+week|last\s+month|earlier\s+today)\b`, MemoryType.EVENT, 0.6, "decaying"),
 	typePattern(String.raw`\b(scheduled|planned|booked|set\s+up)\s+(for|at)\b`, MemoryType.EVENT, 0.7, "decaying"),
 	typePattern(String.raw`\b(incident|outage|bug|issue)\s+#?\d+`, MemoryType.EVENT, 0.8, "decaying"),
-	typePattern(String.raw`\b( launched|released|shipped|deployed)\s+(on|at)\b`, MemoryType.EVENT, 0.8, "decaying"),
+	typePattern(String.raw`\b(launched|released|shipped|deployed)\s+(on|at)\b`, MemoryType.EVENT, 0.8, "decaying"),
 
 	// INSTRUCTION: Rules, guidelines
 	typePattern(String.raw`\b(always|never|must|should|shall|do\s+not|don't)\b`, MemoryType.INSTRUCTION, 0.7, "stable"),

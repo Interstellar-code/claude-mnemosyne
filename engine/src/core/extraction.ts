@@ -243,9 +243,11 @@ export function parseExtractedFactCategories(
 					};
 				}
 			} catch {
-				const matches = [...raw.matchAll(/"([^"]{10,})"/g)]
+				// Pair quotes in order and skip object keys (a string followed by a colon) (#14).
+				const matches = [...raw.matchAll(/"([^"]*)"(\s*:)?/g)]
+					.filter(m => m[2] === undefined)
 					.map(m => m[1])
-					.filter((v): v is string => v !== undefined);
+					.filter((v): v is string => v !== undefined && v.length >= 10);
 				if (matches.length > 0) {
 					return {
 						...emptyFactCategories(),
@@ -257,8 +259,28 @@ export function parseExtractedFactCategories(
 				}
 			}
 		}
+		const looksJson = rawClean.startsWith("{");
 		const cleaned: string[] = [];
-		for (const line of raw.split("\n")) {
+		for (const rawLine of raw.split("\n")) {
+			let line = rawLine;
+			if (looksJson) {
+				// Drop structural JSON lines and unwrap value lines from a broken JSON reply (#14).
+				const trimmed = line.trim();
+				if (/^[[\]{},\s]*$/.test(trimmed) || /^"[^"]*"\s*:\s*[[{]?\s*$/.test(trimmed)) continue;
+				// The salvage above found no complete 10+ value, so a line's closed strings are keys or
+				// short values: keep only a cut-off trailing value (odd quote count), else drop the line.
+				const quotes = [...trimmed.matchAll(/(?<!\\)"/g)];
+				if (quotes.length % 2 === 1) {
+					line = trimmed.slice((quotes[quotes.length - 1]?.index ?? -1) + 1);
+				} else if (quotes.length > 0) {
+					continue;
+				} else line = trimmed
+					.replace(/^"[^"]*"\s*:\s*/, "")
+					.replace(/^\[\s*/, "")
+					.replace(/[\s,\]}]+$/, "")
+					.replace(/^"/, "")
+					.replace(/"$/, "");
+			}
 			const fact = line.replace(/^[\s\d.\-*]+/, "").trim();
 			if (fact.length > 10) {
 				const normalized = normalizeFact(fact);
