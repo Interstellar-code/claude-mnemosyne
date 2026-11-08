@@ -191,7 +191,13 @@ export function expandQuery(query: string): string {
 }
 export function getSynonyms(word: string): string[] {
 	const lowered = word.toLowerCase();
-	const canonical = WORD_TO_CANONICAL.get(lowered);
-	if (canonical === undefined) return [lowered];
-	return [canonical, ...SYNONYM_GROUPS[canonical]];
+	const words = new Set<string>();
+	for (const canonical in SYNONYM_GROUPS) {
+		const group: readonly string[] = SYNONYM_GROUPS[canonical as Canonical];
+		if (canonical !== lowered && !group.includes(lowered)) continue;
+		words.add(canonical);
+		for (const synonym of group) words.add(synonym);
+	}
+	if (words.size === 0) return [lowered];
+	return [...words];
 }
