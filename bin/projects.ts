@@ -14,9 +14,17 @@
 // project). firstSeen is kept, lastSeen is today's UTC date, and a registry that is
 // corrupt is rebuilt. Every error is swallowed and the script always exits 0: a
 // registry must never break the session that records it.
+//
+// resolveProjectOwner(path, store, input) answers which owner a session's folder
+// uses (issue #3, resolveOwner in hooks/projects.ts), reading the registry and, only
+// when the registry does not know the folder's path id, the store read-only:
+//   bun bin/projects.ts resolve <path> <store>   (one ResolveInput on stdin)
+// It prints the owner and exits 0, or exits 1 with one line on stderr; the hook then
+// falls back to the path id, as before issue #3. It never writes.
+import { Database } from 'bun:sqlite'
 import { chmodSync, closeSync, existsSync, fchmodSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeSync } from 'node:fs'
-import { basename, dirname } from 'node:path'
-import { formatProjects, mergeProject, parseProjects, PROJECTS_FILE, sanitizeInput } from '../hooks/projects'
+import { basename, dirname, join } from 'node:path'
+import { formatProjects, mergeProject, parseProjects, PROJECTS_FILE, resolveOwner, sanitizeInput, sanitizeResolve } from '../hooks/projects'
 
 // The script's own cap: a hook's detached run (spawn mode) has no host timeout.
 export const SCRIPT_TIMEOUT_MS = 5_000
@@ -119,6 +127,47 @@ export function writeProjects(path: string, input: unknown, today: string = utcT
   } finally {
     if (temp !== undefined) rmSync(temp, { force: true })
     if (held !== undefined) rmSync(held, { force: true })
+  }
+}
+
+/** True when the store holds any memory under `owner`; false without a store. Throws when the store cannot be read. */
+export function storeHasOwner(store: string, owner: string) {
+  const file = join(store, 'mnemopi.db')
+  if (!existsSync(file)) return false
+  const db = new Database(file, { readonly: true })
+  try {
+    db.exec('PRAGMA query_only = ON')
+    db.exec('PRAGMA busy_timeout = 2000')
+    // A store the engine has not set up yet has no table: no rows.
+    if (db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'working_memory'").get() === null) return false
+    return db.query('SELECT 1 FROM working_memory WHERE session_id = ? LIMIT 1').get(owner) !== null
+  } finally {
+    db.close()
+  }
+}
+
+/** The owner for `input` (a ResolveInput, or its JSON text), from the registry at `path` and the store. Throws on a bad input or path. */
+export function resolveProjectOwner(path: string, store: string, input: unknown) {
+  const request = sanitizeResolve(input)
+  if (request === null) throw new Error('bad resolve input')
+  if (basename(path) !== PROJECTS_FILE) throw new Error(`the registry must be named ${PROJECTS_FILE}`)
+  if (store === '') throw new Error('a store folder is required')
+  // An unreadable registry (not a missing one) throws: guessing past it could hand a project a second owner.
+  return resolveOwner(parseProjects(readRegistry(path)), request, () => storeHasOwner(store, request.legacy))
+}
+
+if (import.meta.main && process.argv[2] === 'resolve') {
+  setTimeout(() => {
+    process.stderr.write('projects: resolve timed out\n')
+    process.exit(1)
+  }, SCRIPT_TIMEOUT_MS).unref()
+  try {
+    if (process.argv.length !== 5) throw new Error('usage: bun bin/projects.ts resolve <projects.json> <store>')
+    process.stdout.write(`${resolveProjectOwner(process.argv[3]!, process.argv[4]!, await Bun.stdin.text())}\n`)
+    process.exit(0)
+  } catch (err) {
+    process.stderr.write(`projects: ${(err as Error).message}\n`)
+    process.exit(1)
   }
 }
 

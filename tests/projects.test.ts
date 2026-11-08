@@ -5,7 +5,7 @@
 // are in tests/bun/projects.spec.ts, because this folder is typed and run without Node or
 // Bun (no file work, no dynamic import).
 import { expect, test } from 'claude-code/testing'
-import { formatProjects, MAX_NAME, mergeProject, parseProjects, projectName, remoteHostOf, sanitizeInput } from '../hooks/projects'
+import { formatProjects, MAX_NAME, mergeProject, parseProjects, projectName, remoteHostOf, resolveOwner, sanitizeInput } from '../hooks/projects'
 
 const OWNER = 'project-My-Repo-apu5fc'
 const input = (over: Record<string, unknown> = {}) => ({ owner: OWNER, name: 'My Repo', kind: 'repo', remoteHost: 'github.com', ...over })
@@ -150,4 +150,25 @@ test('MAPX.8: sanitizeInput refuses the global owner, a bad kind and any host th
   ]) {
     expect(sanitizeInput(bad)).toBeNull()
   }
+})
+
+// ---- Issue #3: the remote's hash, and the owner rule ----
+
+test('issue #3: a repo record carries its remote hash; a folder never does; a remote is refused', () => {
+  expect(sanitizeInput(input({ remoteKey: 'abc12' }))).toEqual(input({ remoteKey: 'abc12' }))
+  expect(sanitizeInput(input({ remoteKey: null }))).toEqual(input())
+  expect(sanitizeInput(input({ kind: 'folder', remoteKey: 'abc12' }))).toEqual(input({ kind: 'folder', remoteHost: null }))
+  expect(sanitizeInput(input({ remoteKey: 'github.com/o/r' }))).toBeNull()
+})
+
+test('issue #3: resolveOwner keeps a known path id, then joins the oldest owner of the remote, then mints the remote id', () => {
+  const day = '2026-11-01'
+  const record = (remoteKey?: string, firstSeen = day) => ({ name: 'r', kind: 'repo' as const, remoteHost: 'github.com', ...(remoteKey ? { remoteKey } : {}), firstSeen, lastSeen: day })
+  const file = { version: 1, projects: { 'project-a-1': record('k1', '2026-10-01'), 'project-b-2': record('k1', '2026-10-09') } }
+  const ask = (legacy: string) => ({ legacy, remoteKey: 'k1', remoteOwner: 'project-r-k1' })
+  expect(resolveOwner(file, ask('project-b-2'), () => false)).toBe('project-b-2')
+  expect(resolveOwner(file, ask('project-new-3'), () => true)).toBe('project-new-3')
+  expect(resolveOwner(file, ask('project-new-3'), () => false)).toBe('project-a-1')
+  expect(resolveOwner(parseProjects(undefined), ask('project-new-3'), () => false)).toBe('project-r-k1')
+  expect(resolveOwner(parseProjects(undefined), { legacy: 'project-new-3', remoteKey: null, remoteOwner: null }, () => false)).toBe('project-new-3')
 })
