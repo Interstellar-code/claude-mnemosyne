@@ -22,12 +22,16 @@ export interface ProjectInput {
   name: string
   kind: ProjectKind
   remoteHost: string | null
+  /** remoteKey() of the normalized remote (issue #3): a hash, never the remote. Absent or null without one. */
+  remoteKey?: string | null
 }
 
 export interface ProjectRecord {
   name: string
   kind: ProjectKind
   remoteHost: string | null
+  /** remoteKey() of the normalized remote, so another clone, a moved repo or a worktree finds this owner (issue #3). */
+  remoteKey?: string
   /** UTC date, YYYY-MM-DD. */
   firstSeen: string
   /** UTC date, YYYY-MM-DD. */
@@ -45,6 +49,9 @@ const HOST = /^(?:[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?|(?:[0-9a-f]{0,4}:){2,7}
 // 'project-<name>-<hash>' as owner() builds it; the prefix keeps 'global' and '__proto__' out of the registry.
 // owner() does not cap the folder name (up to 255 on most file systems), so the owner is kept whole; only the display name is cut to MAX_NAME.
 const OWNER = /^project-[A-Za-z0-9_-]{1,300}$/
+
+// remoteKey(): a 32-bit hash in base 36.
+const REMOTE_KEY = /^[0-9a-z]{1,7}$/
 
 const isHost = (text: string) => text.length <= 253 && HOST.test(text)
 
@@ -124,7 +131,9 @@ function cleanRecord(raw: unknown): ProjectRecord | undefined {
   if (r.kind !== 'repo' && r.kind !== 'folder') return undefined
   if (remoteHost === undefined) return undefined
   if (typeof r.firstSeen !== 'string' || !DAY.test(r.firstSeen) || typeof r.lastSeen !== 'string' || !DAY.test(r.lastSeen)) return undefined
-  return { name: r.name, kind: r.kind, remoteHost, firstSeen: r.firstSeen, lastSeen: r.lastSeen }
+  // An unreadable key is dropped, not the record: the project is still known, only not findable by its remote.
+  const key = typeof r.remoteKey === 'string' && REMOTE_KEY.test(r.remoteKey) ? { remoteKey: r.remoteKey } : {}
+  return { name: r.name, kind: r.kind, remoteHost, ...key, firstSeen: r.firstSeen, lastSeen: r.lastSeen }
 }
 
 /**
@@ -164,7 +173,9 @@ export function sanitizeInput(raw: unknown): ProjectInput | null {
     if (r.kind !== 'repo' && r.kind !== 'folder') return null
     const remoteHost = cleanHost(r.remoteHost)
     if (remoteHost === undefined) return null
-    return { owner: r.owner, name: r.name.trim().slice(0, MAX_NAME), kind: r.kind, remoteHost: r.kind === 'repo' ? remoteHost : null }
+    if (r.remoteKey !== undefined && r.remoteKey !== null && (typeof r.remoteKey !== 'string' || !REMOTE_KEY.test(r.remoteKey))) return null
+    const key = r.kind === 'repo' && typeof r.remoteKey === 'string' ? { remoteKey: r.remoteKey } : {}
+    return { owner: r.owner, name: r.name.trim().slice(0, MAX_NAME), kind: r.kind, remoteHost: r.kind === 'repo' ? remoteHost : null, ...key }
   } catch {
     return null
   }
@@ -177,7 +188,15 @@ export function mergeProject(file: ProjectsFile, input: ProjectInput, today: str
     version: PROJECTS_VERSION,
     projects: {
       ...file.projects,
-      [input.owner]: { name: input.name, kind: input.kind, remoteHost: input.remoteHost, firstSeen: before?.firstSeen ?? today, lastSeen: today },
+      [input.owner]: {
+        name: input.name,
+        kind: input.kind,
+        remoteHost: input.remoteHost,
+        // A session that reports no remote (git failed for a moment) keeps the key already recorded.
+        ...(input.remoteKey ? { remoteKey: input.remoteKey } : before?.remoteKey && input.kind === 'repo' ? { remoteKey: before.remoteKey } : {}),
+        firstSeen: before?.firstSeen ?? today,
+        lastSeen: today,
+      },
     },
   }
 }
@@ -187,4 +206,55 @@ export function formatProjects(file: ProjectsFile): string {
   const projects: Record<string, ProjectRecord> = {}
   for (const owner of Object.keys(file.projects).sort()) projects[owner] = file.projects[owner]!
   return `${JSON.stringify({ version: PROJECTS_VERSION, projects }, null, 2)}\n`
+}
+
+/** What the hook knows about a session's folder when it asks for its owner (issue #3). */
+export interface ResolveInput {
+  /** ownerId() of the folder path: the owner every project had before issue #3. */
+  legacy: string
+  /** remoteKey() of the normalized remote, or null without a network remote. */
+  remoteKey: string | null
+  /** remoteOwnerId() of the normalized remote, or null without one. */
+  remoteOwner: string | null
+}
+
+/**
+ * The owner a session's folder uses (issue #3). Ids are given once and then looked
+ * up, never re-derived, so nothing stored is ever orphaned:
+ * 1. the folder's path id, when the registry knows it or the store holds rows under
+ *    it: every project in use before issue #3 keeps its owner;
+ * 2. else the oldest registered owner with the same remote: another clone, a moved
+ *    repo, a worktree or a fresh cloud checkout joins that project's memory;
+ * 3. else, for a repo with a remote, project-<repo>-<remote hash>, the same id on
+ *    every machine; without a remote, the path id as before.
+ * `legacyHasRows` is asked only when the registry does not know the path id.
+ */
+export function resolveOwner(file: ProjectsFile, input: ResolveInput, legacyHasRows: () => boolean): string {
+  if (Object.hasOwn(file.projects, input.legacy)) return input.legacy
+  if (legacyHasRows()) return input.legacy
+  if (input.remoteKey !== null) {
+    const match = Object.entries(file.projects)
+      .filter(([, record]) => record.remoteKey === input.remoteKey)
+      .sort(([a, x], [b, y]) => x.firstSeen.localeCompare(y.firstSeen) || a.localeCompare(b))[0]
+    if (match !== undefined) return match[0]
+  }
+  return input.remoteOwner ?? input.legacy
+}
+
+/** The resolve script's stdin, checked: every id must be a project owner, the key a remote hash. Null when it does not check out. */
+export function sanitizeResolve(raw: unknown): ResolveInput | null {
+  try {
+    const value: unknown = typeof raw === 'string' ? JSON.parse(raw) : raw
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
+    const r = value as Record<string, unknown>
+    if (typeof r.legacy !== 'string' || !OWNER.test(r.legacy)) return null
+    const remoteKey = r.remoteKey ?? null
+    const remoteOwner = r.remoteOwner ?? null
+    if (remoteKey !== null && (typeof remoteKey !== 'string' || !REMOTE_KEY.test(remoteKey))) return null
+    if (remoteOwner !== null && (typeof remoteOwner !== 'string' || !OWNER.test(remoteOwner))) return null
+    if ((remoteKey === null) !== (remoteOwner === null)) return null
+    return { legacy: r.legacy, remoteKey, remoteOwner }
+  } catch {
+    return null
+  }
 }

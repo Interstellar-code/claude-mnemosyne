@@ -2,6 +2,16 @@
 
 Newest first. Each release is tagged `vX.Y.Z` on GitHub; the README and DESIGN.md describe the contracts.
 
+## Unreleased (one project memory across clones, worktrees and moves)
+
+Issue #3. Only `scope: per-project` changes; `global` is untouched. No engine change.
+
+1. **One memory per repo.** A second clone, a worktree, a moved repo or a fresh cloud checkout of the same remote now uses the project's existing memory instead of starting empty. Remotes match in any form (ssh, https, a port, `.git`, and case on GitHub, GitLab and Bitbucket).
+2. **Nothing moves.** A folder that already has an owner keeps it, so every stored memory stays where it is. A repo seen for the first time gets `project-<repo>-<hash of its remote>`, the same on every machine; a repo without a remote, or a plain folder, keeps the path id.
+3. **No names leave the hook.** `projects.json` gains a hash of each remote (`remoteKey`), never the remote, org or user. The lookup is `bun bin/projects.ts resolve`, once per folder per session; if it fails, the path id is used as before.
+
+Tests: `tests/bun/project-identity.spec.ts` (remote forms, the rule, and real git clones, a worktree, a moved repo, a new repo and a cloud checkout against a real store and registry).
+
 ## 0.30.1 (two engine fixes from mikemikimike)
 
 Engine build 18.12.3-mnemosyne.15 (engine changes 24 and 25). Thanks to mikemikimike for both fixes (#41, #42).

@@ -59,6 +59,8 @@ export type HostOptions = {
   parentEnv?: Record<string, string>
   /** A second plugin instance on the same HOME, store and engine as this host (two live sessions of one user). */
   sharedWith?: { home: string }
+  /** What $.session.repo() answers (default: /work/My Repo with no remote; null: a plain folder at /work/My Repo). */
+  repo?: { root: string; remote?: string | null } | null
 }
 
 export type Host = Awaited<ReturnType<typeof makeHost>>
@@ -109,7 +111,11 @@ export async function makeHost(opts: HostOptions = {}) {
     atoms: new Map<string, unknown>(),
     plugin: { root: ROOT, name: 'mnemosyne' },
     env: { get: async (name: string) => env[name] ?? '' },
-    session: { id: async () => sessionId, repo: async () => ({ root: '/work/My Repo' }), cwd: async () => '/work/My Repo' },
+    session: {
+      id: async () => sessionId,
+      repo: async () => (opts.repo === undefined ? { root: '/work/My Repo' } : opts.repo),
+      cwd: async () => opts.repo?.root ?? '/work/My Repo',
+    },
     fs: {
       read: async (path: string) => readFileSync(path, 'utf8'),
       stat: async (path: string) => {

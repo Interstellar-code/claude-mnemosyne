@@ -102,7 +102,7 @@ import { parseVocabulary, tagRules, VOCAB_FILE } from './vocab'
 import type { Vocabulary } from './vocab'
 import { openDashboard, stopDashboard } from './ui-launch'
 import { cmdWrapper, shWrapper } from './launcher'
-import { GLOBAL_OWNER, ownerId, slashes } from './owner'
+import { GLOBAL_OWNER, normalizeRemote, ownerId, remoteKey, remoteOwnerId, slashes } from './owner'
 import { PROJECTS_FILE, projectName, remoteHostOf } from './projects'
 
 export { ENGINE_BUILD } from './engine-build'
@@ -453,10 +453,43 @@ async function writeEmbeddingsMarker($: EngineInterface, root: string) {
   if (ran.exitCode !== 0) throw new Error(`could not write ${EMBEDDINGS_MARKER}: ${ran.stderr.trim().slice(0, 300)}`)
 }
 
-// The host supplies the root; the formula itself is host-free (hooks/owner.ts, shared with bin/owner.ts).
+// Issue #3: a project's owner is given once and then looked up, so another clone,
+// a moved repo, a worktree or a fresh cloud checkout of the same remote shares one
+// memory, and every owner already in use is kept. bin/projects.ts resolve applies
+// the rule (resolveOwner in hooks/projects.ts) to the registry and the store; it
+// runs once per folder and remote per plugin instance. A failed lookup falls back
+// to the path id (the owner before issue #3) and is asked again on the next call.
+const resolvedOwners = new WeakMap<object, Map<string, Promise<string>>>()
+const RESOLVE_TIMEOUT_MS = 5_000
+const PROJECT_OWNER = /^project-[A-Za-z0-9_-]{1,300}$/
+
+/** The session's folder as the owner rule sees it: its path id and its normalized remote (null without one). */
+async function projectOf($: EngineInterface) {
+  const repo = await $.session.repo()
+  const root = repo?.root ?? (await $.session.cwd())
+  return { legacy: ownerId('per-project', root), remote: repo ? normalizeRemote(repo.remote) : null }
+}
+
 async function owner($: EngineInterface, options: PluginOptions) {
   if (options.scope !== 'per-project') return GLOBAL_OWNER
-  return ownerId(options.scope, (await $.session.repo())?.root ?? (await $.session.cwd()))
+  const { legacy, remote } = await projectOf($)
+  const cache = resolvedOwners.get(options) ?? new Map<string, Promise<string>>()
+  resolvedOwners.set(options, cache)
+  const key = `${legacy}\n${remote ?? ''}`
+  let found = cache.get(key)
+  if (found === undefined) {
+    found = (async () => {
+      const { root, store } = await paths($, options)
+      const input = { legacy, remoteKey: remote === null ? null : remoteKey(remote), remoteOwner: remote === null ? null : remoteOwnerId(remote) }
+      const ran = await $.process.run(['bun', `${slashes($.plugin.root)}/bin/projects.ts`, 'resolve', `${root}/${PROJECTS_FILE}`, store], { stdin: JSON.stringify(input), timeoutMs: RESOLVE_TIMEOUT_MS })
+      const id = ran.stdout.trim()
+      if (ran.exitCode !== 0 || !PROJECT_OWNER.test(id)) throw new Error(`bin/projects.ts resolve failed: ${ran.stderr.trim().slice(0, 300)}`)
+      return id
+    })()
+    cache.set(key, found)
+    found.catch(() => cache.delete(key))
+  }
+  return found.catch(() => legacy)
 }
 
 // Folder work runs through Bun, which every install has: mkdir, rm and chmod
@@ -786,11 +819,14 @@ async function registerProject($: EngineInterface, options: PluginOptions) {
     if (me === GLOBAL_OWNER || sent.has(me)) return
     const repo = await $.session.repo()
     const { root } = await paths($, options)
+    const remote = repo ? normalizeRemote(repo.remote) : null
     const input = {
       owner: me,
       name: projectName(slashes(repo?.root ?? (await $.session.cwd()))),
       kind: repo ? 'repo' : 'folder',
       remoteHost: repo ? remoteHostOf(repo.remote) : null,
+      // A hash of the remote, so the next clone or worktree of it finds this owner (issue #3).
+      remoteKey: remote === null ? null : remoteKey(remote),
     }
     const argv = ['bun', `${slashes($.plugin.root)}/bin/projects.ts`, 'write', `${root}/${PROJECTS_FILE}`]
     sent.add(me)
