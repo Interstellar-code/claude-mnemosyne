@@ -279,7 +279,8 @@ function prepareOption(field: OptionField, current: unknown, body: { value?: unk
       if (field.options !== undefined && !field.options.includes(text)) return refuse(`each entry must be one of ${field.options.join(', ')}`)
       if (!items.some(seen => seen.toLowerCase() === text.toLowerCase())) items.push(text)
     }
-    return { ok: true, value: items }
+    // A lone "none" is the off switch (as typed() reads it back): the list is empty.
+    return { ok: true, value: items.length === 1 && items[0]!.toLowerCase() === 'none' ? [] : items }
   }
   const value = body.value
   if (field.type === 'boolean') return typeof value === 'boolean' ? { ok: true, value } : refuse('must be true or false')
