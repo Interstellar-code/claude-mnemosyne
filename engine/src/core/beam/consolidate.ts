@@ -669,7 +669,7 @@ export function extractAndStoreFacts(
 	const text = String(content ?? "");
 	if (text.length > PATTERN_FACT_EXTRACTION_MAX_INPUT_CHARS) return counts;
 	for (const match of text.matchAll(
-		/(\d+(?:[.,]\d+)?)\s*(ms|sec|seconds?|minutes?|hours?|days?|weeks?|months?|%|KB|MB|GB|TB|rows?|columns?|roles?|features?|bugs?|commits?|cards?|users?|items?|tests?|APIs?|endpoints?|sprints?|tickets?)\b/gi,
+		/(\d+(?:[.,]\d+)?)\s*(%|(?:ms|sec|seconds?|minutes?|hours?|days?|weeks?|months?|KB|MB|GB|TB|rows?|columns?|roles?|features?|bugs?|commits?|cards?|users?|items?|tests?|APIs?|endpoints?|sprints?|tickets?)\b)/gi,
 	)) {
 		const rawUnit = match[2] ?? "";
 		let unit = rawUnit.toLowerCase();
