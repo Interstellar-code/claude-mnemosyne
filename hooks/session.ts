@@ -114,7 +114,8 @@ export const SESSION_CLAIM_SUFFIX = '.claim'
 /** A claim older than this was left by a session that died; listing puts the marker back. A summary run is bounded far below it. */
 export const SESSION_CLAIM_STALE_MS = 600_000
 export const SESSION_ID = /^[A-Za-z0-9_-]{1,100}$/
-const OWNER_ID = /^[A-Za-z0-9_-]{1,100}$/
+// The same limit as OWNER in hooks/projects.ts ('project-' plus up to 300): ownerId() does not cap the folder name.
+const OWNER_ID = /^[A-Za-z0-9_-]{1,308}$/
 
 /** What a marker holds: the ended session's id, its owner and its transcript path. No conversation text, no memory text. */
 export type PendingSession = { sessionId: string; owner: string; transcript: string }
