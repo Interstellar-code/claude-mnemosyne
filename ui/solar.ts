@@ -40,6 +40,8 @@ import {
   startAngle,
   STYLES,
   beltDots,
+  nebulaOf,
+  NEBULA_PALETTE,
   probesOf,
   tagColour,
   tagHash,
@@ -47,7 +49,7 @@ import {
   writerColour,
   writerInfos,
 } from './solar-layout'
-import type { Arrange, Body, ColourMode, LinkInfo, Orbits, PlanetStyle, SolarGalaxy, SolarMemory, StyleId, Target, WriterInfo } from './solar-layout'
+import type { Arrange, Body, ColourMode, LinkInfo, NebulaCloud, NebulaSpeck, Orbits, PlanetStyle, SolarGalaxy, SolarMemory, StyleId, Target, WriterInfo } from './solar-layout'
 
 type Three = typeof import('./vendor/map-lib.js')
 // three.js objects are handled as plain objects here: the vendored declarations are loose on purpose.
@@ -71,6 +73,8 @@ export type SolarView = {
   query: string
   /** Auto-rotate: off by default; a turning camera cancels out the planets' own slow orbits. */
   rotate: boolean
+  /** 0.29.0: the meaning nebula under the orbit plane is drawn. */
+  nebula: boolean
   legend: boolean
 }
 
@@ -120,7 +124,7 @@ export type SolarScene = {
 /** The method names C13 fixes; a spec checks the returned object against this list. */
 export const SCENE_METHODS = ['setData', 'setView', 'flyTo', 'showView', 'zoom', 'event', 'dispose'] as const
 
-export const DEFAULT_VIEW: SolarView = { arrange: 'activity', colour: 'writer', hidden: {}, query: '', rotate: false, legend: true }
+export const DEFAULT_VIEW: SolarView = { arrange: 'activity', colour: 'writer', hidden: {}, query: '', rotate: false, nebula: true, legend: true }
 
 // ---- Constants (the approved look) -----------------------------------------------------
 
@@ -227,6 +231,20 @@ const BOND_GAP = 0.006
 // The probes' orbit is a dashed blue ring of this many dashes.
 const PROBE_DASHES = 28
 type Fade = { obj: O3; index: number; rgb: [number, number, number] }
+/**
+ * 0.29.0, the meaning nebula: group holds the specks (one per placed memory, pickable), the haze (soft glows per
+ * speck, in its cloud's colour), the cloud labels, the thread (memory on its planet to its speck) and the
+ * neighbours (the opened or hovered memory's closest specks, lit). uiltR is maxR when built: the group scales
+ * with the orbits after an Arrange change.
+ */
+type NebRec = { group: O3; specks: O3; haze: O3; labels: O3[]; thread: O3; near: O3; data: NebulaSpeck[]; clouds: NebulaCloud[]; index: Map<string, number>; builtR: number; hiddenKey: string }
+// The nebula's place: its disc reaches this share of the outermost orbit, this share of it below the plane.
+const NEBULA_REACH = 0.95
+const NEBULA_DEPTH = 0.5
+// At most this many neighbours light up around the memory in focus.
+const NEBULA_NEAR = 12
+// Seen from straight above, the nebula keeps this share of its light (it sits behind the planets).
+const NEBULA_TOP_DIM = 0.35
 type EventRec = {
   type: 'recall' | 'save' | 'update' | 'forget' | 'pulse'
   owner: string | null
@@ -318,6 +336,10 @@ class SolarImpl {
   private tethers: TetherRec | null = null
   private outer: O3 = null
   private outerLabel: O3 = null
+  /** 0.29.0: the meaning nebula under the orbit plane, or null when too few memories have a place. */
+  private neb: NebRec | null = null
+  /** 0.29.0: the memory the pointer rests on (a nebula speck or an asteroid), for the thread between the two. */
+  private hoverMem: { id: string; obj: O3; index: number } | null = null
   private now = Date.now()
   private maxR = 700
   private homePos: O3
@@ -370,6 +392,7 @@ class SolarImpl {
       this.tipShown = true
       const owner = hit.planet ?? hit.item?.planet ?? hit.obj?.userData?.planet ?? hit.obj?.userData?.ringOf ?? null
       if (typeof owner === 'string' && this.P[owner]) this.hoverOwner = owner
+      this.hoverMem = hit.item && hit.item.id !== null ? { id: hit.item.id, obj: hit.obj, index: hit.item.i } : null
       this.opts.onHover?.(hit.tip, hit.x, hit.y)
     } else this.hideTip()
   }
@@ -1428,6 +1451,195 @@ class SolarImpl {
     this.world.add(this.outerLabel)
   }
 
+  /**
+   * 0.29.0, the meaning nebula (NebRec): under the orbit plane, every live memory with a meaning place is a
+   * speck in its cloud's colour, with a soft glow around it and a larger glow over each cloud; clouds of three
+   * or more carry their name. Nothing is drawn below NEBULA_MIN placed memories.
+   */
+  private makeNebula(): void {
+    const T = this.T
+    const memories = this.galaxy?.memories ?? []
+    const builtR = this.maxR || 700
+    const neb = nebulaOf(memories, builtR * NEBULA_REACH, builtR * NEBULA_DEPTH)
+    if (neb.specks.length === 0) return
+    const byId = new Map(memories.map(m => [m.id, m]))
+    const group = new T.Group()
+    group.userData = { kind: 'nebula' }
+    const pos: number[] = []
+    const col: number[] = []
+    const items: Item[] = []
+    const index = new Map<string, number>()
+    neb.specks.forEach((sp, i) => {
+      index.set(sp.id, i)
+      pos.push(...sp.position)
+      const c = new T.Color(NEBULA_PALETTE[sp.cloud % NEBULA_PALETTE.length])
+      col.push(c.r, c.g, c.b)
+      const mem = byId.get(sp.id) ?? null
+      const cloud = neb.clouds[sp.cloud]
+      const where = sp.owner === 'global' ? 'global (sun belt)' : (this.bodies.find(b => b.owner === sp.owner)?.label ?? projectLabel(sp.owner))
+      const near = mem?.similar?.length ?? 0
+      items.push({
+        kind: sp.kind,
+        i,
+        planet: sp.owner,
+        id: sp.id,
+        mem,
+        seed: i,
+        tip: [
+          `Nebula · ${mem ? this.firstLine(mem) : sp.id}`,
+          `from ${where} · ${sp.kind}`,
+          `cloud: ${cloud?.name || `cloud ${sp.cloud + 1}`} (${cloud?.count ?? 0} memories)`,
+          near > 0 ? `${near} close in meaning (lit while you look at it)` : 'nothing else close in meaning',
+          sp.owner === 'global' ? 'click: fly to it' : 'click: open it on its planet',
+        ],
+      })
+    })
+    const specks = this.pointsObject(pos, col, 6, items, 0.95, false)
+    specks.userData.nebula = true
+    const hg = new T.BufferGeometry()
+    hg.setAttribute('position', specks.geometry.attributes.position)
+    hg.setAttribute('color', new T.BufferAttribute(new Float32Array(col), 3))
+    const haze = new T.Points(hg, new T.PointsMaterial({ size: builtR * 0.09, map: this.glowTex, vertexColors: true, transparent: true, opacity: 0.16, depthWrite: false, sizeAttenuation: true, blending: T.AdditiveBlending }))
+    haze.frustumCulled = false
+    haze.userData = { kind: 'nebula-haze', clouds: [] as O3[] }
+    group.add(haze, specks)
+    const labels: O3[] = []
+    neb.clouds.forEach((cloud, ci) => {
+      if (cloud.count < 3) return
+      const colour = NEBULA_PALETTE[ci % NEBULA_PALETTE.length] as string
+      const glow = this.glow(colour, cloud.spread * 3.2 + 40, 0.12)
+      glow.position.set(...cloud.centre)
+      group.add(glow)
+      haze.userData.clouds.push(glow)
+      if (cloud.name === '') return
+      const label = this.label(cloud.name, `${cloud.count} memories`, colour, Math.max(18, builtR * 0.05))
+      label.position.set(cloud.centre[0], cloud.centre[1] - 18, cloud.centre[2])
+      group.add(label)
+      labels.push(label)
+    })
+    const ng = new T.BufferGeometry()
+    ng.setAttribute('position', new T.BufferAttribute(new Float32Array((NEBULA_NEAR + 1) * 3), 3))
+    ng.setDrawRange(0, 0)
+    const near = new T.Points(ng, new T.PointsMaterial({ size: 26, map: this.glowTex, color: new T.Color('#ffffff'), transparent: true, opacity: 0.9, depthWrite: false, sizeAttenuation: true, blending: T.AdditiveBlending }))
+    near.frustumCulled = false
+    near.userData = { kind: 'nebula-near' }
+    group.add(near)
+    const tg = new T.BufferGeometry()
+    tg.setAttribute('position', new T.BufferAttribute(new Float32Array(6), 3))
+    const thread = new T.Line(tg, new T.LineBasicMaterial({ color: new T.Color('#ffe8a3'), transparent: true, opacity: 0.7, depthWrite: false }))
+    thread.frustumCulled = false
+    thread.visible = false
+    thread.userData = { kind: 'nebula-thread' }
+    this.world.add(group, thread)
+    this.pickables.push(specks)
+    this.neb = { group, specks, haze, labels, thread, near, data: neb.specks, clouds: neb.clouds, index, builtR, hiddenKey: '' }
+  }
+
+  /**
+   * 0.29.0, each frame: the nebula follows the orbits' size and the Nebula switch; a hidden project's specks go
+   * dark; seen from above it dims to NEBULA_TOP_DIM. The memory in focus (the one the pointer rests on, else the
+   * opened one) gets a thread from its dot on the planet (or the planet, or the sun for a global) to its speck,
+   * and its closest memories' specks light up.
+   */
+  private stepNebula(): void {
+    const N = this.neb as NebRec
+    const T = this.T
+    const s = this.view
+    const on = s.nebula !== false
+    N.group.visible = on
+    N.thread.visible = false
+    if (!on) return
+    N.group.scale.setScalar((this.maxR || N.builtR) / N.builtR)
+    N.group.updateMatrixWorld(true)
+    const key = Object.keys(s.hidden)
+      .filter(owner => s.hidden[owner])
+      .sort()
+      .join('|')
+    if (key !== N.hiddenKey) {
+      N.hiddenKey = key
+      const sc = N.specks.geometry.attributes.color
+      const hc = N.haze.geometry.attributes.color
+      N.data.forEach((sp, i) => {
+        const c = new T.Color(NEBULA_PALETTE[sp.cloud % NEBULA_PALETTE.length])
+        const k = s.hidden[sp.owner] ? 0 : 1
+        sc.setXYZ(i, c.r * k, c.g * k, c.b * k)
+        hc.setXYZ(i, c.r * k, c.g * k, c.b * k)
+      })
+      sc.needsUpdate = true
+      hc.needsUpdate = true
+    }
+    const off = this.camera.position.clone().sub(this.controls.target)
+    const elev = off.length() > 0 ? off.y / off.length() : 0
+    const light = 1 - (1 - NEBULA_TOP_DIM) * Math.max(0, Math.min(1, (elev - 0.3) / 0.55))
+    N.specks.material.opacity = 0.95 * light
+    N.haze.material.opacity = 0.16 * light
+    for (const glow of N.haze.userData.clouds as O3[]) glow.material.opacity = 0.12 * light
+    for (const label of N.labels) label.material.opacity = 0.8 * light
+    const id = this.hoverMem?.id ?? (this.S.level === 'memory' ? this.S.memId : null)
+    const i = id === null ? undefined : N.index.get(id)
+    const sp = i === undefined ? undefined : N.data[i]
+    if (i === undefined || sp === undefined || s.hidden[sp.owner]) {
+      N.near.geometry.setDrawRange(0, 0)
+      return
+    }
+    const to = new T.Vector3(sp.position[0], sp.position[1], sp.position[2])
+    N.group.localToWorld(to)
+    // From the hovered asteroid, else the opened memory's dot, else (a hovered speck) its planet or the sun.
+    const hover = this.hoverMem
+    const src = hover && hover.obj !== N.specks ? { obj: hover.obj, index: hover.index } : !hover && this.memTarget ? { obj: this.memTarget.obj, index: this.memTarget.i } : null
+    let from: O3 = null
+    if (src) {
+      const a = src.obj.geometry.attributes.position
+      from = new T.Vector3(a.getX(src.index), a.getY(src.index), a.getZ(src.index))
+      src.obj.updateWorldMatrix(true, false)
+      src.obj.localToWorld(from)
+    } else if (this.P[sp.owner]) from = this.worldOf((this.P[sp.owner] as PlanetRec).pG)
+    else if (sp.owner === 'global' && this.sunG) from = this.worldOf(this.sunG)
+    if (from) {
+      const arr = N.thread.geometry.attributes.position.array
+      arr[0] = from.x
+      arr[1] = from.y
+      arr[2] = from.z
+      arr[3] = to.x
+      arr[4] = to.y
+      arr[5] = to.z
+      N.thread.geometry.attributes.position.needsUpdate = true
+      N.thread.visible = true
+    }
+    const mem = (N.specks.userData.items as Item[])[i]?.mem ?? null
+    const near = (mem?.similar ?? [])
+      .map(x => N.index.get(x.id))
+      .filter((j): j is number => j !== undefined && !s.hidden[N.data[j]!.owner])
+      .slice(0, NEBULA_NEAR)
+    const arr = N.near.geometry.attributes.position.array
+    ;[i, ...near].forEach((j, slot) => {
+      const p = N.data[j]!.position
+      arr[slot * 3] = p[0]
+      arr[slot * 3 + 1] = p[1]
+      arr[slot * 3 + 2] = p[2]
+    })
+    N.near.geometry.attributes.position.needsUpdate = true
+    N.near.geometry.setDrawRange(0, 1 + near.length)
+  }
+
+  /** 0.29.0: a click on a speck opens its memory on its planet; a global one (no planet) is flown to where it is. */
+  private actNebula(item: Item): void {
+    if (item.id === null) return
+    if (this.P[item.planet]) {
+      this.opts.onPick?.({ level: 'memory', owner: item.planet, kind: item.kind, id: item.id })
+      this.flyMemoryById(item.planet, item.kind, item.id)
+      return
+    }
+    const N = this.neb
+    const sp = N?.data[item.i]
+    if (!N || !sp) return
+    const T = this.T
+    const v = new T.Vector3(sp.position[0], sp.position[1], sp.position[2])
+    N.group.localToWorld(v)
+    const dir = this.camera.position.clone().sub(v).normalize()
+    this.fly(v.clone().add(dir.multiplyScalar(60)), v)
+  }
+
   private rebuild(): void {
     const galaxy = this.galaxy as SceneGalaxy
     const before = this.P
@@ -1464,6 +1676,7 @@ class SolarImpl {
       P.pG.position.set(Math.cos(P.angle) * P.r, 0, Math.sin(P.angle) * P.r)
     }
     this.makeOuter()
+    this.makeNebula()
     this.holes = []
     this.links.forEach((link, i) => this.makeHoles(link, i))
     this.lastLabelArrange = this.view.arrange
@@ -1591,6 +1804,8 @@ class SolarImpl {
     this.focusRing = null
     this.outer = null
     this.outerLabel = null
+    this.neb = null
+    this.hoverMem = null
     this.P = {}
     this.clearSats()
   }
@@ -2029,6 +2244,7 @@ class SolarImpl {
       this.outerLabel.position.set(0, 30, -outerR)
     }
     if (this.sunBeltObj) this.sunBeltObj.rotation.y += dt * 0.06 * spin
+    if (this.neb) this.stepNebula()
 
     // Sun-belt tethers: each true global dot (it turns with the belt) to the planet it is close to (it orbits).
     // A hidden project's tether is hidden, as its black holes go with it. 0.16.0, folding: with no focus only a
@@ -2195,6 +2411,7 @@ class SolarImpl {
   // ---------- picking ----------
 
   private hideTip(): void {
+    this.hoverMem = null
     if (!this.tipShown) return
     this.tipShown = false
     this.opts.onHover?.(null, 0, 0)
@@ -2233,6 +2450,8 @@ class SolarImpl {
       if (o.userData.kind === 'points') {
         const item = o.userData.items[hit.index]
         if (!item) continue
+        // A hidden project's specks are dark: not there to point at.
+        if (o.userData.nebula && this.view.hidden[item.planet]) continue
         return { x, y, obj: o, item, tip: item.tip }
       }
       if (o.userData.kind === 'planet') {
@@ -2311,6 +2530,10 @@ class SolarImpl {
 
   private act(hit: Hit | null): void {
     if (!hit || this.flight) return
+    if (hit.obj.userData.nebula && hit.item) {
+      this.actNebula(hit.item)
+      return
+    }
     const target = this.targetOf(hit)
     if (target === null) return
     const S = this.S

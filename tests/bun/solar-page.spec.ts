@@ -439,12 +439,14 @@ describe('the Galaxy layout as a solar page', () => {
     expect(b.factory.scenes.length).toBe(1)
     expect(b.node('solar-canvas').hidden).toBe(false)
     expect(b.scene().of('setData')[0]!.galaxy.projects.length).toBe(FIXTURE.projects.length)
-    expect(lastView(b)).toEqual({ arrange: 'activity', colour: 'writer', hidden: {}, query: '', rotate: true, legend: true })
+    // 0.29.0: the view carries the Meaning nebula toggle (on by default).
+    expect(lastView(b)).toEqual({ arrange: 'activity', colour: 'writer', hidden: {}, query: '', rotate: true, legend: true, nebula: true })
     expect(b.node('view-map').classList.contains('solar-on')).toBe(true)
     for (const id of ['solar-card-arrange', 'solar-card-show', 'solar-bodies']) expect(b.node(id).hidden).toBe(false)
     for (const id of ['map-card-colour', 'map-card-links', 'map-card-know', 'map-card-layers', 'map-card-projects', 'map-overview', 'map-legend']) expect(b.node(id).classes()).toContain('legacy-only')
     expect(buttons(b.node('solar-arrange')).map(x => x.textContent)).toEqual(['Activity', 'Size', 'Age', 'Recalls'])
-    expect(buttons(b.node('solar-show')).map(x => x.textContent)).toEqual(['Auto-rotate: on', 'Legend: on'])
+    // 0.29.0: Meaning nebula sits between Auto-rotate and Legend.
+    expect(buttons(b.node('solar-show')).map(x => x.textContent)).toEqual(['Auto-rotate: on', 'Meaning nebula: on', 'Legend: on'])
     // The 0.6.0 Live strip stays.
     expect(b.node('map-live-strip').classes()).not.toContain('legacy-only')
     expect(b.node('map-live-strip').hidden).toBe(false)
@@ -457,7 +459,7 @@ describe('the Galaxy layout as a solar page', () => {
     for (const id of ['solar-card-arrange', 'solar-bodies', 'solar-canvas']) expect(b.node(id).hidden).toBe(true)
   })
 
-  test('the Layout card is visible in all three layouts; Timeline gives the old rail back and drops the scene, Galaxy builds a new one', async () => {
+  test('the Layout card is visible in both layouts; Timeline gives the old rail back and drops the scene, Galaxy builds a new one', async () => {
     const b = await boot()
     const layoutCard = b.node('map-card-layout')
     const visible = () => !layoutCard.hidden && !layoutCard.classes().includes('legacy-only')
@@ -472,9 +474,15 @@ describe('the Galaxy layout as a solar page', () => {
     expect(visible()).toBe(true)
     expect(b.factory.scenes.length).toBe(2)
     expect(b.node('view-map').classes()).toContain('solar-on')
-    // Meaning stays unavailable here (no embeddings in the fixture's reply), and the Layout card still shows.
-    b.layout('meaning')
-    expect(visible()).toBe(true)
+  })
+
+  test('0.29.0: the Layout card holds Galaxy and Timeline only; there is no Meaning button', async () => {
+    expect(HTML).not.toContain('data-layout="meaning"')
+    const b = await boot({ reply: { ...FIXTURE, meaning: true } })
+    const layoutButtons = b.node('map-layout').querySelectorAll('button[data-layout]')
+    expect(layoutButtons.map(x => x.dataset.layout)).toEqual(['galaxy', 'timeline'])
+    // The fake DOM keeps no text for static markup, so the labels are read from the page itself.
+    expect([...HTML.matchAll(/data-layout="\w+"[^>]*>([^<]*)</g)].map(m => m[1])).toEqual(['Galaxy', 'Timeline'])
   })
 
   test('Timeline keeps today\'s rail cards: with a solar host they are exactly what they are without one', async () => {
@@ -508,6 +516,26 @@ describe('the controls drive the scene through C13 and are remembered', () => {
     // A new viewer session with the same storage starts there.
     const again = await boot({ storage: b.storage })
     expect(lastView(again)).toMatchObject({ arrange: 'size', colour: 'writer', rotate: false, legend: false })
+  })
+
+  test('0.29.0: the Meaning nebula toggle is on by default, calls setView with nebula: false, presses, saves and is restored', async () => {
+    const b = await boot()
+    const nebula = () => byText(b.node('solar-show'), 'Meaning nebula')
+    expect(nebula().textContent).toBe('Meaning nebula: on')
+    expect(lastView(b).nebula).toBe(true)
+    nebula().fire('click')
+    expect(lastView(b).nebula).toBe(false)
+    expect(nebula().textContent).toBe('Meaning nebula: off')
+    // The other toggles are untouched.
+    expect(lastView(b)).toMatchObject({ rotate: true, legend: true })
+    expect(JSON.parse(b.storage.get('mnemosyne.map.solar')!)).toMatchObject({ nebula: false })
+    const again = await boot({ storage: b.storage })
+    expect(lastView(again).nebula).toBe(false)
+    expect(byText(again.node('solar-show'), 'Meaning nebula').textContent).toBe('Meaning nebula: off')
+    // And back on.
+    byText(again.node('solar-show'), 'Meaning nebula').fire('click')
+    expect(lastView(again).nebula).toBe(true)
+    expect(JSON.parse(again.storage.get('mnemosyne.map.solar')!)).toMatchObject({ nebula: true })
   })
 
   test('a remembered Recalls or Age colour from before 0.28.3 is not restored: dots are by writer', async () => {
@@ -894,7 +922,8 @@ const EMPTY_REPLY = { projects: [], memories: [], knowledge: [], meaning: false,
 const crumbs = (b: Boot) => b.node('solar-path').texts().filter(t => t !== '›')
 
 describe('one renderer at a time: the force graph and the solar scene are made and freed as the layout changes', () => {
-  test('Galaxy, Timeline, Galaxy, Meaning, Galaxy: every renderer made is freed before the next, and at most one WebGL context is ever open', async () => {
+  // 0.29.0: no Meaning button any more, so the round trip is Galaxy and Timeline only.
+  test('Galaxy, Timeline, Galaxy, Timeline, Galaxy: every renderer made is freed before the next, and at most one WebGL context is ever open', async () => {
     const b = await boot({ reply: { ...FIXTURE, meaning: true } })
     const c = b.contexts
     // Galaxy: the solar scene only; the force graph is not made.
@@ -903,13 +932,12 @@ describe('one renderer at a time: the force graph and the solar scene are made a
     expect([c.scenes, c.disposed, c.graphs, c.open]).toEqual([1, 1, 1, 1])
     b.layout('galaxy')
     expect([c.scenes, c.disposed, c.graphs, c.destroyed, c.lost, c.open]).toEqual([2, 1, 1, 1, 1, 1])
-    b.layout('meaning')
+    b.layout('timeline')
     expect([c.scenes, c.disposed, c.graphs, c.open]).toEqual([2, 2, 2, 1])
     b.layout('galaxy')
     expect([c.scenes, c.disposed, c.graphs, c.destroyed, c.lost, c.open]).toEqual([3, 2, 2, 2, 2, 1])
-    // Timeline and Meaning share the force graph: moving between them makes nothing new.
+    // Pressing Timeline again while it shows makes nothing new.
     b.layout('timeline')
-    b.layout('meaning')
     b.layout('timeline')
     expect([c.graphs, c.destroyed, c.open]).toEqual([3, 2, 1])
     b.layout('galaxy')

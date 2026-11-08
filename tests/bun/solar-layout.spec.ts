@@ -21,6 +21,10 @@ import {
   linkInfos,
   linksOf,
   metric,
+  nebulaOf,
+  NEBULA_FLAT,
+  NEBULA_MAX_CLOUDS,
+  NEBULA_MIN,
   noduleSpot,
   orbitSeconds,
   orbitSpeed,
@@ -612,5 +616,135 @@ describe('any order, same answer', () => {
     const bodies = bodiesOf(galaxyOf([project('project-empty-aa', { liveCount: 0, kinds: [], medianAgeDays: null, lastActive: null, firstSaved: null }), project('project-full-aa', { liveCount: 4 })]))
     expect(targets(bodies, 'age').rings.map(r => r.owners[0])).toEqual(['project-full-aa', 'project-empty-aa'])
     expect(must(bodies[0]).iceCap).toBe(false)
+  })
+})
+
+// ---- 0.29.0: the meaning nebula (nebulaOf) ----
+
+describe('the meaning nebula', () => {
+  // A small seeded generator, so every run lays out the same memories.
+  const rng = (seed: number) => () => {
+    seed = (seed * 1664525 + 1013904223) % 4294967296
+    return seed / 4294967296
+  }
+  const nmem = (id: string, position: unknown, over: Partial<SolarMemory> = {}): SolarMemory => ({
+    id, owner: 'project-neb-aa', tags: [], recalls: 0, lastRecalled: null, created: null, label: id, source: 'claude-code',
+    sourceInferred: false, kind: 'fact', scope: 'channel', importance: 3, pinned: false, state: 'live', validUntil: null,
+    position: position as [number, number, number], ...over,
+  })
+  /** n memories in a disc of radius `r` around (cx, cz), with a small height. */
+  const blob = (prefix: string, n: number, cx: number, cz: number, r: number, seed: number, over: Partial<SolarMemory> = {}) => {
+    const next = rng(seed)
+    return Array.from({ length: n }, (_, i) => {
+      const a = next() * Math.PI * 2
+      const d = Math.sqrt(next()) * r
+      return nmem(`${prefix}${String(i).padStart(2, '0')}`, [cx + Math.cos(a) * d, (next() - 0.5) * r * 0.5, cz + Math.sin(a) * d], over)
+    })
+  }
+
+  test('fewer than NEBULA_MIN placed live memories: an empty nebula', () => {
+    expect(NEBULA_MIN).toBe(10)
+    expect(nebulaOf(blob('m', NEBULA_MIN - 1, 0, 0, 5, 1), 100, 20)).toEqual({ specks: [], clouds: [] })
+    expect(nebulaOf([], 100, 20)).toEqual({ specks: [], clouds: [] })
+    // Enough memories, but most of them not placed or not live: still empty.
+    const mixed = [...blob('m', 5, 0, 0, 5, 2), ...blob('r', 10, 0, 0, 5, 3, { state: 'retired' })]
+    expect(nebulaOf(mixed, 100, 20)).toEqual({ specks: [], clouds: [] })
+    // Exactly NEBULA_MIN is enough.
+    expect(nebulaOf(blob('m', NEBULA_MIN, 0, 0, 5, 4), 100, 20).specks).toHaveLength(NEBULA_MIN)
+  })
+
+  test('memories that are not live, or carry no, a short or a NaN position, are skipped', () => {
+    const good = blob('g', 12, 0, 0, 5, 5)
+    const bad = [
+      nmem('x-retired', [1, 0, 1], { state: 'retired' }),
+      nmem('x-expired', [1, 0, 1], { state: 'expired' }),
+      nmem('x-lapsed', [1, 0, 1], { state: 'lapsed' }),
+      nmem('x-none', undefined),
+      nmem('x-short', [1, 2]),
+      nmem('x-nan', [1, Number.NaN, 1]),
+      nmem('x-inf', [Number.POSITIVE_INFINITY, 0, 1]),
+    ]
+    const nebula = nebulaOf([...bad, ...good], 100, 20)
+    expect(nebula.specks.map(s => s.id).sort()).toEqual(good.map(m => m.id).sort())
+  })
+
+  test('the same memories in any order give the same specks and clouds', () => {
+    const memories = [...blob('a', 15, -20, 0, 6, 6), ...blob('b', 15, 20, 5, 6, 7), ...blob('c', 10, 0, 25, 4, 8)]
+    const once = nebulaOf(memories, 100, 20)
+    const reversed = nebulaOf([...memories].reverse(), 100, 20)
+    const next = rng(9)
+    const shuffled = nebulaOf([...memories].sort(() => next() - 0.5), 100, 20)
+    expect(reversed).toEqual(once)
+    expect(shuffled).toEqual(once)
+    expect(nebulaOf(memories, 100, 20)).toEqual(once)
+  })
+
+  test('specks lie in a thin layer around y = -depth, inside radius x 1.15 across', () => {
+    const radius = 100
+    const depth = 30
+    const memories = [...blob('a', 30, 0, 0, 10, 10), nmem('far', [500, 0, -500])]
+    const { specks } = nebulaOf(memories, radius, depth)
+    expect(specks).toHaveLength(31)
+    for (const s of specks) {
+      expect(s.position.every(v => Number.isFinite(v))).toBe(true)
+      expect(Math.hypot(s.position[0], s.position[2])).toBeLessThanOrEqual(radius * 1.15 + 1e-9)
+      // The input's height is at most a quarter of its width; flattened by NEBULA_FLAT it stays well inside the layer.
+      expect(Math.abs(s.position[1] + depth)).toBeLessThanOrEqual(radius * NEBULA_FLAT)
+    }
+    // The far outlier is pulled in to the cap.
+    expect(Math.hypot(specks.find(s => s.id === 'far')!.position[0], specks.find(s => s.id === 'far')!.position[2])).toBeCloseTo(radius * 1.15)
+    // Flat: the layer is much thinner than the disc is wide.
+    const ys = specks.map(s => s.position[1])
+    const xs = specks.map(s => s.position[0])
+    expect(Math.max(...ys) - Math.min(...ys)).toBeLessThan((Math.max(...xs) - Math.min(...xs)) * 0.25)
+    // The speck carries the memory's owner and kind.
+    expect(specks[0]).toMatchObject({ owner: 'project-neb-aa', kind: 'fact' })
+  })
+
+  test('at most NEBULA_MAX_CLOUDS clouds, biggest first, and their counts add up to the specks', () => {
+    expect(NEBULA_MAX_CLOUDS).toBe(8)
+    const many = Array.from({ length: 12 }, (_, i) => blob(`c${String(i).padStart(2, '0')}-`, 20 + i, Math.cos(i) * 200, Math.sin(i) * 200, 5, 20 + i)).flat()
+    for (const memories of [many, blob('s', 14, 0, 0, 8, 11), [...blob('a', 25, -30, 0, 5, 12), ...blob('b', 8, 30, 0, 5, 13)]]) {
+      const { specks, clouds } = nebulaOf(memories, 100, 20)
+      expect(clouds.length).toBeGreaterThan(0)
+      expect(clouds.length).toBeLessThanOrEqual(NEBULA_MAX_CLOUDS)
+      expect(clouds.reduce((sum, c) => sum + c.count, 0)).toBe(specks.length)
+      for (let i = 1; i < clouds.length; i++) expect(clouds[i - 1]!.count).toBeGreaterThanOrEqual(clouds[i]!.count)
+      // Every speck names a cloud that exists, and each cloud's count is its specks.
+      clouds.forEach((c, ci) => expect(specks.filter(s => s.cloud === ci).length).toBe(c.count))
+      for (const c of clouds) expect(c.spread).toBeGreaterThanOrEqual(0)
+    }
+    expect(nebulaOf(many, 100, 20).clouds).toHaveLength(NEBULA_MAX_CLOUDS)
+  })
+
+  test('a cloud is named from tags its members share; agent: tags never name one, namespaces are dropped, and two clouds never share a name', () => {
+    // Two groups far apart, each sharing one tag of its own (and a writer tag both share); every other tag is on one memory only.
+    const left = blob('l', 7, -50, 0, 3, 14).map((m, i) => ({ ...m, tags: ['entity:arxada', 'agent:claude', `solo-l${i}`] }))
+    const right = blob('r', 7, 50, 0, 3, 15).map((m, i) => ({ ...m, tags: ['billing', 'agent:claude', `solo-r${i}`] }))
+    const { specks, clouds } = nebulaOf([...left, ...right], 100, 20)
+    expect(clouds).toHaveLength(2)
+    expect(clouds.map(c => c.count)).toEqual([7, 7])
+    // Each group is one cloud.
+    for (const group of [left, right]) expect(new Set(specks.filter(s => group.some(m => m.id === s.id)).map(s => s.cloud)).size).toBe(1)
+    const nameOf = (group: SolarMemory[]) => clouds[specks.find(s => s.id === group[0]!.id)!.cloud]!.name
+    expect(nameOf(left)).toContain('arxada')
+    expect(nameOf(left)).not.toContain('entity:')
+    expect(nameOf(right)).toContain('billing')
+    for (const c of clouds) {
+      expect(c.name).not.toContain('agent')
+      expect(c.name).not.toContain('claude')
+      expect(c.name).not.toContain('solo-')
+    }
+    expect(new Set(clouds.map(c => c.name)).size).toBe(clouds.length)
+  })
+
+  test('with no shared tags a cloud is named from words of its first lines; names stay distinct', () => {
+    const left = blob('l', 7, -50, 0, 3, 16).map((m, i) => ({ ...m, label: `Invoice posting rule ${i}` }))
+    const right = blob('r', 7, 50, 0, 3, 17).map((m, i) => ({ ...m, label: `Invoice routing table ${i}` }))
+    const { clouds } = nebulaOf([...left, ...right], 100, 20)
+    const names = clouds.map(c => c.name)
+    expect(names.some(n => n.includes('posting'))).toBe(true)
+    expect(names.some(n => n.includes('routing'))).toBe(true)
+    expect(new Set(names).size).toBe(names.length)
   })
 })

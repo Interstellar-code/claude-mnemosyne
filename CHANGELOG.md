@@ -2,6 +2,16 @@
 
 Newest first. Each release is tagged `vX.Y.Z` on GitHub; the README and DESIGN.md describe the contracts.
 
+## 0.29.0 (the meaning nebula)
+
+The Meaning layout moves into the Galaxy: a nebula under the solar system shows your memories by what they say, while the planets above show where they live.
+
+1. **The nebula.** Every live memory with a vector is a glowing speck under the orbit plane, placed by meaning (the same UMAP layout Meaning used). Specks that bunch together form clouds, each in its own colour and named after its most typical tags; the names never repeat, and tags that only say who wrote a memory (`agent:…`) are left out.
+2. **Linked to the planets.** Hover a memory on a planet, or a speck, and a thread joins the two while its closest memories light up; open a memory and its thread stays. Click a speck to open its memory on its planet (a global one is flown to).
+3. **Views.** Below looks up through the nebula at the planets; Side shows the two layers; from above the nebula dims so the planets stay readable. The Show card has a "Meaning nebula" switch, and the legend a Nebula row.
+4. **No separate Meaning layout.** The Layout card has Galaxy and Timeline; a saved Meaning choice opens the Galaxy.
+5. Inside a planet the drag and zoom hint steps aside, so the longer path no longer runs into it.
+
 ## 0.28.4 (the Galaxy pill in the button row)
 
 On the Galaxy page the path pill now sits in the same row as the view buttons (+, -, Top, Below, Side, Reset), with the drag and zoom hint above it.

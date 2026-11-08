@@ -1664,3 +1664,38 @@ describe('MAPX.5 review R5 fixes', () => {
     r.scene.dispose()
   })
 })
+// ---- 0.29.0: the meaning nebula ----
+
+describe('0.29.0 the meaning nebula in the scene', () => {
+  test('setData with ten or more placed live memories draws without error and adds the nebula specks; the Meaning nebula switch hides it', () => {
+    const data = galaxy()
+    // The fixture has fewer than ten live memories: add copies of one with ids of their own.
+    const seed = (data.memories as any[]).find(m => m.state === 'live')
+    for (let i = 0; i < 8; i++) data.memories.push({ ...seed, id: `nebula-extra-${i}`, label: `nebula extra ${i}` })
+    const live = (data.memories as any[]).filter(m => m.state === 'live')
+    expect(live.length).toBeGreaterThanOrEqual(10)
+    live.forEach((m, i) => {
+      m.position = [Math.cos(i) * (5 + i), Math.sin(i * 0.7), Math.sin(i) * (5 + i)]
+      m.similar = []
+    })
+    let r!: ReturnType<typeof rig>
+    expect(() => {
+      r = rig({ data })
+      r.run(1)
+    }).not.toThrow()
+    const specks = r.all(o => o.type === 'Points' && o.userData?.nebula === true)
+    expect(specks).toHaveLength(1)
+    expect(specks[0].geometry.attributes.position.count).toBe(live.length)
+    const group = r.all(o => o.userData?.kind === 'nebula')[0]
+    expect(group).toBeDefined()
+    expect(group.visible).toBe(true)
+    r.scene.setView({ nebula: false })
+    r.run(0.1)
+    expect(group.visible).toBe(false)
+    // Without positions there is no nebula at all.
+    const plain = rig()
+    expect(plain.all(o => o.userData?.nebula === true)).toHaveLength(0)
+    plain.scene.dispose()
+    r.scene.dispose()
+  })
+})

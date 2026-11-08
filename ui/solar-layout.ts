@@ -55,6 +55,10 @@ export type SolarMemory = {
   pinned: boolean
   state: 'live' | 'retired' | 'expired' | 'lapsed'
   validUntil: string | null
+  /** 0.29.0: the meaning layout's place (SEMX.1), only for a memory with a vector; the nebula reads it. */
+  position?: [number, number, number]
+  /** 0.29.0: the memories closest in meaning, best first (SEMX.1). */
+  similar?: { id: string; score: number }[]
 }
 
 export type SolarWriter = { source: string; count: number; inferred: number }
@@ -656,4 +660,170 @@ export function searchResults(bodies: readonly Body[], query: string): SearchOut
   tags.sort((a, b) => b.n - a.n || before(a.label, b.label) || before(a.sub, b.sub))
   out.results = found.concat(moons, tags).slice(0, SEARCH_MAX)
   return out
+}
+
+
+// ---- The meaning nebula (0.29.0) ------------------------------------------------------
+
+/** One memory in the nebula: where it sits (scene units, under the orbit plane) and which cloud it belongs to. */
+export type NebulaSpeck = { id: string; owner: string; kind: string; position: [number, number, number]; cloud: number }
+/** A cloud: a group of memories close in meaning. `name` is from its most used tags (else words); `spread` its radius. */
+export type NebulaCloud = { centre: [number, number, number]; count: number; spread: number; name: string }
+export type Nebula = { specks: NebulaSpeck[]; clouds: NebulaCloud[] }
+
+/** Below this many placed memories there is no nebula (the meaning layout needs ten too). */
+export const NEBULA_MIN = 10
+/** At most this many clouds. */
+export const NEBULA_MAX_CLOUDS = 8
+/** The clouds' colours, in cloud order: soft nebula hues, distinct on the dark sky. */
+export const NEBULA_PALETTE: readonly string[] = ['#c77dff', '#4cc9f0', '#ff6fb5', '#7ff0c8', '#ffb347', '#8fa8ff', '#f9f871', '#ff8a7a']
+/** How flat the nebula is: the meaning layout's height is scaled by this share of its width. */
+export const NEBULA_FLAT = 0.18
+
+const NEBULA_STOP = new Set(['the', 'and', 'for', 'with', 'that', 'this', 'from', 'into', 'are', 'was', 'not', 'use', 'uses', 'used', 'when', 'what', 'which', 'have', 'has', 'should', 'must', 'will', 'can', 'all', 'any', 'one', 'via', 'per', 'its', 'their', 'there', 'then', 'than', 'also', 'only', 'more', 'user', 'memory', 'memories', 'project', 'note', 'notes'])
+
+const sq = (x: number) => x * x
+const dist2 = (a: readonly number[], b: readonly number[]) => sq((a[0] ?? 0) - (b[0] ?? 0)) + sq((a[1] ?? 0) - (b[1] ?? 0)) + sq((a[2] ?? 0) - (b[2] ?? 0))
+
+// Tags that say who wrote a memory, not what it is about: never a cloud's name.
+const NEBULA_SKIP_TAG = /^agent:/
+const tagsOf = (m: SolarMemory) => [...new Set(m.tags.map(t => t.toLowerCase()).filter(t => !NEBULA_SKIP_TAG.test(t)))]
+const wordsOf = (m: SolarMemory) => [...new Set((m.label.toLowerCase().match(/[a-z][a-z0-9-]{3,}/g) ?? []).filter(w => !NEBULA_STOP.has(w)))]
+
+/**
+ * The cloud's name: its two most telling tags (each on at least two of its memories), else words of its
+ * memories' first lines. Telling = used often here and seldom elsewhere: count here × ln(1 + all / count
+ * everywhere), so a tag on half the store ("sap") names a cloud only when nothing more particular does.
+ */
+function cloudName(members: readonly SolarMemory[], everywhere: { tags: Map<string, number>; words: Map<string, number>; total: number }, used: Set<string>): string {
+  // Shown without a namespace ("entity:arxada" reads "arxada"); a name a bigger cloud has already taken
+  // gives way to the next pair, so two clouds never share one.
+  const pick = (ranked: (readonly [string, number])[]) => {
+    const names = [...new Set(ranked.map(([v]) => v.replace(/^[a-z]+:/, '')))]
+    const pairs: string[][] = []
+    for (let a = 0; a < names.length; a++) for (let b = a + 1; b < names.length; b++) pairs.push([names[a]!, names[b]!])
+    // Taken is by the set of words, whatever their order.
+    const key = (parts: string[]) => [...parts].sort().join('\u0000')
+    const chosen = [...pairs, ...names.map(n => [n])].find(parts => !used.has(key(parts)))
+    if (chosen === undefined) return ''
+    used.add(key(chosen))
+    return chosen.join(' · ')
+  }
+  const best = (values: string[], totals: Map<string, number>) => {
+    const m = new Map<string, number>()
+    for (const v of values) m.set(v, (m.get(v) ?? 0) + 1)
+    return [...m.entries()]
+      .filter(([, n]) => n >= 2)
+      .map(([v, n]) => [v, n * Math.log(1 + everywhere.total / (totals.get(v) ?? n))] as const)
+      .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+  }
+  const tags = best(members.flatMap(tagsOf), everywhere.tags)
+  const byTag = tags.length > 0 ? pick(tags) : ''
+  return byTag !== '' ? byTag : pick(best(members.flatMap(wordsOf), everywhere.words))
+}
+
+/**
+ * The nebula: every live memory with a meaning position, laid flat under the orbit plane, and the
+ * clouds they form. The meaning layout's x and z become a disc of `radius` (the 95th percentile of the
+ * memories' distances from their middle reaches it), its y a thin layer around `-depth`. Clouds are
+ * k-means over those places (k from the count, at most NEBULA_MAX_CLOUDS), seeded deterministically
+ * (farthest point from the memory nearest the middle), so the same reply gives the same clouds.
+ * Fewer than NEBULA_MIN placed memories: an empty nebula.
+ */
+export function nebulaOf(memories: readonly SolarMemory[], radius: number, depth: number): Nebula {
+  const placed = memories
+    .filter(m => m.state === 'live' && Array.isArray(m.position) && m.position.length === 3 && m.position.every(v => Number.isFinite(v)))
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+  if (placed.length < NEBULA_MIN || !(radius > 0)) return { specks: [], clouds: [] }
+  const raw = placed.map(m => m.position as [number, number, number])
+  const mid = [0, 1, 2].map(k => raw.reduce((s, p) => s + p[k]!, 0) / raw.length) as [number, number, number]
+  // The disc is turned so its long side runs along x (across the screen from the default camera): the
+  // meaning layout is often twice as long one way as the other. Turning keeps every distance.
+  let cxx = 0
+  let czz = 0
+  let cxz = 0
+  for (const p of raw) {
+    cxx += sq(p[0] - mid[0])
+    czz += sq(p[2] - mid[2])
+    cxz += (p[0] - mid[0]) * (p[2] - mid[2])
+  }
+  const turn = 0.5 * Math.atan2(2 * cxz, cxx - czz)
+  const cos = Math.cos(-turn)
+  const sin = Math.sin(-turn)
+  const reach = raw.map(p => Math.hypot(p[0] - mid[0], p[2] - mid[2])).sort((a, b) => a - b)
+  const r95 = reach[Math.min(reach.length - 1, Math.floor(reach.length * 0.95))] || 1
+  const s = radius / r95
+  const cap = radius * 1.15
+  const pos: [number, number, number][] = raw.map(p => {
+    const dx = p[0] - mid[0]
+    const dz = p[2] - mid[2]
+    let x = (dx * cos - dz * sin) * s
+    let z = (dx * sin + dz * cos) * s
+    const d = Math.hypot(x, z)
+    if (d > cap) {
+      x *= cap / d
+      z *= cap / d
+    }
+    return [x, -depth + (p[1] - mid[1]) * s * NEBULA_FLAT, z]
+  })
+  const k = Math.max(2, Math.min(NEBULA_MAX_CLOUDS, Math.round(Math.sqrt(placed.length / 3))))
+  // Seeds: the memory nearest the middle, then each next the farthest from every seed so far.
+  const centres: [number, number, number][] = []
+  let first = 0
+  pos.forEach((p, i) => {
+    if (Math.hypot(p[0], p[2]) < Math.hypot(pos[first]![0], pos[first]![2])) first = i
+  })
+  centres.push([...pos[first]!] as [number, number, number])
+  while (centres.length < k) {
+    let best = 0
+    let bestD = -1
+    pos.forEach((p, i) => {
+      const d = Math.min(...centres.map(c => dist2(p, c)))
+      if (d > bestD) {
+        bestD = d
+        best = i
+      }
+    })
+    centres.push([...pos[best]!] as [number, number, number])
+  }
+  const cloudOf = new Array<number>(pos.length).fill(0)
+  for (let round = 0; round < 15; round++) {
+    let moved = false
+    pos.forEach((p, i) => {
+      let best = 0
+      for (let c = 1; c < centres.length; c++) if (dist2(p, centres[c]!) < dist2(p, centres[best]!)) best = c
+      if (cloudOf[i] !== best) {
+        cloudOf[i] = best
+        moved = true
+      }
+    })
+    centres.forEach((c, ci) => {
+      const mine = pos.filter((_, i) => cloudOf[i] === ci)
+      if (mine.length === 0) return
+      for (let a = 0; a < 3; a++) c[a] = mine.reduce((sum, p) => sum + p[a]!, 0) / mine.length
+    })
+    if (!moved && round > 0) break
+  }
+  // Clouds biggest first; an empty one is dropped and the rest renumbered.
+  const order = centres
+    .map((c, ci) => ({ ci, n: cloudOf.filter(x => x === ci).length }))
+    .filter(x => x.n > 0)
+    .sort((a, b) => b.n - a.n || a.ci - b.ci)
+  const renumber = new Map(order.map((x, i) => [x.ci, i]))
+  const tally = (lists: string[][]) => {
+    const m = new Map<string, number>()
+    for (const list of lists) for (const v of list) m.set(v, (m.get(v) ?? 0) + 1)
+    return m
+  }
+  const everywhere = { tags: tally(placed.map(tagsOf)), words: tally(placed.map(wordsOf)), total: placed.length }
+  const used = new Set<string>()
+  const clouds: NebulaCloud[] = order.map(({ ci, n }) => {
+    const members = placed.filter((_, i) => cloudOf[i] === ci)
+    const spots = pos.filter((_, i) => cloudOf[i] === ci)
+    const centre = centres[ci]!
+    const spread = Math.sqrt(spots.reduce((sum, p) => sum + dist2(p, centre), 0) / spots.length)
+    return { centre: [centre[0], centre[1], centre[2]], count: n, spread, name: cloudName(members, everywhere, used) }
+  })
+  const specks: NebulaSpeck[] = placed.map((m, i) => ({ id: m.id, owner: m.owner, kind: m.kind, position: pos[i]!, cloud: renumber.get(cloudOf[i]!) ?? 0 }))
+  return { specks, clouds }
 }

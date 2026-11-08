@@ -763,14 +763,14 @@ describe('the galaxy on a real /api/galaxy reply', () => {
       // Hiding a project from the rail.
       rows[0]!.all().find(n => n.tagName === 'input')!.fire('change')
       expect(node('map-toggles').children.length).toBe(3)
-      // Layout: Timeline shows the Time range and is remembered; Meaning stays disabled.
-      const layout = (name: string) => node('map-layout').querySelectorAll('button[data-layout]').find(b => b.dataset.layout === name)!
-      layout('timeline').fire('click')
+      // Layout: Timeline shows the Time range and is remembered.
+      const layout = (name: string) => node('map-layout').querySelectorAll('button[data-layout]').find(b => b.dataset.layout === name)
+      layout('timeline')!.fire('click')
       expect(node('map-range-box').hidden).toBe(false)
-      expect(layout('timeline').attributes.get('aria-pressed')).toBe('true')
-      layout('meaning').fire('click')
-      expect(layout('meaning').attributes.get('aria-pressed')).toBe('false')
-      layout('galaxy').fire('click')
+      expect(layout('timeline')!.attributes.get('aria-pressed')).toBe('true')
+      // 0.29.0: there is no Meaning button any more (Meaning is the nebula under the Galaxy).
+      expect(layout('meaning')).toBeUndefined()
+      layout('galaxy')!.fire('click')
       expect(node('map-range-box').hidden).toBe(true)
       // show(id) selects that star and opens it in the inspector; Open in Memories hands its id to the host.
       view.show(ids.a1!)
@@ -824,7 +824,8 @@ describe('the galaxy on a real /api/galaxy reply', () => {
     }
   })
 
-  test('GAL R2 / 6: a stored Meaning layout is kept when the reply says meaning, and falls back to Galaxy when it does not', async () => {
+  // 0.29.0: a stored Meaning layout now always opens on Galaxy (Meaning is drawn as a nebula under it), with or without vectors.
+  test('GAL R2 / 6: a stored Meaning layout opens on Galaxy whether or not the reply says meaning', async () => {
     const html = readFileSync(join(ROOT, 'ui', 'index.html'), 'utf8')
     const g = globalThis as Record<string, unknown>
     const saved = { document: g.document, CSS: g.CSS, HTMLElement: g.HTMLElement, localStorage: g.localStorage }
@@ -837,12 +838,12 @@ describe('the galaxy on a real /api/galaxy reply', () => {
       const { createMap } = (await import(join(ROOT, 'ui', 'map.ts'))) as { createMap: (host: unknown) => unknown }
       createMap({ api: async () => new Response(JSON.stringify({ ...(rawBody as object), meaning }), { status: 200 }), openMemory: () => {}, status: () => {} })
       await Bun.sleep(30)
-      const pressed = (name: string) => fake.nodes.get('map-layout')!.querySelectorAll('button[data-layout]').find(b => b.dataset.layout === name)!.attributes.get('aria-pressed')
-      return { meaning: pressed('meaning'), galaxy: pressed('galaxy') }
+      const pressed = (name: string) => fake.nodes.get('map-layout')!.querySelectorAll('button[data-layout]').find(b => b.dataset.layout === name)?.attributes.get('aria-pressed')
+      return { meaning: pressed('meaning'), galaxy: pressed('galaxy'), timeline: pressed('timeline') }
     }
     try {
-      expect(await run(true)).toEqual({ meaning: 'true', galaxy: 'false' })
-      expect(await run(false)).toEqual({ meaning: 'false', galaxy: 'true' })
+      expect(await run(true)).toEqual({ meaning: undefined, galaxy: 'true', timeline: 'false' })
+      expect(await run(false)).toEqual({ meaning: undefined, galaxy: 'true', timeline: 'false' })
     } finally {
       g.document = saved.document
       g.CSS = saved.CSS
@@ -1021,7 +1022,8 @@ describe('GAL.3.a5: the overview, and the layout the map opens on', () => {
     expect(initialLayout(null, false)).toBe('galaxy')
     expect(initialLayout('timeline', false)).toBe('timeline')
     expect(initialLayout('meaning', false)).toBe('galaxy')
-    expect(initialLayout('meaning', true)).toBe('meaning')
+    // 0.29.0: a stored Meaning opens on Galaxy even with vectors (Meaning is the nebula under the Galaxy now).
+    expect(initialLayout('meaning', true)).toBe('galaxy')
     expect(initialLayout('nonsense', true)).toBe('galaxy')
     const s = initialState({ reducedMotion: false })
     expect(setLayout(s, 'meaning', false)).toBe(s)
@@ -1181,8 +1183,9 @@ describe('GAL.3.a1/a3/a4: the Map page has the rail in order, the overlay contro
     expect([...places].sort((a, b) => a - b)).toEqual(places)
   })
 
-  test('Layout offers Galaxy, Meaning (disabled) and Timeline, the Time range is hidden until Timeline, and the colour modes are the three', () => {
-    expect([...page.matchAll(/data-layout="(\w+)"([^>]*)>/g)].map(m => [m[1], /\bdisabled\b/.test(m[2]!)])).toEqual([['galaxy', false], ['meaning', true], ['timeline', false]])
+  test('Layout offers Galaxy and Timeline, the Time range is hidden until Timeline, and the colour modes are the three', () => {
+    // 0.29.0: the Meaning button is gone; Meaning is drawn as a nebula under the Galaxy.
+    expect([...page.matchAll(/data-layout="(\w+)"([^>]*)>/g)].map(m => [m[1], /\bdisabled\b/.test(m[2]!)])).toEqual([['galaxy', false], ['timeline', false]])
     expect(page).toMatch(/id="map-range-box"[^>]*\bhidden\b/)
     expect([...page.matchAll(/data-range="(\w+)"/g)].map(m => m[1])).toEqual(['7', '30', 'all'])
     expect([...page.matchAll(/data-colour="(\w+)"/g)].map(m => m[1])).toEqual(['project', 'recalls', 'age'])
@@ -3529,11 +3532,11 @@ describe('SEM: Meaning layout, similar links, inspector list', () => {
     expect(inspector(off, selectStar(state('galaxy'), off, 'r1')).similar).toEqual({ note: 'Similar memories need embeddings.', items: [] })
   })
 
-  test('SEM.2.a1 / SEM.2.a2: with meaning: false the Meaning button and the Similar memories toggle are disabled with the hint, and no request or error comes of the missing data', async () => {
+  test('SEM.2.a1 / SEM.2.a2: with meaning: false the Similar memories toggle is disabled with the hint, and no request or error comes of the missing data', async () => {
     const html = readFileSync(join(ROOT, 'ui', 'index.html'), 'utf8')
     expect(EMBEDDINGS_HINT).toBe('Turn on embeddings, then run /mnemosyne-embed apply')
-    // The static page already says it (before any reply), on the button, the toggle and as a line under the layout buttons.
-    expect(html).toContain(`data-layout="meaning" aria-pressed="false" disabled title="${EMBEDDINGS_HINT}"`)
+    // 0.29.0: there is no Meaning button to carry the hint; the line under the layout buttons still does.
+    expect(html).not.toContain('data-layout="meaning"')
     expect(html).toContain('id="map-meaning-hint"')
     // Builds the Map tab on the page markup, with the document stand-in installed for as long as `use` runs.
     const run = async <T,>(meaning: boolean, use: (page: { calls: string[]; statuses: string[]; node: (id: string) => FakeNode; layout: (name: string) => FakeNode }) => T): Promise<T> => {
@@ -3559,7 +3562,7 @@ describe('SEM: Meaning layout, similar links, inspector list', () => {
         })
         await Bun.sleep(30)
         const node = (id: string) => fake.nodes.get(id)!
-        return use({ calls, statuses, node, layout: name => node('map-layout').groups.find(b => b.dataset.layout === name)! })
+        return use({ calls, statuses, node, layout: name => node('map-layout').querySelectorAll('button[data-layout]').find(b => b.dataset.layout === name)! })
       } finally {
         g.document = saved.document
         g.CSS = saved.CSS
@@ -3570,15 +3573,12 @@ describe('SEM: Meaning layout, similar links, inspector list', () => {
     await run(false, off => {
       expect(off.calls).toEqual(['/api/galaxy'])
       expect(off.statuses).toEqual([])
-      expect(off.layout('meaning').disabled).toBe(true)
-      expect(off.layout('meaning').title).toBe(EMBEDDINGS_HINT)
+      // 0.29.0: the Meaning button assertions are gone with the button.
       expect(off.node('map-similar').disabled).toBe(true)
       expect(off.node('map-similar').checked).toBe(false)
       expect(off.node('map-meaning-hint').hidden).toBe(false)
       expect(off.node('map-meaning-hint').textContent).toBe(EMBEDDINGS_HINT)
-      // Pressing them does nothing and breaks nothing.
-      off.layout('meaning').fire('click')
-      expect(off.layout('meaning').attributes.get('aria-pressed')).toBe('false')
+      // Pressing it does nothing and breaks nothing.
       off.node('map-similar').fire('change')
       expect(off.node('map-similar').checked).toBe(false)
       expect(off.statuses).toEqual([])
@@ -3588,14 +3588,13 @@ describe('SEM: Meaning layout, similar links, inspector list', () => {
     await run(true, on => {
       expect(on.calls).toEqual(['/api/galaxy'])
       expect(on.statuses).toEqual([])
-      expect(on.layout('meaning').disabled).toBe(false)
+      // 0.29.0: no Meaning button to enable or press; the Layout card holds Galaxy and Timeline only.
+      expect(on.layout('meaning')).toBeUndefined()
       expect(on.node('map-similar').disabled).toBe(false)
       expect(on.node('map-similar').checked).toBe(true)
       expect(on.node('map-meaning-hint').hidden).toBe(true)
       on.node('map-similar').fire('change')
       expect(on.node('map-similar').checked).toBe(false)
-      on.layout('meaning').fire('click')
-      expect(on.layout('meaning').attributes.get('aria-pressed')).toBe('true')
       expect(on.statuses).toEqual([])
     })
   })
@@ -3665,7 +3664,8 @@ describe('the solar page state (MAPX.11)', () => {
     const view = viewOf(hidden)
     view.hidden.b = true
     expect(hidden.hidden).toEqual({ a: true })
-    expect(Object.keys(viewOf(initialSolarPage())).sort()).toEqual(['arrange', 'colour', 'hidden', 'legend', 'query', 'rotate'])
+    // 0.29.0: the view carries the Meaning nebula toggle too.
+    expect(Object.keys(viewOf(initialSolarPage())).sort()).toEqual(['arrange', 'colour', 'hidden', 'legend', 'nebula', 'query', 'rotate'])
     expect(setSolarQuery(hidden, 'ab').findOpen).toBe(true)
     expect(setSolarQuery(hidden, 'a').findOpen).toBe(false)
     expect(closeFind(setSolarQuery(hidden, 'abc'))).toMatchObject({ query: '', findOpen: false })
