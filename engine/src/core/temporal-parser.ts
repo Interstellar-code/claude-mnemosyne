@@ -210,6 +210,11 @@ export function parseNlDate(text: string, reference?: QueryTime): ParsedNaturalD
 		return [d, "day", [isoDate(d), dayName(d)]];
 	}
 
+	if (/\bday before yesterday\b/.test(textLower) || /\bday\s+before\s+yesterday\b/.test(textLower)) {
+		const d = addDays(ref, -2);
+		return [d, "day", [isoDate(d)]];
+	}
+
 	if (/\byesterday\b/.test(textLower)) {
 		const d = addDays(ref, -1);
 		return [d, "day", [isoDate(d), dayName(d), "yesterday"]];
@@ -218,11 +223,6 @@ export function parseNlDate(text: string, reference?: QueryTime): ParsedNaturalD
 	if (/\btomorrow\b/.test(textLower)) {
 		const d = addDays(ref, 1);
 		return [d, "day", [isoDate(d), dayName(d), "tomorrow"]];
-	}
-
-	if (/\bday before yesterday\b/.test(textLower) || /\bday\s+before\s+yesterday\b/.test(textLower)) {
-		const d = addDays(ref, -2);
-		return [d, "day", [isoDate(d)]];
 	}
 
 	m =

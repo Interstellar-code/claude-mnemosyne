@@ -305,7 +305,8 @@ export function classifyMemory(content: string): TypeMatch {
 		}
 
 		for (const booster of CONFIDENCE_BOOSTERS[memoryType]) {
-			if (contentLower.includes(booster.toLowerCase())) {
+			const escaped = booster.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+			if (new RegExp(`\\b${escaped}\\b`).test(contentLower)) {
 				confidence += 0.05;
 			}
 		}
