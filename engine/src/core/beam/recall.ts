@@ -711,6 +711,22 @@ function allVisibleIds(
 	return rows.map(row => asString(row.id)).filter(Boolean);
 }
 
+/** Every visible row with a stored embedding, not only the newest DEFAULT_LIMIT (issue #19). */
+function embeddedVisibleIds(
+	beam: BeamMemoryState,
+	table: "working_memory" | "episodic_memory",
+	options: RecallOptionsInternal,
+): string[] {
+	if (!tableExists(beam, "memory_embeddings")) return [];
+	const { where, params } = buildWhere(beam, "", options);
+	const rows = queryAll(
+		beam,
+		`SELECT id FROM ${table} WHERE ${where} AND id IN (SELECT memory_id FROM memory_embeddings)`,
+		params,
+	);
+	return rows.map(row => asString(row.id)).filter(Boolean);
+}
+
 function fetchCandidates(
 	beam: BeamMemoryState,
 	tierLabel: TierLabel,
@@ -981,8 +997,8 @@ function collectMemoryCandidates(
 	let wmVec = new Map<string, number>();
 	let emVec = new Map<string, number>();
 	if (queryEmbedding !== null && queryEmbedding !== undefined) {
-		const allWmIds = options.includeWorking === false ? [] : allVisibleIds(beam, "working_memory", options);
-		const allEmIds = allVisibleIds(beam, "episodic_memory", options);
+		const allWmIds = options.includeWorking === false ? [] : embeddedVisibleIds(beam, "working_memory", options);
+		const allEmIds = embeddedVisibleIds(beam, "episodic_memory", options);
 		wmVec = vectorSimilarities(beam, allWmIds, queryEmbedding);
 		emVec = vectorSimilarities(beam, allEmIds, queryEmbedding);
 		wmIds = [
