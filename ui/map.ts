@@ -1265,6 +1265,8 @@ export function createMap(host: MapHost): MapView {
   let state: MapState = initialState({ reducedMotion, layout: initialLayout(readLayout(storage), true) })
   let galaxy: Galaxy | null = null
   let found: Found | null = null
+  /** What the knowledge note last showed, so it is rebuilt (and its Clear replaced) only when that changes. */
+  let knowNoteKey = ''
   let graph: ForceGraph3DInstance | null = null
   let lib: MapLib | null = null
   let three: Three | null = null
@@ -1811,9 +1813,15 @@ export function createMap(host: MapHost): MapView {
       if (number) number.textContent = String(counts[kind])
     }
     const note = byId('map-know-note')
-    note.textContent = any ? knowledgeNote(state) : 'No knowledge extracted yet. Run /mnemosyne-knowledge, then reload.'
+    const text = any ? knowledgeNote(state) : 'No knowledge extracted yet. Run /mnemosyne-knowledge, then reload.'
+    const withClear = any && state.kinds.size > 0
+    // Rebuild only when the note changes, so a focused Clear keeps its node (and focus) across live events.
+    const key = `${withClear ? 1 : 0}${text}`
+    if (key === knowNoteKey) return
+    knowNoteKey = key
+    note.textContent = text
     // A chip dims the map: the note carries its own Clear (ui/index.html has none, so it is made here).
-    if (any && state.kinds.size > 0) {
+    if (withClear) {
       const clear = el('button', 'Clear', 'btn map-know-clear')
       clear.type = 'button'
       clear.addEventListener('click', () => dispatch(clearKinds(state)))
@@ -2662,7 +2670,7 @@ export function createMap(host: MapHost): MapView {
     if (star === undefined) return
     if (spark.kind === 'recall') {
       const was = star.recalls
-      if (!recallMemory(g, id)) return
+      if (!recallMemory(g, id, spark.t || undefined)) return
       if (v) {
         v.size = starSize(star.recalls)
         // A star that was a hollow ring becomes a glow with its first recall.
@@ -2732,7 +2740,7 @@ export function createMap(host: MapHost): MapView {
     renderStrip()
     const sparks = graph !== null && shown && layerOn(state, event.kind) ? sparksFor(event, targets, state.reducedMotion, Math.random) : []
     if (sparks.length === 0) {
-      for (const target of targets) arrive({ ...target, kind: event.kind, delay: 0, curve: 0, age: 0, demo: event.demo === true })
+      for (const target of targets) arrive({ ...target, kind: event.kind, delay: 0, curve: 0, age: 0, demo: event.demo === true, t: event.t })
       return
     }
     enqueueSparks(sparkPool, sparks)

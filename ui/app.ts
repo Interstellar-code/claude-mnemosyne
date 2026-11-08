@@ -1574,9 +1574,11 @@ export function forgetById(id: string, done: (error?: string) => void) {
       if (opened.has('knowledge')) void loadKnowledge()
       // Search: the forgotten hit leaves the list.
       if (searchHits.some(hit => hit.id === id)) {
+        // #31: the rows already shown stay shown (less the forgotten one); Show more is not undone.
+        const keep = searchShown - (visibleHits().slice(0, searchShown).some(hit => hit.id === id) ? 1 : 0)
         searchHits = searchHits.filter(hit => hit.id !== id)
         drawSearchAside()
-        drawHits(false)
+        drawHits(false, keep)
       }
       done()
     } catch (err) {
@@ -1898,6 +1900,9 @@ function groupedReviewRows<T extends { owner: string; id: string }>(list: readon
 /** The sentence under the filters when the review queue is not there (yet): still loading, or why it failed. */
 const queueMissing = () => (reviewView.queueError !== '' ? reviewView.queueError : 'Loading the review queue…')
 
+/** The queue sentence, with the failed refresh's note after it when the lists shown are the last loaded ones. */
+const queueStale = (text: string) => (reviewView.queueError === '' ? text : `${text} ${reviewView.queueError}`)
+
 /** Takes a row out of the live lists after the server retired it: the candidates (and the near-duplicate reasons that named it), and it joins the Not live list. */
 function applyRetired(id: string) {
   const now = new Date().toISOString()
@@ -2038,13 +2043,13 @@ export function drawReview() {
   let rows: HTMLElement[] = []
   let shown = 0
   if (filter === 'retire') {
-    byId('review-text').textContent = queue === null ? queueMissing() : queueText('retire', candidates.length, queue.candidateTotal)
+    byId('review-text').textContent = queue === null ? queueMissing() : queueStale(queueText('retire', candidates.length, queue.candidateTotal))
     rows = groupedReviewRows(candidates, 4, (candidate, index) => candidateRow(candidate, reviewHost, again(index)))
     shown = candidates.length
     byId('review-candidate-rows').replaceChildren(...rows)
   } else if (filter === 'notlive') {
     const list = queue?.notLive ?? []
-    byId('review-text').textContent = queue === null ? queueMissing() : queueText('notlive', list.length, queue.notLiveTotal)
+    byId('review-text').textContent = queue === null ? queueMissing() : queueStale(queueText('notlive', list.length, queue.notLiveTotal))
     rows = list.map((row, index) => notLiveRow(row, reviewHost, again(index)))
     shown = list.length
     byId('review-notlive-rows').replaceChildren(...rows)
@@ -2127,7 +2132,7 @@ async function loadQueue() {
     reviewView.queueError = ''
   } catch (err) {
     if (err instanceof Expired) return
-    reviewView.queueError = `Could not load the review queue: ${failure(err)}`
+    reviewView.queueError = reviewView.queue === null ? `Could not load the review queue: ${failure(err)}` : `Refresh failed: ${failure(err)}; showing the last loaded queue.`
   }
 }
 
@@ -2520,6 +2525,8 @@ const memories = {
   reach: '' as '' | Reach,
   kind: '',
   facets: null as Facets | null,
+  // Counts loads, so only the reply to the latest one writes the rows (an older reply can answer last).
+  request: 0,
 }
 
 // The state view is a per-viewer setting: this browser's own storage, and the page works without it.
@@ -2565,9 +2572,11 @@ export async function loadMemories() {
   if (memories.tag) params.set('tag', memories.tag)
   if (memories.reach) params.set('reach', memories.reach)
   if (memories.kind) params.set('kind', memories.kind)
+  const request = ++memories.request
   try {
     const response = await api(`/api/memories?${params}`)
     const body = await readJson<{ total?: number; count?: number; memories?: Memory[]; facets?: Facets; error?: string }>(response)
+    if (request !== memories.request) return
     if (!response.ok) throw new Error(body.error ?? `the server answered ${response.status}`)
     memories.rows = body.memories ?? []
     memories.total = body.total ?? memories.rows.length
@@ -2576,6 +2585,7 @@ export async function loadMemories() {
     drawFacets()
     drawRows()
   } catch (err) {
+    if (request !== memories.request) return
     if (!(err instanceof Expired)) setStatus(`Could not load memories: ${failure(err)}`, 'error')
   }
 }
@@ -2834,7 +2844,7 @@ function openForm(memory: Memory | undefined, sheet: { title: string; returnFocu
 export const forgetMemory = (memory: Memory, done: (error?: string) => void) => forgetById(memory.id, done)
 
 /** A tag in the sheet: the Memories list filtered by it, from whichever tab the sheet is on. */
-function pickTagFromSheet(tag: string) {
+export function pickTagFromSheet(tag: string) {
   if (current !== 'memories') show('memories')
   setTagFilter(tag)
 }
@@ -3826,14 +3836,14 @@ function weakCut() {
 }
 
 // The first SHOW_FIRST hits, then SHOW_FIRST more for each press of Show more.
-function drawHits(more: boolean) {
+function drawHits(more: boolean, keep = 0) {
   const results = byId('search-results')
   // A hit opens on this tab: beside the list on a wide screen, else in the bottom sheet.
   const open = (id: string, from?: HTMLElement) => void openMemory(id, from)
   const list = visibleHits()
   const rank = new Map(searchHits.map((hit, i) => [hit.id, i + 1]))
   const from = more ? searchShown : 0
-  searchShown = Math.min(list.length, more ? searchShown + SHOW_FIRST : SHOW_FIRST)
+  searchShown = Math.min(list.length, more ? searchShown + SHOW_FIRST : keep > 0 ? keep : SHOW_FIRST)
   const rows: HTMLElement[] = []
   list.slice(from, searchShown).forEach((hit, i) => {
     const at = from + i
@@ -4050,7 +4060,7 @@ export function searchKey(event: KeyboardEvent) {
   }
 }
 
-function wireSearch() {
+export function wireSearch() {
   const form = byId<HTMLFormElement>('search-form')
   form.addEventListener('submit', event => {
     event.preventDefault()
