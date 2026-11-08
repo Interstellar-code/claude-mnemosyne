@@ -38,4 +38,47 @@ describe("TripleStore.add with an older valid_from", () => {
 			store.close();
 		}
 	});
+
+	test("with several open rows, only rows that start before valid_from are closed", () => {
+		const store = new TripleStore(":memory:");
+		try {
+			const insert = "INSERT INTO triples (subject, predicate, object, valid_from) VALUES (?, ?, ?, ?)";
+			store.conn.run(insert, ["a", "p", "X", "2026-01-01T00:00:00Z"]);
+			store.conn.run(insert, ["a", "p", "Y", "2026-06-01T00:00:00Z"]);
+			store.add("a", "p", "Z", { validFrom: "2026-03-01" });
+
+			const rows = store.exportAll();
+			for (const row of rows) {
+				if (row.valid_until !== null) expect(row.valid_until >= row.valid_from).toBe(true);
+			}
+			expect(rows.find(r => r.object === "X")?.valid_until).toBe("2026-03-01");
+			expect(rows.find(r => r.object === "Y")?.valid_until).toBeNull();
+			expect(rows.find(r => r.object === "Z")?.valid_until).toBe("2026-06-01T00:00:00Z");
+		} finally {
+			store.close();
+		}
+	});
+
+	test("a date-only add on the same day as an open timestamped row is not treated as older", () => {
+		const store = new TripleStore(":memory:");
+		try {
+			const day = new Date().toISOString().slice(0, 10);
+			store.conn.run("INSERT INTO triples (subject, predicate, object, valid_from) VALUES (?, ?, ?, ?)", [
+				"alice",
+				"works_at",
+				"Acme",
+				`${day}T00:00:00.000Z`,
+			]);
+			store.add("alice", "works_at", "Initech");
+
+			const rows = store.exportAll();
+			for (const row of rows) {
+				if (row.valid_until !== null) expect(row.valid_until >= row.valid_from).toBe(true);
+			}
+			expect(rows.find(r => r.object === "Initech")?.valid_until).toBeNull();
+			expect(rows.find(r => r.object === "Acme")?.valid_until).not.toBeNull();
+		} finally {
+			store.close();
+		}
+	});
 });
