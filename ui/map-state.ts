@@ -1816,8 +1816,8 @@ export const initialSolarPage = (): SolarPage => ({
   arrange: 'activity', colour: 'writer', hidden: {}, query: '', rotate: true, sample: true, legend: true, legL: true, legR: true, level: GALAXY_LEVEL, findOpen: false,
 })
 
-/** What is remembered per viewer: Arrange by, Colour dots by and the Show toggles (and the folds of the two legend cards). */
-const SOLAR_KEYS = ['arrange', 'colour', 'rotate', 'sample', 'legend', 'legL', 'legR'] as const
+/** What is remembered per viewer: Arrange by and the Show toggles (and the folds of the two legend cards). */
+const SOLAR_KEYS = ['arrange', 'rotate', 'sample', 'legend', 'legL', 'legR'] as const
 
 /** The remembered settings laid over the defaults; anything stored that is not a known value is ignored. */
 export function readSolarPage(storage: Pick<Storage, 'getItem'> | undefined): SolarPage {
@@ -1826,7 +1826,7 @@ export function readSolarPage(storage: Pick<Storage, 'getItem'> | undefined): So
     const raw = JSON.parse(storage?.getItem(SOLAR_KEY) ?? 'null') as Record<string, unknown> | null
     if (raw === null || typeof raw !== 'object') return page
     if (ARRANGE.some(a => a.id === raw.arrange)) page.arrange = raw.arrange as Arrange
-    if (COLOURS.some(c => c.id === raw.colour)) page.colour = raw.colour as ColourMode
+    // 0.28.3: no Colour-dots-by card any more, so a remembered Recalls or Age is not restored: dots are by writer.
     for (const key of ['rotate', 'sample', 'legend', 'legL', 'legR'] as const) if (typeof raw[key] === 'boolean') page[key] = raw[key] as boolean
   } catch {
     // storage is a convenience only

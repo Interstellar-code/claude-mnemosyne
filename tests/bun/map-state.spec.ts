@@ -3676,7 +3676,8 @@ describe('the solar page state (MAPX.11)', () => {
     const store = new Map<string, string>()
     const storage = { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => void store.set(k, v) }
     saveSolarPage(storage, toggleShow(setColour(setArrange(initialSolarPage(), 'recalls'), 'age'), 'legend'))
-    expect(readSolarPage(storage)).toMatchObject({ arrange: 'recalls', colour: 'age', legend: false, rotate: true })
+    // 0.28.3: the colour is no longer remembered (no Colour dots by card): it reads back as writer.
+    expect(readSolarPage(storage)).toMatchObject({ arrange: 'recalls', colour: 'writer', legend: false, rotate: true })
     store.set('mnemosyne.map.solar', '{"arrange":"nope","colour":7,"rotate":"yes"}')
     expect(readSolarPage(storage)).toEqual(initialSolarPage())
     store.set('mnemosyne.map.solar', 'not json')

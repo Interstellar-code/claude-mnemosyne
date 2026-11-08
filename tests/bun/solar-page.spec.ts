@@ -426,23 +426,24 @@ describe('the solar page: markup and policy', () => {
   })
 
   test('the mockup page is in the markup: path, Find, two legend cards, view buttons, the two-row Bodies strip, Details, Live', () => {
-    for (const id of ['solar-path', 'map-find', 'solar-legend-left', 'solar-legend-right', 'solar-views', 'solar-bodies', 'solar-chips', 'solar-show-all', 'map-inspector', 'map-live-strip', 'solar-card-arrange', 'solar-card-colour', 'solar-card-show', 'solar-find-results']) expect(HTML).toContain(`id="${id}"`)
+    for (const id of ['solar-path', 'map-find', 'solar-legend-left', 'solar-legend-right', 'solar-views', 'solar-bodies', 'solar-chips', 'solar-show-all', 'map-inspector', 'map-live-strip', 'solar-card-arrange', 'solar-card-show', 'solar-find-results']) expect(HTML).toContain(`id="${id}"`)
+    // 0.28.3: no Colour dots by card; dots are by writer.
+    expect(HTML).not.toContain('id="solar-card-colour"')
     expect(readFileSync(join(ROOT, 'ui', 'style.css'), 'utf8')).toContain('grid-template-rows: repeat(2, 38px)')
   })
 })
 
 describe('the Galaxy layout as a solar page', () => {
-  test('the scene is made once with the page canvas, handed the data and the view; the other rail cards give way to Arrange by, Colour dots by and Show', async () => {
+  test('the scene is made once with the page canvas, handed the data and the view; the other rail cards give way to Arrange by and Show', async () => {
     const b = await boot()
     expect(b.factory.scenes.length).toBe(1)
     expect(b.node('solar-canvas').hidden).toBe(false)
     expect(b.scene().of('setData')[0]!.galaxy.projects.length).toBe(FIXTURE.projects.length)
     expect(lastView(b)).toEqual({ arrange: 'activity', colour: 'writer', hidden: {}, query: '', rotate: true, sample: true, legend: true })
     expect(b.node('view-map').classList.contains('solar-on')).toBe(true)
-    for (const id of ['solar-card-arrange', 'solar-card-colour', 'solar-card-show', 'solar-bodies']) expect(b.node(id).hidden).toBe(false)
+    for (const id of ['solar-card-arrange', 'solar-card-show', 'solar-bodies']) expect(b.node(id).hidden).toBe(false)
     for (const id of ['map-card-colour', 'map-card-links', 'map-card-know', 'map-card-layers', 'map-card-projects', 'map-overview', 'map-legend']) expect(b.node(id).classes()).toContain('legacy-only')
     expect(buttons(b.node('solar-arrange')).map(x => x.textContent)).toEqual(['Activity', 'Size', 'Age', 'Recalls'])
-    expect(buttons(b.node('solar-colour')).map(x => x.textContent)).toEqual(['Writer', 'Recalls', 'Age'])
     expect(buttons(b.node('solar-show')).map(x => x.textContent)).toEqual(['Auto-rotate: on', 'Legend: on', 'Sample outer-belt dust: on'])
     // The 0.6.0 Live strip stays.
     expect(b.node('map-live-strip').classes()).not.toContain('legacy-only')
@@ -485,20 +486,18 @@ describe('the Galaxy layout as a solar page', () => {
     withSolar.layout('timeline')
     expect(shape(withSolar)).toEqual(shape(plain))
     expect(withSolar.node('view-map').classes()).not.toContain('solar-on')
-    for (const id of ['solar-card-arrange', 'solar-card-colour', 'solar-card-show']) expect(withSolar.node(id).hidden).toBe(true)
+    for (const id of ['solar-card-arrange', 'solar-card-show']) expect(withSolar.node(id).hidden).toBe(true)
   })
 })
 
 describe('the controls drive the scene through C13 and are remembered', () => {
-  test('Arrange by, Colour dots by and the Show toggles call setView with the new view, press the button, and save', async () => {
+  test('Arrange by and the Show toggles call setView with the new view, press the button, and save', async () => {
     const b = await boot()
     byText(b.node('solar-arrange'), 'Size').fire('click')
     expect(lastView(b).arrange).toBe('size')
     expect(byText(b.node('solar-arrange'), 'Size').attributes.get('aria-pressed')).toBe('true')
     expect(byText(b.node('solar-arrange'), 'Activity').attributes.get('aria-pressed')).toBe('false')
     expect(b.node('solar-arrange-hint').textContent).toContain('Closer = more memories.')
-    byText(b.node('solar-colour'), 'Age').fire('click')
-    expect(lastView(b).colour).toBe('age')
     byText(b.node('solar-show'), 'Auto-rotate').fire('click')
     expect(lastView(b).rotate).toBe(false)
     byText(b.node('solar-show'), 'Sample').fire('click')
@@ -507,11 +506,16 @@ describe('the controls drive the scene through C13 and are remembered', () => {
     expect(lastView(b).legend).toBe(false)
     expect(b.node('solar-legend-left').hidden).toBe(true)
     expect(b.node('solar-legend-right').hidden).toBe(true)
-    expect(JSON.parse(b.storage.get('mnemosyne.map.solar')!)).toMatchObject({ arrange: 'size', colour: 'age', rotate: false, sample: false, legend: false })
+    expect(JSON.parse(b.storage.get('mnemosyne.map.solar')!)).toMatchObject({ arrange: 'size', rotate: false, sample: false, legend: false })
     // A new viewer session with the same storage starts there.
     const again = await boot({ storage: b.storage })
-    expect(lastView(again)).toMatchObject({ arrange: 'size', colour: 'age', rotate: false, sample: false, legend: false })
-    expect(byText(again.node('solar-colour'), 'Age').attributes.get('aria-pressed')).toBe('true')
+    expect(lastView(again)).toMatchObject({ arrange: 'size', colour: 'writer', rotate: false, sample: false, legend: false })
+  })
+
+  test('a remembered Recalls or Age colour from before 0.28.3 is not restored: dots are by writer', async () => {
+    const storage = new Map([['mnemosyne.map.solar', JSON.stringify({ arrange: 'size', colour: 'age' })]])
+    const b = await boot({ storage })
+    expect(lastView(b)).toMatchObject({ arrange: 'size', colour: 'writer' })
   })
 
   test('a storage that throws leaves the defaults and the page working', async () => {

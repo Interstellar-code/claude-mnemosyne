@@ -1621,6 +1621,8 @@ Issue #43. `bin/update.ts` serves the Claude Code layout (`~/.claude/mnemosyne`)
 
 On the Galaxy page the path (#solar-path, `Galaxy > planet > ...`) sits bottom left, 60px up, above the hint; the Bodies legend (.legend-left) takes the top left corner at 12px. The keyboard tour stops (.solar-tour) moved up to 100px so a focused stop does not cover the path.
 
+The Colour dots by card (#solar-card-colour) is gone: the page's `colour` stays `writer` (`initialSolarPage`), `readSolarPage` no longer restores a stored one and `saveSolarPage` no longer writes it. `dotColour`'s Recalls and Age modes stay in solar-layout.ts for the scene, unused by the page.
+
 ### Check now (0.28.2)
 
 `cacheHolds(cached, now, current, force)` in `ui/update-routes.ts`: the cached release check holds while younger than `CHECK_EVERY_MS` (a day), or `CHECK_NOW_MIN_MS` (a minute) for a forced check, and never when it names a release older than the running plugin. `GET /api/update?check=now` forces it; the Version cell's "Check now" (`UpdateHost.check`, hidden while a run is under way) calls it and redraws.

@@ -19,7 +19,7 @@ import type { ForceGraph3DInstance, GraphNode } from './vendor/map-lib.js'
 import { plainLabel } from './escape'
 import type { GalaxyHub, GalaxyStar, Vec3 } from './map-layout'
 import { simulate, toMapEvent, type MapEvent } from './map-live'
-import { ARRANGE, buildBodies, COLOURS, SEARCH_MIN, describe, globalOwnedOf, kindLabel, kindOne, linkInfos, linksOf, searchResults, tagColour, type Body, type SolarGalaxy, type SolarMemory, type Target } from './solar-layout'
+import { ARRANGE, buildBodies, SEARCH_MIN, describe, globalOwnedOf, kindLabel, kindOne, linkInfos, linksOf, searchResults, tagColour, type Body, type SolarGalaxy, type SolarMemory, type Target } from './solar-layout'
 import {
   addMemory,
   announcement,
@@ -235,7 +235,6 @@ import {
   resolveHash,
   saveSolarPage,
   setArrange,
-  setColour,
   setSolarLevel,
   setSolarQuery,
   SEARCH_MEMORY_MIN,
@@ -414,7 +413,7 @@ type GraphLinkData = { source: string; target: string; kind: 'spoke' | 'bridge';
 // map-state.ts. It reaches the scene only through C13 (SolarSceneApi) and never imports ui/solar.ts.
 
 const GALAXY: Target = { level: 'galaxy' }
-const SOLAR_ONLY = ['solar-card-arrange', 'solar-card-colour', 'solar-card-show', 'solar-canvas', 'solar-path', 'solar-bodies', 'solar-legend-left', 'solar-legend-right', 'solar-tour', 'solar-hint', 'solar-views', 'solar-live-note', 'solar-sim']
+const SOLAR_ONLY = ['solar-card-arrange', 'solar-card-show', 'solar-canvas', 'solar-path', 'solar-bodies', 'solar-legend-left', 'solar-legend-right', 'solar-tour', 'solar-hint', 'solar-views', 'solar-live-note', 'solar-sim']
 
 // ---- The Details panel (MAPX.7) ----
 //
@@ -811,13 +810,6 @@ function mountSolarPage(host: MapHost, solar: SolarHost, shell: SolarShell, stor
       }),
     )
     byId('solar-arrange-hint').textContent = `${arrangeHint(page.arrange)} Planet size is always the memory count.`
-    byId('solar-colour').replaceChildren(
-      ...COLOURS.map(option => {
-        const item = button(option.label, 'seg-btn', option.id === page.colour)
-        item.addEventListener('click', () => changeView(setColour(page, option.id)))
-        return item
-      }),
-    )
     byId('solar-show').replaceChildren(
       ...SHOW_TOGGLES.map(toggle => {
         const item = button(`${toggle.label}: ${page[toggle.key] ? 'on' : 'off'}`, 'seg-btn', page[toggle.key])

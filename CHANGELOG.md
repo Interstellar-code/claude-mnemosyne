@@ -2,9 +2,10 @@
 
 Newest first. Each release is tagged `vX.Y.Z` on GitHub; the README and DESIGN.md describe the contracts.
 
-## 0.28.3 (the Galaxy pill moves to the bottom)
+## 0.28.3 (a tidier Galaxy page)
 
-On the Galaxy page the path pill (Galaxy, and the planet or moon you flew to) now sits bottom left above the hint, and the Bodies legend takes the top left corner.
+1. **The path pill moves to the bottom.** On the Galaxy page the path (Galaxy, and the planet or moon you flew to) now sits bottom left above the hint, and the Bodies legend takes the top left corner.
+2. **No Colour dots by card.** Memory dots are always coloured by writer, as the legend says; a Recalls or Age choice remembered from before is not restored.
 
 ## 0.28.2 (the Update button finds a new release at once)
 
