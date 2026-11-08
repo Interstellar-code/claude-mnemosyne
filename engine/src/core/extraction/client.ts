@@ -145,7 +145,7 @@ export class ExtractionClient {
 			return [];
 		}
 
-		const userPrompt = EXTRACTION_USER_TEMPLATE.replace("{conversation_text}", conversationText);
+		const userPrompt = EXTRACTION_USER_TEMPLATE.replace("{conversation_text}", () => conversationText);
 		const response = await this.chat(
 			[
 				{ role: "system", content: EXTRACTION_SYSTEM_PROMPT },
