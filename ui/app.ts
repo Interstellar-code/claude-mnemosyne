@@ -2520,6 +2520,8 @@ const memories = {
   reach: '' as '' | Reach,
   kind: '',
   facets: null as Facets | null,
+  // Counts loads, so only the reply to the latest one writes the rows (an older reply can answer last).
+  request: 0,
 }
 
 // The state view is a per-viewer setting: this browser's own storage, and the page works without it.
@@ -2565,9 +2567,11 @@ export async function loadMemories() {
   if (memories.tag) params.set('tag', memories.tag)
   if (memories.reach) params.set('reach', memories.reach)
   if (memories.kind) params.set('kind', memories.kind)
+  const request = ++memories.request
   try {
     const response = await api(`/api/memories?${params}`)
     const body = await readJson<{ total?: number; count?: number; memories?: Memory[]; facets?: Facets; error?: string }>(response)
+    if (request !== memories.request) return
     if (!response.ok) throw new Error(body.error ?? `the server answered ${response.status}`)
     memories.rows = body.memories ?? []
     memories.total = body.total ?? memories.rows.length
@@ -2576,6 +2580,7 @@ export async function loadMemories() {
     drawFacets()
     drawRows()
   } catch (err) {
+    if (request !== memories.request) return
     if (!(err instanceof Expired)) setStatus(`Could not load memories: ${failure(err)}`, 'error')
   }
 }
@@ -2834,7 +2839,7 @@ function openForm(memory: Memory | undefined, sheet: { title: string; returnFocu
 export const forgetMemory = (memory: Memory, done: (error?: string) => void) => forgetById(memory.id, done)
 
 /** A tag in the sheet: the Memories list filtered by it, from whichever tab the sheet is on. */
-function pickTagFromSheet(tag: string) {
+export function pickTagFromSheet(tag: string) {
   if (current !== 'memories') show('memories')
   setTagFilter(tag)
 }

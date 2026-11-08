@@ -727,6 +727,8 @@ describe('VIEWS R2: the Knowledge and Health glue in app.ts', () => {
   let mode: 'real' | 'fail500' | 'throw' = 'real'
   const calls: { path: string; method: string; body: string }[] = []
   const focused: AppNode[] = []
+  // When set, /api/memories requests wait here until the test lets each one through (out of order).
+  let held: { path: string; release: () => void }[] | null = null
 
   class AppText {
     constructor(public data: string) {}
@@ -831,6 +833,7 @@ describe('VIEWS R2: the Knowledge and Health glue in app.ts', () => {
     g.document = { createElement: (tag: string) => new AppNode(tag.toLowerCase()), createTextNode: (data: string) => new AppText(data), getElementById: (id: string) => page.get(id) ?? null }
     g.fetch = async (path: string, init: RequestInit = {}) => {
       calls.push({ path, method: init.method ?? 'GET', body: typeof init.body === 'string' ? init.body : '' })
+      if (held && path.startsWith('/api/memories?')) await new Promise<void>(release => held!.push({ path, release }))
       if (mode === 'fail500') return new Response(JSON.stringify({ error: 'boom' }), { status: 500 })
       // The server itself still answers /api/health (the page's check on a failed request), so these are tab failures, not a lost server.
       if (mode === 'throw' && path !== '/api/health') throw new TypeError('network down')
@@ -1252,6 +1255,56 @@ describe('VIEWS R2: the Knowledge and Health glue in app.ts', () => {
     expect(app.revealNeeded('accessibility', 'style', true)).toBe(true)
     expect(app.revealNeeded('style', '', true)).toBe(false)
     expect(app.revealNeeded('', 'accessibility', false)).toBe(false)
+  })
+
+  describe('issue #20: only the reply to the latest Memories request writes the rows', () => {
+    const shown = () => (byId('mem-rows').children as AppNode[]).filter(row => row.className.startsWith('row')).map(row => row.dataset.id)
+    const settle = async () => {
+      for (let i = 0; i < 20; i++) await Bun.sleep(5)
+    }
+
+    test('two filters typed in turn, the older reply arriving last: the rows are the newer filter\'s', async () => {
+      held = []
+      try {
+        byId('mem-filter').value = 'first'
+        const older = app.loadMemories()
+        byId('mem-filter').value = 'second'
+        const newer = app.loadMemories()
+        await until(() => held!.length === 2, 'both requests')
+        expect(held[0]!.path).toContain('q=first')
+        expect(held[1]!.path).toContain('q=second')
+        held[1]!.release()
+        await newer
+        expect(shown()).toEqual([ids[1]])
+        held[0]!.release()
+        await older
+        expect(shown()).toEqual([ids[1]])
+      } finally {
+        held = null
+        byId('mem-filter').value = ''
+      }
+    })
+
+    test('a tag picked in a memory panel from another tab: the first open of Memories shows the tagged rows, not the untagged load', async () => {
+      const made = body((await engineCall(CLI, store, 'project-glue-1a2b', [toolCall(1, 'mnemopi_remember', { content: 'tagged for the race test', metadata: { tags: ['race-tag'] } })])).get(1)) as { memory_id: string }
+      app.show('search')
+      held = []
+      try {
+        app.pickTagFromSheet('race-tag')
+        await until(() => held!.length === 2, 'both requests')
+        expect(held[0]!.path).not.toContain('tag=')
+        expect(held[1]!.path).toContain('tag=race-tag')
+        held[1]!.release()
+        await settle()
+        expect(shown()).toEqual([made.memory_id])
+        held[0]!.release()
+        await settle()
+        expect(shown()).toEqual([made.memory_id])
+        expect(byId('mem-tag').textContent).toBe('tag: race-tag ×')
+      } finally {
+        held = null
+      }
+    })
   })
 })
 
