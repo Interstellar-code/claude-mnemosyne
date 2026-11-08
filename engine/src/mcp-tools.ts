@@ -1063,7 +1063,16 @@ async function handleValidate(args: ToolArguments): Promise<ToolResult> {
 		return { error: "new_content is required for action='update'" };
 	const validator = validatorArg(args);
 	if (typeof validator === "object") return validator;
-	return withBeam(args, (beam, bank) => {
+	// 'private' is the main store (the bank the other tools use when none is named); 'surface' is the shared
+	// surface store of the mnemopi_shared_* tools. Any other name is a bank, as before.
+	const requested = stringArg(args, "bank", "private");
+	const run = <T>(fn: (beam: BeamMemory, bank: string) => T | Promise<T>): Promise<T> =>
+		requested === "surface"
+			? withSharedBeam(beam => fn(beam, "surface"))
+			: requested === "private"
+				? withBeam({ ...args, bank: "" }, fn)
+				: withBeam(args, fn);
+	return run((beam, bank) => {
 		const existing = beam.get(memoryId) as { content?: string; author_id?: string | null } | null;
 		if (existing === null) return { error: "memory_not_found", memory_id: memoryId, bank };
 		let status: string;
