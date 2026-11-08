@@ -6,6 +6,8 @@ Newest first. Each release is tagged `vX.Y.Z` on GitHub; the README and DESIGN.m
 
 1. **The path pill moves to the bottom.** On the Galaxy page the path (Galaxy, and the planet or moon you flew to) now sits bottom left above the hint, and the Bodies legend takes the top left corner.
 2. **No Colour dots by card.** Memory dots are always coloured by writer, as the legend says; a Recalls or Age choice remembered from before is not restored.
+3. **No Sample outer-belt dust toggle.** The outer belt is your real retired, expired and lapsed memories (not sample data), so it always shows; the toggle and its leftover mockup name are gone.
+4. **The Bodies strip runs the full width** under the rail and the map, so more chips fit without scrolling.
 
 ## 0.28.2 (the Update button finds a new release at once)
 

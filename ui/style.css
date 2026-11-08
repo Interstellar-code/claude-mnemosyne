@@ -1186,13 +1186,14 @@ button.toggle-name:focus-visible { outline: 2px solid var(--accent); outline-off
   .solar-hint { display: none; }
 }
 @media (prefers-reduced-motion: reduce) { .solar-canvas { cursor: default; } }
-/* The Galaxy page's placement, as in the mockup: the rail beside the map and the Bodies strip, the map running to the
-   right edge (no right column), then one full-width row with Details and, beside it, Live activity. */
+/* The Galaxy page's placement: the rail beside the map, the map running to the right edge (no right column), the
+   Bodies strip full width under both (0.28.3), then one full-width row with Details and, beside it, Live activity. */
 @media (min-width: 901px) {
   #view-map.solar-on {
     display: grid;
     grid-template-columns: minmax(220px, 250px) minmax(0, 1.4fr) minmax(320px, 1fr);
-    grid-template-areas: 'rail stage stage' 'rail bodies bodies' 'details details live';
+    /* 0.28.3: the Bodies strip runs the full width under the rail and the map. */
+    grid-template-areas: 'rail stage stage' 'bodies bodies bodies' 'details details live';
     grid-template-rows: auto auto auto;
     align-items: start;
   }

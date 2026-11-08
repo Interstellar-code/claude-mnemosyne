@@ -1623,6 +1623,8 @@ On the Galaxy page the path (#solar-path, `Galaxy > planet > ...`) sits bottom l
 
 The Colour dots by card (#solar-card-colour) is gone: the page's `colour` stays `writer` (`initialSolarPage`), `readSolarPage` no longer restores a stored one and `saveSolarPage` no longer writes it. `dotColour`'s Recalls and Age modes stay in solar-layout.ts for the scene, unused by the page.
 
+The Show card's third toggle, Sample outer-belt dust (`sample` in `SolarPage` and `SolarView`), is gone: the outer belt (`makeOuter` in ui/solar.ts) holds the real not-live memories, so it is always drawn. The Bodies strip's grid area now spans all three columns (`'bodies bodies bodies'`), under the rail and the map.
+
 ### Check now (0.28.2)
 
 `cacheHolds(cached, now, current, force)` in `ui/update-routes.ts`: the cached release check holds while younger than `CHECK_EVERY_MS` (a day), or `CHECK_NOW_MIN_MS` (a minute) for a forced check, and never when it names a release older than the running plugin. `GET /api/update?check=now` forces it; the Version cell's "Check now" (`UpdateHost.check`, hidden while a run is under way) calls it and redraws.

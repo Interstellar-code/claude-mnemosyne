@@ -1761,7 +1761,6 @@ export type SolarView = {
   hidden: Record<string, true>
   query: string
   rotate: boolean
-  sample: boolean
   legend: boolean
 }
 
@@ -1813,11 +1812,11 @@ export const SOLAR_KEY = 'mnemosyne.map.solar'
 const GALAXY_LEVEL: Target = { level: 'galaxy' }
 
 export const initialSolarPage = (): SolarPage => ({
-  arrange: 'activity', colour: 'writer', hidden: {}, query: '', rotate: true, sample: true, legend: true, legL: true, legR: true, level: GALAXY_LEVEL, findOpen: false,
+  arrange: 'activity', colour: 'writer', hidden: {}, query: '', rotate: true, legend: true, legL: true, legR: true, level: GALAXY_LEVEL, findOpen: false,
 })
 
 /** What is remembered per viewer: Arrange by and the Show toggles (and the folds of the two legend cards). */
-const SOLAR_KEYS = ['arrange', 'rotate', 'sample', 'legend', 'legL', 'legR'] as const
+const SOLAR_KEYS = ['arrange', 'rotate', 'legend', 'legL', 'legR'] as const
 
 /** The remembered settings laid over the defaults; anything stored that is not a known value is ignored. */
 export function readSolarPage(storage: Pick<Storage, 'getItem'> | undefined): SolarPage {
@@ -1827,7 +1826,7 @@ export function readSolarPage(storage: Pick<Storage, 'getItem'> | undefined): So
     if (raw === null || typeof raw !== 'object') return page
     if (ARRANGE.some(a => a.id === raw.arrange)) page.arrange = raw.arrange as Arrange
     // 0.28.3: no Colour-dots-by card any more, so a remembered Recalls or Age is not restored: dots are by writer.
-    for (const key of ['rotate', 'sample', 'legend', 'legL', 'legR'] as const) if (typeof raw[key] === 'boolean') page[key] = raw[key] as boolean
+    for (const key of ['rotate', 'legend', 'legL', 'legR'] as const) if (typeof raw[key] === 'boolean') page[key] = raw[key] as boolean
   } catch {
     // storage is a convenience only
   }
@@ -1844,7 +1843,7 @@ export function saveSolarPage(storage: Pick<Storage, 'setItem'> | undefined, pag
 
 export const setArrange = (page: SolarPage, arrange: Arrange): SolarPage => (ARRANGE.some(a => a.id === arrange) && arrange !== page.arrange ? { ...page, arrange } : page)
 export const setColour = (page: SolarPage, colour: ColourMode): SolarPage => (COLOURS.some(c => c.id === colour) && colour !== page.colour ? { ...page, colour } : page)
-export const toggleShow = (page: SolarPage, key: 'rotate' | 'legend' | 'sample' | 'legL' | 'legR'): SolarPage => ({ ...page, [key]: !page[key] })
+export const toggleShow = (page: SolarPage, key: 'rotate' | 'legend' | 'legL' | 'legR'): SolarPage => ({ ...page, [key]: !page[key] })
 
 /** The Bodies strip: hides one body, or shows it again. */
 export function toggleBody(page: SolarPage, owner: string): SolarPage {
@@ -1860,7 +1859,7 @@ export const setSolarLevel = (page: SolarPage, level: Target): SolarPage => ({ .
 
 /** The C13 `view`: a fresh object, so the scene can keep it. */
 export const viewOf = (page: SolarPage): SolarView => ({
-  arrange: page.arrange, colour: page.colour, hidden: { ...page.hidden }, query: page.query, rotate: page.rotate, sample: page.sample, legend: page.legend,
+  arrange: page.arrange, colour: page.colour, hidden: { ...page.hidden }, query: page.query, rotate: page.rotate, legend: page.legend,
 })
 
 export const arrangeHint = (arrange: Arrange): string => ARRANGE.find(a => a.id === arrange)?.hint ?? ''
@@ -2084,7 +2083,6 @@ export const VIEW_BUTTONS: readonly { label: string; aria: string; action: { zoo
 export const SHOW_TOGGLES = [
   { key: 'rotate', label: 'Auto-rotate' },
   { key: 'legend', label: 'Legend' },
-  { key: 'sample', label: 'Sample outer-belt dust' },
 ] as const
 
 // ---- Path, announcement, Details, Tab order ----

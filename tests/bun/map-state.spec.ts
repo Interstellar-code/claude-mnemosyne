@@ -3656,7 +3656,6 @@ describe('the solar page state (MAPX.11)', () => {
     expect(setArrange(page, 'activity')).toBe(page)
     expect(setColour(page, 'age').colour).toBe('age')
     expect(toggleShow(page, 'rotate').rotate).toBe(false)
-    expect(toggleShow(toggleShow(page, 'sample'), 'sample').sample).toBe(true)
   })
 
   test('the strip hides and shows a body, and view() is a fresh copy for the scene', () => {
@@ -3666,7 +3665,7 @@ describe('the solar page state (MAPX.11)', () => {
     const view = viewOf(hidden)
     view.hidden.b = true
     expect(hidden.hidden).toEqual({ a: true })
-    expect(Object.keys(viewOf(initialSolarPage())).sort()).toEqual(['arrange', 'colour', 'hidden', 'legend', 'query', 'rotate', 'sample'])
+    expect(Object.keys(viewOf(initialSolarPage())).sort()).toEqual(['arrange', 'colour', 'hidden', 'legend', 'query', 'rotate'])
     expect(setSolarQuery(hidden, 'ab').findOpen).toBe(true)
     expect(setSolarQuery(hidden, 'a').findOpen).toBe(false)
     expect(closeFind(setSolarQuery(hidden, 'abc'))).toMatchObject({ query: '', findOpen: false })

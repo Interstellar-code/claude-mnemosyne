@@ -71,8 +71,6 @@ export type SolarView = {
   query: string
   /** Auto-rotate: off by default; a turning camera cancels out the planets' own slow orbits. */
   rotate: boolean
-  /** The outer belt of retired, expired and lapsed memories is drawn. */
-  sample: boolean
   legend: boolean
 }
 
@@ -122,7 +120,7 @@ export type SolarScene = {
 /** The method names C13 fixes; a spec checks the returned object against this list. */
 export const SCENE_METHODS = ['setData', 'setView', 'flyTo', 'showView', 'zoom', 'event', 'dispose'] as const
 
-export const DEFAULT_VIEW: SolarView = { arrange: 'activity', colour: 'writer', hidden: {}, query: '', rotate: false, sample: true, legend: true }
+export const DEFAULT_VIEW: SolarView = { arrange: 'activity', colour: 'writer', hidden: {}, query: '', rotate: false, legend: true }
 
 // ---- Constants (the approved look) -----------------------------------------------------
 
@@ -2028,9 +2026,7 @@ class SolarImpl {
     if (this.outer) {
       this.outer.scale.set(outerR, 1, outerR)
       this.outer.rotation.y += dt * 0.004 * spin
-      this.outer.visible = s.sample
       this.outerLabel.position.set(0, 30, -outerR)
-      this.outerLabel.visible = s.sample
     }
     if (this.sunBeltObj) this.sunBeltObj.rotation.y += dt * 0.06 * spin
 
