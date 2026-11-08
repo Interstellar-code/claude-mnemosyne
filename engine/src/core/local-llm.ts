@@ -231,7 +231,7 @@ export function buildHostPrompt(memories: readonly string[], source = ""): strin
 	return `${header}\n\n${memoryLines(memories)}`;
 }
 
-function hostBackendWillHandleCall(): boolean {
+export function hostBackendWillHandleCall(): boolean {
 	return llmEnabled() && hostLlmEnabled() && getHostLlmBackend() !== null;
 }
 
@@ -264,8 +264,23 @@ export function cleanOutput(text: string): string {
 		.replace(/^(?:\s*<think>[\s\S]*?<\/think>)+\s*/i, "")
 		.replace(/^(Summarize the following memories.*?[.!?:]\s*)/is, "")
 		.replace(/^(Preserve facts.*?[.!?:]\s*)/is, "")
-		.replace(/^Source:.*?\n/im, "")
-		.replace(/^\s*[-*]\s.*\n/gm, "")
+		.trim();
+}
+
+/** A summary reply, cleaned, without the lines that only repeat the prompt: a `- memory` line that is one of
+ * the memories summarised, and a leading `Source:` line. Other list and `Source:` lines are the model's own. */
+export function cleanSummaryOutput(text: string, memories: readonly string[]): string {
+	const echoed = new Set(memories.map(memory => memory.trim()).filter(Boolean));
+	const lines = cleanOutput(text).split("\n");
+	if (/^\s*Source:/i.test(lines[0] ?? "")) {
+		lines.shift();
+	}
+	return lines
+		.filter(line => {
+			const item = /^\s*[-*]\s+(.*)$/.exec(line);
+			return item === null || !echoed.has((item[1] ?? "").trim());
+		})
+		.join("\n")
 		.trim();
 }
 
@@ -402,7 +417,7 @@ async function summarizeChunk(
 		if (raw === null) {
 			return null;
 		}
-		const cleaned = cleanOutput(raw);
+		const cleaned = cleanSummaryOutput(raw, memories);
 		return cleaned === "" ? null : cleaned;
 	}
 	const [attempted, hostText] = await tryHostLlm(hostPrompt, llmMaxTokens(), 0.3);
@@ -412,7 +427,7 @@ async function summarizeChunk(
 		}
 		const raw = await callLocalLlm(prompt);
 		if (raw !== null) {
-			const cleaned = cleanOutput(raw);
+			const cleaned = cleanSummaryOutput(raw, memories);
 			return cleaned === "" ? null : cleaned;
 		}
 		return null;
@@ -421,14 +436,14 @@ async function summarizeChunk(
 	if (llmEnabled() && llmBaseUrl() !== "" && !envBool("MNEMOPI_FORCE_LOCAL", false)) {
 		const raw = await callRemoteLlm(prompt, 0.3, options);
 		if (raw !== null) {
-			const cleaned = cleanOutput(raw);
+			const cleaned = cleanSummaryOutput(raw, memories);
 			return cleaned === "" ? null : cleaned;
 		}
 	}
 
 	const raw = await callLocalLlm(prompt);
 	if (raw !== null) {
-		const cleaned = cleanOutput(raw);
+		const cleaned = cleanSummaryOutput(raw, memories);
 		return cleaned === "" ? null : cleaned;
 	}
 	return null;

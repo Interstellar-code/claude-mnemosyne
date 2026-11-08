@@ -2,6 +2,13 @@
 
 Newest first. Each release is tagged `vX.Y.Z` on GitHub; the README and DESIGN.md describe the contracts.
 
+## 0.30.1 (two engine fixes from mikemikimike)
+
+Engine build 18.12.3-mnemosyne.15 (engine changes 24 and 25). Thanks to mikemikimike for both fixes (#41, #42).
+
+1. **Turning the model off stays off.** `llm: { enabled: false }` was read as "not set" when a model or completion was also configured, so the engine could call a model you had turned off. It is now respected, and fact extraction checks it the same way as consolidation (#6).
+2. **Model replies keep their lists.** Fact extraction and other model replies no longer lose every `- item` line and the first `Source:` line, which had emptied a list of extracted facts. Summaries still drop the lines that only repeat the prompt (#8).
+
 ## 0.30.0 (storm clouds, live ties and captions in the nebula)
 
 1. **Storm clouds.** Each cloud of three or more memories is an electric storm: it breathes slowly, and every 5 to 14 seconds it flashes in two strikes while a jagged bolt crackles between two of its memories. With reduced motion the clouds glow steadily.

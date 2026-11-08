@@ -37,8 +37,9 @@ Ours, not upstream's (engine-diff ignores them): `UPSTREAM.md`, `bun.lock` (our 
 | 18.12.3-mnemosyne.12 | 4f91eb8c87df5678bcda1981a6d76123ad42688994fec87f06506a421fddcfe9 |
 | 18.12.3-mnemosyne.13 | c3d440372055b89b60d1eedeccd12062e57b7ca985a2ab17287b5b7973e56177 |
 | 18.12.3-mnemosyne.14 | f015d15f218cbeda835b65f4ae3b347bf67ba02bc9077efba07aa22718e4da8b |
+| 18.12.3-mnemosyne.15 | 7840532d977bf4b9b7087d9ec73955d34fac3e7613ba60bfd88e0a1854fd9ff7 |
 
-The `18.12.3` row is the untouched upstream source, for reference. `.1` had changes 1 to 3; `.2` makes the change 1 merge keep a `__proto__` key as plain data (it was dropped); `.3` adds the two knowledge tools (change 4) and keeps the first author on dedupe with empty author env unset (change 5); `.4` is the review fix round: the knowledge reply is normalised by `parseExtractedFactCategories` (change 4), and the author pair merges as one unit (change 5); `.5` turns embeddings on: fastembed is a real dependency with an onnxruntime override (change 6), the CLI exits naturally on success (change 7), the on-demand runtime install is gone (change 8), and a `reembed` command backfills vectors (change 9); `.6` is the review fix round: `reembed` recounts after the drain and proves the model before a rebuild (change 9), and the API embedding route is refused without an explicit opt-in (change 10); `.7` is the second fix round: the fastembed cache dir is read from the plugin-pinned `PI_CONFIG_DIR` directly, immune to the dotenv/XDG/profile refill (change 11), and the dry run prints the 'apply' hint only when something is missing (change 9). `.8` is phase MODEL (v3): the trim spares every row whose scope is not 'session' (change 12), remember and update store `memory_type`, `trust_tier` and `valid_until` and update can restore a retired row (change 13), the read-only `mnemopi_similar` (change 14), `mnemopi_expire_unused` (change 15), and the audit trail in `memory_validations` that forget purges (change 16). `.9` MODEL.7 fix round: a re-save of the same text by the same owner never lowers a stored scope, keeps the stored trust tier unless the call names one, and never relabels a fact, preference, instruction or decision or gives it an expiry (change 17). `.10` MODEL.8: a re-save also keeps the first writer's `source` and `trust_tier` (change 18). `.11` the `mnemopi_remember` reply says `duplicate` (change 19). `.12` entity questions rank the memories about the thing asked (change 20). `.13` a process can take the owner per call, for the dashboard's warm search engine (change 21). `.14` a query naming a memory kind finds that kind (change 22), and an entity question gets the extracted facts about it (change 23).
+The `18.12.3` row is the untouched upstream source, for reference. `.1` had changes 1 to 3; `.2` makes the change 1 merge keep a `__proto__` key as plain data (it was dropped); `.3` adds the two knowledge tools (change 4) and keeps the first author on dedupe with empty author env unset (change 5); `.4` is the review fix round: the knowledge reply is normalised by `parseExtractedFactCategories` (change 4), and the author pair merges as one unit (change 5); `.5` turns embeddings on: fastembed is a real dependency with an onnxruntime override (change 6), the CLI exits naturally on success (change 7), the on-demand runtime install is gone (change 8), and a `reembed` command backfills vectors (change 9); `.6` is the review fix round: `reembed` recounts after the drain and proves the model before a rebuild (change 9), and the API embedding route is refused without an explicit opt-in (change 10); `.7` is the second fix round: the fastembed cache dir is read from the plugin-pinned `PI_CONFIG_DIR` directly, immune to the dotenv/XDG/profile refill (change 11), and the dry run prints the 'apply' hint only when something is missing (change 9). `.8` is phase MODEL (v3): the trim spares every row whose scope is not 'session' (change 12), remember and update store `memory_type`, `trust_tier` and `valid_until` and update can restore a retired row (change 13), the read-only `mnemopi_similar` (change 14), `mnemopi_expire_unused` (change 15), and the audit trail in `memory_validations` that forget purges (change 16). `.9` MODEL.7 fix round: a re-save of the same text by the same owner never lowers a stored scope, keeps the stored trust tier unless the call names one, and never relabels a fact, preference, instruction or decision or gives it an expiry (change 17). `.10` MODEL.8: a re-save also keeps the first writer's `source` and `trust_tier` (change 18). `.11` the `mnemopi_remember` reply says `duplicate` (change 19). `.12` entity questions rank the memories about the thing asked (change 20). `.13` a process can take the owner per call, for the dashboard's warm search engine (change 21). `.14` a query naming a memory kind finds that kind (change 22), and an entity question gets the extracted facts about it (change 23). `.15` an explicit nested `llm.enabled: false` is kept (change 24), and model replies keep their list and `Source:` lines outside summaries (change 25).
 
 ## Changes
 
@@ -247,4 +248,24 @@ Not changed: `dist/types/*.d.ts` still describe upstream 18.12.3 (no `metadata` 
 - Files: `src/core/beam/recall.ts` `src/core/beam/index.ts` `src/mcp-tools.ts`
 - Tests: `test/kind-and-card.spec.ts`
 - Upstream issue: placeholder until posted
+- Status: open
+
+### 24. An explicit nested `llm.enabled: false` is kept
+
+- What: preserve an explicit `llm.enabled: false` when resolving instance options, including when a model or completion is configured. Explicit top-level `llmEnabled` retains precedence. Extraction uses the same instance-aware host selection as consolidation.
+- Why: losing `false` fell back to the enabled default and could invoke a model the caller disabled.
+- Files: `src/core/memory.ts` `src/core/local-llm.ts` `src/core/extraction.ts` `dist/types/core/local-llm.d.ts`
+- Tests: `test/llm-enabled.spec.ts`
+- Upstream issue: none yet
+- Contributed by: mikemikimike (claude-mnemosyne#42, fixes claude-mnemosyne#6)
+- Status: open
+
+### 25. Model replies keep their list and `Source:` lines; a summary drops only what repeats the prompt
+
+- What: `cleanOutput` no longer removes every `- item` / `* item` line and the first `Source:` line. `cleanSummaryOutput` (used by `summarizeChunk` only) removes a leading `Source:` line and the `- item` lines that are exactly one of the memories being summarised, which is what a model repeating the prompt writes (`buildPrompt` lists the memories as `- item` lines after a header naming the source).
+- Why: `cleanOutput` also cleans fact extraction and `complete` replies, where those lines are the answer: a list of extracted facts came back empty (claude-mnemosyne#8).
+- Files: `src/core/local-llm.ts` `dist/types/core/local-llm.d.ts`
+- Tests: `test/llm-output.spec.ts`
+- Upstream issue: none yet
+- Contributed by: mikemikimike (claude-mnemosyne#41, fixes claude-mnemosyne#8); the summary-only stripping added at merge
 - Status: open
