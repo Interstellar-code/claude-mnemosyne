@@ -1747,7 +1747,8 @@ async function firstPromptBlock($: EngineInterface, options: PluginOptions, sett
  * 3 a run, never the running session): a session already summarised, with no transcript or with too little said is dropped;
  * otherwise one Haiku call (the extractionModel) turns the redacted conversation into a note of at most 600 characters, which
  * goes through admit() and is saved as kind 'event', source 'import:session', expiring in 30 days, with metadata.session. A lost
- * call or save leaves the marker for the next first prompt. Memory text is never logged. Never throws.
+ * save leaves the marker for the next first prompt; a failed or unanswered model call puts it back to wait 1, 2, 4 then 8 hours
+ * (issue #38), and the fifth failure drops it with one activity line. Memory text is never logged. Never throws.
  */
 async function finishSessionSummaries($: EngineInterface, options: PluginOptions) {
   const mine = runningOf(options)

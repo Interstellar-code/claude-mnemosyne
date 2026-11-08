@@ -8,7 +8,7 @@
 // and, for the session work (plan phase SESSION):
 //   bun bin/memories.ts --store <dir> first-prompt <owner> [<pins>]   the newest session summary and the pinned memories, as JSON (read-only)
 //   bun bin/memories.ts --store <dir> summarised <session id>...      which of those sessions already have a summary, as JSON (read-only)
-//   bun bin/memories.ts session-pending write|list|claim|release|remove <root> ...  the markers session.end leaves (an id, an owner and a path; never text); claim takes one for a summary, release puts it back
+//   bun bin/memories.ts session-pending write|list|claim|release|remove <root> ...  the markers session.end leaves (an id, an owner and a path; never text); claim takes one for a summary, release puts it back (release --failed counts a failed model call: back-off, dropped at the fifth)
 //   bun bin/memories.ts sweep-claim <root>                           whether the daily unused-expiry sweep is due; if so, marks it taken
 //   bun bin/memories.ts --store <dir> expire [--apply] [--days N] [--owner O] [--root R] [--limit N] [--json]
 //                                                                     the unused-expiry sweep: a dry run unless --apply, which backs the store up first
@@ -30,7 +30,7 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { BACKFILL_TEXT_LIMIT, isProposalId } from '../hooks/backfill'
 import { isKind } from '../hooks/kinds'
 import { buildRequests, engineEnv, parseReplies } from '../hooks/engine'
-import { BLOCK_PINNED_MAX, EXPIRE_DEFAULT_DAYS, expireRequest, expireSetting, parseExpireReply, parsePending, SESSION_CLAIM_STALE_MS, SESSION_CLAIM_SUFFIX, SESSION_ID, SESSION_MAX_ATTEMPTS, SESSION_PENDING_DIR, sessionBackoffMs, SWEEP_LIMIT, SWEEP_LOCK, SWEEP_LOCK_STALE_MS, SWEEP_MARKER, sweepDue, sweepMarkerText } from '../hooks/session'
+import { BLOCK_PINNED_MAX, EXPIRE_DEFAULT_DAYS, expireRequest, expireSetting, parseExpireReply, parsePending, SESSION_CLAIM_STALE_MS, SESSION_CLAIM_SUFFIX, SESSION_BACKOFF_MAX_MS, SESSION_ID, SESSION_MAX_ATTEMPTS, SESSION_PENDING_DIR, sessionBackoffMs, SWEEP_LIMIT, SWEEP_LOCK, SWEEP_LOCK_STALE_MS, SWEEP_MARKER, sweepDue, sweepMarkerText } from '../hooks/session'
 import type { BlockRead, ExpiredRow, PendingSession } from '../hooks/session'
 import { cleanTags, MAX_TAGS, normalizeTag } from '../hooks/tags'
 import { readConfig } from './settings'
@@ -536,8 +536,10 @@ export function listSessionPending(root: string, now: number = Date.now()): Pend
   for (const { name } of files) {
     try {
       const entry = parsePending(readFileSync(join(folder, name), 'utf8'))
-      // Issue #38: a marker still waiting after a failed attempt is not listed until its time comes.
-      if (entry !== undefined && `${entry.sessionId}.json` === name && !(entry.notBefore !== undefined && entry.notBefore > now)) out.push(entry)
+      // Issue #38: a marker still waiting after a failed attempt is not listed until its time comes. A wait longer than the
+      // longest back-off (a clock that jumped back, a hand edit) is not trusted, so such a marker is never hidden for good.
+      const waiting = entry?.notBefore !== undefined && entry.notBefore > now && entry.notBefore - now <= SESSION_BACKOFF_MAX_MS
+      if (entry !== undefined && `${entry.sessionId}.json` === name && !waiting) out.push(entry)
     } catch {
       // unreadable: not an entry
     }

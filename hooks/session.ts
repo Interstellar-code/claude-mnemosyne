@@ -128,8 +128,10 @@ export type PendingSession = { sessionId: string; owner: string; transcript: str
 
 /** Issue #38: the failed summary attempt that drops a marker for good. */
 export const SESSION_MAX_ATTEMPTS = 5
+/** Issue #38: the longest wait after a failed attempt; a marker that says it waits longer is not trusted and is due now. */
+export const SESSION_BACKOFF_MAX_MS = 86_400_000
 /** Issue #38: the wait after a marker's nth failed attempt: 1 hour, doubling per attempt, at most 24 hours. */
-export const sessionBackoffMs = (attempts: number) => Math.min(3_600_000 * 2 ** Math.max(0, attempts - 1), 86_400_000)
+export const sessionBackoffMs = (attempts: number) => Math.min(3_600_000 * 2 ** Math.max(0, attempts - 1), SESSION_BACKOFF_MAX_MS)
 
 /** Claude Code's folder name for a project: the working folder with every character outside A-Z, a-z, 0-9 turned into '-'. */
 export const projectSlug = (cwd: string) => cwd.replace(/[^A-Za-z0-9]/g, '-')

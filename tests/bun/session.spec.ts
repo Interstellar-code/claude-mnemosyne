@@ -566,6 +566,21 @@ describe('SESSION.1: session-pending markers', () => {
     expect(JSON.parse(ok(await memories(['session-pending', 'release', host.root, 'one', '--failed'])).stdout)).toEqual({ attempts: 0, gaveUp: false })
     expect((await memories(['session-pending', 'release', host.root, 'one', '--other'])).exitCode).not.toBe(0)
   })
+
+  test('issue #38: a notBefore more than 24 hours ahead (a clock that jumped back, a hand edit) does not hide the marker', async () => {
+    const { listSessionPending } = await import('../../bin/memories')
+    const root = mkdtempSync(join(tmpdir(), 'mnemo-pending-'))
+    try {
+      const folder = join(root, 'session-pending')
+      mkdirSync(folder, { recursive: true })
+      const now = Date.now()
+      writeFileSync(join(folder, 'far.json'), JSON.stringify({ ...entry('far'), attempts: 2, notBefore: now + 365 * DAY }))
+      writeFileSync(join(folder, 'near.json'), JSON.stringify({ ...entry('near'), attempts: 4, notBefore: now + DAY - 60_000 }))
+      expect(listSessionPending(root, now).map(item => item.sessionId)).toEqual(['far'])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('SESSION.1: a session-pending marker that vanishes before it is stat-ed is skipped (#36)', () => {
