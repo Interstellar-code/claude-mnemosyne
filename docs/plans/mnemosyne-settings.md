@@ -2,6 +2,8 @@
 
 Status: decided, ready to build (Rohit accepted all 13 proposed answers, 2026-10-25; see Decisions). Created 2026-10-25. Baseline: `main` at `59d1f3e` (0.8.4). Release: 0.8.5, before the 0.9.0 half of `docs/plans/mnemosyne-v3.md` (waves 4-7) starts, so the 0.9.0 lanes branch from a `main` that already has this. Delivery: each phase on a short branch off `main`, merged into `main` after its review; nothing is pushed until the release task.
 
+Status 2026-11-08: shipped in 0.8.5 (2026-10-26), phases CFG, WIRE, SRV, UI and REL85. UI.4 is Rohit's manual check on his installed plugin and is not recorded here.
+
 Research reference: `research/settings-research.md` (next to this plan; read-only homework, 2026-10-25). Section numbers below ("R1.3") point into it.
 
 ## Summary
