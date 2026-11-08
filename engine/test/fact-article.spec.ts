@@ -7,6 +7,8 @@ const cases: [string, string, string][] = [
 	["Paris is amazing", "is", "amazing"],
 	["Tom has another car", "has", "another"],
 	["Bob uses Atom", "uses", "Atom"],
+	["Bob uses atom", "uses", "atom"],
+	["Bob uses another tool", "uses", "another"],
 	["Paris is a city", "is", "city"],
 	["Tom has the keys", "has", "keys"],
 ];
