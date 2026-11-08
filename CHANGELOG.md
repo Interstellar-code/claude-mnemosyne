@@ -2,6 +2,10 @@
 
 Newest first. Each release is tagged `vX.Y.Z` on GitHub; the README and DESIGN.md describe the contracts.
 
+## 0.28.4 (the Galaxy pill in the button row)
+
+On the Galaxy page the path pill now sits in the same row as the view buttons (+, -, Top, Below, Side, Reset), with the drag and zoom hint above it.
+
 ## 0.28.3 (a tidier Galaxy page)
 
 1. **The path pill moves to the bottom.** On the Galaxy page the path (Galaxy, and the planet or moon you flew to) now sits bottom left above the hint, and the Bodies legend takes the top left corner.

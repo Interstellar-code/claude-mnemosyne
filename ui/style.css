@@ -1112,10 +1112,11 @@ button.toggle-name:focus-visible { outline: 2px solid var(--accent); outline-off
 .solar-tip { display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--stage-line); font-weight: 400; transform: translate(-50%, calc(-100% - 14px)); }
 .solar-tip .tip-title { font-weight: 600; font-size: 13px; color: var(--stage-ink); }
 .solar-tip .tip-line { color: var(--stage-ink-3); font-size: 12px; }
-/* 0.28.3: the Galaxy path sits bottom left, above the hint, so the Bodies legend takes the top left corner. */
-.solar-path { top: auto; bottom: 60px; left: 12px; }
+/* 0.28.3: the Galaxy path sits bottom left, so the Bodies legend takes the top left corner. 0.28.4: in the same row as
+   the view buttons (centred on their 40px), with the hint above it; it stops short of the buttons. */
+.solar-path { top: auto; bottom: 15px; left: 12px; max-width: calc(100% - 400px); }
 .solar-path .crumb-btn { min-height: 34px; }
-.solar-hint { right: auto; left: 14px; text-align: left; max-width: 36%; }
+.solar-hint { right: auto; left: 14px; bottom: 58px; text-align: left; max-width: 36%; }
 .solar-views { position: absolute; right: 12px; bottom: 12px; z-index: 200; max-width: 60%; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
 .solar-views .stage-btn { min-width: 44px; min-height: 40px; padding: 0 12px; }
 .find-results {
