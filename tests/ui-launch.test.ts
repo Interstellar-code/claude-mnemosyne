@@ -8,6 +8,7 @@ import { ENGINE_BUILD } from '../hooks/register'
 import {
   KILL_TIMEOUT_MS,
   LEAVE_TIMEOUT_MS,
+  newerVersion,
   PING_TIMEOUT_MS,
   SESSION_END_BUDGET_MS,
   STOP_WAIT_MS,
@@ -31,9 +32,11 @@ type Options = {
   // The browser openers found on this machine (default: macOS `open`).
   openers?: string[]
   // What ui.json holds before any server of the test starts.
-  state?: { port: number; token: string; pid: number }
+  state?: { port: number; token: string; pid: number; version?: string }
   // What ui-extraction.json holds before any server of the test starts (the settings the running dashboard started with).
   startedWith?: { pid: number; extraction: string; embeddings?: string }
+  // UIVER.1: the version in this plugin's .claude-plugin/plugin.json (default: unreadable).
+  pluginVersion?: string
   // Exit code of the health ping.
   ping?: number
   // What the spawned holder does: print a ready line (in two pieces) and run, or fail first.
@@ -92,6 +95,7 @@ function world(on: On, o: Options = {}) {
   )
   on('fs.read', (_$, e) => {
     if (e.path === INSTALLED_PACKAGE && o.installed !== false) return { value: JSON.stringify({ version: o.build ?? ENGINE_BUILD }) } as never
+    if (e.path.endsWith('/.claude-plugin/plugin.json') && o.pluginVersion !== undefined) return { value: JSON.stringify({ version: o.pluginVersion }) } as never
     if (e.path === UI_JSON && seen.state) return { value: JSON.stringify(seen.state) } as never
     if (e.path === `${ROOT}/ui-extraction.json` && seen.startedWith !== undefined) return { value: seen.startedWith } as never
     if (e.path === `${ROOT}/ui-users.json` && seen.usersReadable && seen.users.size > 0) {
@@ -139,6 +143,7 @@ function world(on: On, o: Options = {}) {
       return { value: { exitCode: 0, stdout: `${JSON.stringify({ live: seen.users.size, listed, stopped })}\n`, stderr: '' } } as never
     }
     if (isPing(e.argv)) return { value: { exitCode: seen.ping, stdout: '', stderr: '' } } as never
+    if (e.argv[0] === 'kill' && e.argv[1] !== '-0' && seen.state !== undefined && e.argv[1] === String(seen.state.pid)) seen.alive = false
     if (e.argv[0] === 'kill' && e.argv[1] === '-0') return { value: { exitCode: seen.alive ? 0 : 1, stdout: '', stderr: '' } } as never
     if (OPENERS.includes(e.argv[0]!)) {
       if (!(o.openers ?? ['open']).includes(e.argv[0]!)) throw new Error(`spawn ${e.argv[0]} ENOENT`)
@@ -319,6 +324,43 @@ test('a later call, from another session, pings the running server with the toke
   expect(seen.spawned.length).toBe(0)
   expect(seen.copied).toEqual([`http://127.0.0.1:5555/#token=${TOKEN_A}`])
   expect(text).toContain(`Link: http://127.0.0.1:5555/#token=${TOKEN_A}`)
+})
+
+test('UIVER.1: newerVersion compares x.y.z by number; an unknown running version counts as older', () => {
+  expect(newerVersion('0.32.0', '0.31.4')).toBe(true)
+  expect(newerVersion('0.32.0', '0.32.0')).toBe(false)
+  expect(newerVersion('0.31.4', '0.32.0')).toBe(false)
+  expect(newerVersion('0.10.0', '0.9.9')).toBe(true)
+  expect(newerVersion('0.32.0', undefined)).toBe(true)
+  expect(newerVersion(undefined, '0.31.4')).toBe(false)
+})
+
+for (const was of ['0.31.4', undefined]) {
+  test(`UIVER.1: a live dashboard an older plugin started (${was ?? 'no version recorded'}) is stopped and replaced after a plugin update`, async ($, on) => {
+    const seen = world(on, { state: { port: 5555, token: TOKEN_A, pid: 42, version: was }, ping: 0, pluginVersion: '0.32.0' })
+    seen.session = 's2'
+    const text = textOf(await openUi($))
+    expect(kills(seen)).toContain('kill 42')
+    expect(seen.spawned.length).toBe(1)
+    expect(text).toContain('older plugin; this one is v0.32.0')
+  })
+}
+
+for (const version of ['0.32.0', '0.33.0']) {
+  test(`UIVER.1: a live dashboard of the same or a newer plugin version (${version}) is reused`, async ($, on) => {
+    const seen = world(on, { state: { port: 5555, token: TOKEN_A, pid: 42, version }, ping: 0, pluginVersion: '0.32.0' })
+    seen.session = 's2'
+    await openUi($)
+    expect(kills(seen)).toEqual([])
+    expect(seen.spawned.length).toBe(0)
+  })
+}
+
+test('UIVER.1: an unreadable plugin version reuses the running dashboard', async ($, on) => {
+  const seen = world(on, { state: { port: 5555, token: TOKEN_A, pid: 42 }, ping: 0 })
+  await openUi($)
+  expect(kills(seen)).toEqual([])
+  expect(seen.spawned.length).toBe(0)
 })
 
 test('a ui.json whose server does not answer (asked twice) is replaced by a new server', async ($, on) => {
