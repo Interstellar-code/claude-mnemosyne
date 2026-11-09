@@ -2,6 +2,10 @@
 
 Newest first. Each release is tagged `vX.Y.Z` on GitHub; the README and DESIGN.md describe the contracts.
 
+## 0.32.2 (Simulate buttons in Galaxy)
+
+1. The map's Simulate a recall and Simulate a write buttons work again in the Galaxy layout (SIM.1). Since the Galaxy page came in, they drew the demo event on the 3D scene only and never added it to the LIVE strip, so the strip kept saying "No new activity since you opened this page." and the buttons looked dead. A demo event now goes where a real one goes: the scene draws it and the strip lists it with its demo badge. Timeline was not affected.
+
 ## 0.32.1 (dashboard restarts after a plugin update)
 
 1. `/mnemosyne-ui` no longer reuses a running dashboard that an older plugin version started (UIVER.1). After `claude plugin update`, the shared dashboard server kept running the old plugin's code, so it still showed the old version and offered the update again. The dashboard now records the plugin version it started with; when this plugin is newer, or no version is recorded, `/mnemosyne-ui` stops the old server and starts a new one, and its reply says so. A dashboard of the same or a newer version is still reused, so an older plugin never replaces a newer one.
