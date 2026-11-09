@@ -454,6 +454,20 @@ describe('the Galaxy layout as a solar page', () => {
     expect(b.node('map-live-strip').hidden).toBe(false)
   })
 
+  // SIM.1: the Galaxy Simulate buttons drew on the scene only, so the LIVE strip stayed "No new activity" and they looked dead.
+  test('SIM.1: in Galaxy a Simulate click draws on the scene and lists a demo row in the LIVE strip, as a real event does', async () => {
+    const b = await boot()
+    b.node('solar-sim-recall').fire('click')
+    b.node('solar-sim-write').fire('click')
+    await Bun.sleep(30)
+    const drawn = b.scene().of('event')
+    expect(drawn.length).toBe(2)
+    expect(drawn.every(entry => entry.event.demo === true)).toBe(true)
+    const feed = b.node('map-feed').textContent ?? ''
+    expect(feed).not.toContain('No new activity')
+    expect(feed).toContain('demo')
+  })
+
   test('without a solar host the Galaxy layout is the page it was: nothing solar shows', async () => {
     const b = await boot({ solar: false })
     expect(b.factory.scenes.length).toBe(0)

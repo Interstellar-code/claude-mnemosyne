@@ -704,7 +704,7 @@ export function renderPanel(box: HTMLElement, model: PanelModel, on: { tag: (nam
   box.replaceChildren(...parts)
 }
 
-type SolarMount = { sync: (layout: string) => void; active: () => boolean; failed: () => boolean; simulate: (kind: 'recall' | 'write') => void; show: (memoryId: string) => void }
+type SolarMount = { sync: (layout: string) => void; active: () => boolean; failed: () => boolean; simulate: (kind: 'recall' | 'write') => MapEvent | undefined; show: (memoryId: string) => void }
 
 export const GLOBAL_BELT = 'Global (sun belt)'
 
@@ -1212,11 +1212,13 @@ function mountSolarPage(host: MapHost, solar: SolarHost, shell: SolarShell, stor
     active: () => active,
     failed: () => broken,
     show: showMemory,
-    // The demo buttons (mockup and 0.6.0): a made-up event drawn by the scene; it never calls the server.
+    // The demo buttons (mockup and 0.6.0): a made-up event drawn by the scene; it never calls the server. Returns it, so the
+    // LIVE strip lists it as it lists a real event (SIM.1).
     simulate(kind) {
-      if (!active || galaxy === null) return
+      if (!active || galaxy === null) return undefined
       const event = simulate(kind, galaxy)
       if (event) send(scene => scene.event(event))
+      return event
     },
     sync(layout: string) {
       const on = layout === 'galaxy'
@@ -2783,10 +2785,9 @@ export function createMap(host: MapHost): MapView {
     )
   }
 
+  // SIM.1: in Galaxy the scene draws the demo event and the strip lists it, as a real event goes to both (host.events above).
   function simulateOnce(kind: 'recall' | 'write') {
-    if (solarPage?.active()) return solarPage.simulate(kind)
-    if (galaxy === null) return
-    const event = simulate(kind, simulationInput(galaxy))
+    const event = solarPage?.active() ? solarPage.simulate(kind) : galaxy === null ? undefined : simulate(kind, simulationInput(galaxy))
     if (event) enqueueEvent(event)
   }
 
