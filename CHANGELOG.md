@@ -2,6 +2,16 @@
 
 Newest first. Each release is tagged `vX.Y.Z` on GitHub; the README and DESIGN.md describe the contracts.
 
+## 0.32.0 (engine updates itself; setup status fixed)
+
+1. A stale engine is updated at session start, in the background, through the same `bin/install-engine.ts` as `/mnemosyne-setup` (AUTO.1). It is built beside the old engine and swapped in only once it answers, so a failed update leaves the old engine as it was. Toasts say when the update starts and when it finishes or fails; the update never sets the status line.
+2. Only an older build of the same engine (a lower `-mnemosyne.N`) is replaced. A newer build, which a session still on an older plugin would find, or a build that cannot be read keeps the old toast asking for `/mnemosyne-setup`, so two plugin versions never reinstall over each other.
+3. When another session holds the install lock, the update waits for that session's engine (polling every 5 seconds, up to the setup limit) instead of reporting a failure.
+4. Embeddings keep their state: the update asks for them only when setup already downloaded the model, so the model is not downloaded again. `bun install` can still fetch engine packages missing from Bun's cache. A missing engine is not installed this way; the first install stays `/mnemosyne-setup`'s.
+5. `memory_remember` and `memory_update` on a stale engine wait up to 60 seconds (`UPDATE_WAIT_MS`) for a running update before they are refused. `/mnemosyne-setup` waits for a running update before it starts its own install.
+6. `/mnemosyne-setup` no longer says it is downloading the embedding model when the model is already in `<root>/model-cache`; it says the model is already cached. Its status line is cleared when the setup ends, on success and on failure, instead of staying in the footer for the rest of the session (SETUP.STATUS).
+7. The engine build is unchanged (`18.12.3-mnemosyne.18`). Outside Claude Code the MCP proxy does not update the engine; run the `--root` install again there, and restart other MCP clients after an update.
+
 ## 0.31.4 (bug-hunt batch E: housekeeping)
 
 No engine change.

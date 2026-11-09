@@ -393,9 +393,7 @@ async function pruneLogs($: EngineInterface, options: PluginOptions) {
  * this stays a cheap check on every engine call.
  */
 async function embeddingsReady($: EngineInterface, root: string): Promise<boolean> {
-  if (!(await fileExists($, `${root}/${EMBEDDINGS_MARKER}`))) return false
-  const dir = `${embeddingsCacheDir(root)}/${EMBEDDINGS_MODEL_DIR}`
-  return (await Promise.all(EMBEDDINGS_MODEL_FILES.map(file => fileExists($, `${dir}/${file}`)))).every(Boolean)
+  return (await fileExists($, `${root}/${EMBEDDINGS_MARKER}`)) && modelCached($, root)
 }
 
 /**
@@ -544,13 +542,36 @@ async function isInstalled($: EngineInterface, options: PluginOptions) {
 // The one "engine is current" check: the installed engine is this plugin's
 // build (ENGINE_BUILD), so it has the metadata update and the recall flag.
 async function isCurrent($: EngineInterface, options: PluginOptions) {
+  return (await installedBuild($, options)) === ENGINE_BUILD
+}
+
+// The installed engine's build, from its package.json; undefined when it cannot be read.
+async function installedBuild($: EngineInterface, options: PluginOptions): Promise<string | undefined> {
   try {
     const { engine } = await paths($, options)
-    const installed = JSON.parse(await $.fs.read(`${engine}/node_modules/${ENGINE_PACKAGE}/package.json`))
-    return installed?.version === ENGINE_BUILD
+    const version = JSON.parse(await $.fs.read(`${engine}/node_modules/${ENGINE_PACKAGE}/package.json`))?.version
+    return typeof version === 'string' ? version : undefined
   } catch {
-    return false
+    return undefined
   }
+}
+
+/**
+ * AUTO.1: whether `installed` is an older build of the same engine than ENGINE_BUILD (same base, lower -mnemosyne.N). Only then
+ * does session start update it: a newer engine (a session still on an older plugin) or an unreadable build is left to /mnemosyne-setup,
+ * so two plugin versions never reinstall over each other.
+ */
+export function isOlderBuild(installed: string | undefined): boolean {
+  const parse = (build: string) => /^(.+)-mnemosyne\.(\d+)$/.exec(build)
+  const ours = parse(ENGINE_BUILD)
+  const theirs = installed === undefined ? null : parse(installed)
+  return ours !== null && theirs !== null && theirs[1] === ours[1] && Number(theirs[2]) < Number(ours[2])
+}
+
+/** Whether every model file is in <root>'s model cache: then setup's install check loads it from disk and downloads nothing. */
+async function modelCached($: EngineInterface, root: string): Promise<boolean> {
+  const dir = `${embeddingsCacheDir(root)}/${EMBEDDINGS_MODEL_DIR}`
+  return (await Promise.all(EMBEDDINGS_MODEL_FILES.map(file => fileExists($, `${dir}/${file}`)))).every(Boolean)
 }
 
 // memory_update's engine arguments, or the reason it is refused before any engine run.
@@ -882,10 +903,10 @@ async function memoriesCli($: EngineInterface, options: PluginOptions, args: rea
   return ran.stdout
 }
 
-// A progress line under the prompt; a UI failure must not stop the run.
-function progress($: EngineInterface, text: string) {
+// A progress line under the prompt (undefined clears it); a UI failure must not stop the run.
+function progress($: EngineInterface, text: string | undefined) {
   try {
-    $.ui.status(`Mnemosyne · ${text}`)
+    $.ui.status(text === undefined ? undefined : `Mnemosyne · ${text}`)
   } catch {
     // no status line
   }
@@ -1737,6 +1758,75 @@ function track<T>(options: PluginOptions, work: Promise<T>): Promise<T> {
   return work
 }
 
+// Runs bin/install-engine.ts for /mnemosyne-setup and the auto-update: builds <engine>.next from the plugin's engine/ and swaps it in only once it answers.
+async function runInstaller($: EngineInterface, options: PluginOptions, embeddings: boolean) {
+  const { engine, store } = await paths($, options)
+  const root = slashes($.plugin.root)
+  return $.process.run(
+    ['bun', `${root}/bin/install-engine.ts`, root, engine, store, ...(embeddings ? ['embeddings'] : [])],
+    // Another install's lock is waited for only briefly, so this one still ends inside SETUP_TIMEOUT_MS.
+    { timeoutMs: SETUP_TIMEOUT_MS, env: { MNEMOSYNE_LOCK_WAIT_MS: String(SETUP_LOCK_WAIT_MS) } },
+  )
+}
+
+// Per plugin instance: the auto-update running now, so a save on a stale engine can wait for it instead of being refused.
+const updating = new WeakMap<object, Promise<boolean>>()
+// Per plugin instance: an auto-update failed, so later session starts in this process (/clear) do not rerun it; /mnemosyne-setup retries.
+const updateFailed = new WeakSet<object>()
+// How long memory_remember and memory_update wait for a running auto-update before they refuse.
+export const UPDATE_WAIT_MS = 60_000
+// How often an auto-update that found another session's install lock checks whether that install put this build in place.
+export const LOCK_POLL_MS = 5_000
+// The installer's exit code when another install held the lock for the whole wait (bin/install-engine.ts LockBusy).
+const LOCK_BUSY_EXIT = 3
+
+/**
+ * AUTO.1: an installed engine older than ENGINE_BUILD (the plugin was updated) is updated in the background at session start,
+ * with no /mnemosyne-setup. Embeddings keep their state: on only when setup already downloaded the model, so nothing is fetched.
+ * The first install stays /mnemosyne-setup's (it downloads the model). Resolves to whether the engine is current afterwards;
+ * an install another session holds the lock for counts once that session's engine is in place.
+ */
+function autoUpdate($: EngineInterface, options: PluginOptions): Promise<boolean> {
+  const found = updating.get(options)
+  if (found !== undefined) return found
+  // Toasts only, never the status line, so nothing is left in the footer when the update ends (SETUP.STATUS).
+  const work = (async () => {
+    $.ui.toast(`Mnemosyne: updating the memory engine to build ${ENGINE_BUILD} in the background.`)
+    const embeddings = await embeddingsOn($, options)
+    const installed = await runInstaller($, options, embeddings).catch((error: unknown) => ({ exitCode: 1, stdout: '', stderr: String(error) }))
+    let current = await isCurrent($, options)
+    // Another session holds the install lock: it is installing, so wait for its engine rather than report a failure.
+    if (!current && installed.exitCode === LOCK_BUSY_EXIT) {
+      $.ui.toast('Mnemosyne: another session is updating the memory engine; waiting for it.')
+      for (let waited = 0; !current && waited < SETUP_TIMEOUT_MS; waited += LOCK_POLL_MS) {
+        if (!(await $.clock.sleep(LOCK_POLL_MS).then(() => true, () => false))) break
+        current = await isCurrent($, options)
+      }
+    }
+    if (current) {
+      await syncWrapper($, options).catch(() => undefined)
+      $.ui.toast(`Mnemosyne: memory engine updated to build ${ENGINE_BUILD}.`)
+    } else {
+      const reason = `${installed.stderr}\n${installed.stdout}`.trim().slice(-300)
+      $.ui.toast(`Mnemosyne: the memory engine update failed; the old engine is unchanged. Run /mnemosyne-setup to retry.${reason ? `\n${reason}` : ''}`)
+    }
+    if (!current) updateFailed.add(options)
+    return current
+  })().catch(() => (updateFailed.add(options), false))
+  updating.set(options, work)
+  void work.finally(() => updating.delete(options))
+  return track(options, work)
+}
+
+/** Whether memory_remember and memory_update may run: the engine is current, or becomes current within UPDATE_WAIT_MS of a running auto-update. */
+async function currentForSaves($: EngineInterface, options: PluginOptions): Promise<boolean> {
+  if (await isCurrent($, options)) return true
+  const work = updating.get(options)
+  if (work === undefined) return false
+  // The host's clock (hooks have no timers of their own); a refused sleep waits for the update alone, which SETUP_TIMEOUT_MS bounds.
+  return Promise.race([work, $.clock.sleep(UPDATE_WAIT_MS).then(() => false, () => work)])
+}
+
 /** For specs: resolves when the background work of this plugin instance is over, including work that started while it waited. */
 export async function backgroundSettled(options: PluginOptions): Promise<void> {
   for (;;) {
@@ -2048,8 +2138,11 @@ export const register: Register = (on, options) => {
     for (const tool of toolsFor(settings)) if (enabled.has(tool.name)) await $.tool.register({ ...tool, isDeferred: false })
     if (!(await isInstalled($, options))) $.ui.toast('Mnemosyne Memory engine not installed. Run /mnemosyne-setup.')
     else {
-      // A stale engine keeps recall, forget and stats working; memory_remember and memory_update refuse (an old engine's 24 h trim would delete the new saves).
-      if (!(await isCurrent($, options))) $.ui.toast('Mnemosyne Memory engine is out of date. Run /mnemosyne-setup to update it.')
+      // A stale engine keeps recall, forget and stats working; memory_remember and memory_update wait for the update (AUTO.1), then refuse if it failed (an old engine's 24 h trim would delete the new saves).
+      if (!(await isCurrent($, options))) {
+        if (isOlderBuild(await installedBuild($, options)) && !updateFailed.has(options)) void autoUpdate($, options)
+        else $.ui.toast('Mnemosyne Memory engine is out of date. Run /mnemosyne-setup to update it.')
+      }
       await Promise.all([secure($, options), syncWrapper($, options)]).catch(() => undefined)
       activity($, options, 'memory ready', 'ready')
     }
@@ -2067,11 +2160,19 @@ export const register: Register = (on, options) => {
     const bun = await $.process.run(['bun', '--version']).catch(() => null)
     if (bun?.exitCode !== 0) return { text: 'Mnemosyne needs Bun on PATH: https://bun.sh' }
 
+    // SETUP.STATUS: whether this setup put a line in the status bar; only then does it clear the line at the end.
+    let shown = false
+    const show = (text: string) => ((shown = true), progress($, text))
     try {
       const { engine, store, root: pluginRoot } = await paths($, options)
+      // AUTO.1: a background auto-update still running finishes first, so two installs never race for the lock.
+      const running = updating.get(options)
+      if (running !== undefined) {
+        show('waiting for the background engine update to finish')
+        await running
+      }
       // Creates <root> and the store first: the installer writes only <engine>, <engine>.next and <engine>.old.
       await secure($, options)
-      const root = slashes($.plugin.root)
       // Embeddings: decide from the option (on / off / auto on macOS arm64). When
       // on, the install check downloads the model once; tell the person where it
       // comes from and how big it is before that download starts (EMB.3.a4).
@@ -2079,16 +2180,12 @@ export const register: Register = (on, options) => {
       const platform = setting === 'off' ? 'other' : await platformOf($)
       const intelMac = platform === 'mac-intel'
       const embeddings = !intelMac && (setting === 'on' || (setting === 'auto' && platform === 'mac-arm64'))
-      if (embeddings) {
-        progress($, 'downloading the embedding model from huggingface.co (about 63 MB)')
+      // SETUP.STATUS: the download line only when the model is not in <root>'s cache yet; a cached model is loaded from disk.
+      if (embeddings && !(await modelCached($, pluginRoot))) {
+        show('downloading the embedding model from huggingface.co (about 63 MB)')
         $.ui.log('Mnemosyne: /mnemosyne-setup downloads the embedding model BAAI/bge-small-en-v1.5 from huggingface.co (Qdrant/bge-small-en-v1.5-onnx-Q, about 63 MB), once.')
-      }
-      // Builds <engine>.next from the plugin's engine/ and swaps it in only once it answers (bin/install-engine.ts).
-      const installed = await $.process.run(
-        ['bun', `${root}/bin/install-engine.ts`, root, engine, store, ...(embeddings ? ['embeddings'] : [])],
-        // Another install's lock is waited for only briefly, so this one still ends inside SETUP_TIMEOUT_MS.
-        { timeoutMs: SETUP_TIMEOUT_MS, env: { MNEMOSYNE_LOCK_WAIT_MS: String(SETUP_LOCK_WAIT_MS) } },
-      )
+      } else show(embeddings ? 'embedding model already cached; installing the engine' : 'installing the engine')
+      const installed = await runInstaller($, options, embeddings)
       if (installed.exitCode !== 0) {
         // M2: when embeddings were requested but the install check could not prove
         // the model loaded (no memory_embeddings row in the check store), the swap
@@ -2121,6 +2218,9 @@ export const register: Register = (on, options) => {
       return { text: `Mnemosyne ready. Engine: ${engine}. Store: ${store}.${external}${saved}${embeddingsNote}${platformNote}\n${stats}` }
     } catch (err) {
       return { text: `Mnemosyne setup failed: ${(err as Error).message}` }
+    } finally {
+      // SETUP.STATUS: the setup's progress line ends with the setup, on success and on failure; the reply says how it went.
+      if (shown) progress($, undefined)
     }
   })
 
@@ -2320,7 +2420,7 @@ export const register: Register = (on, options) => {
           await paths($, options) // a bad HOME or memoryDir says so rather than "not installed"
           return { deny: NOT_INSTALLED }
         }
-        if ((tool === 'memory_update' || tool === 'memory_remember') && !(await isCurrent($, options))) return { deny: NOT_CURRENT }
+        if ((tool === 'memory_update' || tool === 'memory_remember') && !(await currentForSaves($, options))) return { deny: NOT_CURRENT }
         const [name, args] = engineArgs(tool, input, rules, settings)
         await takeTrigger()
         // The trigger save is the person's: human, with veracity 'stated'.

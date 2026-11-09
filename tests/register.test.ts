@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On, ProcessRunInit, SessionCompactResult } from 'claude-code'
-import { afterTerm, EMBED_USAGE, embeddingsSetting, ENGINE_BUILD, ENGINE_VERSION, tagsApply, tagsDryRun } from '../hooks/register'
+import { afterTerm, EMBED_USAGE, isOlderBuild, UPDATE_WAIT_MS, embeddingsSetting, ENGINE_BUILD, ENGINE_VERSION, tagsApply, tagsDryRun } from '../hooks/register'
 import { ENGINE_BUILD as BUILD_FILE, INSTALL_CHECK_TIMEOUT_MS, INSTALL_STEP_TIMEOUT_MS, SETUP_LOCK_WAIT_MS, SETUP_TIMEOUT_MS } from '../hooks/engine-build'
 import { engineTool, mnemosyneStats, publicTool } from '../hooks/surface'
 import { BACKFILL_CONCURRENCY, extractionModelOf, extractionOff, GET_BATCH, parseProposals, parseTags, pool, SYSTEM_PROMPT } from '../hooks/backfill'
@@ -52,6 +52,12 @@ type Extra = {
   resolve?: (stdin: string) => { stdout?: string; exitCode?: number } | undefined
   // SESSION: the answer to a session command of bin/memories.ts (first-prompt, summarised, session-pending, sweep-claim, expire); undefined falls back to a quiet default (nothing pinned, nothing pending, no sweep due).
   memories?: (argv: readonly string[], stdin: string) => { stdout?: string; exitCode?: number; stderr?: string } | undefined
+  // AUTO.1: an install-engine.ts run leaves this build installed (default: the build stays as it was); 'hang' never finishes the run.
+  installTo?: string | 'hang'
+  // AUTO.1: the install finishes only once this promise settles.
+  installGate?: Promise<unknown>
+  // AUTO.1: the install exits with this code and leaves the build alone; the first $.clock.sleep then installs `installTo` (another session's install).
+  installExit?: number
 }
 const SESSION_COMMANDS = ['first-prompt', 'summarised', 'session-pending', 'sweep-claim', 'expire']
 const QUIET_REPLIES: Record<string, string> = {
@@ -122,6 +128,13 @@ function world(on: On, reply: string, isInstalled = true, exitCode = 0, build: s
       return { value: { exitCode: given?.exitCode ?? 0, stdout: given?.stdout ?? (command === 'session-pending' && e.argv.includes('claim') ? '{"claimed":true}\n' : QUIET_REPLIES[command]), stderr: given?.stderr ?? '' } } as never
     }
     runs.push(e)
+    if ((e.argv[1] ?? '').endsWith('/bin/install-engine.ts') && e.argv[2] !== 'prune-logs' && (extra.installTo !== undefined || extra.installExit !== undefined)) {
+      if (extra.installTo === 'hang') return new Promise(() => {}) as never
+      const to = extra.installTo ?? build
+      if (extra.installExit !== undefined) return { value: { exitCode: extra.installExit, stdout: '', stderr: 'another install holds /home/u/.claude/mnemosyne/engine.lock' } } as never
+      if (extra.installGate !== undefined) return extra.installGate.then(() => ((build = to), { value: { exitCode: 0, stdout: '', stderr: '' } })) as never
+      build = to
+    }
     const sent = (e.init?.stdin ?? '').split('\n').filter(Boolean).map(line => JSON.parse(line))
     const stdout =
       exitCode !== 0
@@ -131,6 +144,10 @@ function world(on: On, reply: string, isInstalled = true, exitCode = 0, build: s
             .join('')
     return { value: { exitCode, stdout, stderr: '' } } as never
   })
+  if (extra.installExit !== undefined && extra.installTo !== undefined && extra.installTo !== 'hang') {
+    const to = extra.installTo
+    on('clock.sleep', () => ((build = to), { value: undefined }) as never)
+  }
   on('process.spawn', async function* (_$: unknown, e: { argv: readonly string[]; input?: string }) {
     if ((e.argv[1] ?? '').endsWith('/bin/projects.ts')) {
       runs.projects.push({ argv: e.argv, init: { stdin: e.input }, via: 'spawn' })
@@ -1113,10 +1130,10 @@ test('UPGRADE.1: a refused stale save is logged ok false with the refusal and no
 })
 
 // Session start in a world whose installed engine is `build`; the toasts it raised.
-async function startWith($: Engine, on: On, build: string) {
+async function startWith($: Engine, on: On, build: string, extra: Extra = {}) {
   const toasts: string[] = []
   const tools: string[] = []
-  world(on, '{}', true, 0, build)
+  const runs = world(on, '{}', true, 0, build, extra)
   on('command.register', () => ({ value: {} }) as never)
   on('tool.register', (_$, e) => {
     tools.push((e as { name: string }).name)
@@ -1128,14 +1145,133 @@ async function startWith($: Engine, on: On, build: string) {
   })
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   await $.session.start({ cwd: '/w', surface: null, isInteractive: false } as never)
-  return { toasts, tools }
+  return { toasts, tools, runs }
 }
 
-test('session start: a stale engine gets a toast asking for /mnemosyne-setup, and all five tools register', async ($, on) => {
-  const stale = await startWith($, on, '18.12.3')
-  expect(stale.toasts.length).toBe(1)
-  expect(stale.toasts[0]).toContain('/mnemosyne-setup')
+// Engine installs only: log pruning runs install-engine.ts too, as `prune-logs`.
+// Engine installs only: log pruning runs install-engine.ts too, as `prune-logs`.
+const installs = (runs: Run[]) => runs.filter(r => (r.argv[1] ?? '').endsWith('/bin/install-engine.ts') && r.argv[2] !== 'prune-logs')
+// The build before ENGINE_BUILD, and the one after it.
+const OLDER = ENGINE_BUILD.replace(/\d+$/, n => String(Number(n) - 1))
+const NEWER = ENGINE_BUILD.replace(/\d+$/, n => String(Number(n) + 1))
+const SAVE = { tool: 'mcp__mnemosyne__memory_remember', content: 'A durable note that the old engine would delete after a day.', kind: 'fact' }
+
+test('AUTO.1: isOlderBuild is true only for a lower -mnemosyne.N of the same base', () => {
+  expect(isOlderBuild(OLDER)).toBe(true)
+  expect(isOlderBuild(ENGINE_BUILD)).toBe(false)
+  expect(isOlderBuild(NEWER)).toBe(false)
+  expect(isOlderBuild('18.12.3')).toBe(false)
+  expect(isOlderBuild('17.0.0-mnemosyne.1')).toBe(false)
+  expect(isOlderBuild(undefined)).toBe(false)
+})
+
+test('AUTO.1: session start updates an older engine in the background, with no /mnemosyne-setup and no status line', async ($, on) => {
+  const statuses: (string | undefined)[] = []
+  on('ui.status', (_$, e) => {
+    statuses.push((e as { text?: string }).text)
+    return { value: undefined }
+  })
+  const stale = await startWith($, on, OLDER, { installTo: ENGINE_BUILD })
+  await settle()
+  expect(installs(stale.runs).length).toBe(1)
+  // Embeddings stay off (no marker): nothing is downloaded.
+  expect(installs(stale.runs)[0]!.argv.slice(3)).toEqual(['/home/u/.claude/mnemosyne/engine', '/home/u/.claude/mnemosyne/store'])
+  expect(installs(stale.runs)[0]!.init?.env?.MNEMOSYNE_LOCK_WAIT_MS).toBe(String(SETUP_LOCK_WAIT_MS))
+  expect(stale.toasts.length).toBe(2)
+  expect(stale.toasts[0]).toContain('updating the memory engine')
+  expect(stale.toasts[1]).toContain(`updated to build ${ENGINE_BUILD}`)
+  // SETUP.STATUS: the update raises toasts only, so no status of its own is left in the footer.
+  expect(statuses.filter(text => text !== undefined && !text.endsWith('· ready'))).toEqual([])
   expect(stale.tools).toEqual(['memory_remember', 'memory_recall', 'memory_update', 'memory_forget', 'memory_stats'])
+})
+
+test('AUTO.1: the auto-update keeps embeddings on when setup already downloaded the model', async ($, on) => {
+  const stale = await startWith($, on, OLDER, { installTo: ENGINE_BUILD, embeddingsReady: true })
+  await settle()
+  expect(installs(stale.runs)[0]!.argv.at(-1)).toBe('embeddings')
+})
+
+test('AUTO.1: a newer engine build is never replaced at session start (no downgrade); the toast asks for /mnemosyne-setup', async ($, on) => {
+  const started = await startWith($, on, NEWER, { installTo: ENGINE_BUILD })
+  await settle()
+  expect(installs(started.runs)).toEqual([])
+  expect(started.toasts).toEqual(['Mnemosyne Memory engine is out of date. Run /mnemosyne-setup to update it.'])
+})
+
+test('AUTO.1: a unreadable engine build is never replaced at session start (no downgrade); the toast asks for /mnemosyne-setup', async ($, on) => {
+  const started = await startWith($, on, '18.12.3', { installTo: ENGINE_BUILD })
+  await settle()
+  expect(installs(started.runs)).toEqual([])
+  expect(started.toasts).toEqual(['Mnemosyne Memory engine is out of date. Run /mnemosyne-setup to update it.'])
+})
+
+test('AUTO.1: a failed auto-update says so and points at /mnemosyne-setup; saves stay refused', async ($, on) => {
+  const stale = await startWith($, on, OLDER, { installTo: OLDER })
+  await settle()
+  expect(stale.toasts.length).toBe(2)
+  expect(stale.toasts[1]).toContain('update failed')
+  expect(stale.toasts[1]).toContain('/mnemosyne-setup')
+  expect((await $.tool.call(SAVE as never)).deny).toContain('out of date')
+})
+
+test('AUTO.1: after a failed auto-update, a later session start in the same process (/clear) does not run it again', async ($, on) => {
+  const stale = await startWith($, on, OLDER, { installTo: OLDER })
+  await settle()
+  await $.session.start({ cwd: '/w', surface: null, isInteractive: false } as never)
+  await settle()
+  expect(installs(stale.runs).length).toBe(1)
+  expect(stale.toasts.at(-1)).toBe('Mnemosyne Memory engine is out of date. Run /mnemosyne-setup to update it.')
+})
+
+test('AUTO.1: when another session holds the install lock, the update waits for that engine instead of reporting a failure', async ($, on) => {
+  const stale = await startWith($, on, OLDER, { installTo: ENGINE_BUILD, installExit: 3 })
+  await settle()
+  expect(stale.toasts.length).toBe(3)
+  expect(stale.toasts[1]).toContain('another session is updating')
+  expect(stale.toasts[2]).toContain(`updated to build ${ENGINE_BUILD}`)
+  expect((await $.tool.call(SAVE as never)).deny).toBeUndefined()
+})
+
+test('AUTO.1: a save made while the auto-update runs waits for it and then goes through', async ($, on) => {
+  let release: (value?: unknown) => void = () => {}
+  const gate = new Promise(resolve => (release = resolve))
+  on('clock.sleep', () => new Promise(() => {}) as never) // the wait's time limit never ends: only the update can end it
+  const stale = await startWith($, on, OLDER, { installTo: ENGINE_BUILD, installGate: gate })
+  let done = false
+  const saved = $.tool.call({ tool: 'mcp__mnemosyne__memory_update', memory_id: 'm1', tags: ['a'] }).then(result => ((done = true), result))
+  await settle()
+  expect(done).toBe(false)
+  release()
+  expect((await saved).deny).toBeUndefined()
+  expect(installs(stale.runs).length).toBe(1)
+  expect(stale.runs.some(run => (run.init?.stdin ?? '').includes('mnemopi_update'))).toBe(true)
+})
+
+test('AUTO.1: a save waits at most UPDATE_WAIT_MS for an auto-update that does not finish, then is refused', async ($, on) => {
+  const slept: number[] = []
+  on('clock.sleep', (_$, e) => {
+    slept.push((e as { ms: number }).ms)
+    return { value: undefined } as never
+  })
+  await startWith($, on, OLDER, { installTo: 'hang' })
+  expect((await $.tool.call(SAVE as never)).deny).toContain('out of date')
+  expect(slept).toContain(UPDATE_WAIT_MS)
+})
+
+test('AUTO.1: a missing engine is not auto-installed (the first install downloads the model, so it stays /mnemosyne-setup)', async ($, on) => {
+  const toasts: string[] = []
+  const runs = world(on, '{}', false)
+  on('command.register', () => ({ value: {} }) as never)
+  on('tool.register', () => ({ value: {} }) as never)
+  on('ui.toast', (_$, e) => {
+    toasts.push((e as { text: string }).text)
+    return { value: undefined } as never
+  })
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  await $.session.start({ cwd: '/w', surface: null, isInteractive: false } as never)
+  await settle()
+  expect(installs(runs)).toEqual([])
+  expect(toasts).toEqual(['Mnemosyne Memory engine not installed. Run /mnemosyne-setup.'])
 })
 
 test('session start with the current engine raises no toast', async ($, on) => {
@@ -2758,7 +2894,8 @@ test('EMB.3.a3: elsewhere (not macOS arm64) setup writes no marker, so engine ru
 })
 
 test('EMB.3.a4: setup tells the host and size before it downloads, and passes embeddings to the installer', { options: { embeddings: 'on' } }, async ($, on) => {
-  const runs = embedWorld(on, { darwinArm64: true })
+  // No model in the cache yet: this setup downloads it.
+  const runs = embedWorld(on, { darwinArm64: true, ready: false })
   on('fs.write', () => ({ value: undefined }))
   const logged: string[] = []
   on('ui.log', (_$, e) => {
@@ -2773,6 +2910,45 @@ test('EMB.3.a4: setup tells the host and size before it downloads, and passes em
   const note = logged.join('\n')
   expect(note).toContain('huggingface.co')
   expect(note).toContain('63 MB')
+})
+
+// SETUP.STATUS: setup's UI lines in a world whose model cache is full (`cached`) or empty, and whose install exits `exitCode`.
+async function setupLines($: Engine, on: On, cached: boolean, installExit?: number) {
+  world(on, '{"status":"stored"}', true, 0, ENGINE_BUILD, { darwinArm64: true, embeddingsReady: cached, installExit })
+  on('fs.write', () => ({ value: undefined }))
+  const logs: string[] = []
+  const statuses: (string | undefined)[] = []
+  on('ui.log', (_$, e) => {
+    logs.push((e as { text: string }).text)
+    return { value: undefined }
+  })
+  on('ui.status', (_$, e) => {
+    statuses.push((e as { text?: string }).text)
+    return { value: undefined }
+  })
+  const ran = await $.command.run({ command: 'mnemosyne-setup', args: '' } as never)
+  return { logs, statuses, text: (ran as { text: string }).text }
+}
+
+test('SETUP.STATUS: with the model already cached, setup says so and never claims a download', { options: { embeddings: 'on' } }, async ($, on) => {
+  const { logs, statuses } = await setupLines($, on, true)
+  expect([...logs, ...statuses].join('\n')).not.toContain('downloading')
+  expect(logs.join('\n')).not.toContain('huggingface.co')
+  expect(statuses[0]).toBe('Mnemosyne · embedding model already cached; installing the engine')
+})
+
+test('SETUP.STATUS: setup clears its status line when it finishes', { options: { embeddings: 'on' } }, async ($, on) => {
+  const downloaded = await setupLines($, on, false)
+  expect(downloaded.statuses[0]).toContain('downloading the embedding model')
+  expect(downloaded.text).toContain('Mnemosyne ready')
+  expect(downloaded.statuses.at(-1)).toBeUndefined()
+})
+
+test('SETUP.STATUS: a failed setup clears its status line too', { options: { embeddings: 'off' } }, async ($, on) => {
+  const failed = await setupLines($, on, false, 1)
+  expect(failed.text).toContain('Engine install failed')
+  expect(failed.statuses[0]).toBe('Mnemosyne · installing the engine')
+  expect(failed.statuses.at(-1)).toBeUndefined()
 })
 
 test('EMB.3.a4: setup with embeddings off passes no embeddings argument to the installer', { options: { embeddings: 'off' } }, async ($, on) => {
