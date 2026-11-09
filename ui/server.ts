@@ -149,7 +149,8 @@ export type Config = {
   claudeCli?: string
 }
 
-export type State = { port: number; token: string; pid: number }
+// version: the plugin version this server runs (UIVER.1), so /mnemosyne-ui can replace a server an older plugin started.
+export type State = { port: number; token: string; pid: number; version?: string }
 
 export function configFromEnv(env: Record<string, string | undefined>): Config {
   const root = env.MNEMOSYNE_ROOT ?? ''
@@ -3180,7 +3181,7 @@ async function serve() {
   // A closed terminal sends SIGHUP to the starter's whole group, this server included.
   process.on('SIGHUP', starterGone)
   process.on('exit', () => removeState(config.root, process.pid))
-  writeState(config.root, { port: started.port, token: started.token, pid: process.pid })
+  writeState(config.root, { port: started.port, token: started.token, pid: process.pid, version: pluginVersion() })
   // The ready line: port and pid only; the hook reads the token from ui.json.
   process.stdout.write(`${JSON.stringify({ port: started.port, pid: process.pid })}\n`)
   watchParent(starterGone)

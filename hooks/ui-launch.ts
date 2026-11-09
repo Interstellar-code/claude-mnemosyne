@@ -70,7 +70,7 @@ export type UiPaths = {
   claudeCli?: string
 }
 
-type State = { port: number; token: string; pid: number }
+type State = { port: number; token: string; pid: number; version?: string }
 type Ready = { port: number; pid: number }
 // One started server: ending its loop stops it; `pid` (the server's, from its ready line) once known.
 type Entry = { stop: () => void; ended: Promise<void>; pid?: number }
@@ -83,6 +83,7 @@ const joined = new Map<string, { plugin: string; root: string; pid?: number }>()
 const isState = (value: unknown): value is State => {
   const state = value as Partial<State> | null
   return (
+    (state?.version === undefined || typeof state.version === 'string') &&
     typeof state?.port === 'number' &&
     Number.isInteger(state.port) &&
     state.port > 0 &&
@@ -346,6 +347,27 @@ async function restartNote($: EngineInterface, paths: UiPaths, state: State) {
   return ` (this dashboard ${changed.join('; ')}. A running dashboard keeps what it started with: end the session that started it, then run /mnemosyne-ui again to restart it)`
 }
 
+// The version in <plugin>/.claude-plugin/plugin.json, or undefined when it cannot be read.
+async function pluginVersionOf($: EngineInterface, plugin: string): Promise<string | undefined> {
+  try {
+    const version = (JSON.parse(await $.fs.read(`${plugin}/.claude-plugin/plugin.json`)) as { version?: unknown }).version
+    return typeof version === 'string' ? version : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** UIVER.1: whether plugin version `ours` is newer than `theirs` (x.y.z, compared by number); an unknown `theirs` counts as older. */
+export function newerVersion(ours: string | undefined, theirs: string | undefined): boolean {
+  const parse = (v: string) => (/^\d+\.\d+\.\d+$/.test(v) ? v.split('.').map(Number) : undefined)
+  const a = ours === undefined ? undefined : parse(ours)
+  if (a === undefined) return false
+  const b = theirs === undefined ? undefined : parse(theirs)
+  if (b === undefined) return true
+  for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i]! > b[i]!
+  return false
+}
+
 // Records, mode 0600 and renamed into place, the settings the server `pid` started with.
 async function recordStartedWith($: EngineInterface, paths: UiPaths, pid: number) {
   if (paths.extraction === undefined && paths.embeddings === undefined) return
@@ -361,16 +383,26 @@ async function recordStartedWith($: EngineInterface, paths: UiPaths, pid: number
 
 /** The command's answer: reuse the server ui.json names while it answers, else start one for `session`. */
 export async function openDashboard($: EngineInterface, paths: UiPaths, session: string) {
+  let restarted = ''
   const known = await readState($, paths.root)
   if (known !== undefined) {
     // Asked twice: one slow answer does not replace a working server.
     if ((await answers($, paths.plugin, known)) || (await answers($, paths.plugin, known))) {
-      const listed = await join($, paths, session)
-      return handOver($, known, 'running', `${await restartNote($, paths, known)}${listed ? '' : NOT_LISTED}`)
+      // UIVER.1: a server an older plugin started (after `claude plugin update`) shows the old version and code: replace it.
+      // The server writes its version into ui.json with its pid, so a server started just now always names it; one with none predates 0.32.1.
+      const ours = await pluginVersionOf($, paths.plugin)
+      if (newerVersion(ours, known.version)) {
+        await $.process.run(['kill', String(known.pid)], { timeoutMs: KILL_TIMEOUT_MS }).catch(() => undefined)
+        for (let tries = 0; tries < 20 && (await isAlive($, known.pid)); tries++) await wait($, 250)
+        restarted = ` (restarted: the running dashboard was from an older plugin; this one is v${ours})`
+      } else {
+        const listed = await join($, paths, session)
+        return handOver($, known, 'running', `${await restartNote($, paths, known)}${listed ? '' : NOT_LISTED}`)
+      }
     }
     // This session's own server, still running, is never killed for a missed ping.
     const own = [...(running.get(session) ?? [])].find(entry => entry.pid === known.pid)
-    if (own !== undefined && (await isAlive($, known.pid))) {
+    if (restarted === '' && own !== undefined && (await isAlive($, known.pid))) {
       const listed = await join($, paths, session)
       return handOver(
         $,
@@ -399,13 +431,13 @@ export async function openDashboard($: EngineInterface, paths: UiPaths, session:
     // line is already listed and must stay listed. Users left from an earlier server are live
     // sessions (dead ones are dropped on every change), and each leaves at its own session.end.
     const listed = await join($, paths, session)
-    return handOver($, state, 'started', listed ? '' : NOT_LISTED)
+    return handOver($, state, 'started', `${restarted}${listed ? '' : NOT_LISTED}`)
   }
   // Another start won ui.json in the meantime: hand its server over and stop ours.
   if (state !== undefined && state.pid !== up.pid && (await answers($, paths.plugin, state))) {
     await stopEntry($, session, entry)
     const listed = await join($, paths, session)
-    return handOver($, state, 'running', `${await restartNote($, paths, state)}${listed ? '' : NOT_LISTED}`)
+    return handOver($, state, 'running', `${restarted}${await restartNote($, paths, state)}${listed ? '' : NOT_LISTED}`)
   }
   await stopEntry($, session, entry)
   return { text: `Mnemosyne dashboard did not start: ${paths.root}/${UI_STATE} does not name the new server.` }

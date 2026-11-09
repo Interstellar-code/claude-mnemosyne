@@ -2,6 +2,10 @@
 
 Newest first. Each release is tagged `vX.Y.Z` on GitHub; the README and DESIGN.md describe the contracts.
 
+## 0.32.1 (dashboard restarts after a plugin update)
+
+1. `/mnemosyne-ui` no longer reuses a running dashboard that an older plugin version started (UIVER.1). After `claude plugin update`, the shared dashboard server kept running the old plugin's code, so it still showed the old version and offered the update again. The dashboard now records the plugin version it started with; when this plugin is newer, or no version is recorded, `/mnemosyne-ui` stops the old server and starts a new one, and its reply says so. A dashboard of the same or a newer version is still reused, so an older plugin never replaces a newer one.
+
 ## 0.32.0 (engine updates itself; setup status fixed)
 
 1. A stale engine is updated at session start, in the background, through the same `bin/install-engine.ts` as `/mnemosyne-setup` (AUTO.1). It is built beside the old engine and swapped in only once it answers, so a failed update leaves the old engine as it was. Toasts say when the update starts and when it finishes or fails; the update never sets the status line.

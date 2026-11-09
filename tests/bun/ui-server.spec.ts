@@ -209,10 +209,10 @@ describe('the dashboard server on a real WAL store', () => {
     expect(readyLine).not.toContain(token)
   })
 
-  test('SRV.3.a4: ui.json is mode 0600 and holds port, token and pid', () => {
+  test('SRV.3.a4: ui.json is mode 0600 and holds port, token, pid and the plugin version', () => {
     const file = join(root, 'ui.json')
     if (process.platform !== 'win32') expect(statSync(file).mode & 0o777).toBe(0o600)
-    expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual({ port: ready.port, token, pid: ready.pid })
+    expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual({ port: ready.port, token, pid: ready.pid, version: JSON.parse(readFileSync('.claude-plugin/plugin.json', 'utf8')).version })
   })
 
   test('SRV.2.a2: /api without the token, with a wrong one, or with it only in the query string gets 401 and no data', async () => {
