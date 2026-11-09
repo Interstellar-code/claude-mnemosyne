@@ -17,7 +17,7 @@
 import { createMap, type MapView } from './map'
 import { fragmentAfterToken } from './map-state'
 import { createSolarScene } from './solar'
-import { isRunning, parseStatusBody, parseUpdateInfo, renderProgress, type UpdateStatus, versionCell } from './update'
+import { isRunning, parseStatusBody, parseUpdateInfo, renderProgress, type UpdateInfo, type UpdateStatus, versionCell } from './update'
 import {
   columnsOf,
   dotClass,
@@ -2449,7 +2449,7 @@ async function startUpdate(): Promise<string | undefined> {
 const quietGet = (path: string) => fetch(path, { headers: { Authorization: `Bearer ${token}` }, cache: 'no-store' })
 
 /** Polls the run's progress into `box` until it ends, or until the dashboard stops for the swap. */
-function followUpdate(box: HTMLElement) {
+function followUpdate(box: HTMLElement, via: UpdateInfo['via'] = 'updater') {
   if (followingUpdate) return
   followingUpdate = true
   let last: UpdateStatus | null = null
@@ -2466,7 +2466,9 @@ function followUpdate(box: HTMLElement) {
       renderProgress(box, last)
       if (last !== null && !isRunning(last)) {
         followingUpdate = false
-        if (last.state === 'done') renderProgress(box, last, 'This dashboard was not restarted by the update: restart it to use the new version.')
+        // UPDCC.1: a Claude Code install never restarts this dashboard itself: the next /mnemosyne-ui after a Claude Code restart does.
+        if (last.state === 'done')
+          renderProgress(box, last, via === 'claude' ? 'Restart Claude Code, then run /mnemosyne-ui to open the new version.' : 'This dashboard was not restarted by the update: restart it to use the new version.')
         return
       }
     }

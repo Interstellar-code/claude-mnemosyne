@@ -2,6 +2,11 @@
 
 Newest first. Each release is tagged `vX.Y.Z` on GitHub; the README and DESIGN.md describe the contracts.
 
+## 0.33.0 (Update button for Claude Code installs)
+
+1. The Health tab's Update… button now also shows for a plugin installed through Claude Code (UPDCC.1). Until now it showed only for the Claude Desktop install in `~/.claude/mnemosyne/plugin`, and a Claude Code install got the line "Update with: claude plugin update mnemosyne@mnemosyne" to type yourself. The button now runs `claude plugin update` for you and shows its progress and output. When it finishes it says to restart Claude Code: Claude Code loads the new version only when it starts, and the next `/mnemosyne-ui` then restarts the dashboard on that version (0.32.1). A newer engine build installs itself at that start (0.32.0).
+2. A checkout run by hand (`--plugin-dir`) still gets no button.
+
 ## 0.32.2 (Simulate buttons in Galaxy)
 
 1. The map's Simulate a recall and Simulate a write buttons work again in the Galaxy layout (SIM.1). Since the Galaxy page came in, they drew the demo event on the 3D scene only and never added it to the LIVE strip, so the strip kept saying "No new activity since you opened this page." and the buttons looked dead. A demo event now goes where a real one goes: the scene draws it and the strip lists it with its demo badge. Timeline was not affected.
