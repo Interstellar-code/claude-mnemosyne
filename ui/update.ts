@@ -11,6 +11,8 @@ export type UpdateInfo = {
   latest: Latest | null
   available: boolean
   updatable: boolean
+  /** UPDCC.1: 'updater' (the Claude Desktop install swaps itself), 'claude' (`claude plugin update`), or null. */
+  via: 'updater' | 'claude' | null
   status: UpdateStatus | null
 }
 
@@ -33,6 +35,7 @@ export function parseUpdateInfo(body: unknown): UpdateInfo | null {
     latest,
     available: b.available === true && latest !== null,
     updatable: b.updatable === true,
+    via: b.via === 'updater' || b.via === 'claude' ? b.via : b.updatable === true ? 'updater' : null,
     status: parseStatus(b.status),
   }
 }
@@ -57,6 +60,15 @@ export function confirmLines(info: UpdateInfo): string[] {
   const { plugin, engine } = info.current
   const engineLine =
     latest.engine === null ? `Engine ${engine ?? 'unknown'} → the build that ships with v${latest.plugin}` : latest.engine === engine ? `Engine ${engine} (unchanged)` : `Engine ${engine ?? 'none'} → ${latest.engine}`
+  // UPDCC.1: a Claude Code install updates through Claude Code, and the new version loads when Claude Code restarts.
+  if (info.via === 'claude') {
+    return [
+      `Plugin v${plugin ?? '?'} → v${latest.plugin}`,
+      latest.engine !== null && latest.engine === engine ? `Engine ${engine} (unchanged)` : 'Engine: updated in the background at the next Claude Code start',
+      'Your memories, settings and tags are not touched.',
+      'Runs claude plugin update for you. Restart Claude Code afterwards to load the new version.',
+    ]
+  }
   return [
     `Plugin v${plugin ?? '?'} → v${latest.plugin}`,
     engineLine,
@@ -105,8 +117,8 @@ export function renderProgress(box: HTMLElement, status: UpdateStatus | null, ex
 export type UpdateHost = {
   /** POSTs the start; resolves with the error text when the server refused it. */
   start: () => Promise<string | undefined>
-  /** Called once the run started (app.ts polls the progress from here). */
-  started: (box: HTMLElement) => void
+  /** Called once the run started (app.ts polls the progress from here); `via` says how it installs (UPDCC.1). */
+  started: (box: HTMLElement, via: UpdateInfo['via']) => void
   /** 0.28.2: "Check now": asks the server for a new release check and redraws the cell. */
   check?: () => void
 }
@@ -192,11 +204,11 @@ export function versionCell(info: UpdateInfo, host: UpdateHost): HTMLElement {
       }
       confirm.hidden = true
       renderProgress(progress, { state: 'starting', lines: [`Starting the update to ${info.latest!.tag} ...`], started: '', updated: '' })
-      host.started(progress)
+      host.started(progress, info.via)
     })
   })
   cell.append(ask, confirm, progress)
   // A run already under way (started from another tab, or before a reload): follow it.
-  if (isRunning(info.status)) host.started(progress)
+  if (isRunning(info.status)) host.started(progress, info.via)
   return cell
 }

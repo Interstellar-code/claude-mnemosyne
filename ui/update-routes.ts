@@ -6,7 +6,8 @@
 //                            most one GitHub check a day, a failure is silent;
 //                            ?check=now asks again, at most once a minute),
 //                            whether an update is offered, and the last run's progress
-//   POST /api/update/start   starts bin/update.ts detached and windowless, then 202
+//   POST /api/update/start   starts bin/update.ts detached and windowless, then 202; for a
+//                            Claude Code install (UPDCC.1) runs `claude plugin update <id>` instead
 //   GET  /api/update/status  the progress file the updater writes
 //
 // The dashboard runs from <root>/plugin, the folder the updater replaces, so the
@@ -41,10 +42,14 @@ export type UpdateInfo = {
   current: { plugin: string | null; engine: string | null }
   latest: Latest | null
   available: boolean
-  /** False when this server does not run from <root>/plugin (a Claude Code install updates with `claude plugin update`). */
+  /** Whether the Update button can install here: through bin/update.ts (`via` 'updater') or `claude plugin update` ('claude'). */
   updatable: boolean
+  /** UPDCC.1: how the button installs: 'updater' (<root>/plugin), 'claude' (a Claude Code install), or null (neither). */
+  via: UpdateVia | null
   status: UpdateStatus | null
 }
+
+export type UpdateVia = 'updater' | 'claude'
 
 export type UpdateDeps = {
   fetcher?: typeof fetch
@@ -53,6 +58,35 @@ export type UpdateDeps = {
   launch?: (command: LaunchCommand) => Promise<void>
   /** Whether an updater pid still runs (tests fake it). */
   alive?: (pid: number) => boolean
+  /** UPDCC.1: runs `claude plugin update`; resolves with its exit code and output (tests fake it). */
+  claude?: (cli: string, args: string[], onPid: (pid: number) => void) => Promise<{ code: number; output: string }>
+}
+
+// UPDCC.1: how long `claude plugin update` may take (it clones or fetches the marketplace and copies the plugin).
+export const CLAUDE_UPDATE_TIMEOUT_MS = 5 * 60 * 1000
+
+/** UPDCC.1: whether `pluginRoot` is a Claude Code install: a version folder under <home>/.claude/plugins/cache. */
+export function claudeInstall(root: string, pluginRoot: string) {
+  const fold = (path: string) => (process.platform === 'win32' ? resolve(path).toLowerCase() : resolve(path))
+  const cache = join(dirname(resolve(root)), 'plugins', 'cache')
+  return fold(pluginRoot).startsWith(`${fold(cache)}${process.platform === 'win32' ? '\\' : '/'}`)
+}
+
+/** Runs the claude CLI, its output gathered, killed after CLAUDE_UPDATE_TIMEOUT_MS. */
+async function runClaudeUpdate(cli: string, args: string[], onPid: (pid: number) => void): Promise<{ code: number; output: string }> {
+  const child = Bun.spawn([cli, ...args], { stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' })
+  onPid(child.pid)
+  // A run past its time is asked to stop, then killed outright, so the progress never sits on "running".
+  const timer = setTimeout(() => {
+    child.kill()
+    setTimeout(() => child.kill('SIGKILL'), 5000).unref?.()
+  }, CLAUDE_UPDATE_TIMEOUT_MS)
+  try {
+    const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
+    return { code, output: `${stdout}\n${stderr}` }
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 export type LaunchCommand = { bun: string; script: string; args: string[]; cwd: string; log: string }
@@ -228,11 +262,15 @@ export function takeHandoff(root: string, now = Date.now()): { port: number; tok
 
 type Answer = { status: number; body: unknown }
 
-export function updateRoutes(input: { root: string; pluginRoot: string; plugin: string | null; engine: string | null; port: () => number; token: string }, deps: UpdateDeps = {}) {
+export function updateRoutes(
+  input: { root: string; pluginRoot: string; plugin: string | null; engine: string | null; port: () => number; token: string; pluginId?: string; claudeCli?: string },
+  deps: UpdateDeps = {},
+) {
   const { root } = input
   const now = () => deps.now?.() ?? Date.now()
   const statusFile = join(root, UPDATE_STATUS_FILE)
   const home = () => updaterHome(root, input.pluginRoot)
+  const via = (): UpdateVia | null => (home() !== undefined ? 'updater' : input.pluginId && claudeInstall(root, input.pluginRoot) ? 'claude' : null)
 
   /** The progress, settled; a run that ended while this server stayed up leaves no use for the handoff. */
   function current() {
@@ -245,7 +283,7 @@ export function updateRoutes(input: { root: string; pluginRoot: string; plugin: 
   async function info(force = false): Promise<Answer> {
     const latest = await latestRelease(root, deps, { current: input.plugin, force })
     const status = current()
-    const body: UpdateInfo = { current: { plugin: input.plugin, engine: input.engine }, latest, available: updateAvailable(input.plugin, latest), updatable: home() !== undefined, status }
+    const body: UpdateInfo = { current: { plugin: input.plugin, engine: input.engine }, latest, available: updateAvailable(input.plugin, latest), updatable: via() !== null, via: via(), status }
     return { status: 200, body }
   }
 
@@ -261,11 +299,15 @@ export function updateRoutes(input: { root: string; pluginRoot: string; plugin: 
       return { status: 400, body: { error: 'the body must be JSON' } }
     }
     if (typeof body !== 'object' || body === null || Array.isArray(body)) return { status: 400, body: { error: 'the body must be an object' } }
-    const updaterHomeDir = home()
-    if (updaterHomeDir === undefined) return { status: 409, body: { error: 'This dashboard is not the Claude Desktop install under ~/.claude/mnemosyne/plugin; update it with `claude plugin update` instead.' } }
+    const how = via()
+    if (how === null) return { status: 409, body: { error: 'This dashboard is neither the Claude Desktop install under ~/.claude/mnemosyne/plugin nor a Claude Code install; update it by hand.' } }
     if (running(readStatus(statusFile), now(), deps.alive)) return { status: 409, body: { error: 'An update is already running.' } }
     const latest = await latestRelease(root, deps, { current: input.plugin })
     if (!updateAvailable(input.plugin, latest) || latest === null) return { status: 409, body: { error: 'There is no newer release to install.' } }
+    // The release check awaited: a start that came in meanwhile has written its progress, so ask again before writing ours.
+    if (running(readStatus(statusFile), now(), deps.alive)) return { status: 409, body: { error: 'An update is already running.' } }
+    if (how === 'claude') return startClaude(latest)
+    const updaterHomeDir = home()!
     const begun = nextStatus(undefined, { state: 'starting', lines: [`Starting the update to ${latest.tag} ...`] }, new Date(now()))!
     writePrivate(statusFile, begun)
     writePrivate(join(root, HANDOFF_FILE), { port: input.port(), token: input.token, until: new Date(now() + HANDOFF_MS).toISOString() } satisfies Handoff)
@@ -283,6 +325,38 @@ export function updateRoutes(input: { root: string; pluginRoot: string; plugin: 
       writePrivate(statusFile, nextStatus(begun, { state: 'failed', lines: [`Could not start the updater: ${(error as Error).message}`] }, new Date(now()))!)
       return { status: 500, body: { error: `Could not start the updater: ${(error as Error).message}` } }
     }
+    return { status: 202, body: { started: true, tag: latest.tag } }
+  }
+
+  /**
+   * UPDCC.1: a Claude Code install: `claude plugin update <id>` puts the new version beside this one in Claude Code's
+   * plugin cache. This dashboard keeps running the old code, so the progress file ends with the restart steps.
+   */
+  function startClaude(latest: Latest): Answer {
+    const command = `claude plugin update ${input.pluginId}`
+    let state = nextStatus(undefined, { state: 'starting', lines: [`Running ${command} ...`] }, new Date(now()))!
+    writePrivate(statusFile, state)
+    const write = (change: Parameters<typeof nextStatus>[1]) => {
+      const next = nextStatus(state, change, new Date(now()))
+      if (next === undefined) return
+      state = next
+      try {
+        writePrivate(statusFile, state)
+      } catch {
+        // the page then sees the run settle as failed
+      }
+    }
+    const run = deps.claude ?? runClaudeUpdate
+    void run(input.claudeCli || 'claude', ['plugin', 'update', input.pluginId!], pid => write({ state: 'running', pid }))
+      .then(({ code, output }) => {
+        const lines = output.split('\n').map(line => line.trim()).filter(Boolean).slice(-6)
+        // Claude Code installs what its marketplace copy names, which can lag the GitHub tag: claim the install only when it says so.
+        const restart = 'Restart Claude Code to load it, then run /mnemosyne-ui: the dashboard restarts on the new version by itself.'
+        if (code === 0 && /\bupdated\b/i.test(output)) write({ state: 'done', code, lines: [...lines, `Installed the update. ${restart}`] })
+        else if (code === 0) write({ state: 'done', code, lines: [...lines, `Claude Code found no newer version than the one installed yet; try again in a few minutes. If it was already updated, ${restart[0]!.toLowerCase()}${restart.slice(1)}`] })
+        else write({ state: 'failed', code, lines: [...lines, `${command} exited with ${code}. Run it in a terminal to see why.`] })
+      })
+      .catch((error: unknown) => write({ state: 'failed', lines: [`Could not run ${command}: ${(error as Error).message}`] }))
     return { status: 202, body: { started: true, tag: latest.tag } }
   }
 

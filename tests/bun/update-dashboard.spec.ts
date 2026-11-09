@@ -187,17 +187,34 @@ afterAll(() => {
 })
 
 /** A server whose root is <home>/.claude/mnemosyne and whose plugin root is <root>/plugin (with an updater), or the repo. */
-async function world(options: { updatable: boolean; tags?: string[] }) {
+// UPDCC.1: `claudeCode` serves from <home>/.claude/plugins/cache/mnemosyne/mnemosyne/<v> with a plugin id, and fakes the claude CLI.
+type FakeClaude = { calls: { cli: string; args: string[] }[]; answer: { code: number; output: string }; delayMs?: number }
+async function world(options: { updatable: boolean; tags?: string[]; claudeCode?: FakeClaude; githubDelayMs?: number }) {
   const { dir } = tempDir('update-world')
   const root = join(dir, '.claude', 'mnemosyne')
-  const pluginRoot = options.updatable ? join(root, 'plugin') : ROOT
+  const pluginRoot = options.claudeCode ? join(dir, '.claude', 'plugins', 'cache', 'mnemosyne', 'mnemosyne', CURRENT) : options.updatable ? join(root, 'plugin') : ROOT
   mkdirSync(join(root, 'plugin', 'bin'), { recursive: true })
   if (options.updatable) writeFileSync(join(root, 'plugin', 'bin', 'update.ts'), '')
   const launched: LaunchCommand[] = []
   const github = fakeGitHub(options.tags ?? [`v${NEWER}`])
   const started = await startServer(
-    { root, store: join(root, 'store'), cli: join(ROOT, 'engine', 'src', 'cli.ts'), activityLog: '', pluginRoot },
-    { update: { fetcher: github.fetcher, launch: async command => void launched.push(command) } },
+    { root, store: join(root, 'store'), cli: join(ROOT, 'engine', 'src', 'cli.ts'), activityLog: '', pluginRoot, ...(options.claudeCode ? { pluginId: 'mnemosyne@mnemosyne' } : {}) },
+    {
+      update: {
+        fetcher: options.githubDelayMs ? (async (...args: Parameters<typeof fetch>) => (await Bun.sleep(options.githubDelayMs!), github.fetcher(...args))) as typeof fetch : github.fetcher,
+        launch: async command => void launched.push(command),
+        ...(options.claudeCode
+          ? {
+              claude: async (cli: string, args: string[], onPid: (pid: number) => void) => {
+                options.claudeCode!.calls.push({ cli, args })
+                onPid(process.pid)
+                await Bun.sleep(options.claudeCode!.delayMs ?? 0)
+                return options.claudeCode!.answer
+              },
+            }
+          : {}),
+      },
+    },
   )
   servers.push(started)
   const base = `http://127.0.0.1:${started.port}`
@@ -256,12 +273,62 @@ describe('the update routes', () => {
     const none = await current.call('/api/update/start', { method: 'POST', origin: current.base, body: '{}' })
     expect(none.status).toBe(409)
     expect((await j(none)).error).toBe('There is no newer release to install.')
-    const claudeCode = await world({ updatable: false })
-    expect(await j(await claudeCode.call('/api/update'))).toMatchObject({ available: true, updatable: false })
-    const refused = await claudeCode.call('/api/update/start', { method: 'POST', origin: claudeCode.base, body: '{}' })
+    // A checkout (neither the Claude Desktop install nor a Claude Code one): no button.
+    const checkout = await world({ updatable: false })
+    expect(await j(await checkout.call('/api/update'))).toMatchObject({ available: true, updatable: false, via: null })
+    const refused = await checkout.call('/api/update/start', { method: 'POST', origin: checkout.base, body: '{}' })
     expect(refused.status).toBe(409)
-    expect((await j(refused)).error).toContain('claude plugin update')
-    expect([...current.launched, ...claudeCode.launched]).toHaveLength(0)
+    expect((await j(refused)).error).toContain('update it by hand')
+    expect([...current.launched, ...checkout.launched]).toHaveLength(0)
+  })
+
+  test('UPDCC.1: a Claude Code install offers the button and runs claude plugin update, ending with the restart steps', async () => {
+    const fake: FakeClaude = { calls: [], answer: { code: 0, output: `✔ Plugin "mnemosyne" updated from ${CURRENT} to ${NEWER} for scope user. Restart to apply changes.\n` } }
+    const w = await world({ updatable: false, claudeCode: fake })
+    expect(await j(await w.call('/api/update'))).toMatchObject({ available: true, updatable: true, via: 'claude' })
+    const reply = await w.call('/api/update/start', { method: 'POST', origin: w.base, body: '{}' })
+    expect(reply.status).toBe(202)
+    await Bun.sleep(20)
+    expect(fake.calls).toEqual([{ cli: 'claude', args: ['plugin', 'update', 'mnemosyne@mnemosyne'] }])
+    // The bin/update.ts updater never runs for this install, and no handoff is left.
+    expect(w.launched).toHaveLength(0)
+    expect(existsSync(join(w.root, HANDOFF_FILE))).toBe(false)
+    const status = (await j(await w.call('/api/update/status'))).status
+    expect(status.state).toBe('done')
+    expect(status.lines.join('\n')).toContain(`updated from ${CURRENT} to ${NEWER}`)
+    expect(status.lines.at(-1)).toContain('Installed the update. Restart Claude Code')
+  })
+
+  test('UPDCC.1: an exit 0 that installed nothing does not claim an install', async () => {
+    const fake: FakeClaude = { calls: [], answer: { code: 0, output: 'mnemosyne is already at the latest version (0.27.0).\n' } }
+    const w = await world({ updatable: false, claudeCode: fake })
+    expect((await w.call('/api/update/start', { method: 'POST', origin: w.base, body: '{}' })).status).toBe(202)
+    await Bun.sleep(20)
+    const last = (await j(await w.call('/api/update/status'))).status.lines.at(-1)
+    expect(last).toContain('no newer version')
+    expect(last).not.toContain('Installed')
+  })
+
+  test('UPDCC.1: two starts at once run claude plugin update once', async () => {
+    // The run takes a while, as a real one does: the second start arrives while it is still going.
+    // GitHub answers slowly, so both starts are inside the release check at once.
+    const fake: FakeClaude = { calls: [], answer: { code: 0, output: 'updated\n' }, delayMs: 200 }
+    const w = await world({ updatable: false, claudeCode: fake, githubDelayMs: 50 })
+    const post = () => w.call('/api/update/start', { method: 'POST', origin: w.base, body: '{}' })
+    const codes = (await Promise.all([post(), post()])).map(reply => reply.status).sort()
+    await Bun.sleep(250)
+    expect(codes).toEqual([202, 409])
+    expect(fake.calls).toHaveLength(1)
+  })
+
+  test('UPDCC.1: a failed claude plugin update is reported as failed with its output', async () => {
+    const fake: FakeClaude = { calls: [], answer: { code: 1, output: 'Failed to update: network unreachable\n' } }
+    const w = await world({ updatable: false, claudeCode: fake })
+    expect((await w.call('/api/update/start', { method: 'POST', origin: w.base, body: '{}' })).status).toBe(202)
+    await Bun.sleep(20)
+    const status = (await j(await w.call('/api/update/status'))).status
+    expect(status.state).toBe('failed')
+    expect(status.lines.join('\n')).toContain('network unreachable')
   })
 
   test('a launch that fails is reported, the handoff removed, the run marked failed', async () => {
@@ -384,6 +451,13 @@ describe('the version line and the confirm (ui/update.ts)', () => {
     ])
     expect(view.confirmLines(info({ latest: { tag: 'v0.28.0', plugin: '0.28.0', engine: '18.12.3-mnemosyne.12' } }))[1]).toBe('Engine 18.12.3-mnemosyne.12 (unchanged)')
     expect(view.confirmLines(info({ latest: { tag: 'v0.28.0', plugin: '0.28.0', engine: null } }))[1]).toBe('Engine 18.12.3-mnemosyne.12 → the build that ships with v0.28.0')
+  })
+  test('UPDCC.1: for a Claude Code install the confirm says it runs claude plugin update and that Claude Code needs a restart', () => {
+    const lines = view.confirmLines(info({ via: 'claude' }))
+    expect(lines[0]).toBe('Plugin v0.27.0 → v0.28.0')
+    expect(lines.join('\n')).toContain('Restart Claude Code')
+    expect(lines.join('\n')).not.toContain('Claude Desktop')
+    expect(view.parseUpdateInfo({ current: {}, latest: null, available: false, updatable: true, via: 'claude', status: null })?.via).toBe('claude')
   })
   test('a blocked run says so in plain words and that nothing was stopped', () => {
     const summary = view.statusSummary({ state: 'blocked', lines: ['Windows would not let ...'], started: '', updated: '' })

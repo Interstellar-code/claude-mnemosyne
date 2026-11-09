@@ -2896,7 +2896,10 @@ export async function startServer(config: Config, options: ServerOptions = {}): 
   const meaning = options.meaningRunner ?? new MeaningRunner()
   const meaningWaitMs = options.meaningWaitMs ?? MEANING_WAIT_MS
   let boundPort = 0
-  const updates = updateRoutes({ root: config.root, pluginRoot: config.pluginRoot, plugin: plugin ?? null, engine: engine ?? null, port: () => boundPort, token }, options.update)
+  const updates = updateRoutes(
+    { root: config.root, pluginRoot: config.pluginRoot, plugin: plugin ?? null, engine: engine ?? null, port: () => boundPort, token, pluginId: config.pluginId, claudeCli: config.claudeCli },
+    options.update,
+  )
 
   // Every POST route: the page's own origin, JSON, a body within the route's cap (4096 bytes unless the route says more); then the handler.
   async function post(request: Request, handle: (views: Views, text: string) => Promise<Answer>, maxBytes = MAX_BODY_BYTES) {
