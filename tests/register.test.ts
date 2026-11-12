@@ -4,6 +4,7 @@ import type { On, ProcessRunInit, SessionCompactResult } from 'claude-code'
 import { afterTerm, EMBED_USAGE, isOlderBuild, UPDATE_WAIT_MS, embeddingsSetting, ENGINE_BUILD, ENGINE_VERSION, tagsApply, tagsDryRun } from '../hooks/register'
 import { ENGINE_BUILD as BUILD_FILE, INSTALL_CHECK_TIMEOUT_MS, INSTALL_STEP_TIMEOUT_MS, SETUP_LOCK_WAIT_MS, SETUP_TIMEOUT_MS } from '../hooks/engine-build'
 import { engineTool, mnemosyneStats, publicTool } from '../hooks/surface'
+import { cutMark } from '../hooks/session'
 import { BACKFILL_CONCURRENCY, extractionModelOf, extractionOff, GET_BATCH, parseProposals, parseTags, pool, SYSTEM_PROMPT } from '../hooks/backfill'
 import type { Proposal } from '../hooks/backfill'
 import type { Row } from '../hooks/backfill'
@@ -59,13 +60,14 @@ type Extra = {
   // AUTO.1: the install exits with this code and leaves the build alone; the first $.clock.sleep then installs `installTo` (another session's install).
   installExit?: number
 }
-const SESSION_COMMANDS = ['first-prompt', 'summarised', 'session-pending', 'sweep-claim', 'expire']
+const SESSION_COMMANDS = ['first-prompt', 'summarised', 'session-pending', 'sweep-claim', 'expire', 'row-info']
 const QUIET_REPLIES: Record<string, string> = {
   'first-prompt': '{"summary":null,"pinned":[]}\n',
   summarised: '{"done":[]}\n',
   'session-pending': '[]\n',
   'sweep-claim': '{"due":false}\n',
   expire: '{"dryRun":false,"count":0,"rows":[]}\n',
+  'row-info': 'null\n',
 }
 const MODEL_DIR = '/home/u/.claude/mnemosyne/model-cache/cache/fastembed/Qdrant_bge-small-en-v1.5-onnx-Q'
 const MARKER = '/home/u/.claude/mnemosyne/embeddings.json'
@@ -1182,7 +1184,7 @@ test('AUTO.1: session start updates an older engine in the background, with no /
   expect(stale.toasts[1]).toContain(`updated to build ${ENGINE_BUILD}`)
   // SETUP.STATUS: the update raises toasts only, so no status of its own is left in the footer.
   expect(statuses.filter(text => text !== undefined && !text.endsWith('· ready'))).toEqual([])
-  expect(stale.tools).toEqual(['memory_remember', 'memory_recall', 'memory_update', 'memory_forget', 'memory_stats'])
+  expect(stale.tools).toEqual(['memory_remember', 'memory_recall', 'memory_update', 'memory_forget', 'memory_stats', 'memory_get'])
 })
 
 test('AUTO.1: the auto-update keeps embeddings on when setup already downloaded the model', async ($, on) => {
@@ -3653,14 +3655,14 @@ test('WIRE.2: a broken or hostile config.json gives the defaults and never stops
   }
 })
 
-test('WIRE.3.a1: all five tools are registered by default (C3)', async ($, on) => {
+test('WIRE.3.a1: all six tools are registered by default (C3)', async ($, on) => {
   const registered = await registeredTools($, on)
-  expect(registered.map(tool => tool.name)).toEqual(['memory_remember', 'memory_recall', 'memory_update', 'memory_forget', 'memory_stats'])
+  expect(registered.map(tool => tool.name)).toEqual(['memory_remember', 'memory_recall', 'memory_update', 'memory_forget', 'memory_stats', 'memory_get'])
 })
 
 test('WIRE.3.a1: a tool switched off is not registered at the next session start; the others are', async ($, on) => {
   const registered = await registeredTools($, on, withConfig({ version: 1, tools: { memory_forget: false, memory_stats: false } }))
-  expect(registered.map(tool => tool.name)).toEqual(['memory_remember', 'memory_recall', 'memory_update'])
+  expect(registered.map(tool => tool.name)).toEqual(['memory_remember', 'memory_recall', 'memory_update', 'memory_get'])
 })
 
 test('WIRE.3.a2: with memory_remember off, the remember trigger and the rules block are not added', async ($, on) => {
@@ -3941,4 +3943,162 @@ test('HARDEN.3.a1: session start prunes the logs folder in the background, and a
   const prune = runs.find(r => r.argv.includes('prune-logs'))
   expect(prune?.argv[1]).toMatch(/\/bin\/install-engine\.ts$/)
   expect(prune?.argv.slice(2)).toEqual(['prune-logs', '/home/u/.claude/mnemosyne/model-cache/logs'])
+})
+
+// ---- GET.1-GET.3: memory_get reads a memory in full; recall and the first prompt mark a cut one ----
+
+const LONG_TEXT = `${'Decided: the 7of9 box keeps its 64 GB RAM and gets a second NVMe. '.repeat(12)}The end.`
+const getReply = (id: string, owner: string, content = LONG_TEXT) =>
+  JSON.stringify({
+    status: 'ok',
+    memory: { id, content, source: 'claude-code', timestamp: '2026-11-01T10:00:00Z', session_id: owner, importance: 0.7, metadata: JSON.stringify({ tags: ['hardware', 'servers'], pinned: true }), veracity: 'unknown', created_at: '2026-11-01T10:00:00Z', valid_until: null, superseded_by: null, memory_store: 'working' },
+    bank: 'default',
+  })
+const rowInfoFor = (rows: Record<string, { owner: string; scope: string; kind: string; live?: boolean }>) => (argv: readonly string[]) => {
+  if (!argv.includes('row-info')) return undefined
+  const id = argv.at(-1)!
+  const row = rows[id]
+  return { stdout: `${JSON.stringify(row === undefined ? null : { id, live: true, ...row })}\n` }
+}
+
+test('GET.1: memory_get runs mnemopi_get with the id and gives the full text, kind, tags, pinned and timestamps', async ($, on) => {
+  const runs = world(on, getReply('m1', 'global'), true, 0, ENGINE_BUILD, { memories: rowInfoFor({ m1: { owner: 'global', scope: 'global', kind: 'decision' } }) })
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_get', memory_id: 'm1' })
+
+  expect(runs.length).toBe(1)
+  expect(request(runs[0]!)).toEqual({ name: 'mnemopi_get', arguments: { memory_id: 'm1' } })
+  expect(runs.session.some(run => run.argv.includes('row-info') && run.argv.at(-1) === 'm1')).toBe(true)
+  const got = JSON.parse(String(ran.result))
+  expect(got).toEqual({
+    status: 'ok', id: 'm1', owner: 'global', kind: 'decision', scope: 'global', content: LONG_TEXT, length: LONG_TEXT.length,
+    tags: ['hardware', 'servers'], pinned: true, importance: 0.7, source: 'claude-code',
+    created_at: '2026-11-01T10:00:00Z', timestamp: '2026-11-01T10:00:00Z', valid_until: null, superseded_by: null,
+  })
+  // The whole text, well past recall's 500-character preview.
+  expect(got.content.length).toBeGreaterThan(500)
+  expect(got.content.endsWith('The end.')).toBe(true)
+  expect(lines(runs).at(-1)).toMatchObject({ action: 'get', origin: 'tool', ids: ['m1'], count: 1, ok: true, text: '' })
+})
+
+test('GET.1: memory_get of another project\'s private memory without its owner is not_found, and runs no engine', async ($, on) => {
+  const runs = world(on, getReply('p1', 'project-Other-abc'), true, 0, ENGINE_BUILD, { memories: rowInfoFor({ p1: { owner: 'project-Other-abc', scope: 'channel', kind: 'fact' } }) })
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_get', memory_id: 'p1' })
+
+  expect(JSON.parse(String(ran.result))).toEqual({ status: 'not_found', memory_id: 'p1' })
+  expect(runs.length).toBe(0)
+  expect(lines(runs).at(-1)).toMatchObject({ action: 'get', ok: false })
+})
+
+test('GET.1: memory_get with the owner recall gave reads that owner\'s memory as that owner, like update and forget', async ($, on) => {
+  const runs = world(on, getReply('p1', 'project-Other-abc'), true, 0, ENGINE_BUILD, { memories: rowInfoFor({ p1: { owner: 'project-Other-abc', scope: 'channel', kind: 'fact' } }) })
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_get', memory_id: 'p1', owner: 'project-Other-abc' })
+
+  expect(runs[0]!.init?.env?.MNEMOPI_SESSION_ID).toBe('project-Other-abc')
+  expect(request(runs[0]!)).toEqual({ name: 'mnemopi_get', arguments: { memory_id: 'p1' } })
+  expect(JSON.parse(String(ran.result))).toMatchObject({ status: 'ok', id: 'p1', owner: 'project-Other-abc', kind: 'fact', scope: 'channel', content: LONG_TEXT })
+})
+
+test('GET.1: a global memory of another project is read without its owner, as recall shows it', async ($, on) => {
+  const runs = world(on, getReply('g1', 'project-Other-abc'), true, 0, ENGINE_BUILD, { memories: rowInfoFor({ g1: { owner: 'project-Other-abc', scope: 'global', kind: 'preference' } }) })
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_get', memory_id: 'g1' })
+
+  expect(runs.length).toBe(1)
+  expect(JSON.parse(String(ran.result))).toMatchObject({ status: 'ok', id: 'g1', owner: 'project-Other-abc', kind: 'preference' })
+})
+
+test('GET.1: an unknown id is not_found without an engine run; a malformed id is denied', async ($, on) => {
+  const runs = world(on, getReply('x', 'global'))
+  const unknown = await $.tool.call({ tool: 'mcp__mnemosyne__memory_get', memory_id: 'nope' })
+  const malformed = await $.tool.call({ tool: 'mcp__mnemosyne__memory_get', memory_id: '../etc' })
+  const missing = await $.tool.call({ tool: 'mcp__mnemosyne__memory_get' })
+  const dashed = await $.tool.call({ tool: 'mcp__mnemosyne__memory_get', memory_id: '--store' })
+
+  expect(JSON.parse(String(unknown.result))).toEqual({ status: 'not_found', memory_id: 'nope' })
+  expect(malformed.deny).toBe('Mnemosyne: memory_id must be the id of a memory (from memory_recall).')
+  expect(missing.deny).toBe('Mnemosyne: memory_id must be the id of a memory (from memory_recall).')
+  expect(dashed.deny).toBe('Mnemosyne: memory_id must be the id of a memory (from memory_recall).')
+  expect(runs.length).toBe(0)
+})
+
+test('GET.1: memory_get is registered with memory_id and owner, and the recall description sends a cut memory to it', async ($, on) => {
+  const registered = await registeredTools($, on)
+  const get = registered.find(tool => tool.name === 'memory_get') as unknown as { inputSchema: { properties: Record<string, unknown>; required: string[] }; description: string }
+  expect(Object.keys(get.inputSchema.properties)).toEqual(['memory_id', 'owner'])
+  expect(get.inputSchema.required).toEqual(['memory_id'])
+  const recall = registered.find(tool => tool.name === 'memory_recall') as { description: string }
+  expect(recall.description).toContain('truncated: true')
+  expect(recall.description).toContain('memory_get')
+})
+
+test('WIRE.3.a1: memory_get switched off is not registered', async ($, on) => {
+  const registered = await registeredTools($, on, withConfig({ version: 1, tools: { memory_get: false } }))
+  expect(registered.map(tool => tool.name)).toEqual(['memory_remember', 'memory_recall', 'memory_update', 'memory_forget', 'memory_stats'])
+})
+
+const CUT_RECALL = JSON.stringify({
+  status: 'ok',
+  results: [
+    { id: 'long1', session_id: 'project-servers-abc', content: `${'x'.repeat(499)}…`, scope: 'global', timestamp: 't1', truncated: true, full_length: 1200, score: 0.9 },
+    { id: 'short1', session_id: 'global', content: 'a short memory', scope: 'global', timestamp: 't2', truncated: false, full_length: 14, score: 0.5 },
+  ],
+})
+
+test('GET.2: memory_recall marks a cut row truncated with its full length and a note naming memory_get; a whole row has no mark', async ($, on) => {
+  world(on, CUT_RECALL)
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_recall', query: 'hardware' })
+  const rows = JSON.parse(String(ran.result))
+  expect(rows[0]).toEqual({
+    id: 'long1', owner: 'project-servers-abc', content: `${'x'.repeat(499)}…`, scope: 'global', timestamp: 't1',
+    truncated: true, full_length: 1200, note: 'Cut to a preview. Call memory_get with memory_id long1 and owner project-servers-abc for the full text.',
+  })
+  expect(rows[1]).toEqual({ id: 'short1', owner: 'global', content: 'a short memory', scope: 'global', timestamp: 't2' })
+})
+
+test('GET.3: the first-prompt recall marks a cut memory and names memory_get; with memory_get off it only says cut', async ($, on) => {
+  world(on, CUT_RECALL)
+  const seen: (readonly string[] | undefined)[] = []
+  on('prompt.submit', (_$, e) => {
+    seen.push(e.context)
+    return { text: e.text, context: e.context }
+  })
+  await $.prompt.submit({ text: 'What did we decide about the hardware?' } as never)
+  const text = (seen[0] ?? []).join('\n')
+  expect(text).toContain(`- [long1 owner=project-servers-abc] ${'x'.repeat(499)}…${cutMark(true)}`)
+  expect(text.split('\n')).toContain('- [short1 owner=global] a short memory')
+  expect(cutMark(true)).toContain('mcp__mnemosyne__memory_get')
+  expect(cutMark(false)).toBe(' [cut]')
+})
+
+test('GET.3: the session-start block marks the pinned memory it cuts', async ($, on) => {
+  const pinned = Array.from({ length: 3 }, (_, i) => ({ id: `w${i}`, owner: 'global', content: `${'y'.repeat(900)}${i}` }))
+  world(on, '{"results":[]}', true, 0, ENGINE_BUILD, { memories: argv => (argv.includes('first-prompt') ? { stdout: JSON.stringify({ summary: null, pinned }) } : undefined) })
+  const seen: (readonly string[] | undefined)[] = []
+  on('prompt.submit', (_$, e) => {
+    seen.push(e.context)
+    return { text: e.text, context: e.context }
+  })
+  await $.prompt.submit({ text: 'hello there' } as never)
+  const block = (seen[0] ?? []).find(part => part.startsWith('Mnemosyne: what we were doing last time'))!
+  const cut = block.split('\n').find(line => line.startsWith('- Pinned [w2 owner=global]'))!
+  expect(cut).toEndWith(`…${cutMark(true)}`)
+})
+
+test('GET.1: a retired global memory of another project is not_found, as recall hides it', async ($, on) => {
+  const runs = world(on, getReply('r1', 'project-Other-abc'), true, 0, ENGINE_BUILD, { memories: rowInfoFor({ r1: { owner: 'project-Other-abc', scope: 'global', kind: 'fact', live: false } }) })
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_get', memory_id: 'r1' })
+  expect(JSON.parse(String(ran.result))).toEqual({ status: 'not_found', memory_id: 'r1' })
+  expect(runs.length).toBe(0)
+})
+
+test('GET.2: with memory_get off, the recall description leaves memory_get out', async ($, on) => {
+  const registered = await registeredTools($, on, withConfig({ version: 1, tools: { memory_get: false } }))
+  expect((registered.find(tool => tool.name === 'memory_recall') as { description: string }).description).toBe('Search long-term memory by keywords (full-text).')
+})
+
+test('GET.2: with memory_get off, recall still marks a cut row but names no tool', async ($, on) => {
+  world(on, CUT_RECALL, true, 0, ENGINE_BUILD, withConfig({ version: 1, tools: { memory_get: false } }))
+  const ran = await $.tool.call({ tool: 'mcp__mnemosyne__memory_recall', query: 'hardware' })
+  const rows = JSON.parse(String(ran.result))
+  expect(rows[0]).toMatchObject({ id: 'long1', truncated: true, full_length: 1200 })
+  expect(rows[0].note).toBeUndefined()
 })

@@ -58,8 +58,8 @@ test('an entry has the C3 keys; error only when not ok', () => {
   expect(activityLine({ action: 'stats', origin: 'external', owner: 'global', ok: true })).not.toContain('\n')
 })
 
-test('the five tools map to their actions', () => {
-  expect(TOOL_ACTIONS).toEqual({ memory_remember: 'remember', memory_recall: 'recall', memory_update: 'update', memory_forget: 'forget', memory_stats: 'stats' })
+test('the six tools map to their actions', () => {
+  expect(TOOL_ACTIONS).toEqual({ memory_remember: 'remember', memory_recall: 'recall', memory_update: 'update', memory_forget: 'forget', memory_stats: 'stats', memory_get: 'get' })
 })
 
 // CTX.1.a1: client and session are optional, bounded, and control-free; author_type and veracity

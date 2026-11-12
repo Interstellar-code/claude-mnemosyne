@@ -239,7 +239,7 @@ gives it as `activity`, `<root>/activity.jsonl`). The dashboard reads it.
   backtrack is bounded: 100 KB and 200 KB inputs redact in a few ms (kit
   test, under 200 ms). A forget logs only the id, in `ids`. A remember term
   logs a `remember`/`trigger` line, and Claude's save that follows logs its
-  own `remember`/`tool` line. A `memory_*` tool outside the five is not
+  own `remember`/`tool` line. A `memory_*` tool outside the five (six since 0.34.0) is not
   logged.
 - The writer is `bin/activity.ts`: `appendActivity(path, lines)` for Bun code,
   or `bun bin/activity.ts <path>` with the lines on stdin. It writes only a
@@ -286,7 +286,7 @@ gives it as `activity`, `<root>/activity.jsonl`). The dashboard reads it.
   on disk before it exits. It keeps the calls it sent by JSON-RPC id and writes
   the line when the reply comes back (ok, ids and count read from it); a call
   it refuses (stale engine, bad tags) is logged at once with `ok: false`; a
-  tool outside the five is not a memory call and is not logged; a call the
+  tool outside the five (six since 0.34.0) is not a memory call and is not logged; a call the
   engine never answered is logged as failed at exit. The wrapper passes the
   path as `MNEMOSYNE_ACTIVITY_LOG`, empty when the log is off; a log failure
   never changes what the client receives (Bun test).
@@ -832,7 +832,7 @@ records the code as it was in 0.6.0.
   instructions, timelines, kg } }` or `{ refused: 'gone' | 'stale' |
   'unparseable' | 'invalid' }`; `stale` is a changed hash. Both act only on the
   caller's own row (`session_id` is `MNEMOPI_SESSION_ID`), and neither is in the
-  proxy's allow-list of five tools. After a save (or a `memory_update` that
+  proxy's allow-list of five tools (six since 0.34.0). After a save (or a `memory_update` that
   changes the text) `hooks/register.ts` replies at once and then, per session in
   the order of the saves: gets the prompt, writes the pending file, calls
   `$.model.complete` with the `extractionModel` (2000 tokens, 60 s, low effort),
@@ -1200,7 +1200,7 @@ rows, never scope `session` or NULL, 90 days unused by default and never under
 30; a dry run unless `dry_run` is the boolean `false`, and a real run sets only
 `valid_until` and the audit row. `mnemopi_invalidate`, `mnemopi_update`,
 `mnemopi_validate` and `mnemopi_expire_unused` take an optional `validator`.
-None of these tools is in the proxy's allow-list, which still serves five tools. In
+None of these tools is in the proxy's allow-list, which still serves five tools (six since 0.34.0, with `memory_get`). In
 0.8.0 the plugin calls `mnemopi_similar` (G3) and `mnemopi_invalidate`
 (`replaces`); nothing calls `mnemopi_expire_unused`, and the plugin
 never sends `restore`. The proxy does let a client send it: it strips only
@@ -1481,14 +1481,15 @@ rows written elsewhere, §2.4).
    there is a store worth curating.
 
 6. **External clients get a fixed set of tools only (v0.4.0; five since
-   v0.5.0).** `externalMcp`'s wrapper runs `bin/mcp-proxy.ts`, which lists and
-   serves only `memory_remember/recall/update/forget/stats` (mapped to the
+   v0.5.0, six since 0.34.0).** `externalMcp`'s wrapper runs `bin/mcp-proxy.ts`, which lists and
+   serves only `memory_remember/recall/update/forget/stats/get` (mapped to the
    engine's `mnemopi_*`). Until 0.7.x it pinned remember to `source: 'imported'`;
    since v0.8.0 it writes `source: 'mcp:<client>'` with tier `EXTERNAL_WRITE`
    (§3.9, C4) and runs the save guard first. The engine's other tools were
    verified harmful for   this store: `mnemopi_sleep` widens a project's `channel` facts to `global`
    when a chunk holds one global row, and leaves episodes that `forget` cannot
-   remove; `mnemopi_get` reads any owner's row; `mnemopi_export` writes every
+   remove; `mnemopi_get` reads any owner's row (so `memory_get`, 0.34.0, is
+   served only after the proxy's own read-only check, below); `mnemopi_export` writes every
    owner to any path; `mnemopi_shared_*` writes STATED rows the 24h trim
    deletes. Every engine run also blanks `MNEMOPI_LLM_BASE_URL` and
    `MNEMOPI_HOST_LLM_ENABLED`: the env is layered over the host's, and either
@@ -1521,7 +1522,7 @@ rows written elsewhere, §2.4).
    `/mnemosyne-setup`. The rules text now says to update a fact by id and
    owner, to forget only to delete, and (since 0.8.0) not to save a near-duplicate
    but to update the close memory or save with `replaces`. The proxy
-   (§5.6) serves `memory_update` too, so `tools/list` holds five tools; it
+   (§5.6) serves `memory_update` too, so `tools/list` holds five tools (six since 0.34.0); it
    drops `bank` and `metadata` from every client call (a client `bank` would
    move writes to `<store>/banks/<x>`), maps a cleaned `tags` array to
    `metadata.tags` for remember and update, shows `tags` (never `metadata` or
@@ -1581,11 +1582,20 @@ remember, owner-scoped recall, owner-only forget and stats behave the same.
 
 C10.3: the engine's trigger `trim_validations_to_3` keeps only the newest 3 `memory_validations` rows per memory, so the trail is "the last 3 actions", not a history. C10.1: a row is `{ memory_id, validator, action, validated_at }`; `new_content` and `note` stay NULL, so memory text never enters the trail. Validators: `dashboard`, `claude-code`, `expire-sweep`, else `unknown` (a restore through the outside-agent proxy). Forget deletes the memory's rows in the same transaction (C10.4). The Review tab's Not-live list is the only place the trail is shown.
 
+### Reading a memory in full: memory_get (0.34.0; GET.1 to GET.3)
+
+1. Why. The engine's recall cuts each row to `RECALL_CONTENT_PREVIEW_CHARS` (500, `engine/src/core/beam/recall.ts`), and its MCP recall takes no preview length. Until 0.33 nothing exposed the engine's `mnemopi_get`, so Claude could never see the rest of a long memory, and the first-prompt block cut its last pinned memory at the 2000-character cap with no way back. The engine is unchanged (still `18.12.3-mnemosyne.18`): the fix is all in the plugin.
+2. GET.1, the tool. `memory_get` (`memory_id`, optional `owner`) runs `mnemopi_get` and answers `{ status, id, owner, kind, scope, content, length, tags, pinned, importance, source, created_at, timestamp, valid_until, superseded_by }` (`mnemosyneGet`, `hooks/surface.ts`). The engine's get leaves out `memory_type` and `scope`, so both come from a read-only look at the store, `rowInfo` in `bin/row-info.ts` (no text read; working memory, then episodic; any error on a table gives no row, so the check fails closed and never passes on one table's row while the engine answers with the other's). An id must match `MEMORY_ID`: no leading `-`, so it can never read as an option to `bin/memories.ts`. The plugin's tool reaches it as `bin/memories.ts row-info <id>`; the proxy opens the store itself. It is the sixth M1 tool (`tools.memory_get`, on by default, last in `TOOL_NAMES` so older lists keep their order) and is in the default `tools.externalAllow`. Activity lines use the new action `get` (the dashboard shows "Read … in full").
+3. GET.1, owners. The engine's get reads any owner's working row, so the plugin checks first (`visibleTo`): a row is read when it is the caller's owner's or `global`, the same rows recall shows. In Claude Code the caller's owner is the call's `owner` when given (it runs as that owner, like update and forget), else this project. The proxy reads only as its own owner: an `owner` that is not the row's own, a private row of another owner, a retired or expired `global` row of another owner (recall hides those too; their own owner still reads them), an id from the `facts` table (`rowInfo` does not look there) and an unknown id all get the same `{"status":"not_found","memory_id":…}`, answered without an engine run, so the reply says nothing about other projects' memories. A malformed id is refused (`-32602` in the proxy, a denial in Claude Code).
+4. GET.2, cut recall rows. The engine already marks a cut row `truncated` with `full_length`. The plugin's recall keeps both and adds a `note` that names the `memory_get` call with the id and owner; the proxy adds `truncated: true` and the note to its pass-through rows. Both recall descriptions say that a long memory comes back cut and to call `memory_get`. Neither the note nor that sentence is given when `memory_get` is switched off (M1) or, in the proxy, not in `tools.externalAllow` (M2): the row then carries only `truncated` and `full_length`. A `full`/preview-length argument on recall was not added: the engine's MCP recall has no such argument, and adding one is an engine build.
+5. GET.3, cut lines in the context. A first-prompt recall line whose row is cut, and the block's pinned memory cut at the 2000-character cap, end in `cutMark` (`hooks/session.ts`): `[cut: call mcp__mnemosyne__memory_get with this id and owner for the full text]`, or `[cut]` when `memory_get` is switched off. The mark is not counted in the cap; the line already carries the id and owner.
+6. The proxy's read-only store lookups (`ownerOfMemory` for OWNERHINT and the new one) wait up to 2 s for the engine's lock (`busy_timeout`) instead of failing at once. The OWNERHINT spec failed once on a forget's hint while this was built, and passed on reruns; the wait is believed to be the fix, not proven.
+
 ### Session summaries and the first-prompt block (SESSION.1, SESSION.2)
 
 1. The plugin API gives `session.start` no way to add context (it returns only `{ cwd }`), and `/clear` fires `session.end` but no `session.start`. So `session.end` writes a pending marker (`<root>/session-pending/<session id>.json`, mode 0600: the session id, owner and transcript path, no text), and the next session's first prompt finishes it after the reply, in the background. A marker is claimed by renaming it to `<id>.claim`, so only one session summarises it; a claim older than 10 minutes is put back.
 2. The summary is `sessionSummary: on` only (off by default). `hooks/session.ts` holds the pure parts: the prompt (the transcript goes in as a quoted JSON string, marked as data), the reply reader (`NONE`, an empty or a too-short reply saves nothing; at most 600 characters), the caps (at most 3 per run, at least 2 turns, 90 s per call) and the saved row (`event`, source `import:session`, 30 days, `metadata.session`, through `admit()`). Transcripts are read through `bin/import.ts` because `$.fs.read` refuses files over 4 MiB.
-3. The first-prompt block is read from the store by `bin/memories.ts first-prompt` (no model, no engine process): the newest live summary of the owner, then up to `min(5, recall.firstPromptCount)` pinned memories and 2000 characters of them. What it shows is left out of the related-memories recall so nothing appears twice. It is added in `prompt.submit`'s first-prompt recall, the only place the API lets context in.
+3. The first-prompt block is read from the store by `bin/memories.ts first-prompt` (no model, no engine process): the newest live summary of the owner, then up to `min(5, recall.firstPromptCount)` pinned memories and 2000 characters of them (the one cut at the cap carries a cut mark naming `memory_get` since 0.34.0, GET.3). What it shows is left out of the related-memories recall so nothing appears twice. It is added in `prompt.submit`'s first-prompt recall, the only place the API lets context in.
 
 ### The expiry sweep and its limits (SESSION.4)
 
@@ -1730,7 +1740,7 @@ Sixth step of the tab polish (design proposal `tabs-after/NOTES-activity-review-
 ### The Activity tab (0.21.0)
 
 Fifth step of the tab polish (design proposal `tabs-after/NOTES-activity-review-health.md`, Activity items 1 to 7). Page only: no server, setting or engine change.
-- **Colours.** `actionColour(action)` maps to recall, save (remember, import), update (update, restore), forget, retire (retire, expire) or other. Each row gets `ev-<colour>`, whose rail is a 3 px inset `box-shadow` in `--act-<colour>`. The five tokens are in the fallback block and in the `light-dark()` block. They paint rails, dots, bars and the hour strip only, never text, so the contrast checks do not apply to them.
+- **Colours.** `actionColour(action)` maps to recall (recall, get), save (remember, import), update (update, restore), forget, retire (retire, expire) or other. Each row gets `ev-<colour>`, whose rail is a 3 px inset `box-shadow` in `--act-<colour>`. The five tokens are in the fallback block and in the `light-dark()` block. They paint rails, dots, bars and the hour strip only, never text, so the contrast checks do not apply to them.
 - **From.** `fromOf(line)` is `claude` (origin hook, tool or trigger), `other` (external) or `ui`. `FeedFilter` gains optional `from`, `owner`, `hide` (one app key left out) and the action `failed` (`ok === false`). An older filter without them still works.
 - **Bursts.** `foldBursts(lines, gapMs = 60 000)` walks the shown lines, newest first, and folds runs of `BURST_MIN` (3) or more with the same action, origin and `appKey`, each within `gapMs` of the next. A failed line ends a run and stays alone. `burstSummary` gives the count, span, queries and owners (most first, "all projects (n)" for a cross-owner search), the found range, and `scripted` (30 or more at one a second or faster). An open burst lists 3 lines, then "+ n more" lists up to 200. Group bursts is `mnemosyne.activity.bursts` in localStorage (on unless "off").
 - **Days.** `drawFeed` splits the shown lines by local `day()` and adds `li.day-head` with the counts per colour and the failures. The newest shown day is open, older ones folded; `feedView.days` remembers a day opened or folded by hand. Rows carry `data-day` and `data-hour` for the hour strip's jump.

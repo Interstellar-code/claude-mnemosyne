@@ -21,6 +21,7 @@ const EXPECTED_CLOSURE = [
   'bin/activity.ts',
   'bin/lockfile.ts',
   'bin/mcp-proxy.ts',
+  'bin/row-info.ts',
   'bin/settings.ts',
   'hooks/activity-log.ts',
   'hooks/engine-build.ts',

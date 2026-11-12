@@ -1,10 +1,12 @@
 // Claude Mnemosyne — stdio MCP proxy for other clients (userConfig externalMcp).
 //
-// Runs the engine and passes through only the plugin's own five tools, named
+// Runs the engine and passes through only the plugin's own six tools, named
 // memory_* as in the plugin (the engine calls them mnemopi_*). The
 // engine's others leak across owners or lose data (DESIGN §5.6): sleep widens a
-// project's facts to global, get reads any owner's row, export writes the whole
-// store anywhere, shared_* rows are deleted after 24 hours.
+// project's facts to global, export writes the whole store anywhere, shared_*
+// rows are deleted after 24 hours. The engine's get reads any owner's row, so
+// memory_get (GET.1) is served only after a read-only look at the store shows the
+// row is this server's owner's or global (what recall shows); any other id is not_found.
 //
 // Remember is pinned the way C4 says an outside agent writes: source `mcp:<client>`, trust tier
 // EXTERNAL_WRITE, veracity unknown (a client never sets how far its save is trusted), and a scope that
@@ -18,7 +20,7 @@
 // size block is a -32602 error; a warned save is too in strict guard mode (the
 // default; MNEMOSYNE_GUARD_MODE, set by mnemosyne-mcp) unless the call passes
 // confirm: true, and in warn mode it is stored with metadata.guard.
-// Each call of the five tools is recorded in MNEMOSYNE_ACTIVITY_LOG (empty: off)
+// Each call of the six tools is recorded in MNEMOSYNE_ACTIVITY_LOG (empty: off)
 // as one activity line with origin external, written once its reply is read.
 // An update or forget of another owner's memory answers not_found from the engine; the proxy then
 // adds whose memory it is (`owner`, `hint`), read-only from the store (OWNERHINT).
@@ -31,7 +33,9 @@ import type { ActivityAction } from '../hooks/activity-log'
 import { ENGINE_BUILD } from '../hooks/engine-build'
 import { admit, guardConfigOf } from '../hooks/guard'
 import { expiresInDaysProblem, KIND_NAMES, kindProblem, missingKindMessage, validUntilFor } from '../hooks/kinds'
-import { engineTool, mnemosyneStats, publicTool } from '../hooks/surface'
+import { cutNote, engineTool, getNotFound, isCut, MEMORY_ID, mnemosyneGet, mnemosyneStats, publicTool, RECALL_DESCRIPTION_CUT, visibleTo } from '../hooks/surface'
+import type { RowInfo } from '../hooks/surface'
+import { rowInfo } from './row-info'
 import { cleanTags } from '../hooks/tags'
 import { tagRules } from '../hooks/vocab'
 import { appendActivity } from './activity'
@@ -39,7 +43,7 @@ import { readConfig } from './settings'
 import { parseConfig } from '../hooks/settings'
 import type { ResolvedSettings } from '../hooks/settings'
 
-const ALLOWED = new Set(['memory_remember', 'memory_recall', 'memory_update', 'memory_forget', 'memory_stats'])
+const ALLOWED = new Set(['memory_remember', 'memory_recall', 'memory_update', 'memory_forget', 'memory_stats', 'memory_get'])
 const TAGGED = new Set(['memory_remember', 'memory_update'])
 // The texts that quote a number follow the settings (C6): the tag count (T1) and the context-note days (E1).
 const tagsProperty = (settings: ResolvedSettings) => ({
@@ -110,13 +114,33 @@ const build = installedBuild(cli)
 // names (MNEMOPI_DATA_DIR; the bank is always `default`), and says whose it is. Never fatal: no
 // store, a locked file or a missing row gives no hint and the reply stays as the engine sent it.
 const storeDb = process.env.MNEMOPI_DATA_DIR ? join(process.env.MNEMOPI_DATA_DIR, 'mnemopi.db') : ''
+// Read-only, and waiting up to 2 s for the engine's write lock rather than failing at once: the engine may still be
+// finishing the write that came just before (a lookup that failed on the lock gave no hint, now and then).
+function openStore(dbPath: string) {
+  const db = new Database(dbPath, { readonly: true })
+  db.exec('PRAGMA busy_timeout = 2000')
+  return db
+}
 function ownerOfMemory(dbPath: string, id: unknown): string | undefined {
   if (dbPath === '' || typeof id !== 'string' || id === '' || id.length > 64) return undefined
   let db: Database | undefined
   try {
-    db = new Database(dbPath, { readonly: true })
+    db = openStore(dbPath)
     const row = db.query('SELECT session_id AS owner FROM working_memory WHERE id = ?').get(id) as { owner: unknown } | null
     return typeof row?.owner === 'string' && row.owner !== '' ? row.owner : undefined
+  } catch {
+    return undefined
+  } finally {
+    db?.close()
+  }
+}
+// GET.1: whose a row is, its scope and kind, read-only from the same store; undefined on any failure (the get then answers not_found).
+function infoOfMemory(dbPath: string, id: unknown): RowInfo | undefined {
+  if (dbPath === '' || typeof id !== 'string') return undefined
+  let db: Database | undefined
+  try {
+    db = openStore(dbPath)
+    return rowInfo(db, id)
   } catch {
     return undefined
   } finally {
@@ -133,7 +157,7 @@ const statsIds = new Set<unknown>()
 const send = (message: unknown) => process.stdout.write(`${JSON.stringify(message)}\n`)
 
 // The calls on their way to the engine, by JSON-RPC id: what to log once the reply comes back.
-type Pending = { action: ActivityAction; text: string; args: Record<string, unknown>; warnings?: string[] }
+type Pending = { action: ActivityAction; text: string; args: Record<string, unknown>; warnings?: string[]; info?: RowInfo }
 const pending = new Map<unknown, Pending>()
 
 // One activity line, written synchronously (so it is on disk before the proxy
@@ -147,7 +171,7 @@ function log(call: Pending, outcome: { ok: boolean; ids?: readonly string[]; cou
   }
 }
 
-// A refused call of one of the five tools: logged now, as the engine never sees it.
+// A refused call of one of the six tools: logged now, as the engine never sees it.
 // `logged` replaces the error text in the line (a guard block logs rule ids only).
 function refuse(id: unknown, action: ActivityAction | undefined, args: Record<string, unknown>, error: { code: number; message: string; data?: unknown }, logged?: string) {
   send({ jsonrpc: '2.0', id, error })
@@ -200,13 +224,31 @@ void (async () => {
       const name = message.params?.name
       const raw = message.params?.arguments
       const given: Record<string, unknown> = raw !== null && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}
-      // Tools outside the five are not memory calls and are not logged.
+      // Tools outside the six are not memory calls and are not logged.
       const settings = settingsNow()
       const action = ALLOWED.has(name) ? TOOL_ACTIONS[name] : undefined
-      // M2: a tool outside the allow-list is not served, the same answer as a tool outside the five. Not logged: the line would carry no new fact.
+      // M2: a tool outside the allow-list is not served, the same answer as a tool outside the six. Not logged: the line would carry no new fact.
       if (!ALLOWED.has(name) || !(settings.tools.externalAllow as readonly string[]).includes(name)) {
         refuse(message.id, undefined, given, { code: -32601, message: `Tool not available: ${name}` })
         continue
+      }
+      // GET.1: memory_get reads as this server's owner only. `owner`, when given, must be the row's own; a row that is neither
+      // this owner's nor global, or that does not exist, gets the same not_found, answered here without the engine.
+      let getInfo: RowInfo | undefined
+      if (name === 'memory_get') {
+        const id = given.memory_id
+        if (typeof id !== 'string' || !MEMORY_ID.test(id)) {
+          refuse(message.id, action, given, { code: -32602, message: 'memory_id must be the id of a memory (from memory_recall).' })
+          continue
+        }
+        getInfo = infoOfMemory(storeDb, id)
+        const named = typeof given.owner === 'string' && given.owner !== '' ? given.owner : undefined
+        if (!visibleTo(getInfo, owner) || (named !== undefined && named !== getInfo?.owner)) {
+          const missing = getNotFound(id)
+          send({ jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: missing }] } })
+          if (action) log({ action, text: callText(action, given), args: given }, callOutcome(action, given, missing))
+          continue
+        }
       }
       if ((name === 'memory_update' || name === 'memory_remember') && build !== ENGINE_BUILD) {
         // memory_remember too: an older engine's 24 h trim deletes every row whose trust tier is not IMPORTED, which a save of this build's is not.
@@ -307,9 +349,12 @@ void (async () => {
           action,
           text: callText(action, { ...args, tags: Array.isArray(tags) ? cleanTags(tags, { ...tagRulesNow(), max: settings.tags.maxPerMemory }) : undefined }),
           args: { ...args },
+          ...(getInfo !== undefined ? { info: getInfo } : {}),
           ...(warned.length > 0 ? { warnings: warned.map(hit => `Mnemosyne guard warning: ${hit.message}`) } : {}),
         })
       }
+      // memory_get's owner was checked above; the engine's get takes only the id.
+      if (name === 'memory_get') delete args.owner
       message.params.name = engineTool(name)
       message.params.arguments = args
       if (name === 'memory_stats') statsIds.add(message.id)
@@ -339,10 +384,20 @@ void (async () => {
 
 type Schema = { properties?: Record<string, unknown>; required?: string[] }
 
-// What a client sees of a tool's input: no bank, no metadata; tags on remember and update.
+const GET_OWNER_PROPERTY = { type: 'string', description: "The row's owner from memory_recall (session_id); must be the row's own. Optional." }
+// GET.1 and GET.2: memory_get's and memory_recall's texts, as the plugin's own tools say them.
+const GET_DESCRIPTION =
+  'Read one memory in full by the id memory_recall gave: its whole text, kind, tags, pinned, importance and timestamps. Use it when a recalled memory is cut (truncated: true, or ending in …). Reads this server\'s own memories and global ones.'
+// The recall sentence names memory_get, so it is added only when memory_get is served (M2).
+const getServed = (settings: ResolvedSettings) => (settings.tools.externalAllow as readonly string[]).includes('memory_get')
+const publicDescription = (name: string, description: string | undefined, settings: ResolvedSettings) =>
+  name === 'memory_get' ? GET_DESCRIPTION : name === 'memory_recall' && getServed(settings) ? `${description ?? 'Search memories.'} ${RECALL_DESCRIPTION_CUT}` : description
+
+// What a client sees of a tool's input: no bank, no metadata; tags on remember and update; an owner on get.
 function publicSchema(name: string, schema: Schema | undefined, settings: ResolvedSettings): Schema {
   // memory_type is the engine's name for kind: clients see kind only.
-  const { bank: _bank, metadata: _metadata, memory_type: _memoryType, ...properties } = schema?.properties ?? {}
+  const { bank: _bank, metadata: _metadata, memory_type: _memoryType, ...engineProperties } = schema?.properties ?? {}
+  const properties = name === 'memory_get' ? { ...engineProperties, owner: GET_OWNER_PROPERTY } : engineProperties
   return {
     ...schema,
     properties: TAGGED.has(name) ? { ...properties, kind: KIND_PROPERTY, ...(name === 'memory_remember' ? { expires_in_days: expiresProperty(settings) } : {}), tags: tagsProperty(settings), confirm: CONFIRM_PROPERTY } : properties,
@@ -368,10 +423,10 @@ for await (const line of lines(engine.stdout)) {
       .map((tool: { name: string; description?: string; inputSchema?: Schema }) => ({
         ...tool,
         name: publicTool(tool.name),
-        description: tool.description?.replaceAll('Mnemopi', 'Mnemosyne'),
+        description: publicDescription(publicTool(tool.name), tool.description?.replaceAll('Mnemopi', 'Mnemosyne'), settings),
         inputSchema: publicSchema(publicTool(tool.name), tool.inputSchema, settings),
       }))
-      // M2: only the tools on the allow-list are listed (the five, by default).
+      // M2: only the tools on the allow-list are listed (all six, by default).
       .filter((tool: { name: string }) => ALLOWED.has(tool.name) && (settings.tools.externalAllow as readonly string[]).includes(tool.name))
   }
   if (message?.result?.serverInfo?.name === 'mnemopi') message.result.serverInfo.name = 'mnemosyne'
@@ -379,6 +434,24 @@ for await (const line of lines(engine.stdout)) {
   const call = pending.get(message?.id)
   pending.delete(message?.id)
   if (statsIds.delete(message?.id) && typeof text?.text === 'string') text.text = mnemosyneStats(text.text)
+  // GET.1: the engine's row as the plugin's memory_get shows it, with kind and scope from the store.
+  if (call?.action === 'get' && typeof text?.text === 'string') text.text = mnemosyneGet(text.text, call.info)
+  // GET.2: a recall row cut to its preview says so: truncated: true and a note naming the memory_get call.
+  if (call?.action === 'recall' && typeof text?.text === 'string') {
+    try {
+      const reply = JSON.parse(text.text) as { results?: unknown }
+      const served = getServed(settingsNow())
+      if (Array.isArray(reply?.results) && reply.results.some(row => row !== null && typeof row === 'object' && isCut(row as Record<string, unknown>))) {
+        reply.results = reply.results.map(row => {
+          const r = row as Record<string, unknown>
+          return r !== null && typeof r === 'object' && isCut(r) ? { ...r, truncated: true, ...(served ? { note: cutNote(r.id) } : {}) } : row
+        })
+        text.text = JSON.stringify(reply)
+      }
+    } catch {
+      // not a JSON reply: left as it is
+    }
+  }
   const replyText = String(text?.text ?? '')
   const failure = message?.error?.message ?? (message?.result?.isError ? String(text?.text ?? 'failed') : undefined)
   // One warning line per hit, after the engine's reply.

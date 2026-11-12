@@ -10,6 +10,7 @@ import {
   BLOCK_PINNED_CHARS,
   BLOCK_PINNED_MAX,
   buildSessionBlock,
+  cutMark,
   EXPIRE_DEFAULT_DAYS,
   EXPIRE_KINDS,
   expireRequest,
@@ -168,11 +169,16 @@ test('SESSION.2.a3: at most 5 pinned memories, at most the first-prompt count, a
   expect(buildSessionBlock({ summary: row('s1', 'A summary.'), pinned: many }, 3)!.ids).toEqual(['s1', 'p0', 'p1', 'p2'])
   const wide = Array.from({ length: 5 }, (_, i) => row(`w${i}`, `${'x'.repeat(900)}${i}`))
   const capped = buildSessionBlock({ summary: null, pinned: wide })!
-  const shown = capped.text.split('\n').slice(1).map(line => line.replace(/^- Pinned \[[^\]]*\] /, ''))
+  // GET.3: the cut mark after the ellipsis is not memory text, so it is not counted in the cap
+  const shown = capped.text.split('\n').slice(1).map(line => line.replace(/^- Pinned \[[^\]]*\] /, '').replace(cutMark(true), ''))
   expect(shown.reduce((sum, text) => sum + Array.from(text).length, 0)).toBeLessThanOrEqual(BLOCK_PINNED_CHARS)
-  // the third one crosses the cap and is cut with an ellipsis; the rest do not fit
+  // the third one crosses the cap and is cut with an ellipsis and the cut mark; the rest do not fit
   expect(capped.ids).toEqual(['w0', 'w1', 'w2'])
   expect(shown[2]!.endsWith('…')).toBe(true)
+  expect(capped.text.split('\n')[3]).toEndWith(`…${cutMark(true)}`)
+  expect(capped.text.split('\n')[3]).toStartWith('- Pinned [w2 owner=')
+  // the two that fit whole carry no mark
+  expect(capped.text.split('\n')[1]).not.toContain('[cut')
 })
 
 test('SESSION.2.a2: a pin that is also the summary is shown once; a read that is not the expected shape is empty', () => {
@@ -758,4 +764,14 @@ test('SESSION.4.a2: two triggers close together run one sweep (the marker is tak
   await ticks()
   expect(sessionRuns(state, 'sweep-claim').length).toBeGreaterThanOrEqual(1)
   expect(sweepRuns(state)).toHaveLength(1)
+})
+
+test('GET.3: a cut pinned memory says cut; with memory_get off the mark names no tool', () => {
+  const wide = Array.from({ length: 3 }, (_, i) => row(`w${i}`, `${'x'.repeat(900)}${i}`))
+  const on = buildSessionBlock({ summary: null, pinned: wide })!.text.split('\n')
+  expect(on[3]).toEndWith(`…${cutMark(true)}`)
+  expect(cutMark(true)).toContain('memory_get')
+  const off = buildSessionBlock({ summary: null, pinned: wide }, undefined, undefined, false)!.text.split('\n')
+  expect(off[3]).toEndWith('… [cut]')
+  expect(off.join('\n')).not.toContain('memory_get')
 })

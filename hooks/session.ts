@@ -251,12 +251,18 @@ export function parseBlockRead(stdout: string): BlockRead {
 const oneLine = (text: string) => text.replace(/\s+/g, ' ').trim()
 
 /**
+ * GET.3: what follows a memory the block or the first-prompt recall shows cut, so Claude knows the text goes on and how to read
+ * the rest. With memory_get on (M1) it names the call; the line itself already carries the id and owner. Not counted in the cap.
+ */
+export const cutMark = (getOn: boolean) => (getOn ? ' [cut: call mcp__mnemosyne__memory_get with this id and owner for the full text]' : ' [cut]')
+
+/**
  * The first-prompt block: the newest summary, then the pinned memories, each with id and owner like a recall result.
  * At most `pinnedMax` pinned memories (never more than BLOCK_PINNED_MAX) and `chars` characters of them in all; the one that
- * crosses the cap is cut with an ellipsis. Nothing to show gives undefined. `ids` lists what the block shows, so the recall
+ * crosses the cap is cut with an ellipsis and a cut mark (GET.3). Nothing to show gives undefined. `ids` lists what the block shows, so the recall
  * can leave those out and a memory is shown once.
  */
-export function buildSessionBlock(read: BlockRead, pinnedMax: number = BLOCK_PINNED_MAX, chars: number = BLOCK_PINNED_CHARS): { text: string; ids: string[] } | undefined {
+export function buildSessionBlock(read: BlockRead, pinnedMax: number = BLOCK_PINNED_MAX, chars: number = BLOCK_PINNED_CHARS, getOn = true): { text: string; ids: string[] } | undefined {
   const lines: string[] = []
   const ids: string[] = []
   if (read.summary !== null) {
@@ -269,7 +275,8 @@ export function buildSessionBlock(read: BlockRead, pinnedMax: number = BLOCK_PIN
     if (ids.includes(row.id)) continue
     const text = oneLine(row.content)
     const length = Array.from(text).length
-    const shown = length <= left ? text : `${Array.from(text).slice(0, Math.max(0, left - 1)).join('').trimEnd()}…`
+    // GET.3: the one that crosses the cap is cut, and says so (cutMark) so Claude can read the rest with memory_get.
+    const shown = length <= left ? text : `${Array.from(text).slice(0, Math.max(0, left - 1)).join('').trimEnd()}…${cutMark(getOn)}`
     left -= Math.min(length, left)
     lines.push(`- Pinned [${row.id} owner=${row.owner}] ${shown}`)
     ids.push(row.id)

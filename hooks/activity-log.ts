@@ -7,7 +7,7 @@
 // the call's preview (query, fact, tags): secret-shaped strings are replaced by
 // [redacted] first, then it is cut to TEXT_LIMIT characters.
 
-export type ActivityAction = 'recall' | 'remember' | 'update' | 'forget' | 'stats' | 'rearm' | 'extract' | 'retire' | 'settings' | 'restore' | 'import' | 'expire'
+export type ActivityAction = 'recall' | 'remember' | 'update' | 'forget' | 'stats' | 'rearm' | 'extract' | 'retire' | 'settings' | 'restore' | 'import' | 'expire' | 'get'
 export type ActivityOrigin = 'hook' | 'trigger' | 'tool' | 'external' | 'ui' | 'backfill' | 'import' | 'session'
 
 export type ActivityEntry = {
@@ -77,13 +77,14 @@ const oneOf = (value: unknown, allowed: ReadonlySet<string>) => {
   return allowed.has(normalized) ? normalized : undefined
 }
 
-// The public tool name of each action the five memory tools stand for.
+// The public tool name of each action the six memory tools stand for.
 export const TOOL_ACTIONS: Readonly<Record<string, ActivityAction>> = {
   memory_remember: 'remember',
   memory_recall: 'recall',
   memory_update: 'update',
   memory_forget: 'forget',
   memory_stats: 'stats',
+  memory_get: 'get',
 }
 
 // Pattern-based, so a secret of an unknown shape can get through. Every
@@ -242,7 +243,7 @@ export function callOutcome(action: ActivityAction, args: Record<string, unknown
     const results = Array.isArray(body.results) ? (body.results as Record<string, unknown>[]) : []
     return { ok: true, ids: results.map(r => String(r?.id ?? '')).filter(Boolean), count: results.length }
   }
-  const id = str(body.memory_id) ?? (action === 'update' || action === 'forget' ? str(args.memory_id) : undefined)
+  const id = str(body.memory_id) ?? (action === 'update' || action === 'forget' || action === 'get' ? str(args.memory_id) : undefined)
   // Issue #16: a remember that found its text as a retired or expired memory left it so; it names the row but saved nothing.
   if (action === 'remember' && (body.status === 'retired' || body.status === 'expired')) return { ok: true, ids: id ? [id] : [], count: 0 }
   return { ok: true, ids: id ? [id] : [], count: id ? 1 : 0 }
