@@ -28,6 +28,7 @@ import { createHash } from 'node:crypto'
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statfsSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import { BACKFILL_TEXT_LIMIT, isProposalId } from '../hooks/backfill'
+import { rowInfo } from './row-info'
 import { isKind } from '../hooks/kinds'
 import { buildRequests, engineEnv, parseReplies } from '../hooks/engine'
 import { BLOCK_PINNED_MAX, EXPIRE_DEFAULT_DAYS, expireRequest, expireSetting, parseExpireReply, parsePending, SESSION_CLAIM_STALE_MS, SESSION_CLAIM_SUFFIX, SESSION_BACKOFF_MAX_MS, SESSION_ID, SESSION_MAX_ATTEMPTS, SESSION_PENDING_DIR, sessionBackoffMs, SWEEP_LIMIT, SWEEP_LOCK, SWEEP_LOCK_STALE_MS, SWEEP_MARKER, sweepDue, sweepMarkerText } from '../hooks/session'
@@ -742,6 +743,12 @@ async function main(argv: readonly string[]) {
     const bad = rest.find(id => id.startsWith('-'))
     if (bad !== undefined) throw new Error(`an id may not start with -: ${bad}`)
     process.stdout.write(`${JSON.stringify(getRows(openReadOnly(store), rest))}\n`)
+  } else if (command === 'row-info') {
+    // GET.1: one id's owner, scope and kind as JSON (null when there is no such row); never its text.
+    if (!store) throw new Error('--store <dir> is required')
+    const id = rest[0]
+    if (rest.length !== 1 || id === undefined || id.startsWith('-')) throw new Error('usage: --store <dir> row-info <id>')
+    process.stdout.write(`${JSON.stringify(rowInfo(openReadOnly(store), id) ?? null)}\n`)
   } else if (command === 'pending') {
     // <root> names the plugin's data root; the store flag does not apply here.
     const [action, ...pending] = rest

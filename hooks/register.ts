@@ -46,7 +46,8 @@ import { buildRequests, EMBEDDINGS_CACHE_DIR, EMBEDDINGS_MODEL, engineEnv, parse
 import type { RecallWeights } from './engine'
 import type { EngineRequest } from './engine'
 import { ENGINE_BUILD, SETUP_LOCK_WAIT_MS, SETUP_TIMEOUT_MS } from './engine-build'
-import { mnemosyneStats } from './surface'
+import { cutNote, getNotFound, isCut, MEMORY_ID, mnemosyneGet, mnemosyneStats, RECALL_DESCRIPTION_CUT, visibleTo } from './surface'
+import type { RowInfo } from './surface'
 import { admit, guardConfigOf, nearDuplicateFlags, nearDuplicateMessage, nearMatchesOf } from './guard'
 import type { GuardResult, NearMatch } from './guard'
 import {
@@ -77,6 +78,7 @@ import { CONFIG_FILE, parseConfig, TOOL_NAMES } from './settings'
 import {
   BLOCK_PINNED_MAX,
   buildSessionBlock,
+  cutMark,
   cwdForFolder,
   expireSetting,
   parseBlockRead,
@@ -165,7 +167,7 @@ const KIND_PROPERTY = {
   description: 'What kind of memory this is. Required on memory_remember: a save without it is refused.',
 } as const
 
-// The five tools' definitions. The numbers their texts quote follow the settings (C6): T1 tags, E1 context days, R2 recall limits.
+// The six tools' definitions. The numbers their texts quote follow the settings (C6): T1 tags, E1 context days, R2 recall limits.
 const toolsFor = (settings: ResolvedSettings) => [
   {
     name: 'memory_remember',
@@ -202,7 +204,8 @@ const toolsFor = (settings: ResolvedSettings) => [
   },
   {
     name: 'memory_recall',
-    description: 'Search long-term memory by keywords (full-text).',
+    // GET.2: the cut-memory sentence names memory_get, so it is there only when memory_get is on (M1).
+    description: `Search long-term memory by keywords (full-text).${settings.tools.memory_get ? ` ${RECALL_DESCRIPTION_CUT}` : ''}`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -251,6 +254,19 @@ const toolsFor = (settings: ResolvedSettings) => [
     name: 'memory_stats',
     description: 'Show long-term memory statistics.',
     inputSchema: { type: 'object' },
+  },
+  {
+    name: 'memory_get',
+    description:
+      'Read one memory in full by the id (and owner) memory_recall or the session-start block gave: its whole text, kind, tags, pinned, importance and timestamps. Use it when a recalled memory is cut (truncated: true, or ending in …).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        memory_id: { type: 'string' },
+        owner: { type: 'string', description: "The row's owner from memory_recall; default this project's." },
+      },
+      required: ['memory_id'],
+    },
   },
 ] as const
 
@@ -721,8 +737,10 @@ async function retireReplaced($: EngineInterface, options: PluginOptions, oldId:
   }
 }
 
-// Recall rows carry a dozen scoring fields; the model needs only these.
-function compact(recall: string) {
+// Recall rows carry a dozen scoring fields; the model needs only these. GET.2: a row the engine cut to its preview says so
+// (truncated, full_length), and with `note` also names the memory_get call that gives the whole text.
+type CompactRow = { id: string; owner: string; content: string; scope?: unknown; timestamp?: unknown; truncated?: true; full_length?: number; note?: string }
+function compact(recall: string, note = false): CompactRow[] {
   const { results = [] } = JSON.parse(recall)
   return results.map((r: Record<string, unknown>) => ({
     id: r.id,
@@ -730,6 +748,9 @@ function compact(recall: string) {
     content: r.content,
     scope: r.scope,
     timestamp: r.timestamp,
+    ...(isCut(r)
+      ? { truncated: true as const, ...(typeof r.full_length === 'number' ? { full_length: r.full_length } : {}), ...(note ? { note: cutNote(r.id, r.session_id) } : {}) }
+      : {}),
   }))
 }
 
@@ -1858,11 +1879,11 @@ async function leaveSessionMarker($: EngineInterface, options: PluginOptions, se
  * process, no network): the newest live session summary, then pinned memories. The settings decide how many pins: never
  * more than the first-prompt count (R3). Never throws; nothing to show gives undefined.
  */
-async function firstPromptBlock($: EngineInterface, options: PluginOptions, settings: ResolvedSettings) {
+async function firstPromptBlock($: EngineInterface, options: PluginOptions, settings: ResolvedSettings, getOn = true) {
   try {
     const pins = Math.min(BLOCK_PINNED_MAX, settings.recall.firstPromptCount)
     const read = parseBlockRead(await memoriesCli($, options, ['first-prompt', await owner($, options), String(pins)], undefined, BLOCK_TIMEOUT_MS))
-    return buildSessionBlock(read, pins)
+    return buildSessionBlock(read, pins, undefined, getOn)
   } catch {
     return undefined
   }
@@ -2094,6 +2115,8 @@ export const register: Register = (on, options) => {
         return ['mnemopi_recall', { query: input.query, limit: clamp(input.limit, 1, settings.recall.maxLimit, settings.recall.defaultLimit), ...weightArgs(settings) }] as const
       case 'memory_forget':
         return ['mnemopi_forget', { memory_id: input.memory_id }] as const
+      case 'memory_get':
+        return ['mnemopi_get', { memory_id: input.memory_id }] as const
       case 'memory_update': {
         const args = updateArgs(input, rules)
         // tool.call refuses a bad update before any engine run; this only narrows the type.
@@ -2339,10 +2362,10 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: /^mcp__mnemosyne__memory_/ }, async ($, e) => {
     const tool = e.tool.replace('mcp__mnemosyne__', '')
     const input = e as unknown as Record<string, unknown>
-    // A row is changed or deleted as its owner: a global fact from another project names its own.
-    const ownsRow = tool === 'memory_forget' || tool === 'memory_update'
+    // A row is changed, deleted or read in full as its owner: a global fact from another project names its own.
+    const ownsRow = tool === 'memory_forget' || tool === 'memory_update' || tool === 'memory_get'
     const as = ownsRow && typeof input.owner === 'string' && input.owner ? input.owner : undefined
-    // A memory_* name outside the five is not a memory call: not logged.
+    // A memory_* name outside the six is not a memory call: not logged.
     const action = TOOL_ACTIONS[tool]
     // GUARD.2: the text of a save is checked before anything else. A block never starts an
     // engine process and never consumes the remember trigger, so the retry is still the human's.
@@ -2391,6 +2414,12 @@ export const register: Register = (on, options) => {
     // C6: tags are cleaned with the vocabulary's aliases and without the owner's project name (the row's owner on an update).
     const rules = Array.isArray(input.tags) && (tool === 'memory_remember' || tool === 'memory_update') ? await tagRulesFor($, options, settings, as) : {}
     let retired: Retired | undefined
+    // M1 (GET.2): whether this session has memory_get: the set registered at its start, or the settings with no record of it.
+    const getOn = async () => {
+      const session = await $.session.id().catch(() => undefined)
+      const tools = session === undefined ? undefined : registered.get(session)
+      return tools === undefined ? settings.tools.memory_get : tools.has('memory_get')
+    }
     const answer = await (async (): Promise<{ result: string; reply: string } | { deny: string }> => {
       try {
         if (guard?.verdict === 'block') {
@@ -2421,6 +2450,18 @@ export const register: Register = (on, options) => {
           return { deny: NOT_INSTALLED }
         }
         if ((tool === 'memory_update' || tool === 'memory_remember') && !(await currentForSaves($, options))) return { deny: NOT_CURRENT }
+        // GET.1: a row is read in full only by its owner (the call's owner, else this project) or, when global, by anyone, as recall shows it.
+        // Kind and scope come from a read-only look at the store; an unknown or hidden row is not_found, with nothing about other owners.
+        let info: RowInfo | undefined
+        if (tool === 'memory_get') {
+          if (typeof input.memory_id !== 'string' || !MEMORY_ID.test(input.memory_id)) return { deny: 'Mnemosyne: memory_id must be the id of a memory (from memory_recall).' }
+          const found = JSON.parse(await memoriesCli($, options, ['row-info', input.memory_id])) as RowInfo | null
+          info = found ?? undefined
+          if (!visibleTo(info, as ?? (await owner($, options)))) {
+            const missing = getNotFound(input.memory_id)
+            return { reply: missing, result: missing }
+          }
+        }
         const [name, args] = engineArgs(tool, input, rules, settings)
         await takeTrigger()
         // The trigger save is the person's: human, with veracity 'stated'.
@@ -2451,7 +2492,7 @@ export const register: Register = (on, options) => {
         }
         // One warning line per hit, after the engine's reply; `reply` stays the engine's own text.
         const warnings = (warnIds.length > 0 ? guard!.hits.map(hit => `\nMnemosyne guard warning: ${hit.message}`).join('') : '') + (near.length > 0 ? `\nMnemosyne guard warning: ${nearDuplicateMessage(near)}` : '')
-        return { reply: text, result: name === 'mnemopi_recall' ? JSON.stringify(compact(text)) : name === 'mnemopi_stats' ? mnemosyneStats(text) : `${kept !== undefined ? keptReply(text) : text}${warnings}${retireLine}` }
+        return { reply: text, result: name === 'mnemopi_recall' ? JSON.stringify(compact(text, await getOn()))  : name === 'mnemopi_get' ? mnemosyneGet(text, info) : name === 'mnemopi_stats' ? mnemosyneStats(text) : `${kept !== undefined ? keptReply(text) : text}${warnings}${retireLine}` }
       } catch (err) {
         return { deny: `Mnemosyne: ${(err as Error).message}` }
       }
@@ -2569,7 +2610,8 @@ export const register: Register = (on, options) => {
     const context: string[] = []
     const logged: Activity[] = []
     // SESSION.2: the last session's summary and the pinned memories, read from the store while the recall runs; only where the first-prompt recall is on (R3), so its switch, count and sentences rule.
-    const blockPromise = autoRecall ? firstPromptBlock($, options, settings) : Promise.resolve(undefined)
+    const sessionTools = registered.get(session)
+    const blockPromise = autoRecall ? firstPromptBlock($, options, settings, sessionTools === undefined ? settings.tools.memory_get : sessionTools.has('memory_get')) : Promise.resolve(undefined)
     if (remember) {
       // KNOWX.1: the first main-thread save of this turn is the human's. Cleared
       // at turn end, so a turn that saves nothing leaves the next turn an agent save.
@@ -2596,7 +2638,7 @@ export const register: Register = (on, options) => {
       queries = [...new Set([...(topic ? [topic] : []), ...(autoRecall ? sentences(e.text).slice(0, settings.recall.firstPromptSentences) : [])])].map(query => query.slice(0, 300))
       const count = settings.recall.firstPromptCount
       const answers = queries.length === 0 ? [] : await runAll($, options, queries.map(query => ['mnemopi_recall', { query, limit: count, ...weightArgs(settings) }] as const))
-      const byId = new Map<string, { id: string; owner: string; content: string }>()
+      const byId = new Map<string, CompactRow>()
       // A memory the block shows is not listed again by the recall (shown once).
       const shown = new Set((await blockPromise)?.ids ?? [])
       for (const answer of answers) if (typeof answer === 'string') for (const row of compact(answer)) if (!shown.has(row.id)) byId.set(row.id, row)
@@ -2614,10 +2656,12 @@ export const register: Register = (on, options) => {
       else if (asked !== undefined) activity($, options, n > 0 ? `recalled ${n} ${noun} for ${where}` : `found nothing for ${where}`, n > 0 ? `recalled ${n}` : 'found nothing')
       else if (autoRecall) activity($, options, n > 0 ? `recalled ${n} ${noun} for ${where}` : `recall found nothing for ${where}`, n > 0 ? `recalled ${n}` : 'found nothing')
       if (found.length > 0) {
-        const lines = found.map(r => `- [${r.id} owner=${r.owner}] ${r.content}`)
         // M1: the heading names a tool only when this session has it (the settings decide without a record of the start).
         const tools = registered.get(session)
-        context.push(`${recallHeading(tool => (tools === undefined ? settings.tools[tool] : tools.has(tool)))}\n${lines.join('\n')}`)
+        const hasTool = (tool: ToolName) => (tools === undefined ? settings.tools[tool] : tools.has(tool))
+        // GET.2: a cut memory says so, and names memory_get when this session has it.
+        const lines = found.map(r => `- [${r.id} owner=${r.owner}] ${r.content}${r.truncated ? cutMark(hasTool('memory_get')) : ''}`)
+        context.push(`${recallHeading(hasTool)}\n${lines.join('\n')}`)
       } else if (asked !== undefined) {
         context.push(`Mnemosyne recall for "${topic ?? asked}" found nothing.`)
       }

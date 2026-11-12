@@ -304,7 +304,7 @@ describe('POST /api/settings/update: config settings', () => {
     expect(world.config()).toEqual({ version: 1 })
     // A pick list: the outside-agent allow-list.
     const allow = await world.post('/api/settings/update', { id: 'tools.externalAllow', remove: 'memory_forget' })
-    expect(allow.body.value).toEqual(['memory_remember', 'memory_recall', 'memory_update', 'memory_stats'])
+    expect(allow.body.value).toEqual(['memory_remember', 'memory_recall', 'memory_update', 'memory_stats', 'memory_get'])
     expect((await world.post('/api/settings/update', { id: 'tools.externalAllow', add: 'mnemopi_sleep' })).status).toBe(400)
     // add on a plain setting is refused
     expect((await world.post('/api/settings/update', { id: 'guard.maxLength', add: 5 })).status).toBe(400)

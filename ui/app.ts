@@ -383,6 +383,8 @@ export function resultLabel(line: ActivityLine): string {
       return `${line.count ?? 0} expired`
     case 'stats':
       return 'stats'
+    case 'get':
+      return 'read'
     default:
       return ''
   }
@@ -724,6 +726,8 @@ export function sentenceOf(line: ActivityLine, preview = ''): string {
       return 'Re-armed: will recall on the next prompt'
     case 'stats':
       return 'Checked memory stats'
+    case 'get':
+      return failed ? `Could not read ${ids.map(shortSession).join(', ') || 'a memory'} in full` : `Read ${ids.map(shortSession).join(', ') || 'a memory'} in full`
     case 'extract': {
       const from = text || textOf(preview)
       const source = from ? `from: ${from}` : ids[0] ? `from memory ${shortSession(ids[0])}` : 'from a memory'
@@ -3036,6 +3040,7 @@ export type ActionColour = 'recall' | 'save' | 'update' | 'forget' | 'retire' | 
 export function actionColour(action: string | undefined): ActionColour {
   switch (action) {
     case 'recall':
+    case 'get':
       return 'recall'
     case 'remember':
     case 'import':

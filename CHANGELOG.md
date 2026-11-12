@@ -2,6 +2,14 @@
 
 Newest first. Each release is tagged `vX.Y.Z` on GitHub; the README and DESIGN.md describe the contracts.
 
+## 0.34.0 (read a long memory in full: memory_get)
+
+1. New tool `memory_get` (GET.1), in Claude Code and in the outside-agent MCP server. It takes a memory's id (and, in Claude Code, the owner recall gave) and returns the whole text with its kind, tags, pinned flag, importance and timestamps. Until now recall cut every memory at 500 characters and nothing could read the rest, so a long memory was only ever seen cut mid-sentence. It reads only memories recall would show: the caller's own and live `global` ones; any other id (another project's private or retired memory, an unknown id) answers `not_found`. It can be switched off with `tools.memory_get` and is in the default `tools.externalAllow`. A `tools.externalAllow` list you saved before is kept as it was: add `memory_get` to it on the Settings tab to serve the tool to outside agents.
+2. A recall row cut to its preview now says so (GET.2): `truncated: true`, its `full_length` and a note naming the `memory_get` call. The recall tool's description says the same. With `memory_get` off or not served, the note and that sentence are left out.
+3. The first-prompt recall lines and the session-start block ("what we were doing last time, and pinned memories") mark a memory they cut with `[cut: call mcp__mnemosyne__memory_get with this id and owner for the full text]` (GET.3), next to its id and owner.
+4. The MCP server's read-only store lookups wait for the engine's lock instead of failing at once, so a not_found update or forget of another owner's memory names its owner more reliably.
+5. The engine build is unchanged (`18.12.3-mnemosyne.18`); no `/mnemosyne-setup` is needed. Restart outside MCP clients to get the new tool.
+
 ## 0.33.0 (Update button for Claude Code installs)
 
 1. The Health tab's Update… button now also shows for a plugin installed through Claude Code (UPDCC.1). Until now it showed only for the Claude Desktop install in `~/.claude/mnemosyne/plugin`, and a Claude Code install got the line "Update with: claude plugin update mnemosyne@mnemosyne" to type yourself. The button now runs `claude plugin update` for you and shows its progress and output. When it finishes it says to restart Claude Code: Claude Code loads the new version only when it starts, and the next `/mnemosyne-ui` then restarts the dashboard on that version (0.32.1). A newer engine build installs itself at that start (0.32.0).

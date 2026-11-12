@@ -26,8 +26,8 @@ export type Group = (typeof GROUPS)[number]
 /** When a change takes effect: `now` (the next call reads config.json), `next session` (tools are registered at session start), `after restart`. */
 export type Applies = 'now' | 'next session' | 'after restart'
 
-/** The five tools Claude and outside agents are given. */
-export const TOOL_NAMES = ['memory_remember', 'memory_recall', 'memory_update', 'memory_forget', 'memory_stats'] as const
+/** The six tools Claude and outside agents are given (memory_get came in 0.34.0, so it is last). */
+export const TOOL_NAMES = ['memory_remember', 'memory_recall', 'memory_update', 'memory_forget', 'memory_stats', 'memory_get'] as const
 export type ToolName = (typeof TOOL_NAMES)[number]
 
 // Bounds, named once so the help texts, the checks and the specs read the same numbers.
@@ -151,8 +151,9 @@ export const SETTINGS: readonly SettingDef[] = [
   toolDef('memory_update', 'Changes a saved memory.'),
   toolDef('memory_forget', 'Deletes a memory for good.'),
   toolDef('memory_stats', 'Shows counts of what is stored.'),
+  toolDef('memory_get', 'Reads one memory in full, by id (recall cuts long ones).'),
   { key: 'tools.externalAllow', ref: 'M2', group: 'tools', label: 'Tools for outside agents', applies: 'now', type: 'pick', default: [...TOOL_NAMES], choices: TOOL_NAMES,
-    help: 'Which of the five tools the outside-agent MCP wrapper serves. Any other tool answers "Tool not available". Needs the externalMcp option on.' },
+    help: 'Which of the memory tools the outside-agent MCP wrapper serves. Any other tool answers "Tool not available". Needs the externalMcp option on.' },
   // ---- Storage (S4, S5) ----
   { key: 'storage.activityLogMaxBytes', ref: 'S4', group: 'storage', label: 'Activity log size', applies: 'now', type: 'integer', default: 1024 * 1024, min: 256 * 1024, max: 16 * 1024 * 1024,
     help: 'The activity log rolls over to a single backup file when it passes this many bytes (256 KiB to 16 MiB).' },

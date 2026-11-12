@@ -1,4 +1,4 @@
-// ENG.6: the external MCP proxy offers five memory_* tools, takes only cleaned
+// ENG.6: the external MCP proxy offers six memory_* tools, takes only cleaned
 // tags from clients, never passes bank or metadata on, and refuses
 // memory_update on a stale engine. The real proxy over stdio, against a real
 // engine installed by bin/install-engine.ts into a temp folder, and a temp store.
@@ -62,10 +62,10 @@ describe('the proxy against a real installed engine', () => {
     }
   }
 
-  test('tools/list returns exactly five memory_* tools; remember and update show tags, none shows metadata or bank', async () => {
+  test('tools/list returns exactly six memory_* tools; remember and update show tags, none shows metadata or bank', async () => {
     const replies = await proxy(cli, store, [{ jsonrpc: '2.0', id: 1, method: 'tools/list' }])
     const tools = replies.get(1).result.tools as { name: string; inputSchema: { properties: Record<string, unknown>; required?: string[] } }[]
-    expect(tools.map(tool => tool.name).sort()).toEqual(['memory_forget', 'memory_recall', 'memory_remember', 'memory_stats', 'memory_update'])
+    expect(tools.map(tool => tool.name).sort()).toEqual(['memory_forget', 'memory_get', 'memory_recall', 'memory_remember', 'memory_stats', 'memory_update'])
     for (const tool of tools) {
       expect(tool.inputSchema.properties.bank).toBeUndefined()
       expect(tool.inputSchema.properties.metadata).toBeUndefined()
@@ -77,6 +77,92 @@ describe('the proxy against a real installed engine', () => {
     expect(tools.find(tool => tool.name === 'memory_update')?.inputSchema.required).toEqual(['memory_id'])
     // KINDREQ.2: remember lists kind as required.
     expect(tools.find(tool => tool.name === 'memory_remember')?.inputSchema.required).toEqual(['content', 'kind'])
+  })
+
+  // GET.1, GET.2: memory_get reads a whole memory, as this server's owner only; recall marks a cut row.
+  const LONG = `${'The 7of9 server keeps 64 GB of RAM and gets a second 2 TB NVMe for the model cache. '.repeat(10)}Final word: approved.`
+
+  test('GET.1: memory_get gives the full text, kind, tags, pinned and timestamps of an own memory; recall marks it cut (GET.2)', async () => {
+    const log = join(temp.dir, 'logs-get', 'activity.jsonl')
+    const saved = await proxy(cli, store, [toolCall(1, 'memory_remember', { kind: 'decision', content: LONG, tags: ['hardware'] })], 'project-get-a')
+    const id = text(saved.get(1)).memory_id as string
+    const replies = await proxy(cli, store, [
+      toolCall(2, 'memory_get', { memory_id: id }),
+      toolCall(3, 'memory_get', { memory_id: id, owner: 'project-get-a' }),
+      toolCall(4, 'memory_recall', { query: '7of9 server NVMe model cache' }),
+    ], 'project-get-a', log)
+    const got = text(replies.get(2))
+    expect(got).toMatchObject({ status: 'ok', id, owner: 'project-get-a', kind: 'decision', scope: 'channel', content: LONG, length: LONG.length, tags: ['hardware'], pinned: false })
+    expect(typeof got.created_at).toBe('string')
+    expect(got.content.endsWith('Final word: approved.')).toBe(true)
+    expect(text(replies.get(3))).toMatchObject({ status: 'ok', id, content: LONG })
+    const row = (text(replies.get(4)).results as Record<string, unknown>[]).find(result => result.id === id)!
+    expect(row.truncated).toBe(true)
+    expect((row.content as string).length).toBeLessThanOrEqual(500)
+    expect((row.content as string).endsWith('…')).toBe(true)
+    expect(row.note).toBe(`Cut to a preview. Call memory_get with memory_id ${id} for the full text.`)
+    const lines = readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line))
+    expect(lines.filter(line => line.action === 'get').map(line => [line.ids, line.ok, line.origin])).toEqual([[[id], true, 'external'], [[id], true, 'external']])
+  })
+
+  test('GET.1: another owner\'s private memory is not_found, with or without its owner; a global one is read; an unknown id is not_found', async () => {
+    const saved = await proxy(cli, store, [toolCall(1, 'memory_remember', { kind: 'fact', content: `private to project a: ${LONG}` })], 'project-get-a')
+    const privateId = text(saved.get(1)).memory_id as string
+    const shared = await proxy(cli, store, [toolCall(1, 'memory_remember', { kind: 'preference', content: `shared with every project: ${LONG}` })], 'global')
+    const globalId = text(shared.get(1)).memory_id as string
+    const replies = await proxy(cli, store, [
+      toolCall(1, 'memory_get', { memory_id: privateId }),
+      toolCall(2, 'memory_get', { memory_id: privateId, owner: 'project-get-a' }),
+      toolCall(3, 'memory_get', { memory_id: globalId }),
+      toolCall(4, 'memory_get', { memory_id: 'no-such-memory' }),
+      toolCall(5, 'memory_get', { memory_id: '../x' }),
+      toolCall(6, 'memory_get', { memory_id: globalId, owner: 'project-get-b' }),
+    ], 'project-get-b')
+    expect(text(replies.get(1))).toEqual({ status: 'not_found', memory_id: privateId })
+    expect(text(replies.get(2))).toEqual({ status: 'not_found', memory_id: privateId })
+    expect(text(replies.get(3))).toMatchObject({ status: 'ok', id: globalId, owner: 'global', scope: 'global', kind: 'preference', content: `shared with every project: ${LONG}` })
+    expect(text(replies.get(4))).toEqual({ status: 'not_found', memory_id: 'no-such-memory' })
+    expect(replies.get(5).error).toMatchObject({ code: -32602, message: 'memory_id must be the id of a memory (from memory_recall).' })
+    // owner must be the row's own: naming another owner does not widen or change the read.
+    expect(text(replies.get(6))).toEqual({ status: 'not_found', memory_id: globalId })
+  })
+
+  test('GET.1: a retired global memory of another owner is not_found; GET.2: with memory_get not served, recall names no tool', async () => {
+    const saved = await proxy(cli, store, [toolCall(1, 'memory_remember', { kind: 'fact', content: `retired soon: ${LONG}` })], 'global')
+    const id = text(saved.get(1)).memory_id as string
+    const db = new Database(join(store, 'mnemopi.db'))
+    try {
+      db.prepare('UPDATE working_memory SET valid_until = ? WHERE id = ?').run('2020-01-01T00:00:00Z', id)
+    } finally {
+      db.close()
+    }
+    const hidden = await proxy(cli, store, [toolCall(1, 'memory_get', { memory_id: id })], 'project-get-b')
+    expect(text(hidden.get(1))).toEqual({ status: 'not_found', memory_id: id })
+    // its own owner still reads it (and could restore it)
+    const own = await proxy(cli, store, [toolCall(1, 'memory_get', { memory_id: id })], 'global')
+    expect(text(own.get(1))).toMatchObject({ status: 'ok', id })
+
+    const root = join(temp.dir, 'root-no-get')
+    mkdirSync(root, { recursive: true })
+    writeFileSync(join(root, 'config.json'), JSON.stringify({ version: 1, tools: { externalAllow: ['memory_recall', 'memory_remember'] } }))
+    const saved2 = await proxy(cli, store, [toolCall(1, 'memory_remember', { kind: 'fact', content: `no get here: ${LONG}` })], 'project-get-c')
+    const id2 = text(saved2.get(1)).memory_id as string
+    const replies = await proxy(cli, store, [{ jsonrpc: '2.0', id: 1, method: 'tools/list' }, toolCall(2, 'memory_recall', { query: 'no get here 7of9 server NVMe' })], 'project-get-c', '', { MNEMOSYNE_ROOT: root })
+    const recall = (replies.get(1).result.tools as { name: string; description: string }[]).find(tool => tool.name === 'memory_recall')!
+    expect(recall.description).not.toContain('memory_get')
+    const row = (text(replies.get(2)).results as Record<string, unknown>[]).find(result => result.id === id2)!
+    expect(row.truncated).toBe(true)
+    expect(row.note).toBeUndefined()
+  })
+
+  test('GET.1: tools/list shows memory_get with memory_id and owner, no bank; recall\'s description names memory_get', async () => {
+    const replies = await proxy(cli, store, [{ jsonrpc: '2.0', id: 1, method: 'tools/list' }])
+    const tools = replies.get(1).result.tools as { name: string; description: string; inputSchema: { properties: Record<string, unknown>; required?: string[] } }[]
+    const get = tools.find(tool => tool.name === 'memory_get')!
+    expect(Object.keys(get.inputSchema.properties).sort()).toEqual(['memory_id', 'owner'])
+    expect(get.inputSchema.required).toEqual(['memory_id'])
+    expect(get.description).toContain('in full')
+    expect(tools.find(tool => tool.name === 'memory_recall')!.description).toContain('memory_get')
   })
 
   test('remember and update map cleaned tags to metadata.tags; bank and other metadata never reach the engine', async () => {
@@ -804,14 +890,14 @@ for await (const chunk of Bun.stdin.stream()) {
       .map(line => JSON.parse(line))
       .find(message => message?.method === 'tools/call' && message?.id === id)?.params?.arguments
 
-  test('KNOWX.2.a8: tools/list through the proxy shows only the five memory_* tools, never the engine knowledge tools', async () => {
+  test('KNOWX.2.a8: tools/list through the proxy shows only the six memory_* tools, never the engine knowledge tools', async () => {
     const { replies, forwarded } = await rawProxy(
       `${initialize({ name: 'codex-mcp-client', version: '1.0.0' })}\n${JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' })}\n`,
       join(temp.dir, 'logs-a8-list', 'activity.jsonl'),
     )
     const tools = replies.get(2).result.tools as { name: string }[]
     const names = tools.map(tool => tool.name).sort()
-    expect(names).toEqual(['memory_forget', 'memory_recall', 'memory_remember', 'memory_stats', 'memory_update'])
+    expect(names).toEqual(['memory_forget', 'memory_get', 'memory_recall', 'memory_remember', 'memory_stats', 'memory_update'])
     expect(names).not.toContain('mnemopi_knowledge_prompt')
     expect(names).not.toContain('mnemopi_knowledge_store')
     // The list the client saw came from the fake engine's eight tools, knowledge ones included.
@@ -1045,12 +1131,12 @@ for await (const chunk of Bun.stdin.stream()) {
     expect(forwarded.filter(message => message.method === 'tools/call').map(message => message.params.name)).toEqual(['mnemopi_recall', 'mnemopi_stats'])
   })
 
-  test('WIRE.3.a4: all five tools are served by default, with no config or a broken one (C3); a typo in the list never widens it', async () => {
+  test('WIRE.3.a4: all six tools are served by default, with no config or a broken one (C3); a typo in the list never widens it', async () => {
     for (const config of [undefined, 'not json']) {
       if (typeof config === 'string') writeFileSync(configFile, config)
       else setConfig(config)
       const { replies } = await run([{ jsonrpc: '2.0', id: 1, method: 'tools/list' }, call(2, 'memory_forget', { memory_id: 'm1' })])
-      expect((replies.get(1).result.tools as { name: string }[]).map(tool => tool.name).sort()).toEqual(['memory_forget', 'memory_recall', 'memory_remember', 'memory_stats', 'memory_update'])
+      expect((replies.get(1).result.tools as { name: string }[]).map(tool => tool.name).sort()).toEqual(['memory_forget', 'memory_get', 'memory_recall', 'memory_remember', 'memory_stats', 'memory_update'])
       expect(replies.get(2).error).toBeUndefined()
     }
     setConfig({ version: 1, tools: { externalAllow: ['memory_recal'] } })

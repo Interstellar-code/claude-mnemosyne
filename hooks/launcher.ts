@@ -27,7 +27,7 @@ export const shellQuote = (text: string) => `'${text.replace(/'/g, `'\\''`)}'`
 const shCacheDir = (dir: string) => (dir === EMBEDDINGS_CACHE_DIR ? dir : shellQuote(dir))
 
 export const WRAPPER_NOTE = `Written by the Mnemosyne plugin (externalMcp). A stdio MCP server over its store,
-serving only remember / recall / update / forget / stats.
+serving only remember / recall / update / forget / stats / get.
 MNEMOSYNE_OWNER picks the owner: global (default) or a project-... id.
 MNEMOSYNE_ACTIVITY_LOG is the activity log each call is recorded in; empty when activityLog is off.
 MNEMOSYNE_GUARD_MODE is the guardMode option: strict refuses a warned save unless the call passes confirm: true, warn saves it.
